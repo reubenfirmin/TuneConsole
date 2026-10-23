@@ -1,0 +1,20 @@
+/* ── Enrichment conflicts: header badge icon + resolver modal ──────────────────────── */
+.head-icon.conflict-icon { position: relative; color: var(--amber, var(--warn-2)); }
+.conflict-badge {
+  position: absolute; top: -2px; right: -2px; min-width: 15px; height: 15px; padding: 0 3px;
+  border-radius: 8px; background: var(--amber, var(--warn-2)); color: var(--surface-alt);
+  font-size: 0.62rem; font-weight: 700; line-height: 15px; text-align: center;
+}
+.modal.modal-wide { max-width: 40rem; width: 92vw; max-height: 82vh; overflow-y: auto; }
+.conflict-track { padding: 0.7rem 0; border-top: 1px solid var(--border); }
+.conflict-track:first-of-type { border-top: none; }
+.conflict-track > strong { display: block; color: var(--text); margin-bottom: 0.35rem; }
+.conflict-field { display: flex; gap: 0.7rem; align-items: baseline; margin: 0.3rem 0 0.3rem 0.4rem; }
+.conflict-label { min-width: 4rem; color: var(--dim); font-size: var(--type-sm); text-transform: capitalize; }
+.conflict-options { display: flex; flex-wrap: wrap; gap: 0.5rem .9375rem; }
+.conflict-option { display: inline-flex; align-items: center; gap: 0.3rem; }
+.conflict-option label { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; }
+.conflict-option input { width: auto; }
+.conflict-prov { font-size: var(--type-xs); }
+a.conflict-prov { text-decoration: underline; text-underline-offset: 0.15em; }
+

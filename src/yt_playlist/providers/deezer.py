@@ -6,7 +6,6 @@ recording identity, then use a track lookup whose object carries the
 which we treat as unknown. Deezer also signals quota/errors via an {"error": ...} body on an HTTP
 200, so we check for that explicitly. Failures degrade to None so one bad track never stops a run.
 """
-import json
 import logging
 import math
 import re
@@ -16,6 +15,7 @@ import urllib.request
 from yt_playlist.util import net
 from yt_playlist.util.matching import normalize, recording_title
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter
+from yt_playlist.providers import transport
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ def reset() -> None:
 
 
 def probe(track, store=None) -> EnrichmentResult:
-    """Expose supported catalogue facts from the same lookup, preserving the legacy audio API."""
+    """Expose supported catalogue facts from the shared lookup."""
     feat = lookup(track["title"], track["artist"], duration=track.get("duration_s"),
                   isrc=track.get("isrc"))
     fields = {k: feat[k] for k in (*_FIELDS, "genre", "year") if feat.get(k) is not None}
@@ -52,16 +52,9 @@ _breaker = net.CircuitBreaker()
 
 
 def _get_json(url):
-    _pacer.wait()                          # serialize + pace all Deezer traffic across threads
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT,
                                                "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
-            data = json.load(resp)
-    except Exception as e:                 # report to the breaker, then let the caller decide
-        _breaker.record(e)
-        raise
-    _breaker.record()
+    data = transport.request_json(req, timeout=_HTTP_TIMEOUT_S, pace=_pacer.wait, breaker=_breaker)
     if isinstance(data, dict) and data.get("error"):
         # Deezer reports quota/API errors as HTTP 200. Code 800 means no catalogue entry.
         if data["error"].get("code") != 800:
@@ -70,9 +63,8 @@ def _get_json(url):
 
 
 _FIELDS = ("bpm", "popularity", "gain", "label", "art")
-# Catalogue facts the same two lookups already pay for, but which are not audio features and so are
-# NOT part of enrich()'s contract (set_track_audio only takes _FIELDS): release year, genre and
-# duration. Road Trip reads these off `lookup` to place a YouTube-sourced track on the era/genre
+# Catalogue facts the same two lookups already pay for, alongside the audio fields: release year,
+# genre and duration. Road Trip reads these off `lookup` to place a YouTube-sourced track on the era/genre
 # sliders and to budget the mix by length without a get_song call per track.
 _EXTRA_FIELDS = ("year", "genre", "duration")
 
@@ -85,13 +77,6 @@ def _year(value):
     """Leading 4-digit year of a Deezer release_date ('1997-06-16'), or None."""
     text = str(value or "")[:4]
     return int(text) if text.isdigit() else None
-
-
-def enrich(title, artist):
-    """Return a dict {bpm, popularity, gain, label, art} for a track; each value float/int/str or
-    None. All-None on no match / unknown / error. The audio-feature projection of `lookup`."""
-    feat = lookup(title, artist)
-    return {k: feat[k] for k in _FIELDS}
 
 
 def _title(track):

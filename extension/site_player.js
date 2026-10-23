@@ -8,7 +8,8 @@
   const DIALOG_ID = "tuneconsole-local-player-dialog";
   const LOCAL_URL = "http://127.0.0.1:8765/";
   const DOWNLOADS = "https://github.com/reubenfirmin/TuneConsole/releases/latest/download/";
-  let connected = false, revision = 0;
+  let connected = false, revision = 0, setupNavigating = false;
+  let connectionChecked = false, setupNeeded = false;
 
   function platformInstructions() {
     const platform = (navigator.userAgentData?.platform || navigator.platform || navigator.userAgent).toLowerCase();
@@ -19,7 +20,8 @@
           <a href="${DOWNLOADS}TuneConsole-macos-arm64.dmg" target="_blank" rel="noopener">Apple Silicon</a>
           <a href="${DOWNLOADS}TuneConsole-macos-x86_64.dmg" target="_blank" rel="noopener">Intel</a>
         </div>
-        <p>Open the DMG and drag TuneConsole to Applications. On first launch, right-click the app and choose <strong>Open</strong>.</p>`;
+        <p>Open the DMG and drag TuneConsole to Applications.</p>
+        <p>We’re in beta. The Mac app isn’t Apple notarized yet. Try opening it once and close the blocked-launch alert. In <strong>System Settings</strong>, choose <strong>Privacy &amp; Security</strong>, find TuneConsole under Security, and click <strong>Open Anyway</strong>. Authenticate and confirm opening the app. If the option is missing, try opening TuneConsole again.</p>`;
     }
     if (platform.includes("linux") && !/Android/i.test(navigator.userAgent)) {
       return `<p>Open <strong>TuneConsole</strong> from your applications menu, or run:</p>
@@ -34,7 +36,7 @@
         </details>`;
     }
     return `<p>Install and open TuneConsole on this computer.</p>
-      <p><a href="https://tuneconsole.com/#install">View installation instructions</a> for Linux, macOS, or Docker / Podman.</p>`;
+      <p><a href="https://tuneconsole.com/extension-setup">View installation instructions</a> for Linux, macOS, or Docker / Podman.</p>`;
   }
 
   function updateDialog() {
@@ -50,7 +52,7 @@
   }
 
   async function openPlayer(event) {
-    event.preventDefault();
+    event?.preventDefault();
     if (!connected) { showInstructions(); return; }
     try {
       const reply = await chrome.runtime.sendMessage({ type: "open-local-player" });
@@ -87,8 +89,33 @@
     dialog.showModal();
   }
 
+  function renderSetup() {
+    const setup = document.querySelector("[data-tc-extension-setup]");
+    if (!setup || !connectionChecked) return;
+    // An already-running app needs no setup. A newly started app gets the step 3 payoff.
+    if (connected && !setupNeeded && !setupNavigating) {
+      setupNavigating = true;
+      void openPlayer();
+    }
+    const install = setup.querySelector("[data-tc-setup-install]");
+    const ready = setup.querySelector("[data-tc-setup-ready]");
+    if (!install || !ready) return;
+    const changed = ready.hidden === connected;
+    install.hidden = connected;
+    ready.hidden = !connected;
+    const openLink = ready.querySelector("[data-tc-setup-open]");
+    if (openLink) openLink.onclick = openPlayer;
+    if (changed) {
+      document.title = connected ? "Time to rock out! · TuneConsole" : "Extension installed! Next steps · TuneConsole";
+      const heading = connected ? ready.querySelector("h1") : install.querySelector("h1");
+      heading?.focus({ preventScroll: true });
+      window.scrollTo(0, 0);
+    }
+  }
+
   function renderBadge() {
     if (!chrome.runtime.id) return; // An old content context can outlive an extension reload.
+    renderSetup();
     const links = document.querySelector(".site-nav .nav-links");
     if (!links) return; // Svelte may not have mounted the header yet.
     let badge = document.getElementById(BADGE_ID);
@@ -119,6 +146,10 @@
 
   function setConnected(value) {
     connected = value === true;
+    if (!connectionChecked) {
+      connectionChecked = true;
+      setupNeeded = !connected;
+    }
     renderBadge();
     updateDialog();
   }

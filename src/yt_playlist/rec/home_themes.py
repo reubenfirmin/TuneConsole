@@ -46,7 +46,7 @@ def genre_options(store, *, genre_plays=None):
     """Offer genre families present in prepared candidates, using current track metadata.
     Deduplicate tracks across modes/lanes so a frequently bundled track doesn't dominate labels.
     Before the first rebuild, use the library's artist genres."""
-    bundles = store.rec_surface.get_proposals("mode_bundles") or {}
+    bundles = store.rec_proposals.get_proposals("mode_bundles") or {}
     tracks = {}
     for mid, bucket in bundles.items():
         if mid.startswith("_"):

@@ -1,4 +1,48 @@
 /* Charts: one visual grammar, with warm colour reserved for meaning. */
+/* charts */
+.chart .rank { width: 2.8rem; text-align: right; padding-right: .9375rem; color: var(--faint);
+  font-family: var(--font-mono); font-size: var(--type-sm); }
+.chart .barhead, .chart .barcell { width: 38%; }
+.playbar { display: block; height: 0.55rem; min-width: 2px; border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--teal)); }
+/* ticker charts (genre/year/album/playlist): ranked bar (recent share) + corpus tick + whisker */
+.chart.ticker .tkcell { width: 44%; }
+.chart.ticker .tklabel { max-width: 13rem; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.tickhead { font-weight: 400; font-size: 0.7rem; color: var(--faint); letter-spacing: 0.02em; }
+.ticker-candle { position: relative; display: block; height: 1.25rem; width: 100%; }
+.ticker-candle > i { position: absolute; }
+/* ranked bar: 0 -> recent share, the dominant element (per-dimension color set below) */
+.tk-bar { left: 0; top: 50%; transform: translateY(-50%); height: 0.62rem; min-width: 2px;
+  border-radius: 3px; }
+.tk-bar.over { box-shadow: 0 0 0 1px color-mix(in srgb, var(--up) 55%, transparent); }
+/* corpus tick: dashed vertical mark at the library share */
+.tk-corpus { top: 0; bottom: 0; width: 0; border-left: 2px dashed var(--teal); opacity: 0.9; }
+/* earlier (1y) marker: faint dot showing where it sat a year ago (trend = bar end vs this) */
+.tk-open { top: 50%; transform: translate(-50%, -50%); width: 5px; height: 5px; border-radius: 50%;
+  background: var(--surface); box-shadow: 0 0 0 1.5px var(--dim); opacity: 0.85; }
+/* range whisker: thin, faint line low..high with small caps, subordinate to the bar */
+.tk-whisker { top: 50%; transform: translateY(-50%); height: 1px; background: var(--dim);
+  opacity: 0.45; }
+.tk-whisker::before, .tk-whisker::after { content: ""; position: absolute; top: 50%; width: 1px;
+  height: 0.5rem; transform: translateY(-50%); background: var(--dim); opacity: 0.7; }
+.tk-whisker::before { left: 0; }
+.tk-whisker::after { right: 0; }
+/* per-dimension bar colors so each tab reads distinctly */
+.dim-genre .tk-bar { background: linear-gradient(90deg, var(--accent), var(--accent-3)); }
+.dim-year .tk-bar { background: linear-gradient(90deg, var(--teal-deep), var(--teal)); }
+.dim-album .tk-bar { background: linear-gradient(90deg, var(--chart-album), var(--amber)); }
+.dim-playlist .tk-bar { background: linear-gradient(90deg, var(--dim-playlist-a), var(--dim-playlist-b)); }
+.dim-artist .tk-bar { background: linear-gradient(90deg, var(--dim-artist-a), var(--dim-artist-b)); }
+.tkratio .tk-over { color: var(--up); }
+.tkratio .tk-under { color: var(--down); }
+.tkratio .tk-even { color: var(--dim); }
+@media (max-width: 720px) {
+  .chart:not(.ticker) .barhead, .chart:not(.ticker) .barcell { display: none; }
+}
+@media (max-width: 520px) {
+  .chart:not(.ticker) th:nth-child(4), .chart:not(.ticker) td:nth-child(4) { display: none; }
+}
 .page-charts .library-page-head {
   row-gap: .7rem;
 }

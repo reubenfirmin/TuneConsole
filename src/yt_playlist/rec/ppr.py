@@ -8,7 +8,7 @@ import numpy as np
 from scipy.sparse.linalg import LinearOperator
 
 from yt_playlist.core.activity import check_stopping
-from yt_playlist.rec import embed, rec_params, taste_modes
+from yt_playlist.rec import embedding_training as training, embedding_vectors as vectors, rec_params, taste_modes
 
 _ALPHA = 0.85          # walk weight; restart probability is (1 - alpha)
 _ITERS = 50            # power-iteration steps (converges well before this on a stochastic matrix)
@@ -18,11 +18,11 @@ def build_transition(store):
     """(keys, W, idx): a column-stochastic co-occurrence transition matrix built from the SAME baskets
     the embedding uses. W[:, j] is the distribution of where a walker at track j steps next. Returns
     ([], None, {}) when there are no baskets."""
-    baskets = store.rec_query.rec_baskets()
+    baskets = store.rec_evidence.rec_baskets()
     keys = sorted({k for b in baskets for k in b})
     if not keys:
         return [], None, {}
-    C = embed._cooc_matrix(baskets, keys)          # symmetric Newman-weighted co-occurrence
+    C = training.cooc_matrix(baskets, keys)          # symmetric Newman-weighted co-occurrence
     col = np.asarray(C.sum(axis=0)).ravel()
     dangling = col == 0                            # isolated track: no co-listen edges
     col[dangling] = 1.0
@@ -72,7 +72,7 @@ def mode_rankings(store, alpha=None, iters=None, tol=None, depth=None, *, snapsh
     if not modes:
         return {}
     keys, W, idx = build_transition(store)
-    lkeys, LV, lidx = embed.load_content_vectors(store, snapshot=snapshot)
+    lkeys, LV, lidx = vectors.load_content_vectors(store, snapshot=snapshot)
     if W is None or LV is None or not lkeys:
         return {}
     if alpha is None:

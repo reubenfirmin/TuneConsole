@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import pytest
 from yt_playlist.core.store import Store
 from yt_playlist.rec import trend_rollups as tr
+from yt_playlist.rec import trend_insights, trend_payload, trend_statistics as stats
 from yt_playlist.util import genre_map
 
 
@@ -33,7 +34,7 @@ def _snap(store, day, keys):
 ])
 def test_last_complete_month(now, expected):
     ts = datetime.fromisoformat(now).replace(tzinfo=timezone.utc).timestamp()
-    assert tr.last_complete_month(ts) == expected
+    assert stats.last_complete_month(ts) == expected
 
 
 def test_build_drops_stale_recap_when_previous_month_has_no_data(store):
@@ -41,12 +42,12 @@ def test_build_drops_stale_recap_when_previous_month_has_no_data(store):
     for month in (7, 10):
         day = int(datetime(2026, month, 10, tzinfo=timezone.utc).timestamp() // 86400)
         _snap(store, day, ["k1"])
-    store.rec_surface.put_proposals("trend_rollups", {"story": {"month": "2026-07"}})
+    store.rec_proposals.put_proposals("trend_rollups", {"story": {"month": "2026-07"}})
     now = datetime(2026, 10, 19, tzinfo=timezone.utc).timestamp()
     payload = tr.build(store, now)
     assert payload["review"] is None
     assert payload["story"] is None
-    assert store.rec_surface.get_proposals("trend_rollups")["story"] is None
+    assert store.rec_proposals.get_proposals("trend_rollups")["story"] is None
 
 
 def test_build_recaps_september_in_october(store):
@@ -71,7 +72,7 @@ def test_build_materializes_payload(store):
     _snap(store, 5, ["k1"])
     payload = tr.build(store, now=6 * 86400.0)
     # persisted under the rec_proposals surface and readable back
-    assert store.rec_surface.get_proposals("trend_rollups")["weeks"][0]["plays"] == 2
+    assert store.rec_proposals.get_proposals("trend_rollups")["weeks"][0]["plays"] == 2
     assert payload["first_play_floor_day"] == 2
     assert payload["health"]["total_tracks"] == 1
 
@@ -81,14 +82,14 @@ def test_month_day_counts_zero_fills_and_sums():
     with no listens, summing counts for days that have more than one (key, count) row."""
     # Feb 1970 = days 31..58 (day 0 = 1970-01-01 UTC, so day 31 = 1970-02-01). 28 days in Feb 1970.
     day_counts = [(31, "k1", 2), (31, "k2", 1), (33, "k1", 5)]
-    out = tr.month_day_counts(day_counts, "1970-02")
+    out = stats.month_day_counts(day_counts, "1970-02")
     assert len(out) == 28
     assert out[0] == {"day": 1, "n": 3}     # day 31: 2 + 1
     assert out[2] == {"day": 3, "n": 5}     # day 33
     assert out[1] == {"day": 2, "n": 0}     # day 32: no listens
     assert all(d["n"] == 0 for d in out[3:])
     # rows for a different month are ignored
-    out_jan = tr.month_day_counts(day_counts, "1970-01")
+    out_jan = stats.month_day_counts(day_counts, "1970-01")
     assert all(d["n"] == 0 for d in out_jan)
 
 
@@ -174,8 +175,8 @@ def test_detect_spotlight_cascade_prioritizes_month_review(store):
         {"week_start_day": 7, "plays": 10, "distinct_artists": 1, "new_artist_plays": 10,
          "new_track_plays": 10, "families": {}, "diversity": 0.0},
     ]
-    assert tr.discovery_spike([w["new_artist_plays"] for w in weeks]) is True   # sanity: would fire alone
-    result = tr.detect_spotlight(weeks, [], review, None, store, now=0.0)
+    assert trend_insights.discovery_spike([w["new_artist_plays"] for w in weeks]) is True
+    result = trend_insights.detect_spotlight(weeks, [], review, None, None, now=0.0)
     assert result["signature"] == "month_review:2024-05"
 
 
@@ -189,10 +190,10 @@ def test_detect_spotlight_cascade_prioritizes_discovery_over_family(store):
         {"week_start_day": 7, "plays": 55, "distinct_artists": 1, "new_artist_plays": 50,
          "new_track_plays": 50, "families": {"house": 5, "techno": 50}, "diversity": 0.5},
     ]
-    assert tr.discovery_spike([w["new_artist_plays"] for w in weeks]) is True
-    entered = tr._top_families(weeks[1]) - tr._top_families(weeks[0])
+    assert trend_insights.discovery_spike([w["new_artist_plays"] for w in weeks]) is True
+    entered = trend_insights._top_families(weeks[1]) - trend_insights._top_families(weeks[0])
     assert entered == {"techno"}                                              # sanity: would fire alone
-    result = tr.detect_spotlight(weeks, [], None, None, store, now=0.0)
+    result = trend_insights.detect_spotlight(weeks, [], None, None, None, now=0.0)
     assert result["signature"].startswith("discovery_spike:")
 
 
@@ -215,16 +216,17 @@ def test_detect_spotlight_streak_crosses_month_boundary(store):
     months = [
         {"month": "1970-01", "plays": 3, "distinct_artists": 0, "new_artist_plays": 0,
          "families": {}, "diversity": 0.0, "listen_days": len(jan_days),
-         "longest_streak": tr.longest_streak(jan_days)},
+         "longest_streak": stats.longest_streak(jan_days)},
         {"month": "1970-02", "plays": 4, "distinct_artists": 0, "new_artist_plays": 0,
          "families": {}, "diversity": 0.0, "listen_days": len(feb_days),
-         "longest_streak": tr.longest_streak(feb_days)},
+         "longest_streak": stats.longest_streak(feb_days)},
     ]
     assert months[0]["longest_streak"] == 3                        # Jan run 28,29,30
     assert months[1]["longest_streak"] == 4                        # Feb run 31,32,33,34
     assert months[-1]["longest_streak"] < 7                        # sanity: old month-scoped logic misses it
-    assert tr.current_streak(days) == 7                             # unbroken run ending at day 34
-    result = tr.detect_spotlight([], months, None, None, store, now=100 * 86400.0, days=days)
+    assert stats.current_streak(days) == 7                          # unbroken run ending at day 34
+    result = trend_insights.detect_spotlight([], months, None, None, None,
+                                             now=100 * 86400.0, days=days)
     assert result is not None and result["signature"] == "streak:7"
 
 
@@ -291,7 +293,7 @@ def test_bake_art_names_track_in_repetition_and_song_of_week_headline(store):
          "headline": "Song of the week", "detail": "6 plays last week, your most-played track.",
          "evidence": []},
     ]
-    rep, sotw = tr._bake_art(store, raw, now=100.0)
+    rep, sotw = trend_payload.bake_art(store, raw, now=100.0)
     assert "Windowlicker" in rep["headline"]
     assert "Windowlicker" in sotw["headline"]
     # a track with no title on file (track_cards returns None) falls back to the generic headline
@@ -300,7 +302,7 @@ def test_bake_art_names_track_in_repetition_and_song_of_week_headline(store):
                      "title": None, "event_day": 20, "magnitude": 1.2, "signature": "song_of_week:14:missing",
                      "headline": "Song of the week", "detail": "6 plays last week, your most-played track.",
                      "evidence": []}]
-    baked = tr._bake_art(store, raw_notitle, now=100.0)
+    baked = trend_payload.bake_art(store, raw_notitle, now=100.0)
     assert baked[0]["headline"] == "Song of the week"
 
 

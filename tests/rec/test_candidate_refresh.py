@@ -4,7 +4,7 @@ import json
 import pytest
 
 from tests.rec.test_model_refresh import seed
-from yt_playlist.rec import candidate_refresh, embed, home_prepared, model_refresh, mode_surfaces, rec_params
+from yt_playlist.rec import candidate_refresh, embedding_training as embed, home_prepared, model_refresh, mode_surfaces, rec_params
 
 
 def refresh(store, now=2000):
@@ -13,14 +13,14 @@ def refresh(store, now=2000):
 
 
 def candidate(store, key):
-    pool = store.rec_surface.get_proposals('mode_bundles') or {}
+    pool = store.rec_proposals.get_proposals('mode_bundles') or {}
     return next((row for row in pool.get('all', {}).get('wheelhouse', []) if row['key'] == key), None)
 
 
 def library(store):
     seed(store)
     refresh(store)
-    pool = store.rec_surface.get_proposals('mode_bundles')['all']['wheelhouse']
+    pool = store.rec_proposals.get_proposals('mode_bundles')['all']['wheelhouse']
     assert pool
     return pool[0]['key']
 

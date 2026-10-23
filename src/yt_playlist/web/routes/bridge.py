@@ -6,6 +6,7 @@ radio observes playback separately, so its writes never block this response pump
 import asyncio
 import json
 import logging
+import math
 import time
 from urllib.parse import urlencode, urlparse, parse_qs
 
@@ -31,6 +32,10 @@ def _now_playing_snapshot(msg, previous=None):
                 # exact tri-state available for diagnostics without treating it as a play.
                 "metadata_verified": msg.get("metadataVerified")
                 if type(msg.get("metadataVerified")) is bool else None}
+    for key in ('position', 'duration'):
+        value = msg.get(key)
+        snapshot[key] = value if (type(value) in (int, float) and math.isfinite(value)
+                                  and (value >= 0 if key == 'position' else value > 0)) else None
     # Old sensors omit context on heartbeats. Preserve it only for the same video.
     for field, key in (("playlist", "playlist_ytm_id"), ("albumBrowseId", "album_browse_id")):
         if field in msg:
@@ -72,6 +77,9 @@ def _capture_diagnostics(value):
 def build(ctx) -> APIRouter:
     router = APIRouter()
     bridge = ctx.bridge
+    # Suspension runs in a worker. A new socket must not take ownership while
+    # the previous owner's suspension is still changing the Radio controller.
+    lifecycle_lock = asyncio.Lock()
 
     def prepare_radio(msg):
         playing = bridge.now_playing or {}
@@ -121,7 +129,8 @@ def build(ctx) -> APIRouter:
                 source = {"kind": source["kind"], "title": source["title"], "url": url, "external": False}
             if session.get("active") and session.get("playlist_id") == now_playing.get("playlist_ytm_id"):
                 source = {"kind": "radio", "title": session["title"], "url": "/#radio", "external": False}
-            now_playing = {**now_playing, "source": source}
+            now_playing = {**now_playing, "source": source,
+                           "snapshot_age": max(0, time.monotonic() - seen_at) if seen_at is not None else 0}
         return {"connected": bridge.connected, "now_playing": now_playing,
                 "sensor_health": getattr(bridge, "sensor_health", None),
                 "radio": bool(session.get("active")),
@@ -182,13 +191,25 @@ def build(ctx) -> APIRouter:
                         video_id, action, like_status, bridge.connected)
             # ytmusicapi performs the write through the authenticated extension transport.
             # Run it off the event loop so that transport's WebSocket replies can be received.
-            await activity_for(ctx).to_thread(ctx.ops().set_rating, video_id, like_status)
-            if like_status == "LIKE":
-                await asyncio.to_thread(measurement.record_action, ctx.store, "save", ctx.now_fn(), video_id=video_id)
+            loop = asyncio.get_running_loop()
+
+            def mirror(identity_id):
+                # The admitted worker owns the complete command even if its HTTP waiter leaves.
+                # Keep its per-item turn until native reconciliation and exact-track skip settle.
+                return asyncio.run_coroutine_threadsafe(
+                    mirror_rating(action, video_id, like_status, identity_id), loop).result()
+
+            result = await activity_for(ctx).to_thread(ctx.ops().set_rating, video_id, like_status,
+                                                       after_confirmed=mirror)
             logger.info("rating confirmed: video=%s desired=%s", video_id, like_status)
         except Exception as exc:
             logger.warning("rating failed: video=%s desired=%s", video_id, like_status, exc_info=True)
             return {"ok": False, "error": str(exc)}
+        return {"ok": True, "error": "", **{k: v for k, v in result.items() if k == "player_error"}}
+
+    async def mirror_rating(action, video_id, like_status, identity_id):
+        if like_status == "LIKE":
+            await asyncio.to_thread(measurement.record_action, ctx.store, "save", ctx.now_fn(), video_id=video_id)
         # The API confirms the exact upload/account even if playback has moved on. When it
         # is still playing, also drive Music's native control so its selected thumb follows
         # the saved rating. Radio repairs its saved future before advancing.
@@ -197,7 +218,8 @@ def build(ctx) -> APIRouter:
             player_errors = []
             native_diagnostics = None
             try:
-                identity = await asyncio.to_thread(ctx.store.identities.get_master_identity)
+                identities = await asyncio.to_thread(ctx.store.identities.get_identities)
+                identity = next(i for i in identities if i.id == identity_id)
                 status, body = await bridge.request_control({
                     "type": "rate", "action": action, "videoId": video_id,
                     "likeStatus": like_status, "brandId": identity.brand_account_id or "",
@@ -282,7 +304,8 @@ def build(ctx) -> APIRouter:
             except Exception:
                 pass
 
-        conn_id = bridge.connect(send, loop)
+        async with lifecycle_lock:
+            conn_id = bridge.connect(send, loop)
         ping_task = asyncio.create_task(keepalive())
         store = getattr(ctx, "store", None)
         try:
@@ -294,6 +317,10 @@ def build(ctx) -> APIRouter:
             logger.info("extension bridge connected")
             while True:
                 msg = await ws.receive_json()
+                # No await separates this check from presence updates or reply
+                # resolution. Only this event loop installs socket owners.
+                if bridge.connection_id != conn_id:
+                    break
                 if not isinstance(msg, dict):
                     logger.warning("malformed bridge frame, ignoring: %r", msg)
                     continue
@@ -376,15 +403,15 @@ def build(ctx) -> APIRouter:
             pass
         finally:
             ping_task.cancel()
-            bridge.disconnect(conn_id)
-            bridge.now_playing = None
-            bridge.now_playing_seen_at = None
-            bridge.sensor_health = None
-            try:
-                if getattr(ctx, "radio", None):
-                    await run_in_threadpool(getattr(ctx.radio, "suspend", ctx.radio.stop))
-            except Exception:
-                logger.warning("failed to stop Radio Session on disconnect", exc_info=True)
-            logger.info("extension bridge disconnected")
+            async with lifecycle_lock:
+                if bridge.disconnect(conn_id):
+                    try:
+                        radio = getattr(ctx, "radio", None)
+                        if radio is not None:
+                            suspend = getattr(radio, "suspend", None) or radio.stop
+                            await run_in_threadpool(suspend)
+                    except Exception:
+                        logger.warning("failed to stop Radio Session on disconnect", exc_info=True)
+                    logger.info("extension bridge disconnected")
 
     return router

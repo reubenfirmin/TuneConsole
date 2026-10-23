@@ -4,7 +4,7 @@ import pytest
 from playwright.sync_api import expect
 
 from tests.test_mode_profiles import _groups
-from yt_playlist.rec import embed
+from yt_playlist.rec import embedding_vectors as embed
 
 
 @pytest.mark.parametrize("width", [1920, 1440, 1024, 390, 320])

@@ -1,0 +1,32 @@
+.page-discovery .discovery-sheet {
+  padding-inline: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  overflow-x: auto;
+}
+.page-discovery .discovery-sheet thead th {
+  color: color-mix(in srgb, var(--text) 58%, transparent);
+  background: var(--canvas);
+}
+.page-discovery .pool-table td:first-child {
+  min-width: 18rem;
+  max-width: 34rem;
+  overflow-wrap: anywhere;
+}
+.discovery-charts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-6); margin: var(--sp-6) 0; }
+.discovery-chart { min-width: 0; margin: 0; }
+.discovery-chart figcaption { font-size: var(--type-ui); font-weight: 650; margin-bottom: 1rem; }
+.discovery-chart-total { font-size: 1.8rem; margin: 0; font-variant-numeric: tabular-nums; }
+.discovery-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .3rem .7rem; margin: .7rem 0; font-size: var(--type-ui); }
+.discovery-bar-count { font-variant-numeric: tabular-nums; color: var(--dim); }
+.discovery-bar-track { grid-column: 1 / -1; height: .4rem; background: var(--surface-2); }
+.discovery-bar-track i { display: block; height: 100%; background: var(--accent); width: var(--share); }
+.discovery-bar.is-unknown .discovery-bar-track i { background: var(--dim); }
+@media (max-width: 45rem) {
+  .discovery-charts { grid-template-columns: 1fr; }
+  .page-discovery .discovery-sheet {
+    margin-inline: calc(-1 * var(--sp-3));
+    padding-inline: var(--sp-3);
+  }
+}

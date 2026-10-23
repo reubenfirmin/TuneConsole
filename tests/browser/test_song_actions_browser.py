@@ -444,7 +444,7 @@ def test_metadata_dialog_edits_all_fields_and_restores_originals(song_app, page,
     store.collection.add_saved_album({'browse': 'MPRE_owned', 'title': 'Album', 'artist': 'Artist & Friends',
                                       'year': '2000', 'thumbnail': ''})
     store.tracks.set_track_enrichment(tid, 'Electronic', '1995')
-    store.enrichment.log_enrichment(tid, 'run', 'discogs', 'genre', 'Art Pop', now=1)
+    store.enrichment_state.log_enrichment(tid, 'run', 'discogs', 'genre', 'Art Pop', now=1)
     path = f"/playlist/{song_app['source']}" if surface == 'playlist' else '/album?browse=MPRE_owned'
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
@@ -538,7 +538,7 @@ def test_metadata_save_failure_preserves_edits_for_retry(song_app, page):
 def test_genre_lookup_keeps_unsaved_metadata(song_app, page, monkeypatch):
     def lookup(store, tracks, _config, _progress):
         store.enrichment.apply_provider_fields(tracks[0]['id'], 'discogs', {'genre': 'Ambient', 'year': '2022'})
-        store.enrichment.log_enrichment(tracks[0]['id'], 'lookup', 'discogs', 'genre', 'Ambient', now=2)
+        store.enrichment_state.log_enrichment(tracks[0]['id'], 'lookup', 'discogs', 'genre', 'Ambient', now=2)
 
     monkeypatch.setattr('yt_playlist.web.routes.enrich.waterfall.run_waterfall', lookup)
     page.goto(f"{song_app['base']}/playlist/{song_app['source']}")

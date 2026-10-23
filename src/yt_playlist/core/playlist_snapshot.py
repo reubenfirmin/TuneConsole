@@ -1,5 +1,6 @@
 """Account for every playlist page without treating parser output as pagination proof."""
 from copy import deepcopy
+import json
 
 from ytmusicapi import YTMusic
 from ytmusicapi.continuations import CONTINUATION_ITEMS, get_continuation_token
@@ -15,7 +16,7 @@ from yt_playlist.core.bridge import BridgeError
 class _PlaylistRead:
     """A per-call adapter; never replace methods or state on a shared account client."""
 
-    def __init__(self, client, *, browse_params=None):
+    def __init__(self, client, *, browse_params=None, collect_identities=False):
         self.client = client
         self.tracks = []
         self.pages = self.raw_items = self.omitted = self.unidentified = 0
@@ -26,28 +27,48 @@ class _PlaylistRead:
         self.browse_params = browse_params
         self.first_shape = None
         self.message_paths = []
+        self.validation_stage = 'request'
+        self.item_index = None
+        self.failed_page = None
+        self.identity_rows = [] if collect_identities else None
+
+    def _page_error(self, reason, response):
+        self.failed_page = {'page': self.pages + 1, 'stage': self.validation_stage,
+                            'envelope': _page_envelope(response)}
+        if self.item_index is not None:
+            self.failed_page['item_index'] = min(self.item_index, 1000)
+        details = json.dumps(self.failed_page, sort_keys=True, separators=(',', ':'))
+        return LibrarySnapshotError('playlist', f'{reason}; diagnostics={details}', response, self.pages + 1)
 
     def __getattr__(self, name):
         return getattr(self.client, name)
 
     def _send_request(self, endpoint, body, additionalParams=''):
         check_stopping()
+        self.validation_stage = 'continuation.request' if self.pages else 'initial.request'
+        self.item_index = None
         if not self.pages and self.browse_params:
             body = {**body, 'params': self.browse_params}
         token = body.get('continuation')
         if self.pages:
             if token != self.pending or token in self.requested:
-                raise LibrarySnapshotError('playlist', 'repeated or unexpected continuation', {}, self.pages + 1)
+                raise self._page_error('repeated or unexpected continuation', {})
             self.requested.add(token)
         response = self.client._send_request(endpoint, body, additionalParams)
         if not self.pages:
             self.first_shape = response_shape(response)
             self.message_paths = _message_paths(response)
-        _check_response(response, 'playlist', self.pages + 1)
+        self.validation_stage = 'response.status'
+        try:
+            _check_response(response, 'playlist', self.pages + 1)
+        except LibrarySnapshotError as exc:
+            raise self._page_error(exc.reason, response) from None
         header_count = 'unknown'
         try:
             if not self.pages:
+                self.validation_stage = 'initial.section'
                 section = nav(response, [*TWO_COLUMN_RENDERER, 'secondaryContents', *SECTION])
+                self.validation_stage = 'initial.shelves'
                 shelves = [item['musicPlaylistShelfRenderer'] for item in section['contents']
                            if isinstance(item, dict) and 'musicPlaylistShelfRenderer' in item]
                 if len(shelves) != 1:
@@ -55,12 +76,14 @@ class _PlaylistRead:
                 if shelves[0].get('continuations'):
                     raise ValueError  # Do not certify an unfollowed legacy continuation.
                 # The same flag used by the upstream parser for collaborative columns.
+                self.validation_stage = 'initial.header'
                 metadata = _header_metadata(response)
                 self.collaborative = 'collaborators' in metadata
                 count = metadata.get('trackCount')
                 header_count = count if type(count) is int else 'unknown'
                 self.empty_header = type(count) is int and count == 0
                 shelf = shelves[0]
+                self.validation_stage = 'initial.contents'
                 empty_state = shelf.get('emptyState')
                 if ('contents' not in shelf and self.empty_header
                         and (isinstance(shelf.get('messageRenderer'), dict)
@@ -74,12 +97,12 @@ class _PlaylistRead:
                 else:
                     contents = shelf['contents']
             else:
+                self.validation_stage = 'continuation.envelope'
                 contents = nav(response, CONTINUATION_ITEMS)
             self._append(contents)
         except (KeyError, TypeError, IndexError, ValueError):
-            raise LibrarySnapshotError('playlist',
-                                       f'unsupported or incomplete track page (header_count={header_count})',
-                                       response, self.pages + 1) from None
+            raise self._page_error(f'unsupported or incomplete track page (header_count={header_count})',
+                                   response) from None
         self.pages += 1
         if self.pages == 1 and contents == []:
             # Upstream indexes contents[-1] even for a genuinely empty shelf.
@@ -92,16 +115,21 @@ class _PlaylistRead:
         return response
 
     def _append(self, contents):
+        self.validation_stage = 'contents.type'
         if not isinstance(contents, list):
             raise ValueError
         for i, item in enumerate(contents):
+            self.item_index = i
+            self.validation_stage = 'contents.item_type'
             if not isinstance(item, dict):
                 raise ValueError
             if 'continuationItemRenderer' in item:
+                self.validation_stage = 'contents.continuation'
                 token = get_continuation_token([item])
                 if i != len(contents) - 1 or not isinstance(token, str) or not token:
                     raise ValueError
             elif 'musicResponsiveListItemRenderer' not in item:
+                self.validation_stage = 'contents.renderer'
                 # Music renders an empty saved list as a message in its track
                 # shelf. Require the independent explicit zero header, a sole
                 # message, and the first page; notices on a nonempty list are
@@ -109,13 +137,80 @@ class _PlaylistRead:
                 if not (self.pages == 0 and self.empty_header and len(contents) == 1
                         and set(item) == {'messageRenderer'}):
                     raise ValueError
+        self.item_index = None
+        self.validation_stage = 'contents.parse'
         parsed = parse_playlist_items(contents, is_collaborative=self.collaborative)
         rows = sum('musicResponsiveListItemRenderer' in item for item in contents)
+        if self.identity_rows is not None and rows == len(parsed):
+            raw_rows = [item['musicResponsiveListItemRenderer'] for item in contents
+                        if 'musicResponsiveListItemRenderer' in item]
+            self.identity_rows.extend(_item_identities(raw, track) for raw, track in zip(raw_rows, parsed))
         self.raw_items += rows
         self.omitted += rows - len(parsed)
         self.unidentified += sum(not t.get('videoId') for t in parsed)
         self.tracks.extend(parsed)
+        self.validation_stage = 'contents.next_token'
         self.pending = get_continuation_token(contents) if contents else None
+
+
+def _item_identities(raw, track):
+    """Keep known item/playback identities in memory for the read-only report."""
+    paths = {
+        'playlist_item': ['playlistItemData', 'videoId'],
+        'like_target': ['menu', 'menuRenderer', 'topLevelButtons', 0,
+                        'likeButtonRenderer', 'target', 'videoId'],
+        'title_watch': ['flexColumns', 0, 'musicResponsiveListItemFlexColumnRenderer',
+                        'text', 'runs', 0, 'navigationEndpoint', 'watchEndpoint', 'videoId'],
+    }
+    result = {'playback': track.get('videoId')}
+    for name, path in paths.items():
+        value = nav(raw, path, True)
+        result[name] = value if isinstance(value, str) and value.strip() else None
+    return result
+
+
+def _page_envelope(response):
+    """Fixed paths, types and capped counts only; never echo keys, values or tokens."""
+    def kind(value):
+        if isinstance(value, dict):
+            return f'object[{min(len(value), 1000)}]'
+        if isinstance(value, list):
+            return f'list[{min(len(value), 1000)}]'
+        return ('null' if value is None else 'boolean' if isinstance(value, bool) else
+                'string' if isinstance(value, str) else 'number' if isinstance(value, (int, float)) else 'other')
+
+    result = {'root': kind(response)}
+    if not isinstance(response, dict):
+        return result
+    for name in ('responseContext', 'contents', 'continuationContents', 'onResponseReceivedActions',
+                 'onResponseReceivedEndpoints'):
+        result[name] = kind(response[name]) if name in response else 'missing'
+    for name in ('onResponseReceivedActions', 'onResponseReceivedEndpoints'):
+        actions = response.get(name)
+        if not isinstance(actions, list):
+            continue
+        samples = []
+        for action in actions[:8]:
+            sample = {'type': kind(action)}
+            if isinstance(action, dict):
+                append = action.get('appendContinuationItemsAction')
+                sample['append'] = kind(append) if 'appendContinuationItemsAction' in action else 'missing'
+                if isinstance(append, dict):
+                    items = append.get('continuationItems')
+                    sample['items'] = kind(items) if 'continuationItems' in append else 'missing'
+                    if isinstance(items, list):
+                        sample['sampled_items'] = [
+                            'track' if isinstance(item, dict) and 'musicResponsiveListItemRenderer' in item else
+                            'continuation' if isinstance(item, dict) and 'continuationItemRenderer' in item else
+                            kind(item) for item in items[:8]]
+            samples.append(sample)
+        result[name + '.sample'] = samples
+    continuation = response.get('continuationContents')
+    if isinstance(continuation, dict):
+        for name in ('musicPlaylistShelfContinuation', 'musicShelfContinuation', 'sectionListContinuation'):
+            if name in continuation:
+                result['continuationContents.' + name] = kind(continuation[name])
+    return result
 
 
 def _header_metadata(response):
@@ -195,13 +290,14 @@ def playlist_read_report(client, playlist_id):
     unchanged response is inconclusive and never relaxes membership validation.
     """
     reports, memberships, ordinary_tracks, resolved_id = {}, {}, [], None
+    identity_rows = []
     for name, params in (('ordinary', None), ('include_unavailable_probe', 'wgYCCAA=')):
-        reader = _PlaylistRead(client, browse_params=params)
+        reader = _PlaylistRead(client, browse_params=params, collect_identities=True)
         try:
             detail = _complete_playlist(reader, playlist_id)
         except LibrarySnapshotError as exc:
             reports[name] = {'error': str(exc), 'shape': reader.first_shape,
-                             'message_paths': reader.message_paths}
+                             'message_paths': reader.message_paths, 'failed_page': reader.failed_page}
             continue
         except (BridgeError, YTMusicError, OSError):
             reports[name] = {'error': 'Playlist request unavailable', 'exhausted': False}
@@ -210,6 +306,7 @@ def playlist_read_report(client, playlist_id):
         if name == 'ordinary':
             ordinary_tracks = tracks
             resolved_id = detail.get('id')
+            identity_rows = reader.identity_rows
         memberships[name] = {t['videoId'] for t in tracks if t.get('videoId')}
         reports[name] = {'advertised': detail.get('trackCount'), 'returned': len(tracks),
                          'unavailable': sum(t.get('isAvailable') is False for t in tracks),
@@ -244,7 +341,8 @@ def playlist_read_report(client, playlist_id):
         reports['youtube'] = youtube_playlist_report(client, 'LL' if playlist_id == 'LM' else playlist_id,
                                                      ordinary_tracks)
         if playlist_id == 'LM':
-            reports['youtube_music_alias'] = youtube_playlist_report(client, playlist_id, ordinary_tracks)
+            reports['youtube_music_alias'] = youtube_playlist_report(
+                client, playlist_id, ordinary_tracks, music_identity_rows=identity_rows)
             reports['youtube_default'] = youtube_playlist_report(client, 'LL', ordinary_tracks,
                                                                  include_unavailable=False)
             reports['youtube_music_default'] = youtube_playlist_report(client, 'LM', ordinary_tracks,

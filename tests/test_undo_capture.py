@@ -3,6 +3,7 @@ import logging
 import pytest
 
 from yt_playlist.library.undo_capture import capture_post
+from yt_playlist.library import playlist_creation
 from yt_playlist.library.undo_conflicts import require_unchanged_copy
 
 
@@ -78,9 +79,10 @@ def test_forward_copy_remains_recorded_when_capture_fails(store, monkeypatch):
     store.playlists.set_playlist_tracks(source, [tid])
     client = FakeClient(catalog={"a": _track("a", "Song", "Artist")})
     monkeypatch.setattr(client, "get_playlist", lambda *args, **kwargs: {"tracks": [], "trackCount": 1})
-    monkeypatch.setattr(executor, "_capture_post", lambda *args, **kwargs:
-                        undo_capture.capture_post(*args, **kwargs, sleep=lambda _: None))
-    result = executor.copy_playlist(store, [source], "Copy", client, 2)
+    capture = undo_capture.capture_post
+    monkeypatch.setattr(undo_capture, "capture_post", lambda *args, **kwargs:
+                        capture(*args, **kwargs, sleep=lambda _: None))
+    result = playlist_creation.copy_playlist(store, [source], "Copy", client, 2)
     action = store.actions.get_actions()[0]
     assert action.status == "executed"
     assert json.loads(action.undo_json)["post"] is None
@@ -114,7 +116,8 @@ def test_merge_retry_does_not_claim_an_external_addition(store, monkeypatch):
     monkeypatch.setattr(client, 'get_playlist', read)
     monkeypatch.setattr(executor, '_capture_post', lambda *a, **kw:
                         undo_capture.capture_post(*a, **kw, sleep=lambda _: None))
-    executor.apply_result(store, {iid: client}, [keeper, other], ['a', 'b'], 'all', 2)
+    with pytest.raises(ValueError, match='verify the merged playlist contents'):
+        executor.apply_result(store, {iid: client}, [keeper, other], ['a', 'b'], 'all', 2)
     action = store.actions.get_actions()[0]
     entry = next(e for e in json.loads(action.undo_json)['restored'] if e['ytm'] == 'KEEP')
     assert len(post_reads) == 3 and entry['post_state'] is None and entry['post'] is None

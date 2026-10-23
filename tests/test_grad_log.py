@@ -20,7 +20,7 @@ def test_graduation_logs_the_genre_axis_on_threshold_crossing():
     # A strong "a lot" vibe (signed=2 at source 1.0) crosses THEME_THRESHOLD in one event.
     graduation.graduate_moods(s, [identity_key("song", "band")], 2.0, 1000.0,
                              source=rec_params.SOURCE_W_VIBE, source_label="vibe")
-    rows = s.rec_surface.recent_graduations()
+    rows = s.rec_signals.recent_graduations()
     assert rows, "a threshold crossing must log at least one graduation row"
     assert all(r["source"] == "vibe" and r["created_at"] == 1000.0 for r in rows)
     genre_axis = f"genre:{genre_map.family('Techno')}"
@@ -35,7 +35,7 @@ def test_subthreshold_event_logs_nothing():
     # A single weak play (source 0.08, signed +1) does NOT cross the threshold, so nothing graduates.
     graduation.graduate_moods(s, [identity_key("song", "band")], 1.0, 1000.0,
                              source=rec_params.SOURCE_W_PLAY)
-    assert s.rec_surface.recent_graduations() == []
+    assert s.rec_signals.recent_graduations() == []
 
 
 def test_graduation_counts_aggregate_by_source():
@@ -47,7 +47,7 @@ def test_graduation_counts_aggregate_by_source():
                              source=rec_params.SOURCE_W_VIBE, source_label="vibe")
     graduation.graduate_moods(s, [identity_key("tune", "act")], 2.0, 1000.0,
                              source=rec_params.SOURCE_W_LIKE, source_label="like")
-    counts = s.rec_surface.graduation_log_counts()
+    counts = s.rec_signals.graduation_log_counts()
     assert set(counts) == {"vibe", "like"}
     assert counts["vibe"] >= 1 and counts["like"] >= 1
-    assert sum(counts.values()) == len(s.rec_surface.recent_graduations())   # the counts partition the log
+    assert sum(counts.values()) == len(s.rec_signals.recent_graduations())   # the counts partition the log

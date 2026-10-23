@@ -23,7 +23,7 @@ def test_sync_dislike_suppresses_and_feeds_negative_transient(store):
     # old assertion here encoded the leak #84 fixed). This fixture track has no genre at sync time
     # (enrichment hasn't run), so nothing accrues at all here; genre-facet accrual on dislikes is
     # covered by test_negative_graduation.py with enriched fixtures.
-    assert store.rec_surface.get_theme("artist:Nickelback") is None
+    assert store.rec_signals.get_theme("artist:Nickelback") is None
 
 
 def test_sync_dislike_idempotent(store):
@@ -35,7 +35,7 @@ def test_sync_dislike_idempotent(store):
     # #84: the artist axis no longer accrues on dislikes, and it must STAY empty on a repeat sync
     # (guards against a regression re-adding artist accrual on re-capture; genre-facet accrual and
     # idempotency with enriched fixtures live in test_negative_graduation.py).
-    assert store.rec_surface.get_theme("artist:Nickelback") is None
+    assert store.rec_signals.get_theme("artist:Nickelback") is None
 
 
 def test_sync_reconciles_undislike(store):

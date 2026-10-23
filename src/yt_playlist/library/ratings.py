@@ -2,6 +2,7 @@
 import logging
 
 from yt_playlist.rec import graduation
+from yt_playlist.library.rating_writes import ordered
 from yt_playlist.util.retry import with_retry
 
 
@@ -13,7 +14,6 @@ def record_confirmed(store, identity_id, video_id, status, now):
     # Keep confirmed API results distinct from unconfirmed player-bar readouts.
     with store._lock:
         record_observations(store, identity_id, {video_id: status}, source="api", now=now)
-        store.playlists.set_song_liked(identity_id, video_id, status == "LIKE")
 
 
 def reconcile_recordings(store, keys):
@@ -31,7 +31,13 @@ def record_observations(store, identity_id, statuses, *, source, now):
     """
     with store._lock:
         store.tracks.record_item_ratings(identity_id, statuses, source=source, now=now)
-        reconcile_recordings(store, {store.tracks.identity_key_for_video(v) for v in statuses})
+        retained = store.tracks.retained_rating_statuses(identity_id, statuses,
+            newer_than=now if source == 'sync' else None)
+        # A stale LM snapshot can also omit a newly liked upload. Restore actions at/after
+        # its read time, even when that upload was absent from all observed playlist contexts.
+        for video_id, status in retained.items():
+            store.playlists.set_song_liked(identity_id, video_id, status == 'LIKE')
+        reconcile_recordings(store, {store.tracks.identity_key_for_video(v) for v in retained})
 
 
 def _resolve_track(store, client, video_id, now):
@@ -76,15 +82,28 @@ def reconcile_pending(store, identity_id, client):
     return keys
 
 
-def set_rating(store, identity_id, video_id, status, client, now):
+def set_rating(store, identity_id, video_id, status, client, now, *, after_confirmed=None):
     if not isinstance(video_id, str) or not video_id.strip():
         raise ValueError("A video ID is required")
     if status not in STATUSES:
         raise ValueError("Invalid rating state")
-    result = with_retry(lambda: client.rate_song(video_id, status))
-    if isinstance(result, dict) and result.get("status", "STATUS_SUCCEEDED") != "STATUS_SUCCEEDED":
-        raise ValueError("YouTube wouldn’t update this song’s rating.")
-    record_confirmed(store, identity_id, video_id, status, now)
+    with ordered(store, identity_id, video_id):
+        result = with_retry(lambda: client.rate_song(video_id, status))
+        if isinstance(result, dict) and result.get("status", "STATUS_SUCCEEDED") != "STATUS_SUCCEEDED":
+            raise ValueError("YouTube wouldn’t update this song’s rating.")
+        with store._lock:
+            # An earlier command's native confirmation may have arrived while this intent waited.
+            # Publish this later, confirmed command after it even with a coarse/frozen caller clock.
+            retained = store.tracks.item_rating(identity_id, video_id)
+            confirmed_at = max(now, retained["observed_at"]) if retained else now
+            record_confirmed(store, identity_id, video_id, status, confirmed_at)
+        if after_confirmed is not None:
+            try:
+                return after_confirmed(identity_id)
+            except Exception as exc:
+                logger.warning("rating saved but player reconciliation failed: video=%s", video_id, exc_info=True)
+                return {"player_error": str(exc)}
+        return None
 
 
 def main_rating(store, video_id):

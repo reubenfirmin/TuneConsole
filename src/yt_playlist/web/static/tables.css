@@ -1,0 +1,36 @@
+/* Shared table primitives and HTMX row lifecycle; no feature layout. */
+.sort-indicator { display: none; margin-left: .25rem; vertical-align: middle; }
+.sort-indicator.is-ascending, .sort-indicator.is-descending { display: inline-flex; }
+.sort-indicator.is-ascending .ui-arrow { transform: rotate(180deg); }
+/* ---- tables ---- */
+table { border-collapse: collapse; width: 100%; font-size: var(--type-ui); }
+thead th {
+  text-align: left; font-size: var(--type-xs); letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--faint); font-weight: 700; padding: 0.5rem 0.7rem; border-bottom: 1px solid var(--border-2);
+  /* pin the header below the sticky top bar so it stays visible down a long table.
+     --topbar-h is measured at runtime (see app.js) so it tracks the real navbar height. */
+  position: sticky; top: var(--topbar-h, 3.45rem); z-index: 3; background: var(--surface);
+}
+tbody td { padding: 0.6rem 0.7rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+tbody tr { transition: background 0.12s ease; }
+tbody tr:hover { background: var(--accent-soft); }
+/* Current track supplied by the shared playbackStatus owner in track-tables.js. */
+tr.now-playing > td { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+tr.now-playing > td:first-child { box-shadow: inset 3px 0 0 0 var(--accent-2); }
+td.mono, .mono { font-family: var(--font-mono); font-size: var(--type-sm); }
+/* right-align numeric columns for BOTH header and cells (th + td) so they line up everywhere */
+.num { text-align: right; }
+td.num { font-family: var(--font-mono); }
+
+.alt-dur { color: var(--faint); font-size: var(--type-sm); }
+th.sorth { cursor: pointer; user-select: none; white-space: nowrap; }
+th.sorth:hover { color: var(--text); }
+tr.rowdel { opacity: .35; transition: opacity .2s ease; }
+/* discover: reproduce the old Alpine row states with htmx lifecycle classes */
+tr.htmx-request { opacity: .35; transition: opacity .2s ease; }
+tr.htmx-request td { text-decoration: line-through; }
+#playlist-track-body > tr.htmx-added { opacity: 0; transform: translateY(10px); }
+#playlist-track-body > tr { transition: opacity .22s ease, transform .22s ease; }
+tbody.stale-row.htmx-swapping, tbody.move-row.htmx-swapping,
+tbody.empty-row.htmx-swapping { opacity: 0; transition: opacity .3s ease; }
+

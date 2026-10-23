@@ -8,8 +8,10 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.rec import road_trip as road_trip_rec
 from yt_playlist.rec import road_trip_candidates as candidates
+from yt_playlist.rec import scorecard
+from yt_playlist.rec.road_trip_state import ROW_FIELDS
 from yt_playlist.web.routes import road_trip as road_trip_route
-from yt_playlist.repos.rec_query import GENERATED_GROUP
+from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.web.app import create_app
 from yt_playlist.util.matching import identity_key
 from tests.conftest import FakeClient
@@ -72,12 +74,12 @@ def test_draft_serving_and_generated_save_are_measured_without_counting_progress
     assert [r["identity_key"] for r in rows] == [identity_key(t["title"], t["artist"])
                                                for t in road_trip_rec.draft_tracks(draft)]
     assert rows
-    before = store.rec_surface.recommendation_scorecard(999, 1001)["impressions"]
+    before = scorecard.recommendation_scorecard(store, 999, 1001)["impressions"]
     for _ in range(3):
         assert c.get(f"/road_trip/draft/{rid}/progress").status_code == 200
-    assert store.rec_surface.recommendation_scorecard(999, 1001)["impressions"] == before
+    assert scorecard.recommendation_scorecard(store, 999, 1001)["impressions"] == before
     assert c.post(f"/road_trip/draft/{rid}/save").status_code == 200
-    score = store.rec_surface.recommendation_scorecard(999, 1001)
+    score = scorecard.recommendation_scorecard(store, 999, 1001)
     assert score["save"] == len(rows) and score["conversion"] == 0
     assert score["by_ownership"]["cold"]["impressions"] > 0
 
@@ -98,7 +100,7 @@ def test_reopening_and_saving_repairs_passenger_genre_membership(store):
                                      "theirs", "Singer-Songwriter", None)
     stale["input"] = "Removed Artist"
     state["pool"].append(stale)
-    state["picked"] = [{k: row[k] for k in road_trip_rec._ROW_FIELDS} for row in state["pool"]]
+    state["picked"] = [{k: row[k] for k in ROW_FIELDS} for row in state["pool"]]
     state["picks"] = [row["video_id"] for row in state["picked"]]
     state["axes"]["theirs"] = [{"key": "genre:" + genre, "kind": "genre", "name": genre,
                                 "share": .33, "target": None, "artists": seeds}
@@ -518,7 +520,7 @@ def test_saving_plays_in_the_connected_youtube_tab_when_ready(store, monkeypatch
         calls.append(args)
         navigated.set()
 
-    monkeypatch.setattr(road_trip_route.executor, "navigate_when_ready", navigate)
+    monkeypatch.setattr(road_trip_route.playlist_navigation, "navigate_when_ready", navigate)
     response = c.post(f"/road_trip/draft/{rid}/save")
     assert response.status_code == 200
     assert navigated.wait(2)
@@ -535,7 +537,7 @@ def test_save_failures_use_the_standard_feedback_and_leave_no_saved_link(store, 
     if failure == "youtube":
         def failed(*args, **kwargs):
             raise RuntimeError("private provider details")
-        monkeypatch.setattr(road_trip_route.executor, "create_generated_playlist", failed)
+        monkeypatch.setattr(road_trip_route.playlist_generated, "create_generated_playlist", failed)
     elif failure == "account":
         c.app.state.ctx.client_provider = lambda: {}
     else:

@@ -1,0 +1,347 @@
+.for-you-grid { display: grid; gap: .9375rem;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); }
+.fy-card { display: flex; gap: .8125rem; padding: 0.7rem; align-items: center; }
+.fy-cover { position: relative; width: 3.4rem; height: 3.4rem; flex: 0 0 auto;
+  border-radius: var(--radius-sm); overflow: hidden; display: grid; place-items: center;
+  background: var(--surface-2); }
+.fy-cover img { width: 100%; height: 100%; object-fit: cover; }
+.fy-play { position: absolute; color: var(--light-source); opacity: 0.85; font-size: var(--type-ui); }
+.fy-meta { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; flex: 1 1 auto; }
+.fy-title { font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fy-artist { color: var(--dim); font-size: var(--type-ui); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fy-reason { color: var(--accent-2); font-size: var(--type-xs); margin-top: 0.15rem; }
+.fy-add { flex: 0 0 auto; align-self: center; white-space: nowrap; }
+.fy-add.added { color: var(--teal); border-color: transparent; }
+
+/* For-You dismiss (feedback persistence) */
+.fy-card { position: relative; }
+.fy-x { position: absolute; top: 0.35rem; right: 0.45rem; background: transparent; border: none;
+  color: var(--faint); font-size: var(--type-body); line-height: 1; padding: 0.1rem 0.25rem; cursor: pointer;
+  box-shadow: none; opacity: 0; transition: opacity 0.12s ease; }
+.fy-card:hover .fy-x { opacity: 1; }
+.fy-x:hover { color: var(--danger); background: transparent; box-shadow: none; }
+
+/* Two-lane For-You (exploit / explore) */
+.two-lane { display: grid; grid-template-columns: 1fr 1fr; gap: 1.6rem; align-items: start; }
+.two-lane .for-you-grid { grid-template-columns: 1fr; }
+@media (max-width: 60rem) { .two-lane { grid-template-columns: 1fr; } }
+
+/* For-You feedback chips */
+.fy-fb { position: absolute; top: 0.35rem; right: 0.45rem; }
+.fy-fb .fy-x { position: static; }
+.fy-fb-pop { position: absolute; right: 0; top: 1.5rem; z-index: 20; display: flex; flex-direction: column;
+  min-width: 11rem; background: var(--surface); border: 1px solid var(--border-2); border-radius: 9px;
+  padding: 0.3rem; box-shadow: 0 14px 34px -12px color-mix(in srgb, var(--shadow-ink) 70%, transparent); }
+.fy-fb-pop button { background: transparent; color: var(--dim); text-align: left; font-size: var(--type-sm);
+  padding: 0.35rem 0.5rem; border: none; box-shadow: none; border-radius: 6px; cursor: pointer; }
+.fy-fb-pop button:hover { background: var(--surface-2); color: var(--text); box-shadow: none; }
+.fy-fb-pop button.more { color: var(--teal); }
+
+/* complete-playlist suggestion actions */
+.fy-actions { display: flex; align-items: center; gap: 0.4rem; flex: 0 0 auto; }
+
+/* building / refreshing states */
+.refreshing { font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500; color: var(--accent-2);
+  letter-spacing: 0.06em; text-transform: uppercase; }
+.skeleton { min-height: 4.4rem; background: linear-gradient(90deg, var(--surface) 25%, var(--surface-2) 37%, var(--surface) 63%);
+  background-size: 400% 100%; animation: shimmer 1.4s ease infinite; }
+@keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+
+/* New-artist discovery */
+.na-card { display: flex; flex-direction: column; gap: 0.25rem; }
+.na-name { font-weight: 650; font-size: var(--type-body); }
+.na-because { color: var(--dim); font-size: var(--type-sm); }
+.na-fits { color: var(--accent-2); font-size: var(--type-xs); }
+
+/* ============ Recommendation tiles (graphics-first, hover-reveal) ============ */
+.tile-grid { display: grid; gap: .875rem; grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr)); }
+/* "Explore your artists' catalogs": a responsive album grid of normal-sized covers that flows by width
+   (stepping down to 4 / 3 / 2 as it narrows). It spans the full content width so it's exactly as wide
+   as the double-playlist .gen-lanes above it; at the page max-width auto-fill still tops out at 5
+   columns of 11rem. A small script in the partial then clamps the rows. */
+.album-grid { display: grid; gap: .875rem;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  margin-bottom: 1.375rem; }
+/* New-artists tile grid: match .album-grid exactly (same column min and gap, same full width) so the
+   two Home cards line up with the lanes above. The shared .tile-grid stays narrower elsewhere. */
+#new-artist-grid { grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); }
+.tile { position: relative; }
+.tile-cover { display: block; position: relative; aspect-ratio: 1 / 1; overflow: hidden;
+  border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--border); }
+.tile-cover img { width: 100%; height: 100%; object-fit: cover; display: block;
+  transition: transform 0.4s cubic-bezier(0.2,0.7,0.2,1), filter 0.3s ease; }
+.tile:hover .tile-cover img { transform: scale(1.06); filter: brightness(0.62) saturate(1.05); }
+.tile-cover:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+
+/* source badge: one hue per signal */
+.tile-badge { position: absolute; top: 0.5rem; left: 0.5rem; z-index: 3;
+  font-family: var(--font-mono); font-size: 0.6rem; font-weight: 600; letter-spacing: 0.07em;
+  text-transform: uppercase; padding: 0.18rem 0.45rem; border-radius: 999px;
+  backdrop-filter: blur(6px); border: 1px solid transparent; }
+.b-indigo { color: var(--accent-pale-2); background: color-mix(in srgb, var(--accent) 28%, transparent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
+.b-teal   { color: var(--teal-pale); background: color-mix(in srgb, var(--teal) 22%, transparent);  border-color: color-mix(in srgb, var(--teal) 50%, transparent); }
+.b-amber  { color: var(--amber-pale); background: color-mix(in srgb, var(--warn-3) 22%, transparent);  border-color: color-mix(in srgb, var(--warn-3) 50%, transparent); }
+.b-violet { color: var(--accent-pale-1); background: color-mix(in srgb, var(--accent-2) 26%, transparent); border-color: color-mix(in srgb, var(--accent-2) 50%, transparent); }
+.b-cyan   { color: var(--green-pale); background: color-mix(in srgb, var(--mint-bright) 20%, transparent);  border-color: color-mix(in srgb, var(--mint-bright) 50%, transparent); }
+.b-pink   { color: var(--danger-pale); background: color-mix(in srgb, var(--danger) 22%, transparent); border-color: color-mix(in srgb, var(--danger) 50%, transparent); }
+
+/* title/subtitle scrim: hidden until hover */
+.tile-scrim { position: absolute; inset: auto 0 0 0; z-index: 2; display: flex; flex-direction: column;
+  gap: 0.05rem; padding: 1.6rem 0.6rem 0.55rem;
+  background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--surface-sunk) 55%, transparent) 35%, color-mix(in srgb, var(--surface-sunk) 94%, transparent));
+  opacity: 0; transform: translateY(0.5rem); transition: opacity 0.18s ease, transform 0.18s ease; }
+.tile:hover .tile-scrim, .tile:focus-within .tile-scrim { opacity: 1; transform: none; }
+.tile-title { font-weight: 650; font-size: var(--type-ui); line-height: 1.2; color: var(--light-source);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile-sub  { font-size: var(--type-xs); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile-note { font-size: 0.68rem; color: var(--accent-2); margin-top: 0.12rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* hover-to-play */
+.tile-play { position: absolute; top: 50%; left: 50%; z-index: 4;
+  width: 2.7rem; height: 2.7rem; transform: translate(-50%,-50%) scale(0.7);
+  display: grid; place-items: center; border-radius: 50%; padding: 0; font-size: var(--type-body); color: var(--light-source);
+  background: color-mix(in srgb, var(--accent) 92%, transparent); box-shadow: 0 8px 22px -8px var(--shadow-ink); border: none;
+  opacity: 0; transition: opacity 0.16s ease, transform 0.16s cubic-bezier(0.2,0.7,0.2,1); }
+.tile:hover .tile-play, .tile:focus-within .tile-play { opacity: 1; transform: translate(-50%,-50%) scale(1); }
+.tile-play:hover { background: var(--control-selected-hover); filter: none; text-decoration: none; }
+
+/* art-less tiles (artists): gradient placeholder; name shown by default since there's no cover.
+   These carry the name + "because…/fits…" context as text, which can run several lines, so they grow
+   to fit it (square minimum) instead of inheriting the cover's fixed 1:1 ratio + clip that cut it off. */
+.tile-cover.no-art { background: var(--placeholder); display: grid; place-items: center;
+  aspect-ratio: auto; min-height: 10.5rem; overflow: visible; }
+.tile-cover.no-art .tile-scrim { opacity: 1; transform: none;
+  position: static; inset: auto; align-items: center; text-align: center; background: none;
+  padding: 0.7rem; min-width: 0; }
+.tile-cover.no-art .tile-title { white-space: normal; font-family: var(--font-sans); font-size: var(--type-lg); }
+.tile-cover.no-art .tile-sub, .tile-cover.no-art .tile-note { white-space: normal; }
+
+/* ---- "Complete this playlist" suggestion tiles ----------------------------------------------
+   A functional pick list, not a graphics-first browse grid: the caption and the Add / ⋯ actions
+   are ALWAYS visible (never hover-gated), and the dismiss menu is click-toggled with click-away
+   to close, the same stable pattern as the playlist's own track-row ⋯ menu. */
+.tile-suggest { position: relative; display: flex; flex-direction: column; }
+.suggest-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 54rem) { .suggest-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 42rem) { .suggest-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 28rem) { .suggest-grid { grid-template-columns: 1fr; } }
+.tile-suggest > * { transition: opacity .18s ease, transform .18s ease; }
+.tile-suggest.suggestion-departing > * { opacity: 0; transform: translateY(-7px) scale(.97); }
+.tile-suggest.suggestion-departing::after,
+.tile-suggest.suggestion-vacancy::after { position: absolute; inset: 0; display: grid; place-items: center;
+  border: 1px dashed color-mix(in srgb, var(--accent-2) 55%, var(--border-2)); border-radius: 10px;
+  background: radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 58%);
+  color: var(--accent-2); font-size: var(--type-sm); font-weight: 650; letter-spacing: .01em;
+  animation: suggestion-gap-in .22s ease both; }
+.tile-suggest.suggestion-departing::after { content: '♪  Adding…'; }
+.tile-suggest.suggestion-vacancy { pointer-events: none; }
+.tile-suggest.suggestion-vacancy::after { content: '✦  Added to playlist'; }
+@keyframes suggestion-gap-in { from { opacity: 0; transform: scale(.96); }
+  to { opacity: 1; transform: scale(1); } }
+.tile-suggest .tile-art { position: relative; }
+/* keep the hover ▶ centered on the cover art, not the (now taller) whole tile */
+.tile-suggest .tile-play { top: 50%; }
+
+.tile-cap { display: flex; flex-direction: column; gap: 0.04rem; padding: 0.5rem 0.1rem 0; min-width: 0; }
+.tile-cap-title { font-weight: 650; font-size: var(--type-sm); line-height: 1.25; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile-cap-sub { font-size: var(--type-xs); color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile-cap-note { font-size: 0.67rem; color: var(--accent-2); margin-top: 0.08rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.tile-foot { position: relative; display: flex; align-items: center; gap: 0.35rem;
+  margin-top: 0.45rem; padding: 0 0.1rem; }
+.tile-foot form { flex: 1; min-width: 0; }
+.tile-add { width: 100%; font-family: var(--font-sans); font-size: var(--type-xs); font-weight: 600;
+  color: var(--text); background: var(--surface-2); border: 1px solid var(--border-2);
+  border-radius: 7px; padding: 0.34rem 0.5rem; cursor: pointer; box-shadow: none; line-height: 1.2; }
+.tile-add:hover { background: var(--control-selected-hover); color: var(--light-source); border-color: var(--control-selected-border); box-shadow: none; }
+.tile-foot .dots { font-size: var(--type-lg); flex: none; }
+
+/* --- Rediscover: a couple of stale library playlists spotlighted on Home --- */
+.rediscover-grid { grid-template-columns: 1fr 1fr; gap: 1.375rem; margin-bottom: 1.375rem; }
+@media (max-width: 60rem) { .rediscover-grid { grid-template-columns: 1fr; } }
+/* The 3 "Revisit" album tiles span the full row (equal thirds), instead of .album-grid's auto-fill
+   that would leave only-3 tiles bunched at min-width on the left. */
+.rediscover-albums { grid-template-columns: repeat(3, 1fr); }
+/* The how-we-rank explanation sits at the foot of the section as quiet secondary text. */
+.redis-card { display: flex; flex-direction: column; }
+.redis-head { display: flex; gap: 0.7rem; align-items: center; margin-bottom: 0.7rem; }
+.redis-head .gen-th { width: 3rem; height: 3rem; }
+.redis-meta { min-width: 0; display: flex; flex-direction: column; gap: 0.15rem; }
+.redis-title { font-family: var(--font-sans); font-size: var(--type-lg); line-height: 1.25;
+  letter-spacing: -0.01em; color: var(--text); font-weight: 650; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.redis-title:hover { color: var(--accent-2); text-decoration: none; }
+.redis-sub { font-size: var(--type-xs); color: var(--dim); }
+.redis-list { list-style: none; margin: 0 0 0.2rem; padding: 0; }
+.redis-row { display: flex; gap: 0.5rem; align-items: baseline; padding: 0.35rem 0.2rem;
+  border-bottom: 1px solid var(--border); }
+.redis-row:last-child { border-bottom: none; }
+.redis-row-title { font-size: var(--type-ui); color: var(--text); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; flex: 1 1 auto; min-width: 0; }
+.redis-row-artist { font-size: var(--type-xs); color: var(--dim); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; flex: 0 1 auto; }
+.redis-more { font-size: var(--type-xs); color: var(--faint); padding: 0.4rem 0.2rem 0; font-style: italic; }
+.redis-foot { margin-top: auto; padding-top: .8125rem; display: flex; flex-wrap: wrap;
+  align-items: center; gap: 0.6rem; }
+
+/* Connected editorial spreads retain the uneven rhythm of the magazine layout. */
+.page-home .into-stack { container: recent / inline-size; padding-block: 1.25rem 3rem; }
+.page-home .into-grid { display: grid; gap: 3.5rem; }
+.page-home .into-spread { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 2.5rem clamp(1.5rem, 3.5cqw, 3rem); align-items: start; padding-block-end: 3.5rem; border-block-end: 1px solid var(--border); }
+.page-home .into-wait { grid-column: 1 / -1; display: flex; align-items: center; gap: .6rem; min-height: 12rem; }
+.page-home .into-wait span { width: .45rem; height: .45rem; border-radius: 50%; background: var(--accent-2); animation: into-wait 1.8s ease-in-out infinite alternate; }
+.page-home .into-wait span:nth-child(2) { animation-delay: .3s; }
+.page-home .into-wait span:nth-child(3) { animation-delay: .6s; }
+@keyframes into-wait { from { opacity: .2; transform: translateY(0); } to { opacity: .8; transform: translateY(-3px); } }
+.page-home .into-card { display: flex; flex-direction: column; min-width: 0; gap: 1.3rem; }
+.page-home .into-art { display: block; position: relative; width: 100%; aspect-ratio: 3 / 2; overflow: hidden; background: var(--surface-inset); }
+.page-home .into-art > img { display: block; width: 100%; height: 100%; object-fit: cover; transition: transform .8s cubic-bezier(.2,.7,.2,1); }
+.page-home .into-card[data-kind="genre"] .into-art > img { object-fit: contain; }
+.page-home .into-card:is(:hover, :focus-within) .into-art > img { transform: scale(1.025); }
+.page-home .into-copy { display: flex; flex-direction: column; gap: .9rem; min-width: 0; }
+.page-home .into-story-head { display: flex; align-items: baseline; gap: .7rem; }
+.page-home .into-copy h3 { flex: 1; min-width: 0; margin: 0; font-size: clamp(1.9rem, 3.5cqw, 3rem); line-height: 1.08; }
+.page-home .into-subject { font-family: 'Iowan Old Style', 'Palatino Linotype', Georgia, serif; font-size: inherit; font-weight: 400; line-height: inherit; letter-spacing: -.035em; color: var(--text); text-shadow: none; text-decoration: none; overflow-wrap: anywhere; }
+.page-home a.into-subject:hover { color: var(--subj); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: .14em; }
+.page-home .into-extract { color: color-mix(in srgb, var(--text) 78%, var(--dim)); font-size: var(--type-ui); line-height: 1.75; }
+.page-home .into-extract p { margin: 0; }
+.page-home .into-extract p + p { margin-block-start: .8rem; }
+.page-home .into-read { align-self: start; color: var(--text); font-size: .82rem; text-decoration: underline; text-decoration-color: var(--subj); text-underline-offset: .35em; transition: color .2s; }
+.page-home .into-read:hover { color: var(--subj); }
+.page-home .into-explore { flex: 0 0 auto; display: grid; place-items: center; width: 2rem; height: 2rem; margin-block: -.25rem; color: var(--dim); opacity: 0; transition: opacity .2s ease, color .2s ease; }
+.page-home .into-explore svg { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.page-home .into-card:is(:hover, :focus-within) .into-explore { opacity: 1; }
+.page-home .into-explore:hover { color: var(--subj); }
+.page-home .into-card a:focus-visible { outline: 2px solid var(--subj); outline-offset: 4px; }
+.page-home .into-songs { display: grid; gap: .85rem; min-width: 0; margin: .3rem 0 0; padding: 1rem 0 0; list-style: none; border-block-start: 1px solid var(--border); }
+.page-home .into-song { display: grid; grid-template-columns: 2.5rem minmax(0, 1fr); grid-template-rows: auto auto; column-gap: .75rem; row-gap: .15rem; align-items: center; min-width: 0; }
+.page-home .into-song-play { grid-column: 1; grid-row: 1 / span 2; display: block; width: 2.5rem; height: 2.5rem; border-radius: 2px; }
+.page-home .into-song-art { display: grid; position: relative; place-items: center; width: 100%; height: 100%; overflow: hidden; border-radius: inherit; color: var(--text); }
+.page-home .into-song-art img { width: 100%; height: 100%; object-fit: cover; transition: opacity .2s ease; }
+.page-home .into-song-art svg { position: absolute; fill: currentColor; opacity: 1; transition: opacity .2s ease; }
+.page-home .into-song-art:has(img) svg { opacity: 0; }
+.page-home .into-song:is(:hover, :focus-within) .into-song-art img { opacity: .25; }
+.page-home .into-song:is(:hover, :focus-within) .into-song-art svg { opacity: 1; }
+.page-home .into-song-title { grid-column: 2; align-self: end; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .8rem; font-weight: 500; line-height: 1.35; }
+.page-home .into-song-artist { grid-column: 2; align-self: start; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); font-size: .7rem; line-height: 1.35; text-decoration: none; }
+.page-home .into-song-artist:hover { color: var(--subj); }
+.page-home .into-feature { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); align-items: center; column-gap: clamp(1.5rem, 4.5cqw, 4rem); row-gap: 1.5rem; }
+.page-home .into-feature .into-art { aspect-ratio: 4 / 3; max-height: 24rem; }
+.page-home .into-feature > .into-songs { grid-column: 1 / -1; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 2rem; }
+.page-home .into-feature h3 { font-size: clamp(2.75rem, 6cqw, 4.75rem); }
+.page-home .into-feature .into-extract { font-size: 1rem; }
+.page-home .into-companions { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 2rem clamp(1.5rem, 3.5cqw, 3rem); min-width: 0; align-items: start; }
+.page-home .into-aside { grid-column: span 5; }
+.page-home .into-split { grid-column: span 7; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); align-items: center; gap: 1.5rem; padding-block-start: 2.5rem; }
+.page-home .into-split .into-art { grid-column: 2; grid-row: 1; aspect-ratio: 1; }
+.page-home .into-split .into-copy { grid-column: 1; grid-row: 1; }
+.page-home .into-split > .into-songs { grid-column: 1 / -1; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.page-home .into-text-only { border-block-start: 1px solid var(--subj); padding-block-start: 1.5rem; }
+.page-home .into-column { grid-column: span 4; padding-block-start: 1.5rem; border-block-start: 1px solid var(--border); }
+.page-home .into-column:nth-child(2) { grid-column: span 5; margin-block-start: 2rem; }
+.page-home .into-column:nth-child(2) .into-art { aspect-ratio: 1; }
+.page-home .into-column:nth-child(3) { grid-column: span 3; margin-block-start: 5rem; }
+.page-home .into-cluster-pair > .into-feature { grid-column: span 7; display: flex; align-items: stretch; }
+.page-home .into-cluster-pair > .into-feature h3 { font-size: clamp(2.75rem, 5cqw, 4rem); }
+.page-home .into-cluster-pair > .into-companions { grid-column: span 5; display: flex; flex-direction: column; padding-block-start: 6rem; }
+.page-home .into-cluster-pair .into-aside { width: 100%; }
+.page-home .into-cluster-pair .into-aside h3 { font-size: clamp(1.9rem, 3.5cqw, 2.75rem); }
+.page-home .into-feature-spread > .into-feature > .into-art,
+.page-home .into-linked:nth-child(even):not(.into-cluster-pair) > .into-feature > .into-art { grid-column: 2; grid-row: 1; }
+.page-home .into-feature-spread > .into-feature > .into-copy,
+.page-home .into-linked:nth-child(even):not(.into-cluster-pair) > .into-feature > .into-copy { grid-column: 1; grid-row: 1; }
+@container recent (max-width: 48rem) {
+  .page-home .into-cluster-pair > .into-feature,
+  .page-home .into-cluster-pair > .into-companions { grid-column: 1 / -1; }
+  .page-home .into-cluster-pair > .into-feature { display: grid; }
+  .page-home .into-cluster-pair > .into-companions { padding-block-start: 0; }
+  .page-home .into-cluster-pair .into-aside.into-text-only { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 2rem; }
+  .page-home .into-cluster-pair .into-aside.into-text-only > .into-songs { margin: 0; border: 0; border-inline-start: 1px solid var(--border); padding: .5rem 0 .5rem 2rem; }
+}
+@container recent (max-width: 48rem) {
+  .page-home .into-grid { gap: 2.5rem; }
+  .page-home .into-spread { row-gap: 2rem; padding-block-end: 2.5rem; }
+  .page-home .into-feature .into-extract { font-size: var(--type-ui); }
+  .page-home .into-companions { column-gap: 1.5rem; }
+  .page-home .into-split { display: flex; padding-block-start: 2.5rem; }
+  .page-home .into-split .into-art { aspect-ratio: 3 / 2; }
+  .page-home .into-split > .into-songs { grid-template-columns: minmax(0, 1fr); }
+  .page-home .into-column, .page-home .into-column:nth-child(2) { grid-column: span 6; margin-block-start: 0; }
+  .page-home .into-column:nth-child(3) { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; margin-block-start: 0; }
+  .page-home .into-column:nth-child(3) > .into-songs { grid-column: 1 / -1; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@container recent (max-width: 30rem) {
+  .page-home .into-spread, .page-home .into-companions { display: flex; flex-direction: column; gap: 2.5rem; }
+  .page-home .into-card, .page-home .into-cluster-pair .into-aside.into-text-only,
+  .page-home .into-column:nth-child(3) { display: flex; width: 100%; gap: 1rem; padding-block-start: 0; border-block-start: 0; }
+  .page-home .into-card .into-art { aspect-ratio: 3 / 2; }
+  .page-home .into-feature h3 { font-size: 2.5rem; }
+  .page-home .into-card > .into-songs,
+  .page-home .into-cluster-pair .into-aside.into-text-only > .into-songs,
+  .page-home .into-column:nth-child(3) > .into-songs { grid-template-columns: minmax(0, 1fr); width: 100%; border: 0; border-block-start: 1px solid var(--border); padding: 1rem 0 0; }
+}
+@media (hover: none) {
+  .page-home .into-explore { opacity: .7; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .page-home .into-wait span { animation: none; opacity: .5; }
+  .page-home .into-art > img, .page-home .into-explore { transition: none; }
+  .page-home .into-card:is(:hover, :focus-within) .into-art > img { transform: none; }
+}
+
+/* Rediscover is a memory surface, not another discovery grid. */
+.page-home #rediscover {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(16rem, .65fr);
+  gap: clamp(1rem, 3vw, 2rem);
+}
+.page-home #rediscover > .redis-intro,
+.page-home #rediscover > .redis-shelf-title,
+.page-home #rediscover > .rediscover-grid {
+  grid-column: 1 / -1;
+}
+.page-home .redis-intro { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+.page-home .redis-intro :is(h2, p) { margin: 0; }
+.page-home .redis-intro p { color: var(--dim); font-size: var(--type-sm); }
+.page-home .redis-memory { display: grid; grid-template-columns: minmax(10rem, 1fr) minmax(10rem, .85fr); min-height: 20rem; background: var(--surface-card); border: 1px solid var(--border-strong); }
+.page-home .redis-memory-art { position: relative; min-height: 20rem; overflow: hidden; background: var(--placeholder); }
+.page-home .redis-memory-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.page-home .redis-memory-cue { position: absolute; right: .75rem; bottom: .75rem; display: grid; place-items: center; width: 2rem; height: 2rem; color: var(--text); background: color-mix(in srgb, var(--surface-sunk) 86%, transparent); }
+.page-home .redis-memory-copy { padding: clamp(1.2rem, 3vw, 2.25rem); display: flex; flex-direction: column; justify-content: center; align-items: flex-start; }
+.page-home .redis-memory-copy p { margin: 0 0 .65rem; color: var(--accent-2); font-size: var(--type-xs); }
+.page-home .redis-memory-copy h3 { margin: 0; font-size: clamp(1.7rem, 3vw, 3rem); line-height: .98; letter-spacing: -.045em; }
+.page-home .redis-memory-copy h3 a { color: var(--text); text-decoration: none; }
+.page-home .redis-memory-copy > span { margin-block-start: .65rem; color: var(--dim); }
+.page-home .redis-open { margin-block-start: auto; padding-block-start: 1.5rem; color: var(--text); font-weight: 650; text-decoration: none; }
+.page-home .redis-open .ui-arrow { color: var(--cta); }
+.page-home .redis-trail { display: flex; flex-direction: column; justify-content: stretch; border-block: 1px solid var(--border-strong); }
+.page-home .redis-trail-item { flex: 1; display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); gap: .85rem; align-items: center; padding: .75rem 0; color: var(--text); text-decoration: none; }
+.page-home .redis-trail-item + .redis-trail-item { border-block-start: 1px solid var(--border); }
+.page-home .redis-trail-art { aspect-ratio: 1; overflow: hidden; background: var(--placeholder); }
+.page-home .redis-trail-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.page-home .redis-trail-item > span:last-child { min-width: 0; display: flex; flex-direction: column; }
+.page-home .redis-trail-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page-home .redis-trail-item small { margin-block-start: .25rem; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page-home .redis-shelf-title { margin: 1rem 0 -.25rem; font-size: var(--type-lg); }
+.page-home #rediscover .rediscover-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--border-strong); }
+.page-home #rediscover .redis-card { margin: 0; padding: 1rem; border: 0; background: var(--surface-card); }
+.page-home .redis-foot { flex-direction: row; }
+.page-home .redis-play { display: inline-flex; gap: .4rem; align-items: center; color: var(--text); font-weight: 650; text-decoration: none; }
+.page-home .redis-play span { color: var(--cta); font-size: .7rem; }
+.page-home .redis-edit { margin-inline-start: auto; color: var(--dim); font-size: var(--type-sm); text-decoration: none; }
+.page-home .redis-edit:hover { color: var(--text); }
+@media (max-width: 60rem) {
+  .page-home #rediscover {
+    grid-template-columns: 1fr;
+  }
+  .page-home #rediscover > *,
+  .page-home #rediscover .redis-card {
+    grid-column: 1;
+  }
+  .page-home .redis-memory { grid-template-columns: 1fr; }
+  .page-home #rediscover .rediscover-grid { grid-template-columns: 1fr; }
+}

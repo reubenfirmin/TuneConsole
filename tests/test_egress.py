@@ -3,6 +3,8 @@ allow the allowlist, block everything else, strip secrets from the log, and gate
 *both* HTTP stacks (requests and urllib). The request must never reach the
 underlying transport when the host is off-allowlist."""
 import io
+import ssl
+import urllib.error
 import urllib.request
 from email.message import Message
 
@@ -42,10 +44,11 @@ def test_google_oauth_and_data_api_are_blocked_before_transport(tmp_path, monkey
     # Register both originals so pytest restores the process-wide hooks after this test.
     monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", requests.adapters.HTTPAdapter.send)
     monkeypatch.setattr(urllib.request.OpenerDirector, "open", urllib.request.OpenerDirector.open)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "_open", urllib.request.OpenerDirector._open)
     g.install()
     reached = []
     g._orig_adapter_send = lambda *a, **k: reached.append("requests") or _Resp()
-    g._orig_opener_open = lambda *a, **k: reached.append("urllib") or _Resp()
+    g._orig_opener_send = lambda *a, **k: reached.append("urllib") or _Resp()
     with pytest.raises(BlockedHost):
         requests.adapters.HTTPAdapter().send(_Req(url, method))
     with pytest.raises(BlockedHost):
@@ -90,10 +93,12 @@ class _Req:
         self.url, self.method, self.body = url, method, body
 
 
-def test_install_gates_requests_stack(tmp_path):
+def test_install_gates_requests_stack(tmp_path, monkeypatch):
     """After install(), HTTPAdapter.send enforces the allowlist before the transport."""
     g = EgressGuard(log_path=tmp_path / "net.log")
     orig = requests.adapters.HTTPAdapter.send
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", urllib.request.OpenerDirector.open)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "_open", urllib.request.OpenerDirector._open)
     reached = []
     try:
         g.install()
@@ -111,14 +116,16 @@ def test_install_gates_requests_stack(tmp_path):
         requests.adapters.HTTPAdapter.send = orig
 
 
-def test_install_gates_urllib_stack(tmp_path):
+def test_install_gates_urllib_stack(tmp_path, monkeypatch):
     """After install(), OpenerDirector.open enforces the allowlist before the transport."""
     g = EgressGuard(log_path=tmp_path / "net.log")
     orig = urllib.request.OpenerDirector.open
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", requests.adapters.HTTPAdapter.send)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "_open", urllib.request.OpenerDirector._open)
     reached = []
     try:
         g.install()
-        g._orig_opener_open = lambda self, fullurl, *a, **k: reached.append(
+        g._orig_opener_send = lambda self, fullurl, *a, **k: reached.append(
             fullurl if isinstance(fullurl, str) else fullurl.full_url) or _Resp()
         opener = urllib.request.OpenerDirector()
 
@@ -136,6 +143,11 @@ class _Resp:
     """Stub HTTP response with the bits record() reads."""
     status_code = status = 200
     headers = {"Content-Length": "0"}
+    code = 200
+    msg = "OK"
+
+    def info(self):
+        return self.headers
 
 
 def test_github_has_no_domain_wide_allowance():
@@ -153,10 +165,11 @@ def guarded_transports(tmp_path, monkeypatch):
     g = EgressGuard(log_path=tmp_path / "net.log")
     monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", requests.adapters.HTTPAdapter.send)
     monkeypatch.setattr(urllib.request.OpenerDirector, "open", urllib.request.OpenerDirector.open)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "_open", urllib.request.OpenerDirector._open)
     g.install()
     reached = []
     g._orig_adapter_send = lambda *a, **k: reached.append("requests") or _Resp()
-    g._orig_opener_open = lambda *a, **k: reached.append("urllib") or _Resp()
+    g._orig_opener_send = lambda *a, **k: reached.append("urllib") or _Resp()
     return g, reached
 
 
@@ -238,9 +251,12 @@ def test_update_checker_still_fetches_latest_release_through_guard(guarded_trans
 
     def fetch(opener, request, *args, **kwargs):
         sent.append(request)
-        return io.BytesIO(b'{"tag_name": "v0.2.0"}')
+        response = urllib.response.addinfourl(
+            io.BytesIO(b'{"tag_name": "v0.2.0"}'), {}, request.full_url, code=200)
+        response.msg = "OK"
+        return response
 
-    g._orig_opener_open = fetch
+    g._orig_opener_send = fetch
     assert updatecheck._fetch_latest_release() == "0.2.0"
     assert len(sent) == 1
     assert sent[0].full_url == _UPDATE_URL
@@ -259,6 +275,7 @@ def test_github_redirects_are_checked_before_transport(tmp_path, monkeypatch, st
     g = EgressGuard(log_path=tmp_path / "net.log")
     monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", requests.adapters.HTTPAdapter.send)
     monkeypatch.setattr(urllib.request.OpenerDirector, "open", urllib.request.OpenerDirector.open)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "_open", urllib.request.OpenerDirector._open)
     g.install()
     reached = []
 
@@ -301,3 +318,132 @@ def test_github_redirects_are_checked_before_transport(tmp_path, monkeypatch, st
     assert reached == [_UPDATE_URL]
     assert any("verdict=BLOCK" in line for line in g.recent())
     assert "SECRET" not in "\n".join(g.recent())
+
+
+@pytest.fixture
+def logged_transports(tmp_path, monkeypatch):
+    for owner, attribute in ((requests.adapters.HTTPAdapter, "send"),
+                             (urllib.request.OpenerDirector, "open"),
+                             (urllib.request.OpenerDirector, "_open")):
+        monkeypatch.setattr(owner, attribute, getattr(owner, attribute))
+    guard = EgressGuard(log_path=tmp_path / "net.log")
+    guard.install()
+    return guard
+
+
+def _urllib_response(url, status, headers=None):
+    message = Message()
+    for key, value in (headers or {}).items():
+        message[key] = value
+    response = urllib.response.addinfourl(io.BytesIO(b"unconsumed body"), message, url, code=status)
+    response.msg = "SECRET reason"
+    return response
+
+
+@pytest.mark.parametrize("stack", ["requests", "urllib"])
+@pytest.mark.parametrize("failure", ["timeout", "connection", "tls", "transport", "http429", "http503", None])
+def test_failed_allowed_requests_are_logged_once_without_secrets(logged_transports, stack, failure):
+    g = logged_transports
+    url = "https://private:password@musicbrainz.org/ws/2/artist?api_key=SECRET#SECRET"
+    error = None
+    status = int(failure[4:]) if failure and failure.startswith("http") else 200
+    if failure in ("timeout", "connection", "tls", "transport"):
+        if stack == "requests":
+            kind = {"timeout": requests.exceptions.Timeout, "connection": requests.exceptions.ConnectionError,
+                    "tls": requests.exceptions.SSLError, "transport": ValueError}[failure]
+            error = kind("SECRET " + url)
+        else:
+            reason = {"timeout": TimeoutError, "connection": ConnectionError,
+                      "tls": ssl.SSLError, "transport": ValueError}[failure]("SECRET " + url)
+            error = urllib.error.URLError(reason) if failure != "transport" else reason
+
+    def transport(*args, **kwargs):
+        if error is not None:
+            raise error
+        if stack == "urllib":
+            return _urllib_response(url, status)
+        response = requests.Response()
+        response.status_code, response.url = status, url
+        response.raw = io.BytesIO(b"unconsumed body")
+        return response
+
+    if stack == "requests":
+        g._orig_adapter_send = transport
+        call = lambda: requests.adapters.HTTPAdapter().send(_Req(url), stream=True)
+    else:
+        g._orig_opener_send = transport
+        call = lambda: urllib.request.build_opener().open(url)
+    if error is not None:
+        with pytest.raises(type(error)) as caught:
+            call()
+        assert caught.value is error
+    elif stack == "urllib" and status >= 400:
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            call()
+        assert caught.value.code == status
+        assert caught.value.read() == b"unconsumed body"
+    else:
+        response = call()
+        body = response.raw.read() if stack == "requests" else response.read()
+        assert body == b"unconsumed body"
+    lines = g.recent()
+    assert len(lines) == 1 and "verdict=ALLOW" in lines[0]
+    category = "http" if status >= 400 else failure
+    assert f"failure={category}" in lines[0]
+    assert f"status={None if error is not None else status}" in lines[0]
+    assert "host=musicbrainz.org path=/ws/2/artist" in lines[0]
+    assert all(secret not in lines[0] for secret in ("SECRET", "private", "password", "api_key", "#"))
+
+
+@pytest.mark.parametrize("stack", ["requests", "urllib"])
+@pytest.mark.parametrize("ending", ["success", "http", "timeout", "blocked"])
+def test_redirect_hops_keep_their_own_status_and_failure(logged_transports, stack, ending):
+    g = logged_transports
+    start = "https://musicbrainz.org/start?key=SECRET"
+    target = ("https://evil.example/blocked" if ending == "blocked" else "https://archive.org/final") + "?key=SECRET"
+    reached = []
+
+    def transport(request):
+        url = request.url if stack == "requests" else request.full_url
+        reached.append(url)
+        if len(reached) == 1:
+            status, headers = 302, {"Location": target}
+        else:
+            if ending == "timeout":
+                raise TimeoutError("SECRET " + url)
+            status, headers = (503 if ending == "http" else 200), {}
+        if stack == "urllib":
+            return _urllib_response(url, status, headers)
+        response = requests.Response()
+        response.status_code, response.headers = status, requests.structures.CaseInsensitiveDict(headers)
+        response.url, response.request, response._content = url, request, b""
+        response.raw = io.BytesIO()
+        return response
+
+    if stack == "requests":
+        g._orig_adapter_send = lambda adapter, request, *a, **kw: transport(request)
+        session = requests.Session()
+        session.trust_env = False
+        call = lambda: session.get(start)
+    else:
+        g._orig_opener_send = lambda opener, request, *a, **kw: transport(request)
+        call = lambda: urllib.request.build_opener(urllib.request.ProxyHandler({})).open(start)
+    if ending == "blocked":
+        with pytest.raises(BlockedHost):
+            call()
+    elif ending == "timeout":
+        with pytest.raises(TimeoutError):
+            call()
+    elif ending == "http" and stack == "urllib":
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            call()
+        assert caught.value.code == 503
+    else:
+        call().close()
+    lines = g.recent()
+    assert len(lines) == 2
+    assert "path=/start status=302" in lines[0] and "failure=None" in lines[0]
+    expected = {"success": "status=200", "http": "status=503", "timeout": "failure=timeout", "blocked": "verdict=BLOCK"}
+    assert expected[ending] in lines[1]
+    assert len(reached) == (1 if ending == "blocked" else 2)
+    assert "SECRET" not in "\n".join(lines)

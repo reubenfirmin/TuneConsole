@@ -7,7 +7,7 @@ from tests.test_undo_recovery import RecoveryClient
 from yt_playlist.core.migrations import migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
-from yt_playlist.library import executor, playlist_undo, sync
+from yt_playlist.library import executor, playlist_undo, sync, playlist_generated
 from yt_playlist.library.playlist_metadata import GENERATED_DESCRIPTION, PROMOTED_DESCRIPTION
 
 
@@ -15,18 +15,18 @@ def test_group_names_cannot_adopt_or_quarantine_and_stale_sync_cannot_revoke_ado
     iid = store.identities.upsert_identity('main', 'bridge', None, True)
     pid = store.playlists.upsert_playlist(iid, 'PL', 'Mix', 0, '', 1)
     store.playlists.set_playlist_group('PL', 'Generated')
-    assert store.rec_query.excluded_playlist_ids() == set()
+    assert store.rec_eligibility.excluded_playlist_ids() == set()
     store.playlists.mark_generated_playlist('PL')
     store.playlists.set_playlist_group('PL', 'Road trips')
-    assert store.rec_query.excluded_playlist_ids() == {pid}
+    assert store.rec_eligibility.excluded_playlist_ids() == {pid}
     store.playlists.reconcile_playlist_provenance('PL', None)
-    assert store.rec_query.excluded_playlist_ids() == {pid}
+    assert store.rec_eligibility.excluded_playlist_ids() == {pid}
     store.history.record_play_event(iid, 'song', 'video', 10, playlist_ytm_id='PL', source_timezone='UTC')
     store.playlists.adopt_generated_playlist('PL')
     store.playlists.reconcile_playlist_provenance('PL', GENERATED_DESCRIPTION)
-    assert store.rec_query.excluded_playlist_ids() == set()
+    assert store.rec_eligibility.excluded_playlist_ids() == set()
     assert store.playlists.get_playlist_groups()['PL'] == 'Road trips'
-    assert store.rec_query.generated_only_play_days() == {(0, 'song')}
+    assert store.rec_evidence.generated_only_play_days() == {(0, 'song')}
     assert store.trends.ledger_day_counts() == []
 
 
@@ -49,7 +49,7 @@ def test_recovery_preserves_policy_groups_and_remote_markers(store, tmp_path, mo
             store.playlists.adopt_generated_playlist('SOURCE')
             client.metadata['SOURCE']['description'] = PROMOTED_DESCRIPTION
     if operation == 'gc':
-        assert executor.gc_generated_playlists(store, {iid: client}, 40 * 86400, grace_days=1)
+        assert playlist_generated.gc_generated_playlists(store, {iid: client}, 40 * 86400, grace_days=1)
     else:
         executor.delete_playlist(store, pid, client, 40 * 86400)
     action = store.actions.get_actions()[0]

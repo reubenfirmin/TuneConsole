@@ -16,7 +16,7 @@ def conflict(store):
                  FakeProv("discogs", {"Hyperballad": {"genre": "Pop", "year": "2001"}})]
     config = _cfg(("musicbrainz", True), ("discogs", True))
     _run(store, [track], providers, config)
-    assert store.enrichment.conflict_count_for_playlist(playlist) == 2
+    assert store.enrichment_reports.conflict_count_for_playlist(playlist) == 2
     return track, playlist, providers, config
 
 
@@ -30,8 +30,8 @@ def test_agreement_retires_conflicts_but_keeps_historical_evidence(store, confli
     previous = _rows(store, track)
     providers[1]._by_title = providers[0]._by_title
     _run(store, [track], providers, config)
-    assert store.enrichment.conflict_count_for_playlist(playlist) == 0
-    assert store.enrichment.unresolved_conflicts_for_playlist(playlist) == []
+    assert store.enrichment_reports.conflict_count_for_playlist(playlist) == 0
+    assert store.enrichment_reports.unresolved_conflicts_for_playlist(playlist) == []
     current = _rows(store, track)
     assert all(row["resolved"] == 2 for row in current.values())
     assert {field: row["candidates"] for field, row in current.items()} == {
@@ -41,7 +41,7 @@ def test_agreement_retires_conflicts_but_keeps_historical_evidence(store, confli
     # Even the original options become a current disagreement again after automatic retirement.
     providers[1]._by_title = {"Hyperballad": {"genre": "Pop", "year": "2001"}}
     _run(store, [track], providers, config)
-    assert store.enrichment.conflict_count_for_playlist(playlist) == 2
+    assert store.enrichment_reports.conflict_count_for_playlist(playlist) == 2
 
 
 @pytest.mark.parametrize("problem", ["timeout", "breaker", "disabled", "unavailable", "no-match", "missing-field"])

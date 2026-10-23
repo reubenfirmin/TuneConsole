@@ -60,9 +60,9 @@ def test_saved_metadata_is_visible_without_queue_or_provider_details(store):
     store.discovery.upsert_discovered_track("cold", "v", "Cold Song", "Artist", "Album", None,
                                   "House", "2020", "album", 100,
                                   audio={"bpm": 128.0, "energy": .8, "danceability": .7})
-    store.enrichment.record_enrichment_attempt("cold", "musicbrainz", {"year": "2020"}, now=200)
-    store.enrichment.record_enrichment_attempt("cold", "deezer", {}, now=201)
-    store.enrichment.record_enrichment_attempt("cold", "acousticbrainz", {}, retry=True, now=202)
+    store.enrichment_state.record_enrichment_attempt("cold", "musicbrainz", {"year": "2020"}, now=200)
+    store.enrichment_state.record_enrichment_attempt("cold", "deezer", {}, now=201)
+    store.enrichment_state.record_enrichment_attempt("cold", "acousticbrainz", {}, retry=True, now=202)
     _, client = _client(store)
     page = client.get("/discovery").text
     for text in ("House", "2020", "128.0 BPM", "Energy 0.8", "Danceability 0.7"):

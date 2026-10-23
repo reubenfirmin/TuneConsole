@@ -117,21 +117,10 @@ def replace_hints(conn, entry_id, fields):
 
 def invalidate_derived(conn):
     from yt_playlist.core.first_play import invalidate
+    from yt_playlist.rec.invalidation import catalog_changed
 
     invalidate(conn)
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='rec_change_queue'").fetchone():
-        # Preserve the last completed generation while the background worker
-        # rebuilds. Current identity/eligibility checks filter superseded keys.
-        conn.execute("INSERT INTO rec_change_queue(kind,item) VALUES ('refresh','') "
-                     'ON CONFLICT(kind,item) DO UPDATE SET revision=revision+1')
-        conn.execute('UPDATE rec_model_selection_runs SET identity_version=0 WHERE identity_version=2')
-        return
-    for table in ('rec_vectors','rec_content_vectors','rec_discovered_content_vectors',
-                  'rec_artist_vectors','rec_artist_content_vectors','rec_proposals'):
-        conn.execute(f'DELETE FROM {table}')
-    conn.execute("DELETE FROM settings WHERE key IN ('rec_content_model','rec_content_cov_bucket','rec_content_genre_revision')")
-    # Keep rollback evidence, but do not restore vectors from before an association/key change.
-    conn.execute('UPDATE rec_model_selection_runs SET identity_version=0 WHERE identity_version=2')
+    catalog_changed(conn)
 
 
 def rekey_state(conn, old_key, new_key, recording_id, *, previous_recording_id=None):

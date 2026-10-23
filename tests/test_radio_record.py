@@ -39,7 +39,7 @@ radio.syncRecordPlayback(status('three'));
 assert.equal(radio.recordCover, tracks[2].thumbnail);
 window.addEventListener('playback-requested', e => radio.previewRecord(e.detail));
 window.addEventListener('playback-settled', e => radio.settleRecord(e.detail));
-const app = fs.readFileSync('src/yt_playlist/web/static/app.js', 'utf8');
+const app = fs.readFileSync('src/yt_playlist/web/static/playback-controls.js', 'utf8');
 vm.runInContext(app.slice(app.indexOf('function tcPlay('), app.indexOf('// Capture phase')), context);
 (async () => {
   const requested = context.tcPlay('https://music.youtube.com/watch?v=two&list=PLRADIO');

@@ -7,7 +7,7 @@ seed's neighbours are now merged across both.
 """
 from fastapi.testclient import TestClient
 
-from yt_playlist.rec import embed
+from yt_playlist.rec import embed, embedding_vectors as vectors
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 
@@ -18,7 +18,7 @@ def test_blend_interleaves_both_spaces_collaborative_first(monkeypatch):
     """Merged by rank, not score: the two spaces are different metrics whose numbers do not compare,
     but their Nth picks do. Collaborative leads, being the stronger signal for tracks you own."""
     monkeypatch.setattr(embed, "neighbors", lambda s, k, topn=12: [("lib1", 0.9), ("lib2", 0.8)])
-    monkeypatch.setattr(embed, "_content_space", lambda s, include_new: (
+    monkeypatch.setattr(vectors, "content_space", lambda s, include_new: (
         [SEED, "new1", "new2"], _eye(3), {SEED: 0, "new1": 1, "new2": 2}))
     got = [k for k, _ in embed.neighbors_blended(None, SEED, topn=4)]
     assert got[0] == "lib1"                       # collaborative leads
@@ -27,7 +27,7 @@ def test_blend_interleaves_both_spaces_collaborative_first(monkeypatch):
 
 def test_blend_never_repeats_a_track_present_in_both_spaces(monkeypatch):
     monkeypatch.setattr(embed, "neighbors", lambda s, k, topn=12: [("dup", 0.9)])
-    monkeypatch.setattr(embed, "_content_space", lambda s, include_new: (
+    monkeypatch.setattr(vectors, "content_space", lambda s, include_new: (
         [SEED, "dup"], _eye(2), {SEED: 0, "dup": 1}))
     assert [k for k, _ in embed.neighbors_blended(None, SEED, topn=4)] == ["dup"]
 
@@ -41,7 +41,7 @@ def test_blend_asks_for_the_widened_space(monkeypatch):
         seen["include_new"] = include_new
         return ([], None, {})
 
-    monkeypatch.setattr(embed, "_content_space", fake_space)
+    monkeypatch.setattr(vectors, "content_space", fake_space)
     monkeypatch.setattr(embed, "neighbors", lambda s, k, topn=12: [])
     embed.neighbors_blended(None, SEED, topn=4)
     assert seen["include_new"] is True

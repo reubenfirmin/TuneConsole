@@ -64,9 +64,9 @@ def test_priority_selection_profile(tmp_path, monkeypatch):
         store.init_schema()
         # The pre-fix path is retained as the exact ranking calculation, so measure
         # it under the serving lock without duplicating its SQL.
-        select = (store.enrichment._select_enrich_batch
+        select = (store.enrichment_queue._select_enrich_batch
                   if os.environ.get("TUNECONSOLE_ENRICH_BENCH_LOCKED") == "1"
-                  else store.enrichment.next_enrich_batch)
+                  else store.enrichment_queue.next_enrich_batch)
         # Model the current catalog-wide genre policy refresh, retaining real
         # memberships, container sizes and listening-day distributions.
         with store.conn:
@@ -99,7 +99,7 @@ def test_priority_selection_profile(tmp_path, monkeypatch):
                 ("playlist_totals", "SELECT COUNT(*),SUM(c) FROM pl_plays"),
                 ("album_totals", "SELECT COUNT(*),SUM(c) FROM al_plays"),
                 ("artist_totals", "SELECT COUNT(*),SUM(c) FROM ar_plays")):
-            run(name, lambda sql=sql: [tuple(r) for r in store.conn.execute(store.enrichment._QUEUE_CTES + sql)])
+            run(name, lambda sql=sql: [tuple(r) for r in store.conn.execute(store.enrichment_queue._QUEUE_CTES + sql)])
         for name, limit, offset in (("first_40", 40, 0), ("offset_40", 40, 40), ("all", -1, 0)):
             run(name, lambda limit=limit, offset=offset: select(
                 limit, offset, providers=["deezer"], now=2_000_000_000))

@@ -5,7 +5,7 @@ Clearing a dislike removes its direction immediately. No genre/era weights are w
 """
 import numpy as np
 
-from yt_playlist.rec import embed, rec_params
+from yt_playlist.rec import embedding_vectors as vector_reads, rec_params
 
 
 def penalties(store, vectors, index, *, evidence_vecs=None):
@@ -40,7 +40,7 @@ def for_keys(store, keys):
     disliked = store.rec_model.disliked_identity_keys()
     if not keys or not disliked:
         return {}
-    _, vectors, index = embed._load_vector_rows(list(store.rec_model.vectors_by_keys(keys | disliked).items()))
+    _, vectors, index = vector_reads.load_vector_rows(list(store.rec_model.vectors_by_keys(keys | disliked).items()))
     if vectors is None:
         return {}
     present = sorted(keys & index.keys())

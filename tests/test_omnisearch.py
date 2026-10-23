@@ -85,7 +85,99 @@ def test_artist_row_links_to_artist_page(store):
     _seed(store)
     res = store.search.omni_search("ritmo")
     artist = next(s for s in res["sections"] if s["kind"] == "artist")
-    assert artist["rows"][0]["href"] == "/artist?name=Ritmo"
+    artist_id = store.artists.resolve("Ritmo")
+    assert artist["rows"][0]["href"] == f"/artist?artist_id={artist_id}"
+    assert artist["rows"][0]["artist_id"] == artist_id
+    assert res["primary_artist"]["artist_id"] == artist_id
+
+
+def _section(result, kind):
+    return next((s["rows"] for s in result["sections"] if s["kind"] == kind), [])
+
+
+def test_same_name_artists_keep_distinct_links_and_primary_pivots(store):
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    entries = []
+    for video, title, provider in [("one", "First song", "channel1"),
+                                   ("two", "Second song", "channel2"),
+                                   ("extra", "First artist encore", "channel1")]:
+        tid = store.tracks.upsert_track(video, title, "Homonym", provider, 200,
+            album_browse_id=provider, credits=[{"name": "Homonym", "id": provider}])
+        entries.append(tid)
+    first, second = [store.artists.track_credits(t)[0]["artist_id"] for t in entries[:2]]
+    playlists = []
+    for title, tid in [("First playlist", entries[0]), ("Second playlist", entries[1])]:
+        pid = store.playlists.upsert_playlist(iid, title, title, 1, "h", 0)
+        store.playlists.set_playlist_tracks(pid, [tid])
+        playlists.append(pid)
+
+    result = store.search.omni_search("homonym")
+    artists = _section(result, "artist")
+    assert [(r["label"], r["artist_id"], r["href"]) for r in artists] == [
+        ("Homonym", first, f"/artist?artist_id={first}"),
+        ("Homonym", second, f"/artist?artist_id={second}")]
+    assert store.artists.resolve("Homonym") is None
+    for row, expected in zip(artists, ["First song", "Second song"]):
+        assert store.artists.get_artist(row["artist_id"])["name"] == "Homonym"
+        assert expected in {s["title"] for s in store.charts.artist_songs(row["artist_id"])}
+    assert result["primary_artist"]["artist_id"] == first
+    assert {r["label"] for r in _section(result, "tracks_by")} == {"First song", "First artist encore"}
+    assert [r["href"] for r in _section(result, "albums_by")] == ["/album?browse=channel1"]
+    assert [r["href"] for r in _section(result, "playlists_featuring")] == [f"/playlist/{playlists[0]}"]
+
+
+def test_collaboration_is_found_under_each_ordered_artist_credit(store):
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    tid = store.tracks.upsert_track("duet", "Together", "Alpha & Beta", "Joint album", 200,
+        album_browse_id="joint", credits=[{"name": "Alpha", "id": "a"}, {"name": "Beta", "id": "b"}])
+    pid = store.playlists.upsert_playlist(iid, "joint-playlist", "Duets", 1, "h", 0)
+    store.playlists.set_playlist_tracks(pid, [tid])
+    for name in ["Alpha", "Beta"]:
+        result = store.search.omni_search(name)
+        assert [r["label"] for r in _section(result, "artist")] == [name]
+        assert [r["label"] for r in _section(result, "tracks_by")] == ["Together"]
+        assert _section(result, "tracks_by")[0]["sub"] == "Alpha & Beta"
+        assert [r["href"] for r in _section(result, "albums_by")] == ["/album?browse=joint"]
+        assert [r["href"] for r in _section(result, "playlists_featuring")] == [f"/playlist/{pid}"]
+    assert not _section(store.search.omni_search("Alpha & Beta"), "artist")
+
+
+def test_artist_alias_matches_preserve_canonical_identity_and_label(store):
+    tid = store.tracks.upsert_track("v", "Song", "Canonical", None, 200,
+        credits=[{"name": "Canonical", "id": "channel"}])
+    artist_id = store.artists.track_credits(tid)[0]["artist_id"]
+    store.artists.ensure_artist("Alias 100%", provider="youtube", provider_id="channel")
+    result = store.search.omni_search("Alias 100%")
+    assert result["primary_artist"]["artist_id"] == artist_id
+    assert [r["label"] for r in _section(result, "artist")] == ["Canonical"]
+    assert [r["label"] for r in _section(result, "tracks_by")] == ["Song"]
+    assert not _section(store.search.omni_search("Alias 100_"), "artist")
+
+
+def test_saved_album_credits_are_searchable_without_library_tracks(store):
+    store.collection.add_saved_album({"browse": "saved", "title": "Saved duet", "artist": "Alpha & Beta",
+        "credits": [{"name": "Alpha", "id": "a"}, {"name": "Beta", "id": "b"}]})
+    store.artists.ensure_artist("Uncollected artist", provider="youtube", provider_id="uncollected")
+    for name in ["Alpha", "Beta"]:
+        result = store.search.omni_search(name)
+        assert result["primary_artist"]["name"] == name
+        assert [r["href"] for r in _section(result, "albums_by")] == ["/album?browse=saved"]
+        assert not _section(result, "tracks_by")
+    assert not _section(store.search.omni_search("Uncollected"), "artist")
+
+
+def test_reconciled_artist_search_uses_surviving_identity_only(store):
+    tid = store.tracks.upsert_track("old", "Old song", "Alias", None, 200)
+    old = store.artists.track_credits(tid)[0]["artist_id"]
+    known = store.tracks.upsert_track("known", "Known song", "Canonical", None, 200,
+        credits=[{"name": "Canonical", "id": "channel"}])
+    target = store.artists.track_credits(known)[0]["artist_id"]
+    store.tracks.upsert_track("old", "Old song", "Alias", None, 200,
+        credits=[{"name": "Alias", "id": "channel"}])
+    assert store.artists.resolve(old) == target
+    result = store.search.omni_search("Alias")
+    assert [r["artist_id"] for r in _section(result, "artist")] == [target]
+    assert {r["label"] for r in _section(result, "tracks_by")} == {"Old song", "Known song"}
 
 
 def test_sampling_is_stable_per_query(store):

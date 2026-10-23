@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 from yt_playlist.core.store import Store
-from yt_playlist.rec import ppr, embed
+from yt_playlist.rec import ppr, embedding_vectors as embed
 
 
 @pytest.fixture

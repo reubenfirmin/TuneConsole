@@ -47,14 +47,14 @@ def graduate_facet(store, axis, signed, now, source=1.0, source_label="event") -
     `source` is the signal's SOURCE_W_* weight (graduation speed). `source_label` names the driving
     signal for the §1c graduation log. Model-only. NEVER suppresses."""
     threshold = rec_params.get_param(store, "theme_threshold")
-    score = store.rec_surface.bump_theme(axis, signed * source, now)
+    score = store.rec_signals.bump_theme(axis, signed * source, now)
     if abs(score) >= threshold:
         factor = (rec_params.get_param(store, "graduate_up") if score > 0
                   else rec_params.get_param(store, "graduate_down"))
         new_weight = store.rec_model.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
                                         now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
-        store.rec_surface.discount_theme(axis, math.copysign(threshold, score))
-        store.rec_surface.log_graduation(axis, source_label, score, factor, new_weight, now)
+        store.rec_signals.discount_theme(axis, math.copysign(threshold, score))
+        store.rec_signals.log_graduation(axis, source_label, score, factor, new_weight, now)
 
 
 def graduate_moods(store, keys, signed, now, source=1.0, source_label="mood") -> None:
@@ -105,7 +105,7 @@ def graduate_slider_exposure(store, now) -> None:
         if magnitude == 0.0:
             continue
         signed = math.copysign(magnitude * w_slider, value - 1.0)
-        score = store.rec_surface.bump_theme(axis, signed, now)
+        score = store.rec_signals.bump_theme(axis, signed, now)
         if abs(score) >= threshold:
             factor = (rec_params.get_param(store, "graduate_up") if score > 0
                       else rec_params.get_param(store, "graduate_down"))
@@ -115,8 +115,8 @@ def graduate_slider_exposure(store, now) -> None:
                                           now=now, revert_halflife_d=halflife)
             ratio = (new_perm / old_perm) if old_perm > 0 else 1.0
             store.rec_model.set_lean(axis, value / ratio, now)          # conserve: new_perm*(value/ratio) == old_perm*value
-            store.rec_surface.discount_theme(axis, math.copysign(threshold, score))
-            store.rec_surface.log_graduation(axis, "slider", score, factor, new_perm, now)
+            store.rec_signals.discount_theme(axis, math.copysign(threshold, score))
+            store.rec_signals.log_graduation(axis, "slider", score, factor, new_perm, now)
 
 
 def graduate_play_exposure(store, now, *, prepared_leans=None) -> None:
@@ -139,17 +139,17 @@ def graduate_play_exposure(store, now, *, prepared_leans=None) -> None:
     today = _utc_day(now)
     leans = transient.play_facet_leans(store, now) if prepared_leans is None else prepared_leans
     for axis, lean in leans.items():
-        if store.rec_surface.get_play_graduated_day(axis) == today:
+        if store.rec_signals.get_play_graduated_day(axis) == today:
             continue                                          # already exposed this axis today
-        store.rec_surface.set_play_graduated_day(axis, today)             # stamp the day either way
+        store.rec_signals.set_play_graduated_day(axis, today)             # stamp the day either way
         magnitude = abs(lean)
         if magnitude == 0.0:
             continue
-        score = store.rec_surface.bump_theme(axis, magnitude * w_play, now)    # plays only ever push up
+        score = store.rec_signals.bump_theme(axis, magnitude * w_play, now)    # plays only ever push up
         if abs(score) >= threshold:
             factor = (rec_params.get_param(store, "graduate_up") if score > 0
                       else rec_params.get_param(store, "graduate_down"))
             new_weight = store.rec_model.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
                                             now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
-            store.rec_surface.discount_theme(axis, math.copysign(threshold, score))
-            store.rec_surface.log_graduation(axis, "play", score, factor, new_weight, now)
+            store.rec_signals.discount_theme(axis, math.copysign(threshold, score))
+            store.rec_signals.log_graduation(axis, "play", score, factor, new_weight, now)

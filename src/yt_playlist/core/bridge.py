@@ -49,20 +49,25 @@ class Bridge:
             self.source_timezone = None
             return self._conn_id
 
-    def disconnect(self, conn_id: int | None = None) -> None:
+    def disconnect(self, conn_id: int | None = None) -> bool:
+        """Clear presence with the owned transport; report whether teardown was applied."""
         with self._lock:
             if conn_id is not None and conn_id != self._conn_id:
                 # A stale/older socket tearing down after a newer one connected must not nuke
                 # the current connection.
-                return
+                return False
             self._send = None
             self._loop = None
             self._conn_id = None
             self.source_timezone = None
+            self.now_playing = None
+            self.now_playing_seen_at = None
+            self.sensor_health = None
             pending, self._pending = self._pending, {}
         for fut in pending.values():
             if not fut.done():
                 fut.set_exception(BridgeError("bridge disconnected"))
+        return True
 
     def resolve(self, req_id: int, status: int, text: str, source_timezone=None) -> None:
         with self._lock:

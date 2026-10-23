@@ -19,7 +19,7 @@ def test_ranking_contribution_fades_by_source_half_life(store, space, source):
     rec_params.set_param(store, "session_alpha", 0)
     rec_params.set_param(store, "audio_transient_w", 0.3 if space == "acoustic" else 0)
     if source == "mood":
-        store.rec_surface.record_mood([key], 1, now=now)
+        store.rec_signals.record_mood([key], 1, now=now)
     elif source == "play":
         store.history.record_play_event(iid, key, "v", now)
     elif source == "like":
@@ -52,7 +52,7 @@ def test_missing_and_zero_vectors_do_not_dilute_bounded_tilt(store):
     V = np.array([[1, 0], [0, 1], [0, 0]], dtype=np.float32)
     idx = {"a|x": 0, "b|y": 1, "zero|z": 2}
     for key in ("a|x", "b|y", "missing|m", "zero|z"):
-        store.rec_surface.record_mood([key], 1, now=now)
+        store.rec_signals.record_mood([key], 1, now=now)
     fresh = transient.centroid_tilt(store, now, V, idx)
     np.testing.assert_allclose(fresh, [0.5, 0.5])
     assert np.linalg.norm(fresh) < 1  # disagreeing directions have less confidence
@@ -64,7 +64,7 @@ def test_missing_and_zero_vectors_do_not_dilute_bounded_tilt(store):
 def test_disabled_play_source_cannot_dilute_mood_signal(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     rec_params.set_param(store, "play_transient_w", 0)
-    store.rec_surface.record_mood(["a|x"], 1, now=1000)
+    store.rec_signals.record_mood(["a|x"], 1, now=1000)
     store.history.record_play_event(iid, "b|y", "v", 1000)
     np.testing.assert_allclose(transient.centroid_tilt(
         store, 1000, np.eye(2), {"a|x": 0, "b|y": 1}), [1, 0])

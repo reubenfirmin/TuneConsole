@@ -25,7 +25,7 @@ def test_playlist_taste_ignores_behavior_at_zero_weight(monkeypatch, store):
     # BEHAVIOR_TASTE_W is 0.0 and playlist_taste must NOT append a dead "Your listening" context.
     assert BEHAVIOR_TASTE_W == 0.0
     V = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
-    monkeypatch.setattr(scoring.embed, "load_vectors", lambda s: (["a|x", "b|y"], V, {"a|x": 0, "b|y": 1}))
+    monkeypatch.setattr(scoring.vectors, "load_vectors", lambda s: (["a|x", "b|y"], V, {"a|x": 0, "b|y": 1}))
     monkeypatch.setattr(scoring, "_playlist_centroids",
                         lambda s, M, idx: PlaylistTaste(["P"], np.array([[1.0, 0.0]]), np.array([1.0]), [7]))
     monkeypatch.setattr(store.rec_query, "play_counts", lambda: {"b|y": 3}, raising=False)
@@ -37,7 +37,7 @@ def test_playlist_taste_ignores_behavior_at_zero_weight(monkeypatch, store):
 def test_playlist_taste_behavior_blend_composition(monkeypatch, store):
     # The blend machinery stays correct for any future nonzero weight: contexts and normalization.
     V = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
-    monkeypatch.setattr(scoring.embed, "load_vectors", lambda s: (["a|x", "b|y"], V, {"a|x": 0, "b|y": 1}))
+    monkeypatch.setattr(scoring.vectors, "load_vectors", lambda s: (["a|x", "b|y"], V, {"a|x": 0, "b|y": 1}))
     monkeypatch.setattr(scoring, "_playlist_centroids",
                         lambda s, M, idx: PlaylistTaste(["P"], np.array([[1.0, 0.0]]), np.array([1.0]), [7]))
     monkeypatch.setattr(store.rec_query, "play_counts", lambda: {"b|y": 3}, raising=False)

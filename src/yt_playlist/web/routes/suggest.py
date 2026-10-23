@@ -151,7 +151,7 @@ def build(ctx) -> APIRouter:
                 now = now_fn()
                 halflife_d = rec_params.get_param(store, "mood_halflife_d")
                 prune_before = now - 4 * halflife_d * 86400
-                store.rec_surface.record_mood(keys, signed, now, prune_before=prune_before)
+                store.rec_signals.record_mood(keys, signed, now, prune_before=prune_before)
                 graduation.graduate_moods(store, keys, signed, now, source=rec_params.get_param(store, "source_w_vibe"))
             return HTMLResponse("")
         try:                                          # whole-mix simple buttons
@@ -163,7 +163,7 @@ def build(ctx) -> APIRouter:
             now = now_fn()
             halflife_d = rec_params.get_param(store, "mood_halflife_d")
             prune_before = now - 4 * halflife_d * 86400
-            store.rec_surface.record_mood(keys, signed, now, prune_before=prune_before)
+            store.rec_signals.record_mood(keys, signed, now, prune_before=prune_before)
             graduation.graduate_moods(store, list(keys), signed, now, source=rec_params.get_param(store, "source_w_vibe"))
         return HTMLResponse("")                        # no swap: the panel stays put (Advanced reachable)
 
@@ -178,7 +178,7 @@ def build(ctx) -> APIRouter:
         except (TypeError, ValueError):
             return HTMLResponse("", status_code=422)
         pl = store.playlists.get_playlist(pid)
-        recipe = store.rec_surface.get_recipe(pl.scope_ref) if pl else None
+        recipe = store.playlist_recipes.get_recipe(pl.scope_ref) if pl else None
         journey = (recipe or {}).get("journey")
         if journey:
             graduation.graduate_facet(store, f"journey:{journey}", 1 if direction >= 0 else -1, now_fn())

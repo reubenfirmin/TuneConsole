@@ -7,20 +7,17 @@ genre (MusicBrainz still owns year); it fills tracks that have no genre yet rath
 
 Needs a (free) Last.fm API key: set $LASTFM_API_KEY, or `lastfm_api_key = "..."` in config.toml.
 """
-import json
 import logging
 import re
-import tomllib
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-from yt_playlist.providers import genres
+from yt_playlist.providers import credentials, genres, transport
 from yt_playlist.util.matching import is_remix
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter
 from yt_playlist.util import net
-from yt_playlist.core import paths
 
 name = "lastfm"
 
@@ -41,21 +38,8 @@ class MissingKey(Exception):
 def api_key(store=None, config_path=None):
     """Resolve the Last.fm API key: $LASTFM_API_KEY, then the value saved via the UI (settings
     table), then `lastfm_api_key` in config.toml. Returns None if none is set."""
-    import os
-    env = os.environ.get("LASTFM_API_KEY")
-    if env and env.strip():
-        return env.strip()
-    if store is not None:
-        saved = store.settings.get_setting("lastfm_api_key")
-        if saved and saved.strip():
-            return saved.strip()
-    path = config_path or paths.config_path()
-    try:
-        data = tomllib.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
-    key = data.get("lastfm_api_key")
-    return key.strip() if isinstance(key, str) and key.strip() else None
+    return credentials.resolve(env_name="LASTFM_API_KEY", setting_name="lastfm_api_key",
+                               store=store, config_path=config_path)
 
 
 def available(store=None) -> bool:
@@ -85,16 +69,9 @@ def probe(track, store=None, key=None) -> EnrichmentResult:
 
 
 def _get(params):
-    _pacer.wait()
     url = _API + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
-            data = json.load(resp)
-    except Exception as e:                # report the outcome to the breaker, then let callers handle it
-        _breaker.record(e)
-        raise
-    _breaker.record()
+    data = transport.request_json(req, timeout=_HTTP_TIMEOUT_S, pace=_pacer.wait, breaker=_breaker)
     if isinstance(data, dict) and data.get("error") and data["error"] != 6:
         # Last.fm reports invalid credentials, rate limits and service failures inside HTTP 200.
         # Error 6 is a missing artist/track, which is a valid no-match answer.

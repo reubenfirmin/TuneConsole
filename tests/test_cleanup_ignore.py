@@ -20,7 +20,7 @@ def _app(store):
 def _count_after_reload(c, store):
     """The home count after the browser's HX-Refresh reload of /cleanup (which re-materializes it)."""
     c.get("/cleanup")                                             # the reload every cleanup edit triggers
-    return (store.rec_surface.get_proposals("cleanup") or {}).get("count", 0)
+    return (store.rec_proposals.get_proposals("cleanup") or {}).get("count", 0)
 
 
 def test_ignore_empty_playlist_round_trip(store):

@@ -30,10 +30,21 @@ jobs:
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - uses: actions/cache@v4
+        with:
+          path: packaging/macos/.sparkle/distribution.tar.xz
+          key: sparkle-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packaging/macos/build.sh') }}
+      - name: Prepare locked dependencies within their own budget
+        timeout-minutes: 9
+        run: python3 packaging/ci_stage.py --timeout 240 --attempts 2 macos-dependencies -- packaging/macos/build.sh --prepare-only
       - name: Build locked app and DMG
+        timeout-minutes: 6
         run: |
           test "$(uname -m)" = "${{ matrix.arch }}"
-          packaging/macos/build.sh
+          packaging/macos/build.sh --build-only
       - name: Smoke-test frozen app and DMG
         timeout-minutes: 2
         run: packaging/macos/smoke.sh
@@ -58,8 +69,15 @@ jobs:
           printf '%s\n' "$SPARKLE_PRIVATE_ED_KEY" | packaging/macos/.sparkle/bin/sign_update \
             --ed-key-file - --verify "TuneConsole-macos-${{ matrix.arch }}.dmg" "$signature"
       - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-timings-${{ matrix.arch }}-${{ github.run_attempt }}
+          path: ci-stage-timings.json
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
         with:
           name: release-macos-${{ matrix.arch }}
+          retention-days: 30
           if-no-files-found: error
           path: |
             TuneConsole-macos*.dmg

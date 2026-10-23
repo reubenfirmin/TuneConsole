@@ -20,15 +20,6 @@ def test_eclectic_library_has_high_breadth(store):
     assert taste_analysis.taste_breadth(store)["breadth"] > 0.9
 
 
-def test_palette_penalizes_absent_family_more_when_broad(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    for g, pfx in [("Techno", "t"), ("Jazz", "j"), ("Hip Hop", "h"), ("Folk", "f")]:
-        _tag(store, iid, 5, g, pfx)
-    pal = taste_analysis.palette(store)
-    assert pal["fit"]("Techno") == 0.0           # in palette -> no penalty
-    assert pal["fit"]("Opera") > 0.0             # absent family -> penalized
-
-
 def test_breadth_zero_when_untagged(store):
     store.identities.upsert_identity("main", "cred", None, True)
     store.tracks.upsert_track("x", "X", "A", None, None)   # no genre

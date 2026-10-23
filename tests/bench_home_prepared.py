@@ -38,8 +38,8 @@ def test_repeated_preparation_publishes_on_saved_library(tmp_path, caplog):
     try:
         # No source/model changes between attempts, and no previous serving cache to rescue us.
         for surface in (home_prepared.SURFACE, 'home_tuned'):
-            store.rec_surface.put_proposals(surface, None, now)
-        choice = store.rec_surface.get_proposals('home_choice')
+            store.rec_proposals.put_proposals(surface, None, now)
+        choice = store.rec_proposals.get_proposals('home_choice')
         impressions = store.modes.impression_counts()
         for _ in range(3):
             started, cpu = time.monotonic(), time.thread_time()
@@ -53,8 +53,8 @@ def test_repeated_preparation_publishes_on_saved_library(tmp_path, caplog):
                 published.append(payload)
         assert published, attempts
         assert all(home_prepared._valid(payload) and payload['menus'][0]['protos'] for payload in published)
-        assert store.rec_surface.get_proposals(home_prepared.SURFACE) == json.loads(json.dumps(published[-1]))
-        assert store.rec_surface.get_proposals('home_choice') == choice
+        assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == json.loads(json.dumps(published[-1]))
+        assert store.rec_proposals.get_proposals('home_choice') == choice
         assert store.modes.impression_counts() == impressions
     finally:
         store.conn.close()

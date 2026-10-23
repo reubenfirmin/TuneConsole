@@ -26,12 +26,12 @@ def test_removal_keeps_other_sources_and_never_deletes_canonical_data(store):
     key = discover(store, 'album-a')
     discover(store, 'radio:seed')
     track = store.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
-    store.rec_surface.put_proposals('fresh_pool', [{'key': key}], 1)
+    store.rec_proposals.put_proposals('fresh_pool', [{'key': key}], 1)
     assert not store.discovery.remove_discovery_source(key, 'album-a')
     assert len(store.discovery.get_discovered_tracks()) == 1
     assert store.discovery.remove_discovery_source(key, 'radio:seed')
     assert store.discovery.get_discovered_tracks() == []
-    assert store.rec_surface.get_proposals('fresh_pool') == []
+    assert store.rec_proposals.get_proposals('fresh_pool') == []
     assert store.tracks.catalog_subject(track)['video_id'] == 'video'
     assert store.conn.execute('PRAGMA foreign_key_check').fetchall() == []
 

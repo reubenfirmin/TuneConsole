@@ -1,6 +1,6 @@
 import pytest
 
-from yt_playlist.rec import embed, graduation, scoring, surfaces
+from yt_playlist.rec import embedding_vectors as embed, graduation, scoring, surfaces
 from tests import model_support
 
 

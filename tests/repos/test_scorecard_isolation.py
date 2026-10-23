@@ -5,14 +5,14 @@ import threading
 import pytest
 
 from yt_playlist.core.store import Store
-from yt_playlist.rec import experiments
+from yt_playlist.rec import experiments, scorecard
 from yt_playlist.repos import scorecard_attribution
 
 
 def seed(store):
     iid = store.identities.upsert_identity('main', 'cred', None, True)
     store.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
-    store.rec_surface.record_served_impressions('shown', 'home', [{
+    store.rec_ledger.record_served_impressions('shown', 'home', [{
         'key': 'song|artist', 'rank': 1, 'model_version': 'm',
         'provenance': {'policy_kind': 'live', 'ranker': 'cosine',
                        'candidate': {'video_id': 'video'},
@@ -36,9 +36,9 @@ def test_report_wrappers_leave_foreground_free_and_keep_a_pinned_view(tmp_path, 
 
     monkeypatch.setattr(scorecard_attribution.Attribution, '__init__', paused)
     reports = {
-        'scorecard': lambda: store.rec_surface.recommendation_scorecard(90, 110),
-        'trace': lambda: store.rec_surface.served_recommendation(1)['outcomes'],
-        'experiment': lambda: store.rec_surface.experiment_report(90, 110, 100000)['live']['c:cosine'],
+        'scorecard': lambda: scorecard.recommendation_scorecard(store, 90, 110),
+        'trace': lambda: scorecard.served_recommendation(store, 1)['outcomes'],
+        'experiment': lambda: scorecard.experiment_report(store, 90, 110, 100000)['live']['c:cosine'],
     }
     try:
         with ThreadPoolExecutor(2) as threads:
@@ -50,7 +50,7 @@ def test_report_wrappers_leave_foreground_free_and_keep_a_pinned_view(tmp_path, 
             finally:
                 release.set()
             assert result.result(5)['played'] == 0
-        assert store.rec_surface.recommendation_scorecard(90, 110)['played'] == 1
+        assert scorecard.recommendation_scorecard(store, 90, 110)['played'] == 1
     finally:
         release.set()
         store.conn.close()
@@ -96,7 +96,7 @@ def test_empty_report_does_not_scan_events_or_catalog(store):
     with store.read_snapshot() as snapshot:
         sql = []
         snapshot.store.conn.set_trace_callback(sql.append)
-        report = snapshot.store.rec_surface.recommendation_scorecard(0, 30 * 86400)
+        report = scorecard.recommendation_scorecard(snapshot.store, 0, 30 * 86400)
     assert report['impressions'] == 0
     assert not any(f'FROM {table}' in statement for statement in sql for table in
                    ('player_events', 'play_events', 'rec_response_events', 'tracks', 'discovered_tracks'))
@@ -111,7 +111,7 @@ def test_repeated_exits_use_bulk_historical_lookup_and_index(store):
     with store.read_snapshot() as snapshot:
         sql = []
         snapshot.store.conn.set_trace_callback(sql.append)
-        report = snapshot.store.rec_surface.recommendation_scorecard(90, 110)
+        report = scorecard.recommendation_scorecard(snapshot.store, 90, 110)
         plan = snapshot.store.conn.execute(
             'EXPLAIN QUERY PLAN SELECT identity_key FROM rec_served_impressions '
             f'WHERE {scorecard_attribution.VIDEO}=? AND {scorecard_attribution.LIVE} '

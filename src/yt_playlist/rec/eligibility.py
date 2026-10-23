@@ -10,5 +10,5 @@ def home_exclusions(store, keys, now):
     keys = set(keys)
     if not keys:
         return set()
-    return (store.rec_query.suppressed_candidate_keys(keys, now)
+    return (store.rec_eligibility.suppressed_candidate_keys(keys, now)
             | store.rec_model.suppressed_keys("for_you", now, keys=keys))

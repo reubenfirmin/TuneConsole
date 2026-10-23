@@ -29,7 +29,7 @@ def test_fresh_renders_as_saveable_proto(store):
               for i in range(5)]                    # enough to clear the _MIN_CARD floor
     # only the fresh surface has material, so it wins the mode
     payload = {"1": {surf: (fresh if surf == "fresh" else []) for surf in ms.CARD_SURFACES}}
-    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_proposals.put_proposals("mode_bundles", payload, 1.0)
     prepare_home(store, 1.0)
     html = c.get("/home/cards").text
     assert 'id="gen-fresh"' in html                 # rendered as a proto-playlist card

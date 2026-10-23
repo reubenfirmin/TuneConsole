@@ -55,7 +55,7 @@ def engagement(store):
              "title": f"Song {mid} {i}", "artist": f"Artist {mid} {i}", "album": "",
              "thumbnail": None, "plays": 0, "reason": "", "lane": lane, "genre": genre}
             for i in range(20)]}
-    store.rec_surface.put_proposals("mode_bundles", payload, 1)
+    store.rec_proposals.put_proposals("mode_bundles", payload, 1)
     clock = [1_700_000_000.0]
     prepare_home(store, clock[0])
     fake = FakeClient()

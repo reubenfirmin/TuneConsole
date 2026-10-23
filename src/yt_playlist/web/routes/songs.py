@@ -69,7 +69,7 @@ def build(ctx):
     @router.get("/songs/metadata")
     def metadata(video_id: str):
         track = store.tracks.metadata_for_video(video_id)
-        provenance = store.enrichment.genre_provenance(track['track_id']) if track else None
+        provenance = store.enrichment_reports.genre_provenance(track['track_id']) if track else None
         return {"metadata": track, "genre_options": provenance['options'] if provenance else [],
                 "genres": sorted(set(store.genres.get_genre_whitelist()) | set(store.genres.all_genres()),
                                  key=str.casefold)}

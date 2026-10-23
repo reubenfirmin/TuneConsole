@@ -27,7 +27,7 @@ def test_fresh_cold_item_gets_feedback_radio_does_not(store):
              "artist": f"Cold Artist {i}", "album": "", "thumbnail": None,
              "plays": 0, "reason": "New", "lane": "cold", "genre": ""} for i in range(6)]
     payload = {"1": {surf: (cold if surf == "fresh" else []) for surf in ms.CARD_SURFACES}}
-    store.rec_surface.put_proposals("mode_bundles", payload, 1000.0)
+    store.rec_proposals.put_proposals("mode_bundles", payload, 1000.0)
     prepare_home(store)
     c = _client(store)
     html = c.get("/home/cards").text

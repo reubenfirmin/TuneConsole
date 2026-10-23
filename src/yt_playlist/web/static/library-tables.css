@@ -1,0 +1,118 @@
+/* Shared library table surfaces, row artwork and detail-page column geometry.
+   tables.css owns table primitives; library-controls.css owns track geometry; library.css owns playlist-index
+   selection and view controls. Artwork shapes load last in artwork.css. */
+.library-index-card,
+.library-table-card {
+  padding-inline: 0;
+  background: transparent;
+  border-inline: 0;
+  border-block-color: var(--border-strong);
+  box-shadow: none;
+}
+.library-index-card {
+  border-block: 0;
+}
+.library-index-card tbody tr:last-child td,
+.library-table-card tbody tr:last-child td {
+  border-block-end: 0;
+}
+.library-index-card tbody td {
+  padding-block: .65rem;
+  border-block-end: 0;
+}
+.library-index-card tbody tr {
+  transition: background .12s ease;
+}
+.library-index-card tbody tr:hover {
+  background: var(--surface-raised);
+}
+.library-index-card thead th,
+.library-table-card thead th {
+  color: color-mix(in srgb, var(--text) 62%, transparent);
+  background: var(--canvas);
+}
+.library-index-card thead th {
+  border-block-end: 0;
+}
+.library-index-card thead th.sorth:hover,
+.library-table-card thead th.sorth:hover {
+  color: var(--text);
+}
+.library-index-card .ptitle {
+  font-size: 1rem;
+  font-weight: 720;
+  letter-spacing: -.012em;
+}
+.page-artists .library-index-card .artist-avatar,
+.page-albums .library-index-card .album-thumb {
+  width: 3.1rem;
+  height: 3.1rem;
+}
+.page-artists .library-index-card .artist-avatar {
+  border-radius: 50%;
+  border-width: 2px;
+}
+
+.page-artist .library-table-card {
+  border-block: 0;
+}
+.page-artist .library-table-card tbody td {
+  border-block-end: 0;
+  padding-block: .65rem;
+}
+.page-artist .library-table-card thead th {
+  border-block-end: 0;
+}
+.page-artist .library-table-card tbody tr:hover {
+  background: var(--surface-raised);
+}
+.page-artist .library-table-card :is(.pl-cover, .pl-thumb, .album-thumb) {
+  width: 3rem;
+  height: 3rem;
+}
+.page-artist .library-table-card .col-thumb,
+.page-artist .library-table-card .col-avatar {
+  width: 3.75rem;
+}
+.page-artist .artist-album-columns .album-art-col { width: 3.75rem; }
+.page-artist .artist-album-columns .album-year-col { width: 5rem; }
+.page-artist .artist-album-columns .album-songs-col { width: 5rem; }
+.page-artist .artist-album-columns .album-playlists-col { width: 6rem; }
+.page-artist .artist-album-columns .album-plays-col { width: 5rem; }
+.page-artist .artist-album-columns .album-save-col { width: 6rem; }
+.page-playlist .library-table-card {
+  border-block: 0;
+}
+.page-album .library-table-card {
+  margin-block-start: 0;
+  border-block: 0;
+}
+.page-album .library-table-card thead th,
+.page-album .library-table-card tbody td {
+  border-block-end: 0;
+}
+.page-album .library-table-card tbody td {
+  padding-block: .65rem;
+}
+.page-album .library-table-card tbody tr:hover {
+  background: var(--surface-raised);
+}
+.page-album .library-table-card .track-table { --track-row-height: 3rem; }
+.page-album .library-table-card :is(.pl-cover, .pl-thumb) {
+  width: var(--track-row-height);
+  height: var(--track-row-height);
+}
+.page-album .library-table-card .track-table :is(th, td):first-child {
+  width: 2.5rem;
+}
+.page-album .library-table-card .track-table :is(th, td):nth-child(2) {
+  width: 3.75rem;
+}
+
+@media (max-width: 45rem) {
+  /* Keep the index counts and album song actions inside the narrow card. */
+  .page-artists .library-index-card :is(th, td),
+  .page-album .library-table-card .track-table :is(th, td) {
+    padding-inline: .35rem;
+  }
+}

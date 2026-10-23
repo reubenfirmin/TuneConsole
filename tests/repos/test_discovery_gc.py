@@ -50,13 +50,13 @@ def test_gc_removes_stale_tracks_from_cached_fresh_and_mode_recommendations():
     for key, found in (("old", 0), ("held", 0), ("recent", 99 * 86400)):
         s.discovery.upsert_discovered_track(key, "v:" + key, key, "Artist", None, None, "House", "2020", "album", found)
     items = [{"key": key, "title": key} for key in ("old", "held", "recent")]
-    s.rec_surface.put_proposals("fresh_pool", items, 1)
-    s.rec_surface.put_proposals("mode_bundles", {"all": {"fresh": items, "wheelhouse": [{"key": "library"}]},
+    s.rec_proposals.put_proposals("fresh_pool", items, 1)
+    s.rec_proposals.put_proposals("mode_bundles", {"all": {"fresh": items, "wheelhouse": [{"key": "library"}]},
                                       "123": {"fresh": items}}, 1)
-    s.enrichment.record_enrichment_attempt("old", "musicbrainz", {}, now=1)
+    s.enrichment_state.record_enrichment_attempt("old", "musicbrainz", {}, now=1)
     s.discovery.gc_discovery_pool(100 * 86400, 30, {"held"})
-    assert {t["key"] for t in s.rec_surface.get_proposals("fresh_pool")} == {"held", "recent"}
-    bundles = s.rec_surface.get_proposals("mode_bundles")
+    assert {t["key"] for t in s.rec_proposals.get_proposals("fresh_pool")} == {"held", "recent"}
+    bundles = s.rec_proposals.get_proposals("mode_bundles")
     assert {t["key"] for t in bundles["all"]["fresh"]} == {"held", "recent"}
     assert {t["key"] for t in bundles["123"]["fresh"]} == {"held", "recent"}
     assert bundles["all"]["wheelhouse"] == [{"key": "library"}]

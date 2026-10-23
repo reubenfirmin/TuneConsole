@@ -8,7 +8,7 @@ import pytest
 
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
-from yt_playlist.rec import home_cards, measurement, rec_params
+from yt_playlist.rec import home_cards, measurement, rec_params, scorecard
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.repos.rec_model import RecModelRepo
 
@@ -44,7 +44,7 @@ def test_home_response_shares_policy_and_unchanged_models_skip_full_reads(store,
     assert reads == []  # Analytics writes and a new response time do not invalidate model inputs.
     rows = store.conn.execute("SELECT model_version,provenance FROM rec_served_impressions").fetchall()
     assert len(rows) == 16
-    configs = [store.rec_surface.served_recommendation(r[0])["configuration"] for r in
+    configs = [scorecard.served_recommendation(store, r[0])["configuration"] for r in
                store.conn.execute("SELECT id FROM rec_served_impressions")]
     assert {c["ranker"] for c in configs} == {"ppr", "lane"}
     assert {json.loads(r["provenance"])["policy_kind"] for r in rows} == {"live", "counterfactual"}
@@ -108,14 +108,14 @@ def test_new_listening_evidence_invalidates_basket_identity(store):
 
 
 def test_failed_card_does_not_drop_remaining_response_measurements(store, monkeypatch):
-    original = store.rec_surface.record_served_impressions
+    original = store.rec_ledger.record_served_impressions
     calls = []
     def fail_first(*args, **kwargs):
         calls.append(True)
         if len(calls) == 1:
             raise RuntimeError("instrumentation failure")
         return original(*args, **kwargs)
-    monkeypatch.setattr(store.rec_surface, "record_served_impressions", fail_first)
+    monkeypatch.setattr(store.rec_ledger, "record_served_impressions", fail_first)
     home_cards._record_served_cards(store, _cards(), 100)
     assert len(calls) == 8
     assert store.conn.execute("SELECT COUNT(*) FROM rec_served_impressions").fetchone()[0] == 7
@@ -138,7 +138,7 @@ def test_batched_queue_preserves_offer_bound_and_offer_time_attribution(tmp_path
         worker._flush_measurements()
         assert store.conn.execute("SELECT COUNT(*) FROM rec_served_impressions").fetchone()[0] == 64
         for row in store.conn.execute("SELECT id FROM rec_served_impressions"):
-            config = store.rec_surface.served_recommendation(row[0])["configuration"]
+            config = scorecard.served_recommendation(store, row[0])["configuration"]
             assert config["params"]["axis_weight_cap"] == 1.4
             assert config["models"]["collaborative"] == measurement._vector_identity([])
         for reader in readers:

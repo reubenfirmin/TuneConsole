@@ -1,6 +1,6 @@
 """#86 cross-space blending on comparable scales: a single-space candidate competes on its rank in
 its own space, not on a raw cosine against blended values."""
-from yt_playlist.rec.embed import _blend_spaces
+from yt_playlist.rec.vector_math import blend_spaces as _blend_spaces
 
 
 def test_single_space_candidate_competes_on_rank():

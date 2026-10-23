@@ -4,7 +4,7 @@ import struct
 
 import pytest
 
-from yt_playlist.rec import embed, model_refresh
+from yt_playlist.rec import embed, embedding_vectors as vectors, model_refresh
 from yt_playlist.repos.rec_model import VectorChanges
 
 
@@ -118,10 +118,10 @@ def test_delta_loads_and_tied_rankings_match_full_replacement(store, space):
         changes = snapshot.store.rec_model.prepare_training_changes({f'rec{space}_vectors': target})
         assert snapshot.publish(lambda: store.rec_model.publish_training_generation(changes))
     rows = load()
-    keys, matrix, _ = embed._load_vector_rows(rows)
+    keys, matrix, _ = vectors.load_vector_rows(rows)
     ranked = embed._rank(keys, matrix, matrix[0], set(), 3)
     replace(target)
-    expected_keys, expected_matrix, _ = embed._load_vector_rows(load())
+    expected_keys, expected_matrix, _ = vectors.load_vector_rows(load())
     assert rows == target
     assert ranked == embed._rank(expected_keys, expected_matrix, expected_matrix[0], set(), 3)
 

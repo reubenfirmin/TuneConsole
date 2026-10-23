@@ -20,32 +20,45 @@ function createRequestForwarder({origin, tabs, sensors}) {
   }
 
   async function handle(frame) {
-    const errorReply = error => ({id: frame.id, status: 0, body: JSON.stringify({error})});
-    if (!isAllowed(frame.url)) return errorReply("blocked by allowlist");
-    const tab = await tabs.ensure();
-    if (!tab) return errorReply("open music.youtube.com");
-    const auth = await authHeader();
-    if (!auth) return errorReply("not signed in");
-    const sendFetch = () => chrome.tabs.sendMessage(tab.id, {
-      type: "fetch", url: frame.url, method: frame.method, body: frame.body, auth,
-    });
-    const failed = error => errorReply(isMissingReceiver(error)
-      ? "content script not ready, reload the music.youtube.com tab"
-      : "response lost; the request may have completed. Check YouTube Music before retrying.");
-    let result;
+    let outcome = "not-dispatched";
+    const uncertain = "response lost; the request may have completed. Check YouTube Music before retrying.";
+    const errorReply = error => ({id: frame.id, status: 0, body: JSON.stringify({error, outcome})});
     try {
-      result = await sendFetch();
-      if (!result) throw new Error("no response from content script");
-    } catch (e) {
-      if (!isMissingReceiver(e)) return failed(e);
-      const installed = await sensors.inject(tab.id);
-      if (!installed.ok) return failed(e);
+      if (!isAllowed(frame.url)) return errorReply("blocked by allowlist");
+      const tab = await tabs.ensure();
+      if (!tab) return errorReply("open music.youtube.com");
+      const auth = await authHeader();
+      if (!auth) return errorReply("not signed in");
+      const sendFetch = () => {
+        outcome = "uncertain";
+        return chrome.tabs.sendMessage(tab.id, {
+          type: "fetch", url: frame.url, method: frame.method, body: frame.body, auth,
+        });
+      };
+      const failed = error => {
+        if (isMissingReceiver(error)) outcome = "not-dispatched";
+        return errorReply(outcome === "not-dispatched"
+          ? "content script not ready, reload the music.youtube.com tab" : uncertain);
+      };
+      let result;
       try {
         result = await sendFetch();
         if (!result) throw new Error("no response from content script");
-      } catch (retryError) { return failed(retryError); }
+      } catch (e) {
+        if (!isMissingReceiver(e)) return failed(e);
+        outcome = "not-dispatched"; // Chrome explicitly confirms no receiver accepted the request.
+        const installed = await sensors.inject(tab.id);
+        if (!installed.ok) return failed(e);
+        try {
+          result = await sendFetch();
+          if (!result) throw new Error("no response from content script");
+        } catch (retryError) { return failed(retryError); }
+      }
+      return {id: frame.id, status: result.status, body: result.body, timeZone: result.timeZone};
+    } catch (e) {
+      // Never put cookie, digest, URL, or arbitrary Chrome exception text on the wire.
+      return errorReply(outcome === "not-dispatched" ? "request setup failed before dispatch" : uncertain);
     }
-    return {id: frame.id, status: result.status, body: result.body, timeZone: result.timeZone};
   }
 
   return {handle};

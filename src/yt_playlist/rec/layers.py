@@ -28,7 +28,7 @@ returns a mean of decayed unit vectors or None when quiet/below gate.
 """
 import numpy as np
 
-from yt_playlist.rec import embed, rec_params, taste_modes, transient
+from yt_playlist.rec import embedding_vectors as vectors, rec_params, taste_modes, transient
 
 # #93v2: every layer in this module reads recent plays as MOOD EVIDENCE and feeds that reading back
 # into the scores that steer radio, so every play_events_since read here excludes the radio
@@ -58,7 +58,7 @@ def now_mode_mix(store, now):
     modes = taste_modes.live_modes(store, snapshot=snapshot)
     if not modes:
         return None, 0, modes
-    _ckeys, CV, cidx = embed.load_content_vectors(store, snapshot=snapshot)
+    _ckeys, CV, cidx = vectors.load_content_vectors(store, snapshot=snapshot)
     if CV is None:
         return None, 0, modes
 
@@ -122,7 +122,7 @@ def evidence_coverage(store, now) -> dict:
     `total` is distinct eligible real-time plays after radio provenance exclusion; `mapped` is the
     subset with a content vector and therefore able to vote in the mode posterior.
     """
-    _keys, CV, cidx = embed.load_content_vectors(store, snapshot=_snapshot(store))
+    _keys, CV, cidx = vectors.load_content_vectors(store, snapshot=_snapshot(store))
     cidx = cidx if CV is not None else {}
 
     def one(window_h):
@@ -208,7 +208,7 @@ def session_mode_mix(store, now):
     modes = taste_modes.live_modes(store, snapshot=snapshot)
     if not modes:
         return None, 0, modes
-    _ckeys, CV, cidx = embed.load_content_vectors(store, snapshot=snapshot)
+    _ckeys, CV, cidx = vectors.load_content_vectors(store, snapshot=snapshot)
     if CV is None:
         return None, 0, modes
 

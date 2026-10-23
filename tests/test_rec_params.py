@@ -24,10 +24,10 @@ def test_integer_param_is_rounded_to_int(store):
 
 
 def test_param_is_clamped_to_spec_range(store):
-    rec_params.set_param(store, "palette_absence_penalty", 5.0)   # max is 2.0
-    assert rec_params.get_param(store, "palette_absence_penalty") == 2.0
-    rec_params.set_param(store, "palette_absence_penalty", -2.0)  # min is 0.0
-    assert rec_params.get_param(store, "palette_absence_penalty") == 0.0
+    rec_params.set_param(store, "breadth_bias", 5.0)   # max is 1.0
+    assert rec_params.get_param(store, "breadth_bias") == 1.0
+    rec_params.set_param(store, "breadth_bias", -2.0)  # min is -1.0
+    assert rec_params.get_param(store, "breadth_bias") == -1.0
 
 
 def test_reset_param_restores_default(store):
@@ -85,7 +85,7 @@ def test_boolean_param_roundtrip(store, monkeypatch):
 
 def test_registry_has_expected_groups_and_advanced_flag():
     names = {p.name for p in rec_params.PARAMS}
-    assert {"comfort_recency_full_days", "comfort_min_plays", "palette_absence_penalty",
+    assert {"comfort_recency_full_days", "comfort_min_plays", "breadth_bias",
             "candidate_pool_factor"} <= names
     advanced = {p.name for p in rec_params.PARAMS if p.advanced}
     assert "candidate_pool_factor" in advanced            # the nichest knobs are collapsed

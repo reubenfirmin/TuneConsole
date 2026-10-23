@@ -13,8 +13,9 @@ import pytest
 from tests.conftest import FakeClient, _track
 from yt_playlist.core.store import Store
 from yt_playlist.library.spotify_library import import_spotify_library
-from yt_playlist.library.executor import add_tracks_to_playlist, create_generated_playlist
-from yt_playlist.rec import discover, graduation, scoring, surfaces
+from yt_playlist.library.executor import add_tracks_to_playlist
+from yt_playlist.library.playlist_generated import create_generated_playlist
+from yt_playlist.rec import discover, graduation, scorecard, scoring, surfaces
 
 DAY = 86400
 
@@ -47,14 +48,14 @@ class SearchClient(FakeClient):
 
 
 def shown(db, request, at):
-    db.rec_surface.record_served_impressions(request, "home", [{
+    db.rec_ledger.record_served_impressions(request, "home", [{
         "lane": "wheelhouse", "identity_key": "song|artist", "rank": 1,
         "model_version": "test"}], at)
 
 
 def test_85_old_mood_has_less_ranking_influence(db):
     now = 1000 * DAY
-    db.rec_surface.record_mood(["song|artist"], 1, now)
+    db.rec_signals.record_mood(["song|artist"], 1, now)
     vectors = np.eye(2)
     idx = {"song|artist": 0, "other|artist": 1}
     fresh = scoring._mood_components(np.zeros(2), db, now, vectors, idx)["transient"][0]
@@ -101,7 +102,7 @@ def test_113_later_impression_outside_report_owns_the_outcome(db):
     shown(db, "first", 100)
     shown(db, "second", 150)
     db.history.record_play_event(1, "song|artist", "vid", 160)
-    first_report = db.rec_surface.recommendation_scorecard(90, 110, min_impressions=1)
+    first_report = scorecard.recommendation_scorecard(db, 90, 110, min_impressions=1)
     assert first_report["played"] == 0, first_report
 
 
@@ -112,11 +113,11 @@ def test_113_generated_provenance_survives_playlist_promotion(db):
     db.conn.commit()
     shown(db, "one", 100)
     db.history.record_play_event(1, "song|artist", "vid", 120, playlist_ytm_id="RDAMPLPLGEN")
-    before = db.rec_surface.recommendation_scorecard(90, 200)
+    before = scorecard.recommendation_scorecard(db, 90, 200)
     assert before["generated"] == 1 and before["organic"] == 0
     db.conn.execute("DELETE FROM playlist_group WHERE ytm='PLGEN'")
     db.conn.commit()
-    after = db.rec_surface.recommendation_scorecard(90, 200)
+    after = scorecard.recommendation_scorecard(db, 90, 200)
     assert after["generated"] == 1 and after["organic"] == 0, after
 
 

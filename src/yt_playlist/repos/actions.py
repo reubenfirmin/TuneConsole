@@ -20,7 +20,8 @@ class ActionRepo(Repo):
         if action is None:
             raise ValueError(f"no such action {action_id}")
         from yt_playlist.util.action_kinds import is_undoable
-        if not is_undoable(action.kind) or action.status not in ("executed", "undo_failed", "undoing"):
+        if not is_undoable(action.kind) or action.status not in (
+                "executed", "delete_failed", "undo_failed", "undoing"):
             raise ValueError(f"action {action_id} ({action.kind}/{action.status}) is not undoable")
         with self.conn:
             changed = self.conn.execute(

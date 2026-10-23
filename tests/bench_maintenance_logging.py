@@ -38,7 +38,7 @@ def measure(directory):
     store.settings.set_setting('rec_dim', '16')
     rec_params.set_param(store, 'modes_k', 3)
     rec_params.set_param(store, 'modes_min_members', 8)
-    store.rec_surface.put_proposals('home_prepared', {'last-good': True}, time.time())
+    store.rec_proposals.put_proposals('home_prepared', {'last-good': True}, time.time())
     # Exercise the real cooperative budget boundary without a two-second wait
     # on each pass. The normal configured budget is unchanged in the application.
     home_prepared.PREPARE_BUDGET_S = 0
@@ -90,7 +90,7 @@ def measure(directory):
         (directory / 'maintenance-info.log').write_text('\n'.join(
             f'{datetime.fromtimestamp(r.created, timezone.utc).isoformat()} '
             f'{r.levelname} {r.name} {r.getMessage()}' for r in info) + '\n')
-        prepared_bundles = store.rec_surface.get_proposals('mode_bundles') or {}
+        prepared_bundles = store.rec_proposals.get_proposals('mode_bundles') or {}
         mode_bundles = [bucket for mode, bucket in prepared_bundles.items() if mode.isdigit()]
         bundled_tracks = {item['key'] for bucket in mode_bundles
                           for items in bucket.values() for item in items}
@@ -102,7 +102,7 @@ def measure(directory):
                 'modeled_tracks': store.rec_model.rec_vectors_count(),
                 'prepared_bundle_modes': len(mode_bundles),
                 'prepared_bundle_tracks': len(bundled_tracks),
-                'last_good_home': store.rec_surface.get_proposals('home_prepared')}
+                'last_good_home': store.rec_proposals.get_proposals('home_prepared')}
     finally:
         log.removeHandler(handler)
         log.setLevel(previous_level)

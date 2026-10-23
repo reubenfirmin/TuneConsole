@@ -30,13 +30,6 @@ def test_probe_exposes_existing_facts_without_extra_requests(requests):
     assert len(requests) == 3
 
 
-def test_legacy_audio_projection_remains_compatible(requests):
-    result = deezer.enrich("Song", "Artist")
-    assert set(result) == set(deezer._FIELDS)
-    assert result["bpm"] == 128
-    assert len(requests) == 3
-
-
 @pytest.mark.parametrize("membership", ["library", "discovery"])
 @pytest.mark.parametrize("chosen", [False, True])
 def test_deezer_only_facts_reach_shared_sink_and_preserve_choices(store, requests, membership, chosen):
@@ -64,7 +57,7 @@ def test_deezer_only_facts_reach_shared_sink_and_preserve_choices(store, request
     assert completed
     assert len(requests) == 3
     assert store.tracks.get_track_enrichment(entry) == (("Chosen genre", "1990") if chosen else ("Electronic", "2000"))
-    fields = store.enrichment.enrichment_attempts("song|artist")["deezer"]["fields"]
+    fields = store.enrichment_state.enrichment_attempts("song|artist")["deezer"]["fields"]
     assert fields["genre"] == "Electronic" and fields["year"] == "2000"
     logged = {row["field"]: (row["value"], row["field_scope"]) for row in store.conn.execute(
         "SELECT field,value,field_scope FROM enrichment_log WHERE provider='deezer'")}

@@ -4,12 +4,12 @@ on:
     tags: ['v*']
   workflow_dispatch:
     inputs:
-      candidate_tag:
-        description: Existing release tag to finish publishing
+      tag:
+        description: Existing release tag to publish
         required: true
         type: string
-      candidate_run_id:
-        description: Release run with all candidate builds completed successfully
+      source_run:
+        description: Original tag build run with complete, unexpired candidate artifacts
         required: true
         type: string
 permissions:
@@ -18,111 +18,113 @@ permissions:
 jobs:
   version:
     runs-on: ubuntu-latest
+    timeout-minutes: 1
     outputs:
       version: ${{ steps.policy.outputs.version }}
+      revision: ${{ steps.revision.outputs.revision }}
+      tag: ${{ steps.revision.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+      - id: revision
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          printf 'revision=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
       - id: policy
         env:
-          RELEASE_TAG: ${{ inputs.candidate_tag || github.ref_name }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: python3 packaging/release_policy.py "$RELEASE_TAG"
-      - name: Verify the original candidate builds before resuming publication
-        if: github.event_name == 'workflow_dispatch'
+  checks:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions:
+      actions: read
+    steps:
+      - name: Require completed CI for the exact tagged revision
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          RELEASE_REVISION: ${{ needs.version.outputs.revision }}
         run: |
-          candidate_sha=$(git rev-parse "$CANDIDATE_TAG^{commit}")
-          python3 packaging/release_candidate.py "$CANDIDATE_RUN_ID" "$CANDIDATE_TAG" "$candidate_sha"
-  # Unit and browser suites run in CI before the release is tagged.
-  containers:
-    if: github.event_name != 'workflow_dispatch'
-    needs: version
+          # PR checks validate a synthetic merge commit. Only a main push or explicit
+          # manual check of this exact revision can admit release builds.
+          run_ids=$(gh api --paginate --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f head_sha="$RELEASE_REVISION" -f status=success | \
+            jq --raw-output --arg revision "$RELEASE_REVISION" '.workflow_runs[] | select(.head_sha == $revision and .status == "completed" and .conclusion == "success" and (.event == "push" or .event == "workflow_dispatch")) | .id')
+          if [ -z "$run_ids" ]; then
+            echo "::error::Run Tests successfully for $RELEASE_REVISION before retrying this release."
+            exit 1
+          fi
+          printf 'Verified CI run(s): %s\n' "$run_ids"
+  preflight:
+    needs: [version, checks, candidates]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: write
+      packages: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      RELEASE_TAG: ${{ needs.version.outputs.tag }}
+      REHEARSAL_TAG: publisher-contract-release-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.revision }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check publisher services before expensive platform work
+        env:
+          RELEASE_REVISION: ${{ needs.version.outputs.revision }}
+        run: python3 packaging/release_services.py preflight "$RELEASE_TAG" --revision "$RELEASE_REVISION" --rehearsal-tag "$REHEARSAL_TAG"
+      - name: Clean up isolated draft even after failure
+        if: always()
+        run: python3 packaging/rehearse_publisher.py "$REHEARSAL_TAG" --cleanup-only
+  candidates:
+    needs: [version, checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
     permissions:
       contents: read
-      packages: write
-    uses: ./.github/workflows/container.yml
-    with:
-      version: ${{ needs.version.outputs.version }}
-  macos:
-    if: github.event_name != 'workflow_dispatch'
-    needs: version
-    uses: ./.github/workflows/macos.yml
-    secrets: inherit
-    with:
-      version: ${{ needs.version.outputs.version }}
-      tag: ${{ github.ref_name }}
-  wheel:
-    if: github.event_name != 'workflow_dispatch'
-    needs: version
-    runs-on: ubuntu-latest
-    env:
-      SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.version.outputs.version }}
+      actions: read
+    outputs:
+      artifact_ids: ${{ steps.inspect.outputs.artifact_ids }}
+      source_run: ${{ steps.inspect.outputs.source_run }}
+      ci_completed_at: ${{ steps.inspect.outputs.ci_completed_at }}
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - run: uv sync --locked --only-group build --no-install-project
-      - run: uv build --wheel --no-build-isolation --python .venv/bin/python
-      - uses: actions/upload-artifact@v4
         with:
-          name: release-wheel
-          path: dist/*.whl
-          if-no-files-found: error
-  flatpak:
-    if: github.event_name != 'workflow_dispatch'
-    needs: [version, wheel]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {arch: x86_64, runner: ubuntu-latest}
-          - {arch: aarch64, runner: ubuntu-24.04-arm}
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with: {name: release-wheel, path: dist}
-      - name: Install Flatpak tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
-          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-      - name: Build signed candidate and check packaged startup and bridge
+          ref: ${{ needs.version.outputs.revision }}
+      - id: inspect
         env:
-          FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
-          VERSION: ${{ needs.version.outputs.version }}
-          ARCH: ${{ matrix.arch }}
-        working-directory: packaging/flatpak
-        run: |
-          printf '%s' "$FLATPAK_GPG_KEY" | gpg --batch --import
-          fpr=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')
-          flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse \
-            --repo=repo --gpg-sign="$fpr" --force-clean build-dir com.tuneconsole.TuneConsole.yaml
-          flatpak build-update-repo repo --gpg-sign="$fpr"
-          gpg --batch --export "$fpr" > repo-key.gpg
-          python3 bundle.py repo "TuneConsole-$ARCH.flatpak" repo-key.gpg
-          flatpak install --user --noninteractive "TuneConsole-$ARCH.flatpak"
-          python3 smoke.py "$VERSION"
-          tar -cf "flatpak-repo-$ARCH.tar" repo
-          if [[ "$ARCH" == x86_64 ]]; then cp "TuneConsole-$ARCH.flatpak" TuneConsole.flatpak; fi
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_RUN: ${{ inputs.source_run || 'auto' }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+          RELEASE_REVISION: ${{ needs.version.outputs.revision }}
+        run: python3 packaging/release_candidates.py "$SOURCE_RUN" "$RELEASE_TAG" "$RELEASE_REVISION"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: release-flatpak-${{ matrix.arch }}
-          if-no-files-found: error
-          path: |
-            packaging/flatpak/TuneConsole*.flatpak
-            packaging/flatpak/flatpak-repo-*.tar
+          name: candidate-status-${{ github.run_attempt }}
+          path: candidate-status.json
+          if-no-files-found: ignore
   promote:
+    needs: [version, checks, preflight, candidates]
     if: >-
-      ${{ !cancelled() && needs.version.result == 'success' &&
-          (github.event_name == 'workflow_dispatch' ||
-           (needs.wheel.result == 'success' && needs.flatpak.result == 'success' &&
-            needs.macos.result == 'success' && needs.containers.result == 'success')) }}
-    needs: [version, wheel, flatpak, macos, containers]
+      always() && needs.version.result == 'success' && needs.checks.result == 'success' &&
+      needs.preflight.result == 'success' && needs.candidates.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # All tags share this owner. Do not cancel a promotion already changing channels.
     concurrency:
       group: release-production
@@ -133,25 +135,46 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.revision }}
       - uses: actions/download-artifact@v4
         with:
-          pattern: release-*
+          artifact-ids: ${{ needs.candidates.outputs.artifact_ids }}
+          run-id: ${{ needs.candidates.outputs.source_run }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           merge-multiple: true
           path: candidate
-          run-id: ${{ inputs.candidate_run_id || github.run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify immutable payload handoff before any channel changes
+        env:
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+          RELEASE_REVISION: ${{ needs.version.outputs.revision }}
+          SOURCE_RUN: ${{ needs.candidates.outputs.source_run }}
+        run: |
+          if [ -f candidate/release-provenance.json ]; then
+            python3 packaging/candidate_provenance.py verify candidate "$RELEASE_TAG" --revision "$RELEASE_REVISION" --source-run "$SOURCE_RUN"
+          fi
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Assemble the exact signed repositories from both architectures
+      - name: Install publication tools within a separate setup budget
+        timeout-minutes: 3
+        run: |
+          sudo timeout 120 apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
+          sudo timeout 120 apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2 install -y flatpak ostree
+      - name: Restore the exact signed repository from CI
+        timeout-minutes: 2
         env:
           FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y flatpak ostree
+          if [ -f candidate/flatpak-repository.tar ]; then
+            tar -xf candidate/flatpak-repository.tar -C candidate
+            exit 0
+          fi
+          # Transitional support for retained candidates from the original tag
+          # build workflow. New CI candidates always contain the signed archive.
           printf '%s' "$FLATPAK_GPG_KEY" | gpg --batch --import
           fpr=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')
           ostree --repo=candidate/flatpak-repo init --mode=archive-z2
@@ -160,7 +183,7 @@ jobs:
             tar -xf "candidate/flatpak-repo-$arch.tar" -C "candidate/$arch"
             ostree --repo=candidate/flatpak-repo pull-local "candidate/$arch/repo"
           done
-          flatpak build-update-repo candidate/flatpak-repo --gpg-sign="$fpr"
+          flatpak build-update-repo candidate/flatpak-repo --no-summary-index --gpg-sign="$fpr"
           cp packaging/flatpak/tuneconsole.flatpakrepo candidate/flatpak-repo/
       - name: Validate all assets and promote with rollback and version ordering
         env:
@@ -168,5 +191,61 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          RELEASE_TAG: ${{ inputs.candidate_tag || github.ref_name }}
-        run: python3 packaging/promote_release.py candidate "$RELEASE_TAG"
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+        run: python3 packaging/promote_release.py candidate "$RELEASE_TAG" --budget-seconds 180
+      - name: Verify anonymous downloads and signed public update channels
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+        run: python3 packaging/release_services.py public "$RELEASE_TAG"
+      - name: Preserve channel recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: promotion-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            candidate/channel-recovery.json
+            candidate/release-manifest.json
+          if-no-files-found: ignore
+          retention-days: 90
+  summary:
+    needs: [version, checks, preflight, candidates, promote]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: '*timings*'
+          path: evidence/timings
+          run-id: ${{ needs.candidates.outputs.source_run || inputs.source_run || github.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: candidate-status-${{ github.run_attempt }}
+          path: evidence/candidates
+          merge-multiple: true
+      - name: Record completed work and recovery action
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag || inputs.tag || github.ref_name }}
+          SOURCE_RUN: ${{ needs.candidates.outputs.source_run || inputs.source_run || github.run_id }}
+        run: python3 packaging/release_summary.py
+      - name: Measure green CI through verified publication
+        if: needs.candidates.outputs.ci_completed_at != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 packaging/release_timing.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-status-${{ github.run_attempt }}
+          path: |
+            release-status.md
+            release-timing.json

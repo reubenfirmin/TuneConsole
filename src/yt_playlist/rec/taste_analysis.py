@@ -1,4 +1,4 @@
-"""Taste analysis: read-only summaries of the library's taste, covering breadth, palette, era spread,
+"""Taste analysis: read-only summaries of the library's taste, covering breadth, era spread,
 the Home fingerprint, and per-playlist facets/diversity. A leaf below scoring (imports no scoring)."""
 import math
 
@@ -152,7 +152,7 @@ def playlist_mood_state(store, playlist_id, now) -> int:
     keys = set(store.playlists.get_playlist_track_keys(playlist_id))
     if not keys:
         return 0
-    for _created, direction, mkeys in store.rec_surface.recent_mood_events():   # newest-first
+    for _created, direction, mkeys in store.rec_signals.recent_mood_events():   # newest-first
         if set(mkeys) == keys:                       # whole-mix feedback; first match is the latest
             return 1 if direction > 0 else -1
     return 0
@@ -164,7 +164,7 @@ def track_mood_states(store, now) -> dict:
     so single-key events are exactly the per-track ones. Whole-mix and facet tilts (many keys) are
     excluded. Persists until changed; newest-first, so the first event seen for a key is the latest."""
     out = {}
-    for _created, direction, mkeys in store.rec_surface.recent_mood_events():   # newest-first
+    for _created, direction, mkeys in store.rec_signals.recent_mood_events():   # newest-first
         if len(mkeys) == 1 and mkeys[0] not in out:    # first match is the latest -> latest wins
             out[mkeys[0]] = 1 if direction > 0 else -1
     return out
@@ -175,7 +175,7 @@ def taste_breadth(store, *, genre_plays=None) -> dict:
 
     breadth in [0,1]: ~0 = one-vibe (opera-only), ~1 = spread across many families. Computed over
     a *play-weighted* genre distribution, so a low-play context doesn't inflate your apparent breadth
-    or register its genres as 'in palette' (the Clapton-leak fix). Spec §5.2.
+    relative to genres the user actually plays. Spec §5.2.
     """
     fams: dict = {}
     dist = store.rec_query.genre_play_distribution() if genre_plays is None else genre_plays
@@ -189,24 +189,3 @@ def taste_breadth(store, *, genre_plays=None) -> dict:
     entropy = -sum(p * math.log(p) for p in shares.values())
     return {"breadth": entropy / math.log(len(fams)), "n_families": len(fams),
             "families": shares, "n_tagged": total}
-
-
-def palette(store):
-    """The library's genre-family palette + an out-of-palette penalty for a candidate genre.
-
-    fit(genre) = 0 if its family is already present; otherwise the nearest-present-family
-    distance scaled by breadth: 'absence-as-avoidance', a broad library that has never adopted
-    a family penalizes it more (deliberate exclusion), a narrow one less (merely unexplored).
-    Spec §5.3.
-    """
-    bd = taste_breadth(store)
-    present = set(bd["families"])
-
-    def fit(genre):
-        fam = genre_map.family(genre)
-        if not present or fam in present:
-            return 0.0
-        nearest = min(genre_map.family_distance(fam, p) for p in present)
-        return nearest * (rec_params.get_param(store, "palette_absence_penalty") + bd["breadth"])
-
-    return {"breadth": bd["breadth"], "present": present, "fit": fit}

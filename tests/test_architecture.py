@@ -194,6 +194,29 @@ def test_prepared_recommendation_policy_contains_no_connection_access_or_sql():
                 assert not re.match(r"\s*(SELECT |INSERT |UPDATE |DELETE |REPLACE )", node.value), name
 
 
+def test_embedding_calculations_stay_detached_from_storage_and_serving():
+    modules = _modules()
+    forbidden = {"yt_playlist.rec.embedding_vectors", "yt_playlist.rec.model_refresh",
+                 "yt_playlist.rec.rec_worker", "yt_playlist.rec.embed"}
+    for owner in ("embedding_training", "content_model", "vector_math"):
+        name = f"yt_playlist.rec.{owner}"
+        tree = modules[name]
+        imports = set(_imports(tree, name))
+        assert not imports & forbidden, name
+        assert not any(dependency.startswith(("yt_playlist.repos", "yt_playlist.web",
+                                              "yt_playlist.core.store")) for dependency in imports), name
+        for node in ast.walk(tree):
+            if isinstance(node, ast.arg):
+                assert node.arg not in {"store", "reader", "session"}, name
+    graph = modules["yt_playlist.rec.embed"]
+    assert not set(_imports(graph)) & {"yt_playlist.rec.embedding_training",
+                                      "yt_playlist.rec.content_model"}
+    expansion = next(node for node in graph.body
+                     if isinstance(node, ast.FunctionDef) and node.name == "expand_spaces")
+    assert not any(isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                   and node.value.id in {"vectors", "rec_params"} for node in ast.walk(expansion))
+
+
 def test_refresh_notifications_do_not_write_model_or_serving_state():
     modules = _modules()
     for name in ("yt_playlist.repos.models", "yt_playlist.core.recommendation_settings"):

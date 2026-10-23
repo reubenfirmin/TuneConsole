@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from yt_playlist.rec import embed, eval_recs
+from yt_playlist.rec import embedding_training as training, eval_recs
 
 DAY = 86400
 MIN_HISTORY_DAYS = 14
@@ -26,7 +26,7 @@ METHODS = {"svd": "Playlist patterns (SVD)", "item2vec": "Track co-occurrence (I
 
 def current_setup(store):
     return {"method": store.settings.get_setting("rec_embed_method") or "svd",
-            "dim": int(store.settings.get_setting("rec_dim") or embed.DIM)}
+            "dim": int(store.settings.get_setting("rec_dim") or training.DIM)}
 
 
 def _tracked_run(store, latest):
@@ -69,7 +69,7 @@ def readiness(store, now):
         if last["status"] == "failed":
             return {"state": "ready", "reason": "Ready to retry automatically on the next model update.", "checks": checks}
         since = max(last.get("evidence_end", last["ran_at"]), restored_at)
-        fresh = len(store.history.history_keys_between(since, now) - store.rec_query.generated_only_keys_between(since, now))
+        fresh = len(store.history.history_keys_between(since, now) - store.rec_evidence.generated_only_keys_between(since, now))
         checks.append({"label": "Fresh listening since the last comparison", "value": min(fresh, MIN_FRESH_TRACKS),
                        "total": MIN_FRESH_TRACKS, "unit": "distinct tracks"})
         if fresh < MIN_FRESH_TRACKS:
@@ -88,10 +88,10 @@ def _windows(store, now):
     for i in range(3):
         end = hi - i * span + 1e-6
         cutoff = end - span
-        baskets, _ = store.rec_query.rec_baskets_as_of(cutoff)
+        baskets, _ = store.rec_evidence.rec_baskets_as_of(cutoff)
         before = store.history.history_keys_before(cutoff)
         held = store.history.history_keys_between(cutoff, end) - before
-        generated = store.rec_query.generated_only_keys_between(cutoff, end)
+        generated = store.rec_evidence.generated_only_keys_between(cutoff, end)
         weights = {k: 1 + math.log1p(v) for k, v in store.history.play_counts_before(cutoff).items()} if weighted else None
         out.append({"baskets": baskets, "before": before, "held": held - generated,
                     "cutoff": cutoff, "end": end, "weights": weights})
@@ -115,7 +115,7 @@ def _rank(keys, vectors, context, eligible, k=20):
 def _evaluate(setup, windows):
     outcomes = []
     for window in windows:
-        keys, vectors = embed.build_vectors_from_baskets(window["baskets"], dim=setup["dim"],
+        keys, vectors = training.build_vectors_from_baskets(window["baskets"], dim=setup["dim"],
                                                         method=setup["method"], weights=window["weights"])
         eligible = set(keys) - window["before"]
         held = window["held"] & eligible
@@ -162,23 +162,23 @@ def _paired(previous, candidate, alternatives):
 
 
 def _build(store, setup):
-    return embed.build_vectors_from_baskets(
-        store.rec_query.rec_baskets(), dim=setup["dim"], method=setup["method"],
-        weights=embed._cooc_weights(store) if store.settings.get_setting("rec_cooc_weighting") == "1" else None)
+    return training.build_vectors_from_baskets(
+        store.rec_evidence.rec_baskets(), dim=setup["dim"], method=setup["method"],
+        weights=training.cooc_weights(store.rec_query.play_counts()) if store.settings.get_setting("rec_cooc_weighting") == "1" else None)
 
 
 def _forecast(store, previous, selected, now):
     """Save both top-20 predictions on the same candidate universe, before observing outcomes."""
     with store.read_snapshot() as snapshot:
         reader = snapshot.store
-        baskets = reader.rec_query.rec_baskets()
-        weights = embed._cooc_weights(reader) if reader.settings.get_setting("rec_cooc_weighting") == "1" else None
+        baskets = reader.rec_evidence.rec_baskets()
+        weights = training.cooc_weights(reader.rec_query.play_counts()) if reader.settings.get_setting("rec_cooc_weighting") == "1" else None
         context = reader.history.history_keys_before(now) | reader.model_selection.selection_play_keys(0, now)
-    old_keys, old_vectors = embed.build_vectors_from_baskets(baskets, dim=previous["dim"], method=previous["method"], weights=weights)
+    old_keys, old_vectors = training.build_vectors_from_baskets(baskets, dim=previous["dim"], method=previous["method"], weights=weights)
     if previous == selected:
         keys, vectors = old_keys, old_vectors
     else:
-        keys, vectors = embed.build_vectors_from_baskets(baskets, dim=selected["dim"], method=selected["method"], weights=weights)
+        keys, vectors = training.build_vectors_from_baskets(baskets, dim=selected["dim"], method=selected["method"], weights=weights)
     eligible = (set(old_keys) & set(keys)) - context
     if len(eligible) <= 20 or not (context & set(old_keys)) or not (context & set(keys)):
         return None
@@ -207,7 +207,7 @@ def update_followup(store, now, *, now_fn=None):
         # Late imports may establish that a track was already played before the forecast.
         # Revise eligibility instead of calling that repeat a successful new prediction.
         held -= store.history.history_keys_before(start) | store.model_selection.selection_play_keys(0, start)
-        generated = store.rec_query.generated_only_keys_between(start, stop)
+        generated = store.rec_evidence.generated_only_keys_between(start, stop)
         excluded += len(held & generated)
         held -= generated
         seen |= held

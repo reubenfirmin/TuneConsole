@@ -3,9 +3,10 @@
 from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
-from yt_playlist.web.routes.home import lastfm_nudge_due, LASTFM_NUDGE_SNOOZE_S
+from yt_playlist.web.routes.home_onboarding import lastfm_nudge_due, LASTFM_NUDGE_SNOOZE_S
 from yt_playlist.providers import lastfm
 from tests.conftest import FakeClient
+from tests.onboarding_support import publish_personal_mix
 
 
 def test_due_when_no_key_and_not_snoozed(store, monkeypatch):
@@ -36,14 +37,16 @@ def test_banner_links_to_enrichment_tab(store, monkeypatch):
     # not dump the user on the default Pairing tab.
     monkeypatch.setattr(lastfm, "available", lambda s=None: False)
     store.settings.set_setting("last_sync_at", "1700000000")
-    c = TestClient(create_app(store, lambda: FakeClient()), base_url="http://127.0.0.1")
+    publish_personal_mix(store, now=1700000000)
+    c = TestClient(create_app(store, lambda: FakeClient(), now_fn=lambda: 1700000000), base_url="http://127.0.0.1")
     assert "/setup?tab=enrichment" in c.get("/").text
 
 
 def test_banner_renders_and_dismiss_persists(store, monkeypatch):
     monkeypatch.setattr(lastfm, "available", lambda s=None: False)
     store.settings.set_setting("last_sync_at", "1700000000")
-    c = TestClient(create_app(store, lambda: FakeClient()), base_url="http://127.0.0.1")
+    publish_personal_mix(store, now=1700000000)
+    c = TestClient(create_app(store, lambda: FakeClient(), now_fn=lambda: 1700000000), base_url="http://127.0.0.1")
     assert "lastfm-nudge" in c.get("/").text
     assert c.post("/onboard/lastfm/dismiss").status_code == 200
     assert store.settings.get_setting("lastfm_nudge_dismissed_at") is not None   # snooze timestamp recorded

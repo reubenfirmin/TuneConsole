@@ -87,6 +87,7 @@ def test_global_mutations_keep_the_configured_main_account(store,monkeypatch,ord
 @pytest.mark.parametrize('order',['main-last','main-first','main-missing'])
 def test_radio_creation_uses_the_main_account(store,monkeypatch,order):
     from yt_playlist.web import radio_session
+    from yt_playlist.library import playlist_generated
     other = store.identities.upsert_identity('Other','c','brand',False)
     main = store.identities.upsert_identity('Main','c',None,True)
     remotes = {other:object(),main:object()}
@@ -105,7 +106,7 @@ def test_radio_creation_uses_the_main_account(store,monkeypatch,order):
     def create(store,title,tracks,client,now,identity):
         writes.append((identity,client))
         raise RuntimeError('remote creation unavailable')
-    monkeypatch.setattr(radio_session.executor,'create_generated_playlist',create)
+    monkeypatch.setattr(playlist_generated,'create_generated_playlist',create)
     try:
         result = radio.start()
         assert not result['ok']

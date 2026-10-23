@@ -52,6 +52,8 @@
         {% if backend_update.kind == 'flatpak' %}
         <button type="button" class="btn btn-sm alert-go" @click="restart()" :disabled="working"
                 x-show="phase === 'ready'" x-cloak>Restart to update</button>
+        <button type="button" class="btn btn-sm" @click="cancelRestart()" :disabled="pending"
+                x-show="canCancel" x-cloak>Cancel restart</button>
         <a class="btn btn-sm alert-go" href="appstream://com.tuneconsole.TuneConsole"
            x-show="phase === 'unavailable'" x-cloak>Open software manager</a>
         {% else %}

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from yt_playlist.rec import discover, embed, eval_recs
+from yt_playlist.rec import content_model, discover, embedding_vectors as embed, eval_recs
 from tests import model_support
 
 
@@ -47,7 +47,7 @@ def test_evaluation_excludes_targets_and_feature_fitting_inputs(store, monkeypat
     vectors = np.eye(30, dtype=np.float32)
     monkeypatch.setattr(embed, "load_vectors", lambda s: (keys, vectors, {k: i for i, k in enumerate(keys)}))
     original_fit = discover.ContentProjection.fit
-    original_model = embed.build_content_model
+    original_model = content_model.build_content_model
     original_solve = np.linalg.solve
     active_training = set()
     tested = []
@@ -81,7 +81,7 @@ def test_evaluation_excludes_targets_and_feature_fitting_inputs(store, monkeypat
         projection.predict = held_out
         return projection
 
-    monkeypatch.setattr(embed, "build_content_model", model)
+    monkeypatch.setattr(content_model, "build_content_model", model)
     monkeypatch.setattr(np.linalg, "solve", solve)
     monkeypatch.setattr(discover.artist_model, "load_artist_vectors",
                         lambda s: pytest.fail("evaluation must not use shared artist features"))

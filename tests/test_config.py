@@ -74,19 +74,3 @@ def test_error_summary_bounds_and_flattens_generic_errors():
     assert "\n" not in summary
     assert summary.endswith("...")
     assert len(summary) <= 420
-
-
-def test_credential_path_inside_base_ok(tmp_path):
-    from yt_playlist.core.config import credential_path
-    (tmp_path / "cred.json").write_text("{}")
-    assert credential_path(tmp_path, "cred.json") == (tmp_path / "cred.json").resolve()
-
-def test_credential_path_rejects_traversal(tmp_path):
-    from yt_playlist.core.config import credential_path
-    with pytest.raises(ValueError):
-        credential_path(tmp_path, "../../../../etc/passwd")
-
-def test_credential_path_rejects_absolute(tmp_path):
-    from yt_playlist.core.config import credential_path
-    with pytest.raises(ValueError):
-        credential_path(tmp_path, "/etc/passwd")

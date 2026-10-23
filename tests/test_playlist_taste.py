@@ -1,4 +1,4 @@
-from yt_playlist.rec import embed, scoring
+from yt_playlist.rec import embedding_vectors as embed, scoring
 from tests import model_support
 
 

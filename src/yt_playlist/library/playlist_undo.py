@@ -1,42 +1,17 @@
 """Claimed, journaled playlist recovery with verified remote outcomes."""
 import json
-import os
-from contextlib import contextmanager
+from collections import Counter
 from pathlib import Path
 from uuid import uuid4
 
-from yt_playlist.core import paths
+from yt_playlist.library.action_claim import claim_action
 from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.library.sync import refresh_playlist
-from yt_playlist.library.playlist_mutation import restore_playlist_sequence
+from yt_playlist.library.playlist_mutation import mutation_status, restore_playlist_sequence
+from yt_playlist.library.playlist_positions import cancel_insertions
 from yt_playlist.library.playlist_snapshot import (
     http_status as _http_status, playlist_if_present)
 from yt_playlist.library.undo_conflicts import keeper_target, playlist_state, require_unchanged_copy
-
-
-@contextmanager
-def _claim_lock(store, action_id):
-    directory = paths.data_dir() / "undo-locks"
-    directory.mkdir(exist_ok=True)
-    # Never unlink a lock: every contender must refer to the same inode. OS ownership ends
-    # automatically on process exit, so an abandoned durable journal remains resumable.
-    with (directory / (store.actions.undo_lock_key(action_id) + ".lock")).open("a+b") as stream:
-        if os.name == "nt":
-            import msvcrt
-            stream.write(b"0")
-            stream.flush()
-            stream.seek(0)
-            try:
-                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-            except OSError as exc:
-                raise ValueError("Undo is already running for this action. Reload the Action Log.") from exc
-        else:
-            import fcntl
-            try:
-                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise ValueError("Undo is already running for this action. Reload the Action Log.") from exc
-        yield
 
 
 def _existing(client, playlist_id):
@@ -67,20 +42,36 @@ def _refresh(store, client, identity, playlist_id, title, now, *, created_at=Non
 
 
 def _steps(undo, action_id):
-    steps = [{"kind": "keeper", "entry": entry, "phase": "pending"}
-             for entry in undo.get("restored", [])]
+    steps = []
     backups = list(undo.get("backups", []))
     if undo.get("backup"):
         backups.append(undo["backup"])
-    # Restore sources before removing a move destination: keep a usable copy throughout recovery.
+    # Restore deleted sources before removing transferred songs from keepers or a move destination.
     for index, backup in enumerate(dict.fromkeys(backups)):
         steps.append({"kind": "backup", "backup": backup, "phase": "pending",
                       "marker": f"TuneConsole undo {action_id}/{index}/{uuid4().hex}"})
+    steps.extend({"kind": "keeper", "entry": entry, "phase": "pending"}
+                 for entry in undo.get("restored", []))
     if undo.get("new_ytm") is not None:
         steps.append({"kind": "copy", "ytm": undo["new_ytm"],
                       "identity": undo.get("target_identity"), "post": undo.get("post"),
                       "phase": "pending"})
     return steps
+
+
+def _verify_restored_sources(clients, steps):
+    """Recheck durable completed steps before taking away another remote copy on a retry."""
+    for step in steps:
+        if step["kind"] != "backup":
+            continue
+        payload = json.loads(Path(step["backup"]).read_text(encoding="utf-8"))
+        client = _client(clients, payload.get("identity_id"))
+        detail = _existing(client, step["created_id"])
+        required = Counter(t["video_id"] for t in payload.get("tracks", []))
+        actual = Counter(t["videoId"] for t in detail["tracks"]) if detail is not None else Counter()
+        if detail is None or required - actual:
+            raise ValueError("A restored source is missing or has changed. The remaining playlists "
+                             "were preserved. Review the source in YouTube Music before retrying Undo.")
 
 
 def _restore(client, playlist_id, target, step, save):
@@ -210,9 +201,13 @@ def _delete_copy(store, clients, step, save):
         save()
         error = None
         try:
-            client.delete_playlist(step["ytm"])
+            result = client.delete_playlist(step["ytm"])
         except Exception as exc:
-            error = exc
+            error, result = exc, None
+        status = mutation_status(result)
+        if status is not None and status != "STATUS_SUCCEEDED":
+            raise ValueError("YouTube has not confirmed deletion of the copied playlist: "
+                             "it rejected the request. Retry Undo to recheck it.")
         if _existing(client, step["ytm"]) is not None:
             raise ValueError(f"YouTube has not confirmed deletion of copy {step['ytm']}. "
                              "It was preserved. Retry Undo to check again.") from error
@@ -222,35 +217,57 @@ def _delete_copy(store, clients, step, save):
 
 
 def undo_action(store, action_id, clients, now):
-    with _claim_lock(store, action_id):
+    with claim_action(store, action_id):
+        action = store.actions.get_action(action_id)
+        if action is not None and action.status in ("delete_pending", "delete_failed"):
+            from yt_playlist.library.playlist_deletion import reconcile_deletion
+            reconcile_deletion(store, action_id, clients, now, locked=True)
         action = store.actions.claim_undo(action_id, now)
         undo = json.loads(action.undo_json or "{}")
-        recovery = undo.setdefault("recovery", {"version": 1, "steps": _steps(undo, action_id)})
+        recovery = undo.get("recovery")
+        if recovery is None:
+            recovery = undo["recovery"] = {"version": 2, "steps": _steps(undo, action_id)}
 
         def save():
             store.actions.save_undo_progress(action_id, undo, now)
 
         try:
+            if recovery["version"] == 1:
+                # Preserve every marker, created ID, conflict baseline and completed phase from
+                # an older journal; only its execution order changes, before any remote write.
+                recovery["steps"].sort(key=lambda step: step["kind"] != "backup")
+                recovery["version"] = 2
+            elif recovery["version"] != 2:
+                raise ValueError("Unsupported recovery journal version. Review this action manually.")
             recovery.pop("error", None)
             save()
             if not recovery["steps"]:
                 raise ValueError("This action has no recovery snapshot. Review it before recovering manually.")
+            sources_verified = False
             for step in recovery["steps"]:
                 if step["phase"] == "complete":
                     continue
+                if step["kind"] in ("keeper", "copy") and not sources_verified:
+                    _verify_restored_sources(clients, recovery["steps"])
+                    sources_verified = True
                 if step["kind"] == "keeper":
                     entry = step["entry"]
                     client = _client(clients, entry["identity"])
+                    target = step.get("target")
                     if step["phase"] != "remote_complete":
-                        target = step.get("target")
                         if target is None:
                             detail = _existing(client, entry["ytm"])
                             if detail is None:
                                 raise ValueError("The kept playlist is missing. Review it in YouTube Music.")
                             target = keeper_target(entry, playlist_state(detail))
-                        _restore(client, entry["ytm"], target, step, save)
                     pl = next((p for p in store.playlists.get_playlists() if p.identity_id == entry["identity"]
                                and p.ytm_playlist_id == entry["ytm"]), None)
+                    if pl is not None:
+                        # Retire placement intent before recovery writes or its targeted
+                        # refresh; a failed recovery must not resume the superseded move.
+                        cancel_insertions(store, pl.id, now)
+                    if step["phase"] != "remote_complete":
+                        _restore(client, entry["ytm"], target, step, save)
                     _refresh(store, client, entry["identity"], entry["ytm"], pl.title if pl else None, now)
                 elif step["kind"] == "backup":
                     _restore_backup(store, clients, step, now, save)

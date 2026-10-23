@@ -6,7 +6,7 @@ import pytest
 
 from tests.rec.test_candidate_refresh import candidate, library, no_fit, refresh
 from yt_playlist.core.store import Store
-from yt_playlist.rec import candidate_refresh, embed
+from yt_playlist.rec import candidate_refresh, embedding_training as embed
 from yt_playlist.rec.rec_worker import RecWorker
 
 

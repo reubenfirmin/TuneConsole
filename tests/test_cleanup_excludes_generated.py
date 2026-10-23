@@ -5,7 +5,7 @@ playlists, and it's app-managed, not yours to tidy. So it must never surface as 
 near-dup, identical-group member, empty, or tiny candidate, nor in the cleanup summary.
 """
 from yt_playlist.library import analysis
-from yt_playlist.repos.rec_query import GENERATED_GROUP
+from yt_playlist.repos.base import GENERATED_GROUP
 
 
 def _pl(store, iid, ytm, title, track_ids, *, generated=False):

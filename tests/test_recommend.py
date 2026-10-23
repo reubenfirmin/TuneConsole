@@ -101,7 +101,7 @@ def test_comfort_candidates_scores_plays_times_recency(store):
         store.history.record_history_plays(iid, now - d * day, ["heavyrecent|x"], source_timezone="UTC")
     store.history.record_history_plays(iid, now - 10 * day, ["barely|x"], source_timezone="UTC")
 
-    res = store.rec_query.comfort_candidates(now=now, min_plays=4, recency_full_days=30, limit=10)
+    res = store.rec_candidates.comfort_candidates(now=now, min_plays=4, recency_full_days=30, limit=10)
     titles = [r["title"] for r in res]
     assert titles[0] == "Dormant"                              # 4*1.0 > 8*(1/30)
     assert set(titles) == {"Dormant", "HeavyRecent"}           # Barely excluded (below min_plays)
@@ -225,7 +225,8 @@ def test_complete_playlist_rejects_genreless_related_artist_candidate(store, mon
                  'video_id': 'v3', 'genre': 'Techno', 'artist_score': 0.5}]
 
     monkeypatch.setattr(artist_model, 'artist_track_candidates', candidates)
-    monkeypatch.setattr(artist_model, 'related_artists', lambda *args, **kwargs: [('Other Artist', 0.9)])
+    monkeypatch.setattr(artist_model, 'related_artist_scores',
+                        lambda *args, **kwargs: {store.artists.key('Other Artist'): 0.9})
 
     items = surfaces.complete_playlist(store, target, limit=4)
 
@@ -577,7 +578,7 @@ def test_generators_exclude_dj_mixes(store):
         store.history.record_history_plays(iid, now - (40 + d) * day,
             ["short song|x", "live set|x", "untimed|x"], source_timezone="UTC")
 
-    keys = {r["key"] for r in store.rec_query.comfort_candidates(now=now, min_plays=4, recency_full_days=30, limit=20)}
+    keys = {r["key"] for r in store.rec_candidates.comfort_candidates(now=now, min_plays=4, recency_full_days=30, limit=20)}
     assert "short song|x" in keys
     assert "untimed|x" in keys
     assert "live set|x" not in keys              # the 60-min mix is excluded from generated playlists
@@ -597,8 +598,8 @@ def test_library_candidate_pools_follow_the_saved_duration_limit(store):
     rec_params.set_param(store, "max_track_minutes", 5)
     expected = {"short|artist", "boundary|artist", "unknown|artist"}
     assert {t["key"] for t in store.rec_query.library_songs()} == expected
-    assert {t["key"] for t in store.rec_query.comfort_candidates(now)} == expected
-    assert {key for basket in store.rec_query.rec_baskets() for key in basket} == expected
+    assert {t["key"] for t in store.rec_candidates.comfort_candidates(now)} == expected
+    assert {key for basket in store.rec_evidence.rec_baskets() for key in basket} == expected
     rec_params.reset_param(store, "max_track_minutes")
     assert len(store.rec_query.library_songs()) == 4
-    assert len(store.rec_query.comfort_candidates(now)) == 4
+    assert len(store.rec_candidates.comfort_candidates(now)) == 4

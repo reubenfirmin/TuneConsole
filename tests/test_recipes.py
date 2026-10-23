@@ -3,10 +3,10 @@ from yt_playlist.library import playlist_metadata
 
 
 def test_recipe_round_trips(store):
-    store.rec_surface.set_recipe("PLX", {"model": "fresh", "facets": {"genres": ["house"], "eras": ["2010"]}}, now=1.0)
-    got = store.rec_surface.get_recipe("PLX")
+    store.playlist_recipes.set_recipe("PLX", {"model": "fresh", "facets": {"genres": ["house"], "eras": ["2010"]}}, now=1.0)
+    got = store.playlist_recipes.get_recipe("PLX")
     assert got["model"] == "fresh" and got["facets"]["genres"] == ["house"]
-    assert store.rec_surface.get_recipe("PLZ") is None                  # unknown playlist -> None
+    assert store.playlist_recipes.get_recipe("PLZ") is None                  # unknown playlist -> None
 
 
 def test_versioned_title_increments_per_prefix(store):

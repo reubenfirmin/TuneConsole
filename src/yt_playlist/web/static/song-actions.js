@@ -346,3 +346,14 @@ function songActions() {
     }
   };
 }
+function toggleTrackLike(source, videoId, liked) {
+  const request = new CustomEvent('track-like-requested', {
+    detail: { videoId, liked }, cancelable: true,
+  });
+  // The global player handles its current song; every other song uses the library API.
+  if (window.dispatchEvent(request)) {
+    htmx.ajax('POST', '/track/like', {
+      source, values: { video_id: videoId, on: liked ? '1' : '' }, swap: 'none',
+    }).catch(() => {}); // the completion event rolls back the heart; the response carries the toast
+  }
+}

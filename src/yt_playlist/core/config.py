@@ -10,18 +10,6 @@ class IdentityConfig:
     is_master: bool
     identity_id: int | None = None
 
-def credential_path(base_dir, credential_ref) -> Path:
-    """Resolve an identity's credential file, refusing references that escape base_dir.
-
-    credential_ref comes from config.toml; an absolute path or "../" would otherwise
-    let it read an arbitrary file (the resulting auth blob is a secret).
-    """
-    base = Path(base_dir).resolve()
-    path = (base / credential_ref).resolve()
-    if base not in path.parents:
-        raise ValueError(f"credential_ref {credential_ref!r} must be a file inside {base}")
-    return path
-
 def validate_identities(identities) -> None:
     """Validate the identity rows; raise ValueError on the first problem."""
     if not identities:

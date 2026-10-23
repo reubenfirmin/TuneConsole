@@ -26,7 +26,7 @@ def test_populated_migration_preserves_identity_membership_choices_and_raw_evide
     assert s.conn.execute('SELECT COUNT(*) FROM legacy_track_evidence').fetchone()[0] == 7
     assert s.tracks.track_for_waterfall(7)['id'] == 3
     assert s.tracks.track_for_waterfall(7)['video_id'] == 'upload-a'
-    assert {'provider':'musicbrainz','value':'Techno'} in s.enrichment.genre_provenance(3)['candidates']
+    assert {'provider':'musicbrainz','value':'Techno'} in s.enrichment_reports.genre_provenance(3)['candidates']
     assert s.playlists.get_playlist_track_ids(1) == [3,8]
     assert s.playlists.get_playlist(1).track_count == 2
     assert {r[0] for r in s.conn.execute('SELECT browse_id FROM album_track_links WHERE recording_id=3')} == {'release-a','release-b','release-c'}
@@ -44,11 +44,11 @@ def test_populated_migration_preserves_identity_membership_choices_and_raw_evide
     for rid in (3,8,9):
         assert not s.rec_model.mark_graduated_once(s.conn.execute('SELECT identity_key FROM recordings WHERE id=?',(rid,)).fetchone()[0],'like_grad',999)
     assert s.rec_model.weight_records()['genre:house']['weight'] == 1.3
-    assert s.enrichment.enrichment_attempts('cold|other')['deezer']['fields']['art'] == 'full-cover'
+    assert s.enrichment_state.enrichment_attempts('cold|other')['deezer']['fields']['art'] == 'full-cover'
     assert s.conn.execute('SELECT COUNT(*) FROM legacy_enrichment_attempts').fetchone()[0] == 1
     assert s.conn.execute('SELECT COUNT(*) FROM tracks').fetchone()[0] == 4
-    assert len(s.enrichment.next_enrich_batch(20)) == 5  # library/discovery overlap is queued once
-    canvas = json.loads(s.rec_surface.get_cluster_canvas('CLUSTER'))
+    assert len(s.enrichment_queue.next_enrich_batch(20)) == 5  # library/discovery overlap is queued once
+    canvas = json.loads(s.playlist_recipes.get_cluster_canvas('CLUSTER'))
     key = s.tracks.catalog_subject(3)['identity_key']
     mode = s.conn.execute('SELECT centroid,rep_keys,space FROM taste_modes WHERE mode_id=1').fetchone()
     assert mode['centroid'] == centroid
@@ -111,7 +111,7 @@ def test_exact_uploads_versions_and_verified_grouping_keep_item_choices_and_like
     s.tracks.set_track_audio(a,bpm=123)
     s.tracks.set_track_audio(c,danceability=.7)
     c_key = s.tracks.catalog_subject(c)['identity_key']
-    s.enrichment.record_enrichment_attempt(c_key,'provider',{'danceability':.7},video_id='c',now=1)
+    s.enrichment_state.record_enrichment_attempt(c_key,'provider',{'danceability':.7},video_id='c',now=1)
     s.tracks.set_track_genre(c,'')
     s.tracks.set_track_year(a,'1990')
     s.tracks.set_track_year(c,'2020')
@@ -119,7 +119,7 @@ def test_exact_uploads_versions_and_verified_grouping_keep_item_choices_and_like
     assert s.tracks.resolve_identity_key(c_key) == s.tracks.catalog_subject(a)['identity_key']
     assert s.playlists.get_playlist_track_ids(pid) == [a,b,c]
     assert s.tracks.get_track_audio(c)[0] == 123
-    assert s.enrichment.enrichment_attempts(s.tracks.catalog_subject(a)['identity_key'])['provider']['fields'] == {'danceability':.7}
+    assert s.enrichment_state.enrichment_attempts(s.tracks.catalog_subject(a)['identity_key'])['provider']['fields'] == {'danceability':.7}
     assert s.conn.execute('SELECT danceability FROM catalog_tracks WHERE id=?',(a,)).fetchone()[0] == .7
     s.tracks.set_track_enrichment(a,'House',None)
     s.tracks.set_track_audio(c,energy=.5)
@@ -127,7 +127,7 @@ def test_exact_uploads_versions_and_verified_grouping_keep_item_choices_and_like
     assert s.tracks.get_track_enrichment(c) == ('','2020')
     s.playlists.set_song_liked(iid,'a',False)
     assert s.playlists.get_playlist_track_ids(pid) == [b,c]
-    assert len(s.enrichment.next_enrich_batch(20)) == 2
+    assert len(s.enrichment_queue.next_enrich_batch(20)) == 2
     assert not s.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
@@ -136,16 +136,16 @@ def test_discovery_promotion_expiry_and_attempts_share_catalog_without_ownership
     key = s.discovery.upsert_discovered_track('cold|artist','cold','Cold','Artist','Album',None,None,None,'radio:a',1)
     s.discovery.upsert_discovered_track('new spelling|artist','cold','Cold','Artist','Album',None,None,None,'radio:b',2)
     assert not s.rec_query.library_keys()
-    s.enrichment.record_enrichment_attempt(key,'provider',{'art':'cover','isrc':['ONE']},video_id='cold',now=3)
-    s.enrichment.record_enrichment_attempt(key,'provider',{},video_id='cold',now=4)
+    s.enrichment_state.record_enrichment_attempt(key,'provider',{'art':'cover','isrc':['ONE']},video_id='cold',now=3)
+    s.enrichment_state.record_enrichment_attempt(key,'provider',{},video_id='cold',now=4)
     assert s.conn.execute('SELECT COUNT(*) FROM provider_attempts').fetchone()[0] == 2
     tid = s.tracks.upsert_track('cold','Cold','Artist','Album',200)
-    assert len(s.enrichment.next_enrich_batch(20)) == 1
-    assert s.enrichment.enrichment_memberships([s.tracks.catalog_subject(tid)['recording_id']]) == {'library','discovery'}
+    assert len(s.enrichment_queue.next_enrich_batch(20)) == 1
+    assert s.enrichment_queue.enrichment_memberships([s.tracks.catalog_subject(tid)['recording_id']]) == {'library','discovery'}
     s.discovery.gc_discovery_pool(100*86400,30,set())
     assert not s.discovery.get_discovered_tracks()
     assert s.tracks.identity_key_for_video('cold') == key
-    assert s.enrichment.enrichment_attempts(key)['provider']['status'] == 'no_match'
+    assert s.enrichment_state.enrichment_attempts(key)['provider']['status'] == 'no_match'
     assert s.conn.execute('SELECT COUNT(*) FROM youtube_items').fetchone()[0] == 1
 
 
@@ -176,8 +176,8 @@ def test_confirmed_recording_has_one_coverage_count_and_a_coherent_playable_item
     store.tracks.set_track_year(b,'2020')
     store.tracks.associate_youtube_item('b',store.tracks.catalog_subject(a)['recording_id'],
                                 source='verified',evidence={'review':'same recording'},now=2)
-    assert store.enrichment.coverage_stats()['total'] == 1
-    assert store.enrichment.coverage_stats()['year'] == 1
+    assert store.enrichment_reports.coverage_stats()['total'] == 1
+    assert store.enrichment_reports.coverage_stats()['year'] == 1
     songs = store.rec_query.tracks_by_keys([store.tracks.catalog_subject(a)['identity_key']])
     chosen = next(iter(songs.values()))
     assert chosen['video_id'] == 'b'
@@ -192,7 +192,7 @@ def test_alias_disambiguation_and_verified_association_preserve_event_counts_and
     store.history.record_play_event(iid,original,'a',10)
     store.history.record_history_plays(iid,10,[original])
     store.rec_model.record_feedback('for_you',original,'less',now=11)
-    store.rec_surface.set_cluster_canvas('saved',json.dumps({'nodes':[{'id':1,'keys':[original]}],'label':original}))
+    store.playlist_recipes.set_cluster_canvas('saved',json.dumps({'nodes':[{'id':1,'keys':[original]}],'label':original}))
     b = store.tracks.upsert_track('b','Song','Artist',None,200)
     key = store.tracks.catalog_subject(a)['identity_key']
     assert key != original
@@ -203,7 +203,7 @@ def test_alias_disambiguation_and_verified_association_preserve_event_counts_and
                                 source='verified',evidence={'review':'same recording'},now=12)
     assert store.conn.execute('SELECT COUNT(*) FROM play_events').fetchone()[0] == 1
     assert store.conn.execute('SELECT COUNT(*) FROM listening_observations').fetchone()[0] == 1
-    saved = json.loads(store.rec_surface.get_cluster_canvas('saved'))
+    saved = json.loads(store.playlist_recipes.get_cluster_canvas('saved'))
     assert saved['nodes'][0]['keys'] == [key] and saved['label'] == original
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
@@ -228,11 +228,11 @@ def test_enrichment_priority_counts_confirmed_recording_once_per_artist(store):
     other_key = store.tracks.catalog_subject(other)['identity_key']
     store.history.record_history_plays(iid,86400,[key,other_key])
     store.history.record_history_plays(iid,172800,[other_key])
-    store.enrichment.mark_enriched([a,b,other],3)
+    store.enrichment_queue.mark_enriched([a,b,other],3)
     preferred = store.tracks.upsert_track('other-new','New song','Other artist',None,200,created_at=10)
     store.tracks.upsert_track('artist-new','New song','Artist',None,200,created_at=20)
     store.settings.set_setting('enrich_caught_up_at','30')
-    assert store.enrichment.next_enrich_batch(1)[0]['id'] == preferred
+    assert store.enrichment_queue.next_enrich_batch(1)[0]['id'] == preferred
 
 
 def test_identity_changes_preserve_but_refuse_incompatible_model_rollback(store):

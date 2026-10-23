@@ -582,6 +582,20 @@ class RecModelRepo(Repo):
         return result
 
     @synchronized
+    def content_vector_pools(self, keys):
+        """Keep library and discovery provenance separate for bounded encoder updates."""
+        keys = list(dict.fromkeys(keys))
+        pools = {'library': {}, 'discovered': {}}
+        for scope, table in (('library', 'rec_content_vectors'),
+                             ('discovered', 'rec_discovered_content_vectors')):
+            for offset in range(0, len(keys), 500):
+                batch = keys[offset:offset + 500]
+                pools[scope].update(self.conn.execute(
+                    f'SELECT identity_key,vec FROM {table} WHERE identity_key IN ('
+                    + ','.join('?' for _ in batch) + ')', batch))
+        return pools
+
+    @synchronized
     def content_vectors_by_keys(self, keys) -> dict:
         """Read a bounded neighbourhood; prefer library vectors for overlapping recordings."""
         keys = list(dict.fromkeys(keys))

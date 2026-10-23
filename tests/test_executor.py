@@ -2,8 +2,9 @@ import json
 from pathlib import Path
 import pytest
 from yt_playlist.library.executor import (
-    backup_playlist, deserialize_plan, store_plan, execute_planned,
+    deserialize_plan, store_plan, execute_planned,
     MergePlan, Resolution)
+from yt_playlist.library.playlist_backups import backup_playlist
 from yt_playlist.library.playlist_undo import undo_action
 from tests.conftest import FakeClient, _track
 
@@ -136,7 +137,8 @@ def test_apply_result_update_both(store, monkeypatch, tmp_path):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
-    client = FakeClient(tracks={"PLA": [_track("v1", "One", "X")], "PLB": [_track("v2", "Two", "X")]})
+    client = FakeClient(tracks={"PLA": [_track("v1", "One", "X", set_video_id="item-a")],
+                                "PLB": [_track("v2", "Two", "X", set_video_id="item-b")]})
     s = apply_result(store, {iid: client}, [a, b], ["v1", "v2"], "all", now=1.0)
     assert s["deleted"] == [] and client.deleted == []
     assert store.playlists.get_playlist(a) is not None and store.playlists.get_playlist(b) is not None
@@ -190,7 +192,8 @@ def test_apply_result_partial_failure_records_undoable_action(store, monkeypatch
     undo = json.loads(actions[0].undo_json)
     prev = next(e["prev"] for e in undo["restored"] if e["ytm"] == "PLA")
     assert set(prev) == {"v1", "v2"}            # A's pre-merge contents captured for undo
-    assert actions[0].status == "executed"      # undoable
+    assert actions[0].status == "delete_pending"  # uncertain forward deletion remains recoverable
+    assert undo["deletions"][0]["phase"] == "uncertain"
 
 
 def test_undo_apply_merge_restores(store, monkeypatch, tmp_path):

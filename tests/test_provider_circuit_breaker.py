@@ -72,7 +72,7 @@ def test_waterfall_probe_distinguishes_outages_from_confirmed_misses(
     completed = run_waterfall(store, store.tracks.tracks_for_waterfall(pid),
                               [{"name": provider.name, "enabled": True}], events.append,
                               registry={provider.name: provider}, now_fn=lambda: 1000)
-    attempt = store.enrichment.enrichment_attempts("t0|art")[provider.name]
+    attempt = store.enrichment_state.enrichment_attempts("t0|art")[provider.name]
     # A known MusicBrainz recording ID is itself retained evidence for AcousticBrainz.
     expected = "found" if provider is acousticbrainz else "no_match"
     assert attempt["status"] == ("retry" if offline else expected)
@@ -81,7 +81,7 @@ def test_waterfall_probe_distinguishes_outages_from_confirmed_misses(
         assert len(calls) < 8
         assert any(event.get("warning") for event in events)
         recording_id = store.tracks.track_for_waterfall(ids[0])["recording_id"]
-        state = store.enrichment.enrichment_provider_state(recording_id)[provider.name]
+        state = store.enrichment_state.enrichment_provider_state(recording_id)[provider.name]
         assert state["retry_at"] > 1000
     else:
         assert len(completed) == 8

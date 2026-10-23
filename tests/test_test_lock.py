@@ -17,6 +17,7 @@ from pathlib import Path
 import sys
 import pytest
 
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
 spec = importlib.util.spec_from_file_location("test_lock_plugin", sys.argv[1])
 plugin = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(plugin)

@@ -24,7 +24,7 @@ def test_unrelated_settings_and_analytics_do_not_invalidate_catalog_snapshot(dat
         assert snapshot.store.conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0] == 1
         assert snapshot.store.settings.get_setting("model-input") == "old"
         store.settings.set_setting("sync-watermark", "new")
-        store.rec_surface.record_serving_policy("new", "{}", 10)
+        store.rec_ledger.record_serving_policy("new", "{}", 10)
         assert snapshot.publish(lambda: published.append(True))
     assert published == [True]
 

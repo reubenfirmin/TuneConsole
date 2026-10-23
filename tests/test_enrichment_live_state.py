@@ -46,7 +46,7 @@ def test_delivery_and_reconnect_render_current_authoritative_row(store, scope):
         store.tracks.set_track_genre(entry, "Chosen genre")
         store.tracks.set_track_year(entry, "1999")
         key = store.tracks.catalog_subject(entry)["identity_key"]
-        store.rec_surface.record_mood([key], 1, now=1000)
+        store.rec_signals.record_mood([key], 1, now=1000)
         job.events.append({"type": "track", "video_id": "video", "genre": "Old genre", "year": "2000"})
         job.done = True
         delivered = json.loads((await anext(response.body_iterator)).splitlines()[0][6:])

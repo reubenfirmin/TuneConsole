@@ -6,6 +6,7 @@ from enum import StrEnum
 
 class Job(StrEnum):
     RATINGS = "ratings"
+    PREPARE = "prepare"
     FULL = "full"
     MODES = "modes"
     BUNDLES = "bundles"
@@ -61,6 +62,7 @@ class PendingJobs:
         # expensive phase. Ratings and serving projections keep their own clocks.
         for job in (Job.FULL, Job.BUNDLES):
             self.retry[job].minimum_interval = 60
+        self.retry[Job.PREPARE].minimum_interval = 5
 
     def __bool__(self):
         return bool(self.pending)

@@ -1,5 +1,5 @@
 from yt_playlist.core.store import Store
-from yt_playlist.rec import embed, rec_params
+from yt_playlist.rec import embed, embedding_vectors as vectors, rec_params
 
 
 def test_cluster_content_weight_default(tmp_path):
@@ -47,6 +47,6 @@ def test_cluster_expand_reads_beta_param(tmp_path, monkeypatch):
         return real(pos_keys, neg_keys, beta, *a, **k)
 
     monkeypatch.setattr(embed, "_branch_scores", spy)
-    monkeypatch.setattr(embed, "load_vectors", lambda store: (["x"], __import__("numpy").zeros((1, 4), dtype="float32"), {"x": 0}))
+    monkeypatch.setattr(vectors, "load_vectors", lambda store: (["x"], __import__("numpy").zeros((1, 4), dtype="float32"), {"x": 0}))
     embed.cluster_expand(s, pos_keys=["x"])
     assert seen["beta"] == 1.25

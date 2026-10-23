@@ -1,7 +1,7 @@
 // MV3 bootstrap: construct modules, wire explicit interfaces, and own Chrome lifecycle listeners.
 // Factories register no listeners and perform no work until called here.
 importScripts("worker/config.js", "worker/music_tabs.js", "worker/sensors.js", "worker/ratings.js",
-  "worker/playback.js", "worker/requests.js", "worker/radio.js", "worker/site.js", "worker/transport.js");
+  "worker/playback.js", "worker/requests.js", "worker/radio.js", "worker/site.js", "worker/setup.js", "worker/transport.js");
 
 const tuneConsole = (() => {
   const warn = createBridgeWarnings();
@@ -15,6 +15,8 @@ const tuneConsole = (() => {
   const requests = createRequestForwarder({origin: TC_CONFIG.musicOrigin, tabs, sensors});
   const radio = createRadioSession({pickTab: playback.pickTab});
   const site = createSiteIntegration({appOrigin: TC_CONFIG.appOrigin, connected: () => transport.connected});
+  const setup = createSetupIntegration({musicOrigin: TC_CONFIG.musicOrigin,
+    connected: () => transport.connected, openPlayer: site.openPlayer});
 
   async function dispatch(frame) {
     if (frame && frame.type === "navigate") { playback.navigate(frame.url); return; }
@@ -31,11 +33,12 @@ const tuneConsole = (() => {
     return requests.handle(frame);
   }
 
-  const transport = createBridgeTransport({url: TC_CONFIG.bridgeUrl, dispatch,
-    onStatus: site.publish,
+  const transport = createBridgeTransport({url: TC_CONFIG.bridgeUrl, dispatch, warn,
+    onStatus: () => { site.publish(); setup.publish(); },
     onOpen: async () => { await sensors.probe(); sensors.resync(); }});
 
   chrome.runtime.onMessage.addListener(site.receive);
+  chrome.runtime.onMessage.addListener(setup.receive);
   chrome.runtime.onMessage.addListener(playback.receive);
   chrome.tabs.onRemoved.addListener(id => { playback.removed(id); sensors.removed(id); });
   chrome.tabs.onUpdated.addListener((id, info, tab) => {
@@ -47,7 +50,10 @@ const tuneConsole = (() => {
   chrome.runtime.onInstalled.addListener(transport.connect);
   chrome.runtime.onInstalled.addListener(sensors.injectAll);
   chrome.runtime.onInstalled.addListener(site.publish);
+  chrome.runtime.onInstalled.addListener(setup.onInstalled);
+  chrome.runtime.onEnabled?.addListener(setup.openDestination);
   chrome.runtime.onStartup.addListener(site.publish);
+  setup.install();
   transport.connect();
-  return {tabs, sensors, playback, requests, radio, site, transport};
+  return {tabs, sensors, playback, requests, radio, site, setup, transport};
 })();

@@ -84,6 +84,8 @@ const context = vm.createContext({
   console: {log() {}, warn() {}}, setTimeout() {}, clearTimeout() {},
 });
 const {playback, sensors, requests} = require('./tests/extension_worker.cjs').loadWorker(context);
+// The startup setup reminder is separate from replaying playback/fetch sensors.
+const actionInjections = () => injections.filter(call => !call.files?.includes('music_setup.js'));
 (async () => {
   if (scenario === 'refresh_views') {
     await playback.refreshView('PL_edited');
@@ -116,12 +118,12 @@ const {playback, sensors, requests} = require('./tests/extension_worker.cjs').lo
   } else if (scenario === 'next_missing_receiver') {
     assert.equal((await playback.next('v')).ok,true);
     assert.equal(attempts,2,'retry only after a proven missing receiver');
-    assert(injections.length>0);
+    assert(actionInjections().length>0);
   } else if (['playpause_lost_reply', 'rating_lost_reply', 'next_lost_reply'].includes(scenario)) {
     await (scenario === 'playpause_lost_reply' ? playback.playPause()
       : scenario === 'next_lost_reply' ? playback.next('v') : playback.rate('like', 'v'));
     assert.equal(attempts, 1, 'a lost click reply must not replay the toggle');
-    assert.equal(injections.length, 0);
+    assert.equal(actionInjections().length, 0);
   } else {
     const result = await requests.handle({id: 7, method: 'POST',
       url: 'https://music.youtube.com/youtubei/v1/browse/edit_playlist', body: {}});
@@ -130,7 +132,7 @@ const {playback, sensors, requests} = require('./tests/extension_worker.cjs').lo
     if (['lost_reply', 'empty_reply', 'lost_retry_reply'].includes(scenario)) {
       assert.match(JSON.parse(result.body).error, /may have completed/);
     }
-    if (['lost_reply', 'empty_reply'].includes(scenario)) assert.equal(injections.length, 0);
+    if (['lost_reply', 'empty_reply'].includes(scenario)) assert.equal(actionInjections().length, 0);
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """

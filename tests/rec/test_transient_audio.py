@@ -4,7 +4,7 @@ you have been playing, not only its genre/era/artist facets. This is the produce
 (transient.audio_centroid_tilt); the scorer applies it (see the wiring note in the fork report)."""
 import numpy as np
 
-from yt_playlist.rec import embed, rec_params, scoring, transient
+from yt_playlist.rec import embedding_vectors as embed, rec_params, scoring, transient
 from tests import model_support
 
 

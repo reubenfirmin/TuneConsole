@@ -14,7 +14,8 @@ from playwright.sync_api import expect
 from yt_playlist.core.store import Store
 from yt_playlist.rec import road_trip as road_trip_rec
 from yt_playlist.rec import road_trip_candidates as candidates
-from yt_playlist.repos.rec_query import GENERATED_GROUP
+from yt_playlist.rec.road_trip_axes import canonical_genre
+from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes import road_trip as road_trip_route
 from tests.conftest import FakeClient, _track
@@ -226,14 +227,14 @@ def test_build_curate_then_save_road_trip_recipe(live_road_trip_app, page, monke
     expect(mix).to_have_js_property("open", True)
 
     saving, release = threading.Event(), threading.Event()
-    create_playlist = road_trip_route.executor.create_generated_playlist
+    create_playlist = road_trip_route.playlist_generated.create_generated_playlist
 
     def slow_save(*args, **kwargs):
         saving.set()
         assert release.wait(15), "test did not release the YouTube save"
         return create_playlist(*args, **kwargs)
 
-    monkeypatch.setattr(road_trip_route.executor, "create_generated_playlist", slow_save)
+    monkeypatch.setattr(road_trip_route.playlist_generated, "create_generated_playlist", slow_save)
     try:
         with page.expect_popup() as opened:
             page.get_by_role("button", name="Save to YouTube").click()
@@ -269,7 +270,7 @@ def test_failed_save_closes_loading_screen_and_keeps_the_draft(live_road_trip_ap
         assert release.wait(15), "test did not release the YouTube save"
         raise RuntimeError("YouTube unavailable")
 
-    monkeypatch.setattr(road_trip_route.executor, "create_generated_playlist", failed_save)
+    monkeypatch.setattr(road_trip_route.playlist_generated, "create_generated_playlist", failed_save)
     page.goto(f"{base_url}/road_trip")
     try:
         with page.expect_popup() as opened:
@@ -389,7 +390,7 @@ def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_t
         waiting = store.road_trip.get_road_trip_draft(rid)
         assert waiting["building"]
         assert not any(c["genre"] == new_genre for c in waiting["pool"])
-        assert new_genre in {candidates._canon_genre(g) for g in store.road_trip.get_road_trip_recipe(rid)["genres"]}
+        assert new_genre in {canonical_genre(g) for g in store.road_trip.get_road_trip_recipe(rid)["genres"]}
         if addition == "artist":
             expect(passenger.locator(".genre-chip.is-theirs").filter(has_text="Classic Rock like Journey")).to_be_visible()
             expect(passenger.locator(".rt-axis-context").filter(has_text="Like Journey")).to_be_visible()

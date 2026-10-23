@@ -125,7 +125,7 @@ def test_centroid_tilt_skip_only_is_not_quiet():
 
 
 def test_audio_centroid_tilt_cosine_to_skipped_track_decreases(monkeypatch):
-    from yt_playlist.rec import embed
+    from yt_playlist.rec import embedding_vectors as embed
 
     CV = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
     cidx = {"skip|artist": 0, "base|artist": 1}

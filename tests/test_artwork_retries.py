@@ -49,9 +49,9 @@ def test_transient_art_failure_recovers_after_restart_without_repeating_complete
     provider = Provider()
     w = worker(store, clock, provider)
     assert w.drain_once() == 1
-    assert store.enrichment.coverage_stats()["processed"] == 1
-    assert store.enrichment.queue_remaining() == 0
-    assert store.enrichment.artwork_retry_status() == {"count":1,"retry_at":1060}
+    assert store.enrichment_reports.coverage_stats()["processed"] == 1
+    assert store.enrichment_reports.queue_remaining() == 0
+    assert store.enrichment_state.artwork_retry_status() == {"count":1,"retry_at":1060}
     assert len(calls) == 1
     store.conn.close()
     # Simulate a new process: persistent schedule survives, while the response cache does not.
@@ -66,7 +66,7 @@ def test_transient_art_failure_recovers_after_restart_without_repeating_complete
     assert w.drain_once() == 1
     assert store.tracks.catalog_subject(tid)["thumbnail"] == "https://cover.example/real.jpg"
     assert provider.calls == [tid]
-    assert store.enrichment.artwork_retry_status()["count"] == 0
+    assert store.enrichment_state.artwork_retry_status()["count"] == 0
     assert store.conn.execute("SELECT status FROM enrichment_artwork").fetchone()[0] == "found"
     store.conn.close()
 
@@ -85,14 +85,14 @@ def test_cached_failures_retain_retry_outcome_and_due_job_waits_for_cache_expiry
     store.tracks.upsert_track("v1", "One", "Artist", None, 200)
     w = worker(store, clock, provider)
     assert w.drain_once() == 1
-    assert store.enrichment.artwork_retry_status()["retry_at"] >= 1120
+    assert store.enrichment_state.artwork_retry_status()["retry_at"] >= 1120
     clock[0], mono[0] = 1010, 110
     store.tracks.upsert_track("v2", "Two", "Artist", None, 200)
     assert w.drain_once() == 1
     assert len(calls) == 1                        # second track sees cached failure, not absence
-    assert store.enrichment.artwork_retry_status()["count"] == 2
-    assert store.enrichment.coverage_stats()["processed"] == 2
-    assert store.enrichment.queue_remaining() == 0
+    assert store.enrichment_state.artwork_retry_status()["count"] == 2
+    assert store.enrichment_reports.coverage_stats()["processed"] == 2
+    assert store.enrichment_reports.queue_remaining() == 0
 
 
 @pytest.mark.parametrize("status", [400,404])
@@ -104,17 +104,17 @@ def test_confirmed_absence_has_no_retry_job(store, monkeypatch, status):
     tid = store.tracks.upsert_track("v", "Song", "Artist", None, 200)
     assert worker(store, [1000], Provider()).drain_once() == 1
     assert store.conn.execute("SELECT status FROM enrichment_artwork WHERE entry_id=?", (tid,)).fetchone()[0] == "absent"
-    assert store.enrichment.artwork_retry_status()["count"] == 0
+    assert store.enrichment_state.artwork_retry_status()["count"] == 0
 
 
 def test_retry_preserves_useful_cover_added_after_failure(store, monkeypatch):
     from yt_playlist.enrich.artwork import retry_due
     tid = store.tracks.upsert_track("v", "Song", "Artist", None, 200)
-    store.enrichment.record_artwork_result(tid, ["release"], coverart.CoverResult("retry", retry_in=60), 1000)
+    store.enrichment_state.record_artwork_result(tid, ["release"], coverart.CoverResult("retry", retry_in=60), 1000)
     store.tracks.set_track_art(tid, "https://cover.example/user.jpg")
     def unexpected(*args):
         raise AssertionError("useful cover must prevent another archive call")
     monkeypatch.setattr(coverart, "front_cover", unexpected)
     assert retry_due(store, lambda:1060) == 1
     assert store.tracks.catalog_subject(tid)["thumbnail"] == "https://cover.example/user.jpg"
-    assert store.enrichment.artwork_retry_status()["count"] == 0
+    assert store.enrichment_state.artwork_retry_status()["count"] == 0

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 from yt_playlist.core.store import Store
-from yt_playlist.rec import embed, taste_modes as tm
+from yt_playlist.rec import embedding_vectors as embed, taste_modes as tm
 
 
 @pytest.fixture
@@ -177,7 +177,7 @@ def test_live_modes_returns_modes_in_the_current_space(monkeypatch, store):
     tm.recompute(store, now=1000.0, k=3, min_members=20)
     live = tm.live_modes(store)
     assert len(live) == 3
-    from yt_playlist.rec import embed as _e
+    from yt_playlist.rec import embedding_vectors as _e
     assert {m["space"] for m in live} == {_e.content_space_id(store)}
 
 

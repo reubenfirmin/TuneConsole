@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from playwright.sync_api import expect
 
-from tests.test_radio_session import poc, play
+from tests.radio_session_support import poc, play
 
 
 def test_restart_with_old_radio_keeps_the_seed_grid_visible(poc, store, page, live_app):

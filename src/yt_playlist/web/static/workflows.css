@@ -1,4 +1,53 @@
 /* Workflow pages: control desks, working sheets and decision cases. */
+.w-below { fill: var(--ov-3); }
+.wedge-off { opacity: 0.28; cursor: not-allowed; }   /* "hide below" only applies when sorted by overlap */
+/* small A/B marker so same-named playlists are distinguishable */
+.abx { display: inline-block; min-width: 1.1rem; text-align: center; font-family: var(--font-mono);
+  font-weight: 700; font-size: 0.7rem; color: var(--light-source); background: var(--accent); border-radius: 4px;
+  padding: 0 0.3rem; margin-right: 0.35rem; vertical-align: middle; }
+/* Pop-up PIE menu: colored donut wedges around a dismiss hub. */
+.pie-wrap { position: relative; display: inline-block; }
+/* Anchor inside the action cell so the menu stays within the page's right edge. */
+.pie { position: absolute; z-index: 60; width: 160px; filter: drop-shadow(0 10px 24px color-mix(in srgb, var(--shadow-ink) 55%, transparent)); }
+.pie svg { display: block; overflow: visible; }
+.wedge { cursor: pointer; stroke: var(--bg); stroke-width: 2.5; transition: filter .12s ease, opacity .12s ease; }
+.pie:hover .wedge { opacity: .72; }
+.pie .wedge:hover { opacity: 1; filter: brightness(1.18) saturate(1.1); }
+.w-hide { fill: var(--danger); } .w-mute { fill: var(--teal); } .w-a { fill: var(--accent); } .w-b { fill: var(--amber); }
+.pie-glyph { fill: var(--glyph-ink); font-family: var(--font-mono); font-weight: 800; font-size: 15px;
+  pointer-events: none; }
+.pie-sub { font-size: 12px; }
+.pie-eyeoff { fill: none; stroke: var(--glyph-ink); stroke-width: 2; stroke-linecap: round; pointer-events: none; }
+.pie-eyeoff-pupil { fill: var(--glyph-ink); pointer-events: none; }
+.pie-icon { pointer-events: none; }
+.pie-hub { fill: var(--surface-2); stroke: var(--border-2); stroke-width: 1.5; cursor: pointer; }
+.pie-hub:hover { fill: var(--surface); }
+.pie-hub-x { fill: var(--faint); font-size: 18px; font-weight: 700; letter-spacing: 1px; pointer-events: none; }
+.cleanup-pairs .kebab { min-width: 2rem; min-height: 2rem; }
+@media (max-width: 700px) {
+  .cleanup-pairs table, .cleanup-pairs thead, .cleanup-pairs tbody { display: block; }
+  .cleanup-pairs tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cleanup-pairs th, .cleanup-pairs td { min-width: 0; padding: .625rem .75rem; }
+  .cleanup-pairs thead th:nth-child(3) { grid-column: 1 / -1; }
+  .cleanup-pairs thead th:last-child { display: none; }
+  .cleanup-pairs tbody { border-bottom: 1px solid var(--border); }
+  .cleanup-pairs tbody td { border-bottom: 0; }
+  .cleanup-pairs tbody td:nth-child(-n+2) { grid-column: 1 / -1; }
+  .cleanup-pairs .cell-actions { align-self: end; }
+}
+
+/* Shared Cleanup empty state: reads as an achievement, not an absence. */
+.inbox-zero { text-align: center; padding: 2.4rem .9375rem; font-size: var(--type-lg);
+  color: var(--text); opacity: .85; }
+
+/* dim a duplicate-group card while its keep-one request is in flight (matches old .dim) */
+.card.group.htmx-request { opacity: .5; transition: opacity .2s ease; }
+
+/* setup "Check sign-in" button: swap label -> "Checking…" while the request is in flight */
+.check-busy { display: none; }
+button.htmx-request .check-idle { display: none; }
+button.htmx-request .check-busy { display: inline; }
+
 .page-workflow .page-head p,
 .page-workflow .section-note {
   max-width: 68ch;
@@ -313,34 +362,6 @@
   border-block-end-color: var(--accent);
   box-shadow: none;
 }
-.page-discovery .discovery-sheet {
-  padding-inline: 0;
-  background: transparent;
-  border: 0;
-  box-shadow: none;
-  overflow-x: auto;
-}
-.page-discovery .discovery-sheet thead th {
-  color: color-mix(in srgb, var(--text) 58%, transparent);
-  background: var(--canvas);
-}
-.page-discovery .pool-table td:first-child {
-  min-width: 18rem;
-  max-width: 34rem;
-  overflow-wrap: anywhere;
-}
-.discovery-charts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-6); margin: var(--sp-6) 0; }
-.discovery-chart { min-width: 0; margin: 0; }
-.discovery-chart figcaption { font-size: var(--type-ui); font-weight: 650; margin-bottom: 1rem; }
-.discovery-chart-total { font-size: 1.8rem; margin: 0; font-variant-numeric: tabular-nums; }
-.discovery-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .3rem .7rem; margin: .7rem 0; font-size: var(--type-ui); }
-.discovery-bar-count { font-variant-numeric: tabular-nums; color: var(--dim); }
-.discovery-bar-track { grid-column: 1 / -1; height: .4rem; background: var(--surface-2); }
-.discovery-bar-track i { display: block; height: 100%; background: var(--accent); width: var(--share); }
-.discovery-bar.is-unknown .discovery-bar-track i { background: var(--dim); }
-@media (max-width: 45rem) {
-  .discovery-charts { grid-template-columns: 1fr; }
-}
 .page-taste .scope-tag {
   border-radius: 2px;
 }
@@ -354,8 +375,7 @@
     display: none;
   }
   .page-actions .workflow-sheet,
-  .page-network .workflow-sheet,
-  .page-discovery .discovery-sheet {
+  .page-network .workflow-sheet {
     margin-inline: calc(-1 * var(--sp-3));
     padding-inline: var(--sp-3);
   }

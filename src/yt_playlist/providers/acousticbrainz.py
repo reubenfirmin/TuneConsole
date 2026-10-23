@@ -8,12 +8,11 @@ low-level (rhythm.bpm) and high-level (mood/danceability classifiers). AcousticB
 "energy" scalar, so we derive one from its mood models (see derive_energy). A 404 means "no data for
 this MBID" (common, given frozen coverage): a clean miss, not an outage. Failures degrade to Nones.
 """
-import json
 import logging
 import urllib.request
 
 from yt_playlist.util import net
-from yt_playlist.providers import musicbrainz
+from yt_playlist.providers import musicbrainz, transport
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -55,17 +54,9 @@ _breaker = net.CircuitBreaker()
 
 
 def _get_json(url):
-    _pacer.wait()
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT,
                                                "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
-            data = json.load(resp)
-    except Exception as e:                  # report to the breaker (404 = reachable), then re-raise
-        _breaker.record(e)
-        raise
-    _breaker.record()
-    return data
+    return transport.request_json(req, timeout=_HTTP_TIMEOUT_S, pace=_pacer.wait, breaker=_breaker)
 
 
 def _prob(highlevel, model, label):

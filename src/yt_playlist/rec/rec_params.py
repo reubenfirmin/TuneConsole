@@ -72,10 +72,6 @@ PARAMS = [
               "If you have not added it by then, it is removed. A track held in a generated "
               "playlist stays until that playlist is cleaned up.",
               1, 365, 1, 30, integer=True),
-    ParamSpec("palette_absence_penalty", "Favor familiar genres", "discovery",
-              "Higher gives music in unfamiliar genres less priority, keeping suggestions closer to "
-              "genres in your library. Too high can limit discovery of something different.",
-              0.0, 2.0, 0.05, 0.5),
     ParamSpec("candidate_pool_factor", "Suggestions prepared per slot", "discovery",
               "Tracks prepared for each displayed recommendation. Higher gives rotating suggestions "
               "more variety and requires more processing.",

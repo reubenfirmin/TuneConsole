@@ -5,7 +5,7 @@ import zlib
 from collections import Counter
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import arc_energy, embed, journeys, rec_params, transient
+from yt_playlist.rec import arc_energy, journeys, rec_params, transient
 from yt_playlist.rec.ordering import _field
 from yt_playlist.rec.taste_analysis import era_distribution, taste_breadth
 

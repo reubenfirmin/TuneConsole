@@ -18,7 +18,8 @@ from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.repos.modes import ModesRepo
 from yt_playlist.repos.rec_model import RecModelRepo
 from yt_playlist.repos.rec_query import RecQueryRepo
-from yt_playlist.repos.rec_surface import RecSurfaceRepo
+from yt_playlist.repos.rec_ledger import RecLedgerRepo
+from yt_playlist.repos.rec_proposals import RecProposalsRepo
 from yt_playlist.repos.settings import SettingsRepo
 from yt_playlist.util import genre_map
 
@@ -35,7 +36,8 @@ class HomeRepositories(Protocol):
     modes: ModesRepo
     rec_model: RecModelRepo
     rec_query: RecQueryRepo
-    rec_surface: RecSurfaceRepo
+    rec_ledger: RecLedgerRepo
+    rec_proposals: RecProposalsRepo
     settings: SettingsRepo
 
 
@@ -122,7 +124,7 @@ def _order_by_journey(store, items, journey, seed, selection_data=None):
 
 def _epoch(store, card):
     cap = max(1, rec_params.get_param(store, "erosion_view_cap"))
-    return max(0, store.rec_surface.card_views(card) - 1) // cap
+    return max(0, store.rec_ledger.card_views(card) - 1) // cap
 
 
 def _rolled_theme(store, lane, pool, now):
@@ -231,7 +233,7 @@ class HomeCards:
         from yt_playlist.rec import mode_surfaces
         mix_tuning.expire(store, now)
         epoch = _epoch(store, "cards") if request.epoch is None else request.epoch
-        genres = store.rec_surface.get_proposals("home_genre_request") or {}
+        genres = store.rec_proposals.get_proposals("home_genre_request") or {}
         active = request.use_genre_request and genres.get("epoch") == _epoch(store, "cards")
         avoid = set(genres.get("avoid_genres", [])) if active else set()
         include = set(genres.get("include_genres", [])) if active else set()
@@ -245,7 +247,7 @@ class HomeCards:
                                              **({"mode_order": request.mode_order} if request.mode_order is not None else {}),
                                              **({'preparation': prepared} if prepared is not None else {}))
         assembly = (prepared or {}).get('assembly')
-        bundles = assembly['bundles'] if assembly is not None else store.rec_surface.get_proposals('mode_bundles')
+        bundles = assembly['bundles'] if assembly is not None else store.rec_proposals.get_proposals('mode_bundles')
         if include:
             cards = [c for c in cards if c["lane"] != "fresh"]
         if cards:
@@ -350,7 +352,7 @@ class HomeCards:
             signatures = [hashlib.sha256(json.dumps({"choice": experiment_id(p),
                 "tracks": [ordering._field(t, "key") for t in p["tracks"]]},
                 sort_keys=True).encode()).hexdigest() for p in protos]
-            unseen = self.store.rec_surface.claim_home_offers(epoch, signatures, now)
+            unseen = self.store.rec_ledger.claim_home_offers(epoch, signatures, now)
             protos = [p for p, signature in zip(protos, signatures) if signature in unseen]
         self.offered(protos, now)
         try:
@@ -441,7 +443,7 @@ class HomeCards:
         return self.jobs.start(kind, parameters, excluded)
 
     def refresh_card(self, card: str, now: float) -> dict | None:
-        self.store.rec_surface.refresh_card(card, max(1, rec_params.get_param(self.store, "erosion_view_cap")), now)
+        self.store.rec_ledger.refresh_card(card, max(1, rec_params.get_param(self.store, "erosion_view_cap")), now)
         proto = _one_card(self.store, card, now)
         if proto:
             self.offered([proto], now)

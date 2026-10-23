@@ -31,6 +31,11 @@ assert updatecheck.install_kind() == 'flatpak'
 print(json.dumps({'version':m.version('yt-playlist'),'origin':EXTENSION_ORIGIN}))
 """))
     assert info["version"] == version, info
+    exported_version = inside("""
+import xml.etree.ElementTree as ET
+print(ET.parse('/app/share/metainfo/com.tuneconsole.TuneConsole.metainfo.xml').find('releases/release').get('version'))
+""")
+    assert exported_version == version, (exported_version, version)
     if installed:
         origin = subprocess.run(["flatpak", "info", "--user", "--show-origin", APP],
                                 check=True, capture_output=True, text=True).stdout.strip()

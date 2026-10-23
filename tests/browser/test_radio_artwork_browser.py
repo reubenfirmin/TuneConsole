@@ -3,7 +3,7 @@ import pytest
 from fastapi.templating import Jinja2Templates
 from playwright.sync_api import expect
 
-from tests.browser.test_radio_browser import radio_ui  # noqa: F401
+from tests.browser.radio_ui_support import radio_ui  # noqa: F401
 
 
 @pytest.mark.parametrize('width,height', [(1440, 1000), (1792, 1398), (390, 1000)])

@@ -50,8 +50,8 @@ def test_pool_shows_metadata_charts_above_tracks(live_app, store, page, width, t
     store.discovery.upsert_discovered_track("cold", "v1", "Cold Song", "Artist", "Album", None,
                                   "House", "2020", "album", 1,
                                   audio={"bpm": 128.0, "energy": .8, "danceability": .7})
-    store.enrichment.record_enrichment_attempt("cold", "musicbrainz", {"genre": "House"}, now=100)
-    store.enrichment.record_enrichment_attempt("cold", "deezer", {}, retry=True, now=101)
+    store.enrichment_state.record_enrichment_attempt("cold", "musicbrainz", {"genre": "House"}, now=100)
+    store.enrichment_state.record_enrichment_attempt("cold", "deezer", {}, retry=True, now=101)
     store.discovery.upsert_discovered_track("unknown", "v2", "Unknown Song", "Artist", None, None,
                                   None, None, "radio:v", 2)
     page.set_viewport_size({"width": width, "height": 1000})

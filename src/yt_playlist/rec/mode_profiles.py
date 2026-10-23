@@ -8,7 +8,7 @@ import json
 
 import numpy as np
 
-from yt_playlist.rec import embed
+from yt_playlist.rec import content_model, embedding_vectors as vector_reads
 from yt_playlist.util import genre_catalog, genre_map
 
 
@@ -76,11 +76,11 @@ def describe_modes(store):
     if not raw:
         return profiles
     model = json.loads(raw)
-    space = embed.content_model_fingerprint(model)
+    space = content_model.content_model_fingerprint(model)
     current = [m for m in modes if m.get("space") == space]
     if not current:
         return profiles
-    keys, vectors, _ = embed.load_content_vectors(store, snapshot=snapshot)
+    keys, vectors, _ = vector_reads.load_content_vectors(store, snapshot=snapshot)
     dim = model["ncat"] + len(model["cont"])
     if vectors is None or vectors.shape[1] != dim or any(len(m["centroid"]) != dim for m in current):
         return profiles

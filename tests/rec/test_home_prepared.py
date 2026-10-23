@@ -41,7 +41,7 @@ def seed(store):
             bundles[str(mid)][lane] = items
             bundles["all"].setdefault(lane, []).extend(items)
     store.modes.replace_modes(modes, [], 1)
-    store.rec_surface.put_proposals("mode_bundles", bundles, 1)
+    store.rec_proposals.put_proposals("mode_bundles", bundles, 1)
     return bundles
 
 
@@ -92,7 +92,7 @@ def test_missing_candidate_dependencies_keep_last_usable_home(store, prepared):
     with store.conn:
         store.conn.execute("DELETE FROM rec_proposals WHERE surface IN ('mode_bundles','fresh_pool')")
     assert home_prepared.prepare(store, 1001) is None
-    assert store.rec_surface.get_proposals(home_prepared.SURFACE) == prepared
+    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
     assert home_prepared.cards(store, prepared, 1001, service(store), record=False).protos
 
 
@@ -166,7 +166,7 @@ def test_ordinary_home_reads_use_prepared_results_without_selection_or_analytics
     for menu in prepared['menus']:
         for proto in menu['protos']:
             proto['tracks'][0]['genre'] = ''
-    store.rec_surface.put_proposals(home_prepared.SURFACE, prepared, 1000)
+    store.rec_proposals.put_proposals(home_prepared.SURFACE, prepared, 1000)
     def forbidden(*a, **kw):
         raise AssertionError("Heavy Home work must stay in background preparation")
     for target, name in ((mode_surfaces, "assemble_cards"), (home_themes, "genre_options"),
@@ -213,7 +213,7 @@ def test_corrupt_prepared_payload_never_breaks_home_routes(store, prepared, dama
         payload['menus'][0]['protos'][0].pop('experiment_id')
     else:
         payload['rediscover'] = None
-    store.rec_surface.put_proposals(home_prepared.SURFACE, payload, 1000)
+    store.rec_proposals.put_proposals(home_prepared.SURFACE, payload, 1000)
     iid = store.identities.upsert_identity('main', 'cred', None, True)
     store.settings.set_setting('last_sync_at', '1000')
     store.settings.set_setting('onboard_dismissed', '1')
@@ -304,7 +304,7 @@ def test_hidden_presync_and_onboarding_menus_are_not_exposures(store, prepared):
 
 @pytest.mark.parametrize("bad", [None, {}, {"schema": 999}, "bad-json"])
 def test_missing_or_corrupt_cache_queues_preparation_without_ranking(store, monkeypatch, bad):
-    monkeypatch.setattr(store.rec_surface, "get_proposals", lambda key: bad if key == home_prepared.SURFACE else None)
+    monkeypatch.setattr(store.rec_proposals, "get_proposals", lambda key: bad if key == home_prepared.SURFACE else None)
     calls = []
     assert home_prepared.load(store, 1000, lambda: calls.append(True)) is None
     result = home_prepared.cards(store, None, 1000, service(store), lambda: calls.append(True))
@@ -316,12 +316,12 @@ def test_malformed_menu_is_discarded_and_damaged_tuned_cache_keeps_baseline(stor
     corrupt = deepcopy(prepared)
     corrupt["menus"][0]["protos"] = [None]
     assert not home_prepared._valid(corrupt)
-    original = store.rec_surface.get_proposals
+    original = store.rec_proposals.get_proposals
     def get(surface):
         if surface == "home_tuned":
             raise ValueError("corrupt JSON")
         return original(surface)
-    monkeypatch.setattr(store.rec_surface, "get_proposals", get)
+    monkeypatch.setattr(store.rec_proposals, "get_proposals", get)
     assert home_prepared.load(store, 1001) == prepared
 
 
@@ -405,7 +405,7 @@ def test_generation_race_retains_previous_cache(store, prepared, monkeypatch):
         return result
     monkeypatch.setattr(home_themes, "genre_options", changed)
     assert home_prepared.prepare(store, 1002) is None
-    assert store.rec_surface.get_proposals(home_prepared.SURFACE) == prepared
+    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
 
 
 def test_setup_sql_obeys_total_budget_and_preserves_previous_cache(store, prepared, monkeypatch):
@@ -418,7 +418,7 @@ def test_setup_sql_obeys_total_budget_and_preserves_previous_cache(store, prepar
     started = time.monotonic()
     assert home_prepared.prepare(store, 1002) is None
     assert time.monotonic() - started < 1.5
-    assert store.rec_surface.get_proposals(home_prepared.SURFACE) == prepared
+    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
 
 
 def test_small_preparation_batches_accumulate_alternatives_across_attempts(store, prepared, monkeypatch):
@@ -430,7 +430,7 @@ def test_small_preparation_batches_accumulate_alternatives_across_attempts(store
         clock[0] += 6
         return result
 
-    store.rec_surface.put_proposals(home_prepared.SURFACE, None, 1000)
+    store.rec_proposals.put_proposals(home_prepared.SURFACE, None, 1000)
     monkeypatch.setattr(home_prepared.time, 'monotonic', lambda: clock[0])
     monkeypatch.setattr(home_prepared, 'PREPARE_BUDGET_S', 10)
     monkeypatch.setattr(home_cards.HomeCards, 'cards', one_menu)

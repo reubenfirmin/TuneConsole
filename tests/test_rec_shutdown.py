@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from yt_playlist.core.activity import Activity, WorkClosing
-from yt_playlist.rec import embed, model_refresh, ppr
+from yt_playlist.rec import embedding_training as embed, model_refresh, ppr
 from yt_playlist.rec.rec_worker import RecWorker
 
 

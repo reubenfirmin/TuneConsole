@@ -16,7 +16,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const root = 'src/yt_playlist/web/static/';
-const app = fs.readFileSync(root + 'app.js', 'utf8');
+const playerSource = fs.readFileSync(root + 'player-card.js', 'utf8');
+const tableSource = fs.readFileSync(root + 'track-tables.js', 'utf8');
 const homeSource = fs.readFileSync(root + 'home.js', 'utf8');
 const statusSource = fs.readFileSync(root + 'playback-status.js', 'utf8');
 const window = new EventTarget(), document = new EventTarget();
@@ -49,15 +50,15 @@ function fetch(url, options) {
   calls.push({url, options});
   if (url === '/bridge/status') return response(options);
   if (url.endsWith('/cells')) return Promise.resolve({json: async () => ({cells: [], pending: 1})});
-  if (url === '/sync/active') return Promise.resolve({json: async () => ({})});
+  if (url === '/sync/active' || url === '/sync/recent') return Promise.resolve({json: async () => ({})});
   throw Error('Unexpected request ' + url);
 }
 const context = vm.createContext({window, document, location, URL, CustomEvent, AbortController,
   fetch, console, setInterval: interval, clearInterval: clear, setTimeout: interval, clearTimeout: clear});
 vm.runInContext(statusSource, context);
-vm.runInContext(app.slice(app.indexOf('function playerStatus()'), app.indexOf('\nfunction toggleTrackLike')), context);
-vm.runInContext(app.slice(app.indexOf('// On a track-list page'), app.indexOf('// Navbar omnisearch')), context);
-vm.runInContext(homeSource.slice(homeSource.indexOf('function homeStatus()'), homeSource.indexOf('// A genre row')), context);
+vm.runInContext(playerSource, context);
+vm.runInContext(tableSource, context);
+vm.runInContext(homeSource, context);
 function mountDock() {
   const dock = vm.runInContext('playerStatus()', context);
   const listener = e => dock.apply(e.detail);
@@ -101,7 +102,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert(rows[1].classList.contains('now-playing'));
   const timerCount = timers.size;
   vm.runInContext(statusSource, context);
-  vm.runInContext(app.slice(app.indexOf('// On a track-list page'), app.indexOf('// Navbar omnisearch')), context);
+  vm.runInContext(tableSource, context);
   window.playbackStatus.start();
   assert.equal(timers.size, timerCount);
   assert.equal(count('/bridge/status'), 2);

@@ -55,7 +55,7 @@ def test_library_audio_takes_precedence_and_keeps_extra_discovery_features(store
 
 def test_vibe_changes_offered_styles_as_well_as_track_order(store):
     seed_genres(store)
-    bundles = store.rec_surface.get_proposals("mode_bundles")
+    bundles = store.rec_proposals.get_proposals("mode_bundles")
     for mid in range(6):
         for items in bundles[str(mid)].values():
             for item in items:
@@ -72,7 +72,7 @@ def test_vibe_changes_offered_styles_as_well_as_track_order(store):
 
 def seed_sounds(store):
     seed_genres(store)
-    bundles = store.rec_surface.get_proposals("mode_bundles")
+    bundles = store.rec_proposals.get_proposals("mode_bundles")
     for mid in range(6):
         for lane, items in bundles[str(mid)].items():
             for i, item in enumerate(items):
@@ -82,14 +82,14 @@ def seed_sounds(store):
                 store.discovery.upsert_discovered_track(item["key"], item["key"], item["title"], item["artist"], "", None,
                     item["genre"], None, None, 1,
                     audio={"energy": energy, "bpm": 70 if i >= 12 else 160, "mood_relaxed": 1 - energy})
-    store.rec_surface.put_proposals("mode_bundles", bundles, 1)
+    store.rec_proposals.put_proposals("mode_bundles", bundles, 1)
 
 
 def test_vibe_changes_rendered_tracks_persists_and_expires_without_learning(store):
     seed_sounds(store)
     clock = [1000.0]
     client = client_at(store, clock)
-    before = store.rec_surface.get_proposals("mode_bundles")
+    before = store.rec_proposals.get_proposals("mode_bundles")
     learned = store.rec_model.get_weights()
     response = client.post("/home/vibe", data={"vibe": "gentle"})
     assert response.status_code == 200
@@ -100,7 +100,7 @@ def test_vibe_changes_rendered_tracks_persists_and_expires_without_learning(stor
     audio = home_vibe.audio_features(store)
     assert all(sum(audio[t["key"]]["energy"] < .2 for t in card["tracks"]) >= 8 for card in cards)
     assert store.rec_model.get_weights() == learned and store.rec_model.get_leans() == {}
-    assert store.rec_surface.get_proposals("mode_bundles") == before
+    assert store.rec_proposals.get_proposals("mode_bundles") == before
     assert 'data-vibe="gentle"' in client.get("/home/cards").text
     assert 'data-vibe="gentle"' in client.post("/home/refresh-cards").text
 

@@ -9,6 +9,63 @@ from websockets.sync.client import connect
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 
 
+def test_space_controls_playback_without_intercepting_search_or_focused_buttons(live_app, page):
+    status = {'connected':True,'now_playing':{'video_id':'keyboard','title':'Song','artist':'Artist','paused':False}}
+    page.route('**/bridge/status',lambda route: route.fulfill(json=status))
+    commands = []
+    def toggle(route):
+        commands.append(route.request.url)
+        status['now_playing']['paused'] = not status['now_playing']['paused']
+        route.fulfill(json={'ok':True})
+    page.route('**/now-playing/toggle',toggle)
+    page.goto(live_app+'/artists')
+    player = page.locator('.global-now-playing')
+    expect(player).to_be_visible()
+    page.locator('body').click(position={'x':600,'y':600})
+    page.keyboard.press('Space')
+    expect(player.get_by_role('button',name='Play',exact=True)).to_be_visible()
+    assert len(commands)==1
+    search = page.get_by_role('searchbox',name='Search your library')
+    search.fill('two')
+    search.press('Space')
+    expect(search).to_have_value('two ')
+    assert len(commands)==1
+    player.get_by_role('button',name='Play',exact=True).focus()
+    page.keyboard.press('Space')
+    expect(player.get_by_role('button',name='Pause',exact=True)).to_be_visible()
+    assert len(commands)==2
+
+
+@pytest.mark.parametrize('path,width', [('/',1280),('/artists',1280),('/',390),('/artists',390),('/artists',800)])
+def test_progress_is_readable_in_home_and_dock_and_reduced_motion(live_app, page, path, width, tmp_path):
+    status = {'connected':True,'now_playing':{'video_id':'progress','title':'Song','artist':'Artist',
+        'position':45,'duration':200,'paused':True}}
+    page.route('**/bridge/status',lambda route: route.fulfill(json=status))
+    page.set_viewport_size({'width':width,'height':900})
+    page.emulate_media(reduced_motion='reduce')
+    page.goto(live_app+path)
+    player = page.locator('.global-now-playing')
+    progress = player.get_by_role('progressbar',name='Track progress')
+    expect(progress).to_be_visible()
+    expect(progress).to_have_attribute('value','45')
+    expect(progress).to_have_attribute('max','200')
+    expect(progress).to_have_attribute('aria-valuetext','0:45 of 3:20')
+    expect(player.locator('.hs-times')).to_have_text('0:45 3:20',use_inner_text=True)
+    box, card = progress.bounding_box(), player.bounding_box()
+    assert box['x']>=card['x'] and box['x']+box['width']<=card['x']+card['width']
+    page.screenshot(path=tmp_path/f'progress-{path.strip("/") or "home"}-{width}.png')
+    status['now_playing'].update(position=3,duration=None)
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(progress).to_be_hidden()
+    expect(player.get_by_label('Elapsed time',exact=True)).to_have_text('0:03')
+    expect(player.get_by_label('Total duration unavailable',exact=True)).to_have_text('--:--')
+    page.emulate_media(forced_colors='active')
+    status['now_playing'].update(duration=200)
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(progress).to_be_visible()
+    assert progress.evaluate('el => getComputedStyle(el).forcedColorAdjust')=='none'
+
+
 @pytest.mark.parametrize("kind", ["playlist", "album"])
 def test_track_table_and_dock_share_one_playback_request_per_interval(live_app, store, page, kind):
     playlist = store.playlists.get_playlists()[0]

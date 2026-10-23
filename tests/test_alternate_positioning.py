@@ -176,3 +176,75 @@ def test_later_explicit_edit_cancels_pending_placement(store, edit):
     sync.refresh_playlist(store, iid, client, "PL", "Mix", 102)
     assert local(store, pid) == remote(client) == expected
     assert store.actions.get_action(action.id).status == "cancelled"
+
+
+def test_merge_removal_then_undo_and_sync_never_resume_the_old_placement(store, monkeypatch, tmp_path):
+    from yt_playlist.library.playlist_undo import undo_action
+
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    iid, pid, client, chosen = seed(store)
+    client.fail_moves = True
+    executor.add_tracks_to_playlist(store, pid, chosen, client, 100, after_video_id="anchor")
+    placement = store.actions.get_actions()[0]
+    before = remote(client)
+    other = store.playlists.upsert_playlist(iid, "OTHER", "Other", 0, "", 1)
+    client._tracks["OTHER"] = []
+    executor.apply_result(store, {iid: client}, [pid, other], ["anchor", "next"], pid, 101)
+    merge_action = store.actions.get_actions()[0]
+    assert store.actions.get_action(placement.id).status == "cancelled"
+    client.fail_moves = False
+    for refresh in (lambda: sync.refresh_playlist(store, iid, client, "PL", "Mix", 102),
+                    lambda: sync.sync_identity(store, iid, client, 103)):
+        refresh()
+        assert local(store, pid) == remote(client) == ["anchor", "next"]
+    undo_action(store, merge_action.id, {iid: client}, 104)
+    sync.refresh_playlist(store, iid, client, "PL", "Mix", 105)
+    assert local(store, pid) == remote(client) == before
+    assert store.actions.get_action(placement.id).status == "cancelled"
+    assert store.actions.get_action(merge_action.id).status == "undone"
+
+
+def test_undo_of_a_legacy_merge_cancels_placement_before_its_refresh(store, monkeypatch, tmp_path):
+    from yt_playlist.library.playlist_undo import undo_action
+    from yt_playlist.library.undo_conflicts import playlist_state
+
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    iid, pid, client, chosen = seed(store)
+    client.fail_moves = True
+    executor.add_tracks_to_playlist(store, pid, chosen, client, 100, after_video_id="anchor")
+    placement = store.actions.get_actions()[0]
+    before = remote(client)
+    # A forward merge written by an older version left the placement pending.
+    client._tracks["PL"] = client._tracks["PL"][:2]
+    post = playlist_state(client.get_playlist("PL", limit=None))
+    aid = store.actions.record_action("apply_merge", "{}", "{}", "executed", json.dumps({
+        "restored": [{"ytm": "PL", "identity": iid, "prev": before,
+                      "post": post["videos"], "post_state": post}],
+    }), 101)
+    client.fail_moves = False
+    undo_action(store, aid, {iid: client}, 102)
+    assert local(store, pid) == remote(client) == before
+    assert store.actions.get_action(placement.id).status == "cancelled"
+    sync.refresh_playlist(store, iid, client, "PL", "Mix", 103)
+    assert local(store, pid) == remote(client) == before
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_cancelled_in_flight_retry_cannot_resurrect_local_membership(store, monkeypatch, failed):
+    _, pid, client, chosen = seed(store)
+    client.fail_moves = True
+    executor.add_tracks_to_playlist(store, pid, chosen, client, 100, after_video_id="anchor")
+    placement = store.actions.get_actions()[0]
+    ids = store.tracks.track_ids_for_videos(["anchor", "next"])
+
+    def superseded(*args):
+        playlist_positions.cancel_insertions(store, pid, 101)
+        store.playlists.set_playlist_tracks(pid, [ids["anchor"], ids["next"]])
+        if failed:
+            raise RuntimeError("old move failed after the newer edit")
+
+    monkeypatch.setattr(playlist_positions, "_move", superseded)
+    monkeypatch.setattr(playlist_positions, "with_retry", lambda fn, **kwargs: fn())
+    assert playlist_positions.retry_insertions(store, pid, client, 102, attempts=1) == 0
+    assert local(store, pid) == ["anchor", "next"]
+    assert store.actions.get_action(placement.id).status == "cancelled"

@@ -22,7 +22,7 @@ def test_wrong_vibe_steers_genre_through_the_ledger_not_a_direct_nudge(store):
     fam = genre_map.family("Techno")
     r = _post(store, item="song|band", surface="suggest", scope="7", kind="dismiss", reason="vibe")
     assert r.status_code == 200
-    assert (store.rec_surface.get_theme(f"genre:{fam}") or 0) < 0               # accumulated in the ledger
+    assert (store.rec_signals.get_theme(f"genre:{fam}") or 0) < 0               # accumulated in the ledger
     assert store.rec_model.get_weights().get(f"genre:{fam}", 1.0) == 1.0      # not nudged directly (sub-threshold)
 
 
@@ -31,7 +31,7 @@ def test_wrong_era_steers_the_decade(store):
     tid = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_year(tid, "1995")
     _post(store, item="song|band", surface="suggest", scope="7", kind="dismiss", reason="era")
-    assert (store.rec_surface.get_theme("era:1990") or 0) < 0
+    assert (store.rec_signals.get_theme("era:1990") or 0) < 0
 
 
 def test_not_this_artist_steers_artist_through_the_ledger(store):
@@ -39,7 +39,7 @@ def test_not_this_artist_steers_artist_through_the_ledger(store):
     store.tracks.upsert_track("v1", "Song", "Band", None, None)
     _post(store, item="song|band", surface="suggest", scope="7", kind="dismiss",
           reason="artist", axis="artist:Band")                     # the template sends an explicit axis
-    assert (store.rec_surface.get_theme("artist:Band") or 0) < 0
+    assert (store.rec_signals.get_theme("artist:Band") or 0) < 0
     assert store.rec_model.get_weights().get("artist:Band", 1.0) == 1.0      # routed through the ledger, not nudged
 
 
@@ -49,7 +49,7 @@ def test_already_know_it_suppresses_without_any_taste_steer(store):
     store.tracks.set_track_genre(tid, "Techno")
     fam = genre_map.family("Techno")
     _post(store, item="song|band", surface="suggest", scope="7", kind="dismiss", reason="own_it")
-    assert not store.rec_surface.get_theme(f"genre:{fam}")                      # no taste penalty
+    assert not store.rec_signals.get_theme(f"genre:{fam}")                      # no taste penalty
     assert "song|band" in store.rec_model.suppressed_keys("suggest", now=1001.0, scope="7")   # but suppressed
 
 
@@ -61,16 +61,16 @@ def test_too_mainstream_steers_pop_only_when_track_is_mainstream(store):
     cold = store.tracks.upsert_track("v2", "Cold", "B", None, None)
     store.tracks.set_track_audio(cold, popularity=1)
     _post(store, item="hot|a", surface="suggest", scope="7", kind="dismiss", reason="mainstream")
-    assert (store.rec_surface.get_theme("pop:mainstream") or 0) < 0
-    before = store.rec_surface.get_theme("pop:mainstream")
+    assert (store.rec_signals.get_theme("pop:mainstream") or 0) < 0
+    before = store.rec_signals.get_theme("pop:mainstream")
     _post(store, item="cold|b", surface="suggest", scope="7", kind="dismiss", reason="mainstream")
-    assert store.rec_surface.get_theme("pop:mainstream") == before             # a niche track doesn't steer mainstream
+    assert store.rec_signals.get_theme("pop:mainstream") == before             # a niche track doesn't steer mainstream
 
 
 def test_why_chip_axis_routes_through_graduation_not_direct_nudge(store):
     store.identities.upsert_identity("main", "cred", None, True)
     _post(store, item="x|y", surface="for_you", kind="more", axis="genre:techno")
-    assert (store.rec_surface.get_theme("genre:techno") or 0) > 0
+    assert (store.rec_signals.get_theme("genre:techno") or 0) > 0
     assert store.rec_model.get_weights().get("genre:techno", 1.0) == 1.0     # the §4b leak is closed
 
 

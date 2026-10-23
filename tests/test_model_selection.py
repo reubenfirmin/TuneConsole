@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from yt_playlist.rec import embed, model_selection as ms
+from yt_playlist.rec import embedding_training as embed, model_selection as ms
 from tests import model_support
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.util.matching import identity_key

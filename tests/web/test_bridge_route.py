@@ -243,6 +243,7 @@ def test_rich_now_playing_heartbeat_restores_expired_ui_without_recording_play()
             "title": "Recovered", "artist": "Artist", "thumbnail": "art",
             "likeStatus": "LIKE", "video_id": "v-recovered", "paused": False,
             "metadata_verified": None,
+            "position": None, "duration": None,
             "playlist_ytm_id": "OLAK5uy_album", "album_browse_id": "MPRE_album",
         }
         assert store.history.play_events_since(0) == []
@@ -282,6 +283,29 @@ def test_legacy_heartbeat_for_another_video_does_not_inherit_source():
     snapshot = _now_playing_snapshot({"videoId": "new", "title": "New"}, previous)
     assert "playlist_ytm_id" not in snapshot
     assert "album_browse_id" not in snapshot
+
+
+@pytest.mark.parametrize('value', [None, '12', True, -1, float('inf'), float('nan')])
+def test_playback_progress_rejects_invalid_sensor_values_and_never_inherits_position(value):
+    from yt_playlist.web.routes.bridge import _now_playing_snapshot
+    previous = {'video_id':'old','position':120,'duration':200}
+    snapshot = _now_playing_snapshot({'videoId':'new','position':value,'duration':value},previous)
+    assert snapshot['position'] is None and snapshot['duration'] is None
+    assert _now_playing_snapshot({'videoId':'old'},previous)['position'] is None
+
+
+def test_status_carries_progress_and_heartbeat_age_for_authoritative_interpolation(monkeypatch):
+    from types import SimpleNamespace
+    from yt_playlist.web.routes import bridge as route
+    bridge = Bridge()
+    bridge.now_playing = route._now_playing_snapshot({'videoId':'v','position':0,'duration':200,'paused':False})
+    bridge.now_playing_seen_at = 100
+    monkeypatch.setattr(route, 'time', SimpleNamespace(monotonic=lambda: 102))
+    client = TestClient(_app(bridge))
+    playing = client.get('/bridge/status').json()['now_playing']
+    assert playing['position']==0 and playing['duration']==200 and playing['snapshot_age']==2
+    monkeypatch.setattr(route, 'time', SimpleNamespace(monotonic=lambda: 109))
+    assert client.get('/bridge/status').json()['now_playing'] is None
 
 
 @pytest.mark.parametrize("value, expected", [(True, True), (False, False), (None, None),

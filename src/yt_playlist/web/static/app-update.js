@@ -2,8 +2,8 @@
 function appUpdate() {
   return {
     phase: 'available', message: '', progress: null, instance: null,
-    pending: false, timer: null, destroyed: false, pollId: 0,
-    get working() { return this.pending || this.phase === 'installing' || this.phase === 'restarting'; },
+    pending: false, timer: null, destroyed: false, pollId: 0, canCancel: false, restartDeadline: null,
+    get working() { return this.pending || ['installing', 'draining', 'launching', 'restarting'].includes(this.phase); },
     init() { this.refresh(); },
     destroy() { this.destroyed = true; clearTimeout(this.timer); },
     apply(state) {
@@ -11,6 +11,14 @@ function appUpdate() {
       this.message = state.message;
       this.progress = state.progress;
       this.instance = state.instance;
+      this.canCancel = !!state.can_cancel;
+      if (state.phase === 'restarting') {
+        this.restartDeadline ??= Date.now() + 60000;
+        if (Date.now() >= this.restartDeadline) {
+          this.phase = 'reconnect';
+          this.message = 'Couldn’t reconnect. Open TuneConsole from your applications menu, then reload this tab.';
+        }
+      } else this.restartDeadline = null;
     },
     async request(path, method = 'GET') {
       const response = await fetch('/app-update/' + path, { method, cache: 'no-store' });
@@ -33,10 +41,15 @@ function appUpdate() {
           this.apply(state);
         }
       } catch (_) {
-        if (pollId === this.pollId && !this.pending) this.message = 'Couldn’t check the update. Please try again.';
+        if (pollId === this.pollId && !this.destroyed && !this.pending) {
+          if (this.restartDeadline && Date.now() >= this.restartDeadline) {
+            this.phase = 'reconnect';
+            this.message = 'Couldn’t reconnect. Open TuneConsole from your applications menu, then reload this tab.';
+          } else if (this.phase !== 'restarting') this.message = 'Couldn’t check the update. Please try again.';
+        }
       }
       if (!this.destroyed && !this.pending && pollId === this.pollId)
-        this.timer = setTimeout(() => this.refresh(), 2000);
+        this.timer = setTimeout(() => this.refresh(), this.phase === 'restarting' ? 1000 : 2000);
     },
     async install() {
       if (this.working) return;
@@ -53,41 +66,24 @@ function appUpdate() {
       this.pending = true;
       this.pollId++;
       clearTimeout(this.timer);
-      const oldInstance = this.instance;
       try {
-        let state;
-        do {
-          state = await this.request('restart', 'POST');
-          this.message = state.message;
-          if (state.busy) await new Promise(resolve => setTimeout(resolve, 2000));
-        } while (state.busy && !this.destroyed);
-        if (this.destroyed) return;
-        if (state.phase !== 'restarting') {
-          this.apply(state);
-          return;
-        }
-        this.phase = 'restarting';
-        this.message = 'Restarting TuneConsole…';
-        const deadline = Date.now() + 60000;
-        while (Date.now() < deadline && !this.destroyed) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          try {
-            const current = await this.request('status');
-            if (current.instance && current.instance !== oldInstance) {
-              window.location.reload();
-              return;
-            }
-          } catch (_) { /* The listener is expected to disappear during the handoff. */ }
-        }
-        this.phase = 'reconnect';
-        this.message = 'Couldn’t reconnect. Open TuneConsole from your applications menu, then reload this tab.';
+        const state = await this.request('restart', 'POST');
+        if (!this.destroyed) this.apply(state);
       } catch (error) {
-        this.phase = 'ready';
-        this.message = error.message;
+        if (!this.destroyed) this.message = error.message;
       } finally {
         this.pending = false;
-        if (!['restarting', 'reconnect'].includes(this.phase)) this.refresh();
+        this.refresh();
       }
+    },
+    async cancelRestart() {
+      if (!this.canCancel || this.pending) return;
+      this.pending = true;
+      this.pollId++;
+      clearTimeout(this.timer);
+      try { this.apply(await this.request('restart/cancel', 'POST')); }
+      catch (error) { this.message = error.message; }
+      finally { this.pending = false; this.refresh(); }
     },
     reconnect() { window.location.reload(); }
   };

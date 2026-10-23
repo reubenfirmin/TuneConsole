@@ -65,7 +65,7 @@ def test_story_collection_has_clear_reading_links_and_room_to_scroll(live_app, s
                        'video_id': f'story-{i}-{j}', 'thumbnail': _art(i + j) if j != 2 else None}
                       for j, title in enumerate(['A Slow Unfolding', 'Patterns in the Light',
                                                   'The Very Long Name of a Song in Three Parts'])]})
-    store.rec_surface.put_proposals(into_recently.SURFACE,
+    store.rec_proposals.put_proposals(into_recently.SURFACE,
         {'schema': into_recently.SCHEMA, 'built_at': 1, 'cards': cards, 'pending': False}, 1)
     page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(live_app + '/playlists')
@@ -130,7 +130,7 @@ def test_story_cooldown_only_counts_visible_headings_and_ignores_fragment_polls(
               'extract': 'A full paragraph about the band. ' * 30, 'thumbnail': _art(i),
               'url': f'http://wiki/Band_{i}', 'color': 'var(--accent)', 'seed': f'Band {i}',
               'genre': None, 'depth': 2, 'songs': []} for i in range(3)]
-    store.rec_surface.put_proposals(into_recently.SURFACE,
+    store.rec_proposals.put_proposals(into_recently.SURFACE,
         {'schema': into_recently.SCHEMA, 'built_at': 1, 'cards': cards, 'pending': False}, 1)
     store.settings.set_setting('last_sync_at', '1')
     store.settings.set_setting('onboard_dismissed', '1')
@@ -141,18 +141,18 @@ def test_story_cooldown_only_counts_visible_headings_and_ignores_fragment_polls(
     expect(headings).to_have_count(3)
     expect(headings.first).to_be_hidden()
     page.wait_for_timeout(1100)
-    assert store.rec_surface.story_views() == {}
+    assert store.rec_ledger.story_views() == {}
     page.get_by_role('tab', name='Into recently', exact=True).click()
     headings.first.scroll_into_view_if_needed()
     page.wait_for_timeout(1100)
-    views = store.rec_surface.story_views()
+    views = store.rec_ledger.story_views()
     assert views['artist:Band 0']['views'] == 1
     assert 'artist:Band 2' not in views
     page.evaluate("""async () => htmx.ajax('GET', '/home/into-recently', {
         target: '[data-dash="recent"] > div', swap: 'innerHTML'})""")
     headings.first.scroll_into_view_if_needed()
     page.wait_for_timeout(1100)
-    assert store.rec_surface.story_views()['artist:Band 0']['views'] == 1
+    assert store.rec_ledger.story_views()['artist:Band 0']['views'] == 1
     headings.last.scroll_into_view_if_needed()
     page.wait_for_timeout(1100)
-    assert store.rec_surface.story_views()['artist:Band 2']['views'] == 1
+    assert store.rec_ledger.story_views()['artist:Band 2']['views'] == 1

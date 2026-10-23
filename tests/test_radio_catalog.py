@@ -4,7 +4,7 @@ import json
 import numpy as np
 import pytest
 
-from yt_playlist.rec import embed, radio_catalog, radio_tuning
+from yt_playlist.rec import embedding_vectors as embed, radio_catalog, radio_tuning
 from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, RadioCandidates
 from yt_playlist.rec.radio_directions import DEPTH, RadioDirections
 from yt_playlist.rec.radio_genres import genre
@@ -23,7 +23,7 @@ def seed(store):
     track, _ = catalog_track(store, "seed")
     store.modes.replace_modes([dict(mode_id=1, label="Electronic", families=[["electro-synth", 1]],
         centroid=np.array([1., 0.], dtype=np.float32), size=1, rep_keys=[track["key"]])], [], 1)
-    store.rec_surface.put_proposals("mode_bundles", {"1": {"wheelhouse": [track]}})
+    store.rec_proposals.put_proposals("mode_bundles", {"1": {"wheelhouse": [track]}})
     return track
 
 

@@ -1,43 +1,292 @@
-# Runs the full test suite on every push and pull request, so code changes that break tests
-# (or leave them stale) can't land silently.
+# PRs validate the synthetic merge revision; main pushes validate the landed revision.
+# Feature pushes and tag pushes deliberately do not start a second copy of these checks.
 #
-#   - unit: the default pytest run (the Playwright suite is deselected via pyproject addopts)
-#   - browser: the live-browser suite (pytest -m browser) against real Chromium
+# Each suite uses two isolated runners, with serial pytest inside each runner.
 name: Tests
 
 on:
   push:
-    tags-ignore: ['v*']  # Release commits have already passed CI before tagging.
+    branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Prospective release tag; package this final version before tagging the tested commit
+        required: false
+        type: string
+      test_shards:
+        description: Runners per suite; use 1 for a serial benchmark on the same revision
+        required: true
+        type: choice
+        options: ['2', '1']
+        default: '2'
   workflow_call:
 
+concurrency:
+  # Reusable release calls retain their tag ref and never cancel another release.
+  group: tests-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
 jobs:
-  unit:
+  plan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      reuse_tests: ${{ steps.plan.outputs.reuse_tests }}
+      checked_run: ${{ steps.plan.outputs.checked_run }}
+      timing_run: ${{ steps.plan.outputs.timing_run }}
+      timing_artifact: ${{ steps.plan.outputs.timing_artifact }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 packaging/ci_plan.py
+  unit:
+    needs: plan
+    if: needs.plan.outputs.reuse_tests != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    name: unit (${{ matrix.shard }}/${{ inputs.test_shards || '2' }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(inputs.test_shards == '1' && '[1]' || '[1, 2]') }}
     env:
       UV_PYTHON: '3.12'  # Exercise the minimum supported application runtime.
+      SHARD_TOTAL: ${{ inputs.test_shards || '2' }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - name: Install dependencies
         run: uv sync --locked --group build
       - name: Verify packaged resolutions
+        if: matrix.shard == 1
         run: uv run --frozen --group build python packaging/generate_deps.py --check
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.timing_artifact != ''
+        with:
+          artifact-ids: ${{ needs.plan.outputs.timing_artifact }}
+          run-id: ${{ needs.plan.outputs.timing_run }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: shard-baseline
+          merge-multiple: true
       - name: Run the unit / route suite
-        run: uv run pytest
+        env:
+          SHARD_BASELINE: ${{ needs.plan.outputs.timing_artifact != '' && 'shard-baseline' || '.github/test-durations.json' }}
+        run: uv run pytest --ci-suite=unit --ci-shard=${{ matrix.shard }}/$SHARD_TOTAL --ci-shard-report=evidence/shard.json --ci-duration-baseline="$SHARD_BASELINE" --junitxml=evidence/junit.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-shard-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 30
 
   browser:
+    needs: plan
+    if: needs.plan.outputs.reuse_tests != 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    name: browser (${{ matrix.shard }}/${{ inputs.test_shards || '2' }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(inputs.test_shards == '1' && '[1]' || '[1, 2]') }}
+    env:
+      SHARD_TOTAL: ${{ inputs.test_shards || '2' }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
       - name: Install dependencies
         run: uv sync --locked
       - name: Install Playwright Chromium
         run: uv run playwright install --with-deps chromium
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.timing_artifact != ''
+        with:
+          artifact-ids: ${{ needs.plan.outputs.timing_artifact }}
+          run-id: ${{ needs.plan.outputs.timing_run }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: shard-baseline
+          merge-multiple: true
       - name: Run the live-browser suite
-        run: uv run pytest -m browser
+        env:
+          SHARD_BASELINE: ${{ needs.plan.outputs.timing_artifact != '' && 'shard-baseline' || '.github/test-durations.json' }}
+        run: uv run pytest -m browser --ci-suite=browser --ci-shard=${{ matrix.shard }}/$SHARD_TOTAL --ci-shard-report=evidence/shard.json --ci-duration-baseline="$SHARD_BASELINE" --junitxml=evidence/junit.xml --tracing=retain-on-failure --output=evidence/browser-traces
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-shard-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 30
+
+  coverage:
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.reuse_tests != 'true'
+    needs: [plan, unit, browser]
+    runs-on: ubuntu-latest
+    env:
+      SHARD_TOTAL: ${{ inputs.test_shards || '2' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-shard-*-${{ github.run_attempt }}'
+          path: evidence
+      - name: Prove exact case coverage and retain measured file durations
+        run: |
+          uv run python ci_test_shards.py evidence unit --total="$SHARD_TOTAL"
+          uv run python ci_test_shards.py evidence browser --total="$SHARD_TOTAL"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: source-test-timings-${{ github.run_attempt }}
+          path: evidence/*-timings.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  checks:
+    if: always()
+    needs: [plan, unit, browser, coverage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require every source test job
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          REUSE_TESTS: ${{ needs.plan.outputs.reuse_tests }}
+          CHECKED_RUN: ${{ needs.plan.outputs.checked_run }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          assert results['plan']['result'] == 'success', results
+          reused = os.environ['REUSE_TESTS'] == 'true' and os.environ['CHECKED_RUN'].isdigit()
+          expected = 'skipped' if reused else 'success'
+          assert all(results[name]['result'] == expected for name in ('unit', 'browser', 'coverage')), results
+          PY
+  metrics:
+    # Measure the completed stable gate as well as queues, setup and coverage.
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.reuse_tests != 'true'
+    needs: [plan, coverage, checks]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SHARD_TOTAL: ${{ inputs.test_shards || '2' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        if: needs.coverage.result == 'success'
+        with:
+          name: source-test-timings-${{ github.run_attempt }}
+          path: evidence
+      - name: Record queue, setup and total test runner time
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 packaging/ci_test_metrics.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: source-test-run-metrics-${{ github.run_attempt }}
+          path: ci-test-metrics.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  containers:
+    needs: checks
+    if: inputs.release_tag == ''
+    uses: ./.github/workflows/container.yml
+    with:
+      version: '0.0.0.dev0'
+
+  publisher-contract:
+    needs: checks
+    # Secrets and write tokens are restricted to trusted default-branch runs.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REHEARSAL_TAG: publisher-contract-ci-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise authenticated draft and resumed asset lifecycle
+        run: python3 packaging/rehearse_publisher.py "$REHEARSAL_TAG"
+      - name: Clean up isolated draft even after failure
+        if: always()
+        run: python3 packaging/rehearse_publisher.py "$REHEARSAL_TAG" --cleanup-only
+
+  macos:
+    needs: checks
+    if: inputs.release_tag == ''
+    uses: ./.github/workflows/macos.yml
+    with:
+      version: '0.0.0.dev0'
+      tag: ''
+
+  wheel:
+    needs: checks
+    if: inputs.release_tag == ''
+    runs-on: ubuntu-latest
+    env:
+      SETUPTOOLS_SCM_PRETEND_VERSION: '0.0.0.dev0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --locked --only-group build --no-install-project
+      - run: uv build --wheel --no-build-isolation --python .venv/bin/python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-wheel
+          path: dist/*.whl
+          if-no-files-found: error
+
+  flatpak:
+    needs: [checks, wheel]
+    if: inputs.release_tag == ''
+    uses: ./.github/workflows/flatpak.yml
+    with:
+      version: '0.0.0.dev0'
+      wheel-artifact: ci-wheel
+
+  prepared:
+    needs: [plan, checks]
+    if: needs.plan.outputs.tag != '' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+      packages: write
+      actions: read
+    uses: ./.github/workflows/prepared-candidates.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.plan.outputs.version }}
+      tag: ${{ needs.plan.outputs.tag }}

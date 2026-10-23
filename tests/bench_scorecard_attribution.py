@@ -15,6 +15,7 @@ import time
 import pytest
 
 from yt_playlist.core import db_diagnostics
+from yt_playlist.rec import scorecard
 from yt_playlist.core.activity import cancellable_work
 from yt_playlist.core.store import Store
 from yt_playlist.repos.scorecard_attribution import VIDEO
@@ -131,7 +132,7 @@ def test_scorecard_profile(tmp_path, monkeypatch, record_property, profile, exit
         started = time.monotonic()
         try:
             with cancellable_work(lambda: stop.is_set() or time.monotonic() - started > 120):
-                return store.rec_surface.recommendation_scorecard(START, START + 30 * DAY)
+                return scorecard.recommendation_scorecard(store, START, START + 30 * DAY)
         finally:
             report['scorecard_seconds'] = time.monotonic() - started
 

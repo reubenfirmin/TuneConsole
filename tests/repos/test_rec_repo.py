@@ -2,28 +2,45 @@
 from yt_playlist.repos.base import Repo
 from yt_playlist.repos.rec_model import RecModelRepo
 from yt_playlist.repos.rec_query import RecQueryRepo
-from yt_playlist.repos.rec_surface import RecSurfaceRepo
+from yt_playlist.repos.rec_candidates import RecCandidatesRepo
+from yt_playlist.repos.rec_evidence import RecEvidenceRepo
+from yt_playlist.repos.rec_eligibility import RecEligibilityRepo
+from yt_playlist.repos.rec_ledger import RecLedgerRepo
+from yt_playlist.repos.rec_proposals import RecProposalsRepo
+from yt_playlist.repos.rec_signals import RecSignalsRepo
+from yt_playlist.repos.playlist_recipes import PlaylistRecipesRepo
+from yt_playlist.repos.artist_similarity import ArtistSimilarityRepo
 
 
 def test_named_recommendation_repositories(store):
     import pytest
     assert isinstance(store.rec_model, RecModelRepo)
-    assert isinstance(store.rec_surface, RecSurfaceRepo)
+    assert isinstance(store.rec_ledger, RecLedgerRepo)
+    assert isinstance(store.rec_proposals, RecProposalsRepo)
+    assert isinstance(store.rec_signals, RecSignalsRepo)
+    assert isinstance(store.playlist_recipes, PlaylistRecipesRepo)
+    assert isinstance(store.artist_similarity, ArtistSimilarityRepo)
+    assert not hasattr(store, "rec_surface")
     assert isinstance(store.rec_query, RecQueryRepo)
+    assert isinstance(store.rec_candidates, RecCandidatesRepo)
+    assert isinstance(store.rec_evidence, RecEvidenceRepo)
+    assert isinstance(store.rec_eligibility, RecEligibilityRepo)
     store.rec_model.set_weight("lane:neighbourhood", 1.1)
     assert store.rec_model.get_weights()["lane:neighbourhood"] == pytest.approx(1.1)
     assert store.rec_query.tracks_total() == 0
-    assert store.rec_surface.get_proposals("discover") is None
+    assert store.rec_proposals.get_proposals("discover") is None
 
 
 def test_unified_onto_repo_base(store):
-    for dao in (store.rec_model, store.rec_surface, store.rec_query):
+    for dao in (store.rec_model, store.rec_ledger, store.rec_proposals, store.rec_signals,
+                store.playlist_recipes, store.artist_similarity, store.rec_query,
+                store.rec_candidates, store.rec_evidence, store.rec_eligibility):
         assert isinstance(dao, Repo)
         assert dao.conn is store.conn and dao._lock is store._lock
 
 
 def test_card_view_counter_ticks_and_reads(store):
-    dao = store.rec_surface
+    dao = store.rec_ledger
     assert dao.card_views("wheelhouse") == 0                      # never shown
     assert dao.bump_card_view("wheelhouse", now=1000.0) == 1      # first tick
     assert dao.bump_card_view("wheelhouse", now=1100.0) == 2
@@ -34,7 +51,7 @@ def test_card_view_counter_ticks_and_reads(store):
 
 
 def test_proposals_roundtrip_and_missing(store):
-    dao = store.rec_surface
+    dao = store.rec_proposals
     assert dao.get_proposals("discover") is None
     dao.put_proposals("discover", [{"artist": "X", "title": "LP"}], now=1.0)
     assert dao.get_proposals("discover") == [{"artist": "X", "title": "LP"}]

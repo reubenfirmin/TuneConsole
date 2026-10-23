@@ -54,45 +54,59 @@ class SearchRepo(Repo):
     # --- matched artists (ranked by track count); primary = the strongest match ---
     def _artist_section(self, like, sections):
         rows = self.conn.execute(
-            "SELECT artist, COUNT(DISTINCT identity_key) n, MIN(thumbnail) thumb "
-            "FROM tracks WHERE artist LIKE ? ESCAPE '\\' AND artist<>'' "
-            "GROUP BY artist ORDER BY n DESC, artist LIMIT 3", (like,)).fetchall()
+            "WITH library_artists AS ("
+            " SELECT ta.artist_id,t.identity_key,t.thumbnail FROM tracks t "
+            " JOIN track_artists ta ON ta.entry_id=t.id UNION ALL "
+            " SELECT aa.artist_id,NULL,a.thumbnail FROM albums a "
+            " JOIN album_artists aa ON aa.album_id=a.id "
+            " WHERE EXISTS (SELECT 1 FROM album_library_memberships m WHERE m.album_id=a.id)"
+            ") SELECT a.id artist_id,a.name artist,COUNT(DISTINCT l.identity_key) n,MIN(l.thumbnail) thumb "
+            "FROM artists a JOIN library_artists l ON l.artist_id=a.id "
+            "WHERE NOT EXISTS (SELECT 1 FROM artist_redirects r WHERE r.retired_id=a.id) "
+            "AND (a.name LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM artist_aliases aa "
+            "WHERE aa.artist_id=a.id AND aa.alias LIKE ? ESCAPE '\\')) "
+            "GROUP BY a.id ORDER BY n DESC,a.name,a.id LIMIT 3", (like,like)).fetchall()
         if not rows:
             return None
         sections.append({"kind": "artist", "title": "Artist", "rows": [
-            {"type": "artist", "label": r["artist"],
+            {"type": "artist", "label": r["artist"], "artist_id": r["artist_id"],
              "sub": f"{r['n']} track" + ("" if r["n"] == 1 else "s"),
-             "href": "/artist?name=" + quote(r["artist"]),
+             "href": f"/artist?artist_id={r['artist_id']}",
              "thumbnail": r["thumb"], "external": False} for r in rows]})
-        return {"name": rows[0]["artist"], "thumbnail": rows[0]["thumb"]}
+        return {"artist_id": rows[0]["artist_id"], "name": rows[0]["artist"],
+                "thumbnail": rows[0]["thumb"]}
 
     # --- the pivot: this artist's tracks / albums / playlists ---
     def _artist_pivot(self, primary, q, per_section, sections) -> tuple[set, set]:
         name = primary["name"]
+        artist_id = primary["artist_id"]
         shown_keys = set()
 
-        eligible = playable_tracks_sql('SELECT * FROM tracks WHERE artist=?')
+        eligible = playable_tracks_sql(
+            'SELECT t.* FROM tracks t WHERE EXISTS (SELECT 1 FROM track_artists ta '
+            'WHERE ta.entry_id=t.id AND ta.artist_id=?)')
         trows = self.conn.execute(
-            "SELECT title, identity_key key, video_id vid, thumbnail thumb "
-            f"FROM ({eligible}) LIMIT ?", (name, CANDIDATE_CAP)).fetchall()
+            "SELECT title, artist, identity_key key, video_id vid, thumbnail thumb "
+            f"FROM ({eligible}) LIMIT ?", (artist_id, CANDIDATE_CAP)).fetchall()
         picked = _sample(trows, q, per_section)
         if picked:
             shown_keys = {r["key"] for r in picked}
             sections.append({"kind": "tracks_by", "title": f"Tracks by {name}", "rows": [
-                {"type": "track", "label": r["title"], "sub": name,
+                {"type": "track", "label": r["title"], "sub": r["artist"],
                  "href": "https://music.youtube.com/watch?v=" + r["vid"],
                  "thumbnail": r["thumb"], "external": True} for r in picked]})
 
         arows = self.conn.execute(
-            "SELECT album, browse, MIN(thumb) thumb FROM ("
-            "  SELECT a.title album,p.provider_id browse,COALESCE(a.thumbnail,MIN(t.thumbnail)) thumb "
-            "  FROM albums a JOIN album_tracks at ON at.album_id=a.id JOIN tracks t ON t.id=at.entry_id "
-            "  JOIN album_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
-            "  WHERE t.artist=? AND NULLIF(a.title,'') IS NOT NULL GROUP BY a.id "
-            "  UNION ALL "
-            "  SELECT title album, browse_id browse, thumbnail thumb FROM saved_albums WHERE artist=?"
-            ") WHERE browse IS NOT NULL AND browse<>'' GROUP BY browse LIMIT ?",
-            (name, name, CANDIDATE_CAP)).fetchall()
+            "SELECT a.title album,p.provider_id browse,COALESCE(a.thumbnail,("
+            " SELECT MIN(t.thumbnail) FROM album_tracks at JOIN tracks t ON t.id=at.entry_id "
+            " WHERE at.album_id=a.id)) thumb FROM albums a "
+            "JOIN album_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
+            "WHERE NULLIF(a.title,'') IS NOT NULL AND NULLIF(p.provider_id,'') IS NOT NULL AND ("
+            " EXISTS (SELECT 1 FROM album_tracks at JOIN tracks t ON t.id=at.entry_id "
+            " JOIN track_artists ta ON ta.entry_id=t.id WHERE at.album_id=a.id AND ta.artist_id=?) "
+            " OR (EXISTS (SELECT 1 FROM album_library_memberships m WHERE m.album_id=a.id) "
+            " AND EXISTS (SELECT 1 FROM album_artists aa WHERE aa.album_id=a.id AND aa.artist_id=?))) "
+            "ORDER BY a.id LIMIT ?", (artist_id,artist_id,CANDIDATE_CAP)).fetchall()
         picked = _sample(arows, q, per_section)
         if picked:
             sections.append({"kind": "albums_by", "title": f"Albums by {name}", "rows": [
@@ -104,9 +118,10 @@ class SearchRepo(Repo):
             "SELECT p.id pid, p.title title, p.thumbnail thumb "
             "FROM playlists p JOIN playlist_tracks pt ON pt.playlist_id=p.id "
             "JOIN tracks t ON t.id=pt.track_id "
+            "JOIN track_artists ta ON ta.entry_id=t.id "
             "LEFT JOIN quarantined_playlists g ON g.ytm=p.scope_ref "
-            "WHERE t.artist=? AND (g.name IS NULL OR g.name<>?) "
-            "GROUP BY p.id LIMIT ?", (name, GENERATED_GROUP, CANDIDATE_CAP)).fetchall()
+            "WHERE ta.artist_id=? AND (g.name IS NULL OR g.name<>?) "
+            "GROUP BY p.id LIMIT ?", (artist_id, GENERATED_GROUP, CANDIDATE_CAP)).fetchall()
         picked = _sample(prows, q, per_section)
         shown_pids = set()
         if picked:

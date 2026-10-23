@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from yt_playlist.rec import discover, embed, eval_recs, rec_params, scoring, surfaces, transient
+from yt_playlist.rec import discover, embedding_vectors as embed, eval_recs, rec_params, scoring, surfaces, transient
 from yt_playlist.util.matching import identity_key
 
 
@@ -106,7 +106,7 @@ def test_library_collaborative_evidence_reranks_cold_candidates(store, cold_libr
     if signal == "play":
         store.history.record_play_event(iid, keys[0], "Techno0", 999, playlist_ytm_id="PL_owned")
     else:
-        store.rec_surface.record_mood([keys[0]], 1, now=999)
+        store.rec_signals.record_mood([keys[0]], 1, now=999)
     _, vectors, idx = embed.load_vectors(store)
     tilt = transient.centroid_tilt(store, 1000, vectors, idx)
     assert tilt is not None and tilt[0] > tilt[1]
@@ -127,7 +127,7 @@ def test_library_session_evidence_reranks_cold_candidates(store, cold_library):
 def test_explicit_cold_mood_still_contributes_with_library_evidence(store, cold_library):
     _, _, _, cold = cold_library
     assert _rank(store) == [cold["Folk"], cold["Techno"]]
-    store.rec_surface.record_mood([cold["Techno"]], 1, now=999)
+    store.rec_signals.record_mood([cold["Techno"]], 1, now=999)
     assert _rank(store) == [cold["Techno"], cold["Folk"]]
 
 

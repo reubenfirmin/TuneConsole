@@ -106,7 +106,7 @@ def build(ctx) -> APIRouter:
             "cover": cover, "mosaic": mosaic,
             "genres": sorted(set(store.genres.get_genre_whitelist()) | set(store.genres.all_genres()), key=str.lower),
             "lastfm_configured": lastfm.api_key(store) is not None,
-            "conflict_count": store.enrichment.conflict_count_for_album(browse_id)})
+            "conflict_count": store.enrichment_reports.conflict_count_for_album(browse_id)})
 
     @router.get("/album/{browse}/share.txt")
     def album_share(browse: str):
@@ -212,9 +212,9 @@ def build(ctx) -> APIRouter:
     @router.get("/album/{browse}/conflicts")
     def album_conflicts(request: Request, browse: str):
         return templates.TemplateResponse(request, "_partials/conflicts_modal.html", {
-            "conflicts": store.enrichment.unresolved_conflicts_for_album(browse),
+            "conflicts": store.enrichment_reports.unresolved_conflicts_for_album(browse),
             "resolve_url": f"/album/{browse}/conflicts/resolve",
-            "count_left": store.enrichment.conflict_count_for_album(browse)})
+            "count_left": store.enrichment_reports.conflict_count_for_album(browse)})
 
     @router.post("/album/{browse}/conflicts/resolve")
     async def album_resolve_conflicts(request: Request, browse: str):
@@ -229,8 +229,8 @@ def build(ctx) -> APIRouter:
                 except ValueError:
                     pass
         return templates.TemplateResponse(request, "_partials/conflicts_modal.html", {
-            "conflicts": store.enrichment.unresolved_conflicts_for_album(browse),
+            "conflicts": store.enrichment_reports.unresolved_conflicts_for_album(browse),
             "resolve_url": f"/album/{browse}/conflicts/resolve",
-            "count_left": store.enrichment.conflict_count_for_album(browse)})
+            "count_left": store.enrichment_reports.conflict_count_for_album(browse)})
 
     return router

@@ -54,12 +54,12 @@ def test_more_failures_than_one_batch_do_not_starve_healthy_tracks_and_recovery_
     for _ in range(4):
         w.drain_once(limit=2)
         clock[0] += 31
-    assert {t["id"] for t in store.enrichment.enriched_tracks()} == set(ids[5:])
+    assert {t["id"] for t in store.enrichment_reports.enriched_tracks()} == set(ids[5:])
     assert healthy.calls == [f"Song {i}" for i in range(7)]
-    assert store.enrichment.queue_remaining() == 5
+    assert store.enrichment_reports.queue_remaining() == 5
     assert "malformed response" in w.activity["warning"]
     key = store.tracks.catalog_subject(ids[0])["identity_key"]
-    assert store.enrichment.enrichment_attempts(key)["deezer"]["fields"] == {"genre": "techno"}
+    assert store.enrichment_state.enrichment_attempts(key)["deezer"]["fields"] == {"genre": "techno"}
     # A new process uses saved deadlines and successful provider evidence.
     store.conn.close()
     store = Store(path); store.init_schema()
@@ -68,9 +68,9 @@ def test_more_failures_than_one_batch_do_not_starve_healthy_tracks_and_recovery_
     clock[0] += 3600
     for _ in range(3):
         w.drain_once(limit=2)
-    assert store.enrichment.queue_remaining() == 0
+    assert store.enrichment_reports.queue_remaining() == 0
     assert len(healthy.calls) == 7
-    assert len(store.enrichment.enriched_tracks()) == 7
+    assert len(store.enrichment_reports.enriched_tracks()) == 7
     store.conn.close()
 
 
@@ -85,33 +85,33 @@ def test_throttle_cooldown_honors_retry_after_across_batches(store, retry_after)
     w = worker(store, clock, [throttled, healthy])
     assert w.drain_once(limit=4) == 0
     assert len(throttled.calls) == 1 and len(healthy.calls) == 4
-    assert store.enrichment.enrichment_cooldowns()["musicbrainz"]["retry_at"] == 1120
+    assert store.enrichment_state.enrichment_cooldowns()["musicbrainz"]["retry_at"] == 1120
     clock[0] = 1119
     assert w.drain_once(limit=4) == 0
     assert len(throttled.calls) == 1
-    assert store.enrichment.next_enrich_batch(4, providers=["musicbrainz", "deezer"], now=1119) == []
-    assert store.enrichment.queue_remaining() == 4
+    assert store.enrichment_queue.next_enrich_batch(4, providers=["musicbrainz", "deezer"], now=1119) == []
+    assert store.enrichment_reports.queue_remaining() == 4
     clock[0] = 1120
     throttled.fail = None
     assert w.drain_once(limit=4) == 4
     assert len(healthy.calls) == 4
-    assert store.enrichment.enrichment_cooldowns() == {}
+    assert store.enrichment_state.enrichment_cooldowns() == {}
 
 
 def test_backoff_is_bounded_and_partial_provider_evidence_is_retained(store):
     tid = tracks(store, 1)[0]
     track = store.tracks.catalog_subject(tid)
     for i in range(12):
-        store.enrichment.record_enrichment_attempt(track["identity_key"], "musicbrainz",
+        store.enrichment_state.record_enrichment_attempt(track["identity_key"], "musicbrainz",
             {"mb_recording_id": "mbid"} if i == 0 else {}, retry=True, now=10000*i,
             video_id=track["video_id"], error="invalid JSON")
-        state = store.enrichment.enrichment_provider_state(track["recording_id"])["musicbrainz"]
+        state = store.enrichment_state.enrichment_provider_state(track["recording_id"])["musicbrainz"]
         assert 30 <= state["retry_at"] - 10000*i <= 3600
     assert state["failures"] == 12
     assert state["fields"] == {"mb_recording_id": "mbid"}
     # A completed pass starts a new cycle on the next stale sweep.
-    store.enrichment.mark_recordings_enriched([track["recording_id"]], 200000)
-    assert store.enrichment.enrichment_provider_state(track["recording_id"]) == {}
+    store.enrichment_queue.mark_recordings_enriched([track["recording_id"]], 200000)
+    assert store.enrichment_state.enrichment_provider_state(track["recording_id"]) == {}
 
 
 def test_retry_after_invalid_header_uses_default_backoff():

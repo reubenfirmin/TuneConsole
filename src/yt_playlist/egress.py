@@ -34,7 +34,8 @@ make a server-side request that skips this guard:
         not rely on that pin.)
   • urllib    ->  urllib.request.OpenerDirector.open
         Our MusicBrainz / Discogs / Last.fm enrichment uses ``urllib.urlopen``,
-        which dispatches through ``OpenerDirector.open``.
+        which dispatches through ``OpenerDirector.open``. Its ``_open`` transport
+        hook records each response before redirects and HTTP errors are processed.
 
 WHAT THIS DOES *NOT* COVER (stated honestly, also shown on /network)
 ---------------------------------------------------------------------
@@ -52,6 +53,8 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import ssl
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 
 from yt_playlist.core import paths
@@ -105,7 +108,7 @@ class EgressGuard:
     """The one place all server-side outbound HTTP is enforced and logged.
 
     A single instance is installed at startup (see :func:`install`). It owns the
-    rotating log file and the two monkeypatches; the wrappers it installs call
+    rotating log file and the transport hooks; the wrappers it installs call
     back into :meth:`gate` (allow/deny decision) and :meth:`record` (logging).
     """
 
@@ -114,6 +117,7 @@ class EgressGuard:
         self._installed = False
         self._orig_adapter_send = None
         self._orig_opener_open = None
+        self._orig_opener_send = None
         self._configure_logger()
 
     # -- logging ---------------------------------------------------------------
@@ -137,10 +141,34 @@ class EgressGuard:
         _access.setLevel(logging.INFO)
         _access.propagate = False
 
-    def record(self, *, verdict, method, host, path, status=None, nbytes=None, via) -> None:
+    def record(self, *, verdict, method, host, path, status=None, nbytes=None, via, failure=None) -> None:
         """Write one structured, query-stripped line for a single request."""
-        _access.info("verdict=%s via=%s method=%s host=%s path=%s status=%s bytes=%s",
-                     verdict, via, method or "?", host or "?", path or "/", status, nbytes)
+        _access.info("verdict=%s via=%s method=%s host=%s path=%s status=%s bytes=%s failure=%s",
+                     verdict, via, method or "?", host or "?", path or "/", status, nbytes, failure)
+
+    def _record_failure(self, error, **request):
+        """Classify without recording exception text, which can contain credentials."""
+        import requests.exceptions
+
+        reason = error.reason if isinstance(error, URLError) else error
+        status = error.code if isinstance(error, HTTPError) else getattr(
+            getattr(error, "response", None), "status_code", None)
+        if isinstance(error, (HTTPError, requests.exceptions.HTTPError)):
+            category = "http"
+        elif isinstance(reason, (TimeoutError, requests.exceptions.Timeout)):
+            category = "timeout"
+        elif isinstance(reason, (ssl.SSLError, requests.exceptions.SSLError)):
+            category = "tls"
+        elif isinstance(error, (URLError, OSError, requests.exceptions.ConnectionError)):
+            category = "connection"
+        else:
+            category = "transport"
+        self.record(verdict="ALLOW", status=status, failure=category, **request)
+
+    def _record_response(self, response, *, status, **request):
+        self.record(verdict="ALLOW", status=status,
+                    nbytes=response.headers.get("Content-Length") if hasattr(response, "headers") else None,
+                    failure="http" if isinstance(status, int) and status >= 400 else None, **request)
 
     # -- the allow/deny decision -----------------------------------------------
     def gate(self, url: str, *, method: str, via: str, body=None) -> tuple[str, str]:
@@ -180,10 +208,15 @@ class EgressGuard:
         def send(adapter_self, request, *args, **kwargs):
             host, path = guard.gate(request.url, method=request.method, via="requests",
                                    body=request.body)
-            resp = guard._orig_adapter_send(adapter_self, request, *args, **kwargs)
-            guard.record(verdict="ALLOW", method=request.method, host=host, path=path,
-                         status=getattr(resp, "status_code", None),
-                         nbytes=resp.headers.get("Content-Length"), via="requests")
+            details = dict(method=request.method, host=host, path=path, via="requests")
+            try:
+                resp = guard._orig_adapter_send(adapter_self, request, *args, **kwargs)
+            except BlockedHost:
+                raise
+            except Exception as error:
+                guard._record_failure(error, **details)
+                raise
+            guard._record_response(resp, status=getattr(resp, "status_code", None), **details)
             return resp
 
         requests.adapters.HTTPAdapter.send = send
@@ -192,6 +225,7 @@ class EgressGuard:
         import urllib.request
         guard = self
         self._orig_opener_open = urllib.request.OpenerDirector.open
+        self._orig_opener_send = urllib.request.OpenerDirector._open
 
         def open_(opener_self, fullurl, *args, **kwargs):
             # `fullurl` may be a str or a Request; both expose the URL we need.
@@ -204,15 +238,28 @@ class EgressGuard:
             # account for the resulting implicit POST before deciding the policy.
             if data is not None and getattr(fullurl, "method", None) is None:
                 method = "POST"
-            host, path = guard.gate(url, method=method, via="urllib", body=data)
-            resp = guard._orig_opener_open(opener_self, fullurl, *args, **kwargs)
-            guard.record(verdict="ALLOW", method=method, host=host, path=path,
-                         status=getattr(resp, "status", None),
-                         nbytes=resp.headers.get("Content-Length") if hasattr(resp, "headers") else None,
-                         via="urllib")
+            guard.gate(url, method=method, via="urllib", body=data)
+            return guard._orig_opener_open(opener_self, fullurl, *args, **kwargs)
+
+        def send(opener_self, request, *args, **kwargs):
+            # Observe before response processors follow redirects or raise HTTPError.
+            # Each actual hop is logged once, with its own status; an inner failure
+            # cannot be counted again as each redirected open() unwinds.
+            method = request.get_method()
+            host, path = guard.gate(request.full_url, method=method, via="urllib", body=request.data)
+            details = dict(method=method, host=host, path=path, via="urllib")
+            try:
+                resp = guard._orig_opener_send(opener_self, request, *args, **kwargs)
+            except BlockedHost:
+                raise
+            except Exception as error:
+                guard._record_failure(error, **details)
+                raise
+            guard._record_response(resp, status=getattr(resp, "status", None), **details)
             return resp
 
         urllib.request.OpenerDirector.open = open_
+        urllib.request.OpenerDirector._open = send
 
     # -- read-back for the /network page ---------------------------------------
     def recent(self, limit=200) -> list[str]:

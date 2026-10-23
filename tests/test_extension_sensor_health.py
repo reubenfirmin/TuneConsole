@@ -88,7 +88,7 @@ sockets[0].readyState = Socket.OPEN;
   assert.equal(report.versions[0].capture.metadataVerified, false,
     'healthy transport must not hide an ineligible exact-play producer');
   assert.equal(probes.at(-1).main, true);
-  if (scenario === 'fresh') assert.equal(injections.length, 0);
+  if (scenario === 'fresh') assert.equal(injections.filter(call => !call.files.includes('music_setup.js')).length, 0);
   else assert(injections.some(call => call.world === 'MAIN' && call.files.includes('nowplaying_main.js')));
   if (scenario === 'partial_injection') {
     assert.match(report.error, /MAIN injection failed/);

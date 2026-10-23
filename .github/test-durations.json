@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "source": "Bootstrap estimates until the first complete shard timings are retained; no measured speedup claimed.",
+  "unit": {},
+  "browser": {}
+}

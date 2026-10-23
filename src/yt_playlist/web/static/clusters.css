@@ -414,3 +414,15 @@ main.page-clusters { max-width: none; margin: 0; padding: 0; animation: none; }
 }
 .sync-urgent { border-color: var(--danger, var(--danger-deep)); box-shadow: 0 0 0 2px var(--danger, var(--danger-deep)) inset; }
 .sync-urgent .sync-nudge { color: var(--danger, var(--danger-deep)); font-weight: 600; }
+/* Clusters: switcher between multiple saved canvases. Sits at the bottom, just left of the zoombar
+   (which lives at right:.8125rem), as a horizontal row that wraps UPWARD when there are many. */
+.canvas-switcher { position: absolute; right: 3.6rem; bottom: .8125rem; z-index: 4;
+  display: flex; flex-direction: row; flex-wrap: wrap-reverse; justify-content: flex-end;
+  align-items: flex-end; gap: 0.4rem; max-width: calc(100% - 6rem); }
+.canvas-chip { max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 0.35rem .75rem; border-radius: 999px; font-size: var(--type-sm); color: var(--dim);
+  background: var(--surface-raised);
+  border: 1px solid var(--border); box-shadow: var(--shadow); }
+.canvas-chip:hover { color: var(--text); border-color: var(--border-2); }
+.canvas-chip.active { color: var(--text); font-weight: 600;
+  border-color: var(--accent); background: var(--accent-soft); }

@@ -16,7 +16,7 @@ import numpy as np
 from yt_playlist.core.activity import WorkClosing, check_stopping
 from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.core.work_diagnostics import work_span
-from yt_playlist.rec import (embed, experiments, home_themes, home_vibe, layers, mode_eval, rec_params, surfaces,
+from yt_playlist.rec import (embedding_vectors as vectors, experiments, home_themes, home_vibe, layers, mode_eval, rec_params, surfaces,
                              taste_modes, transient, measurement, negative)
 from yt_playlist.util import genre_map
 from yt_playlist.rec.eligibility import home_exclusions
@@ -106,8 +106,9 @@ def prepare_bundles(store, now) -> dict | None:
             settings = candidate_refresh.prepared_settings(snapshot.store, now)
         encoded, fresh_encoded = json.dumps(payload), json.dumps(fresh)
         def publish():
-            store.rec_surface.publish_prepared_bundles(
-                encoded, fresh_encoded, list(policies.rows.values()), now)
+            store.rec_ledger.publish_prepared_policies(list(policies.rows.values()))
+            store.rec_proposals.publish_prepared_bundles(
+                encoded, fresh_encoded, now)
             store.settings.publish_values(settings)
         if not snapshot.publish(publish, allow_stale_tables=RANKING_CHURN_TABLES):
             return None
@@ -133,8 +134,8 @@ def _calculate_bundles(store, now, policies):
                 "unmodeled": True, "comfort_pool": len(pools["comfort"])}}, all_pools["fresh"]
     mode_ids = [m["mode_id"] for m in modes]
     C = np.stack([m["centroid"].astype(np.float64) for m in modes])
-    lkeys, LV, lidx = embed.load_content_vectors(store, snapshot=snapshot)
-    dkeys, DV, didx = embed.load_discovered_content_vectors(store, snapshot=snapshot)
+    lkeys, LV, lidx = vectors.load_content_vectors(store, snapshot=snapshot)
+    dkeys, DV, didx = vectors.load_discovered_content_vectors(store, snapshot=snapshot)
     cap = int(rec_params.get_param(store, "modes_cand_per_mode"))
     # Rank through the library before bucketing. A global top-400 cutoff can leave a substantial
     # genre with only six candidates even when the library contains hundreds of matching songs.
@@ -382,7 +383,7 @@ def _assembly_inputs(store, now, preparation):
     """Reuse eligibility and resolved pools only inside one private preparation snapshot."""
     if preparation is not None and 'assembly' in preparation:
         return preparation['assembly']
-    bundles = store.rec_surface.get_proposals('mode_bundles') or {}
+    bundles = store.rec_proposals.get_proposals('mode_bundles') or {}
     keys = {d['key'] for bucket in bundles.values() if isinstance(bucket, dict)
             for items in bucket.values() if isinstance(items, list)
             for d in items if isinstance(d, dict) and d.get('key')}
@@ -543,7 +544,7 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=(), mod
                         if mid != "all" and not mid.startswith("_"):
                             pool.extend(bucket.get(surf, []))
                     if preparation is None and surf in ("wheelhouse", "explore"):
-                        keys, _, _ = embed.load_content_vectors(store)
+                        keys, _, _ = vectors.load_content_vectors(store)
                         limit = max(len(keys), int(rec_params.get_param(store, "modes_pool_limit")))
                         scorer = surfaces.for_you if surf == "wheelhouse" else surfaces.explore_for_you
                         pool.extend(_item_dict(it) for it in scorer(store, now, limit=limit))

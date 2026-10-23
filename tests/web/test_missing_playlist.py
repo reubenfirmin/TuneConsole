@@ -40,7 +40,7 @@ def test_production_http_404_removes_only_the_empty_local_entry(missing, store, 
     assert http.post('/playlist/delete-empty', data={'playlist': pid}).status_code == 200
     assert store.playlists.get_playlist(pid) is None
     assert not client.deleted and not list(tmp_path.glob('backups/*'))
-    assert store.rec_surface.get_proposals(CLEANUP_SURFACE)['count'] == 0
+    assert store.rec_proposals.get_proposals(CLEANUP_SURFACE)['count'] == 0
     action, = store.actions.get_actions()
     assert action.kind == REMOVE_LOCAL_PLAYLIST and not is_undoable(action.kind)
     assert json.loads(action.params_json)['reason'] == 'remote_missing'

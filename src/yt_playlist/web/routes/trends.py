@@ -18,7 +18,7 @@ def build(ctx) -> APIRouter:
     def trends_story(request: Request, month: str):
         """The reel for one month. Serves the newest baked story; a mismatched month 404s (past months
         become available once the archive/recompute path lands -- see the design doc)."""
-        story = (store.rec_surface.get_proposals("trend_rollups") or {}).get("story")
+        story = (store.rec_proposals.get_proposals("trend_rollups") or {}).get("story")
         if not story or story.get("month") != month:
             raise HTTPException(status_code=404, detail="no recap for that month")
         # Refresh the copy from baked counts so cached recaps also get accurate wording immediately.

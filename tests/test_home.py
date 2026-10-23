@@ -16,7 +16,7 @@ def test_home_visit_ticks_card_rotation_but_previews_dont(store):
     """A genuine Home visit advances each card's rotation counter once; steer/breadth previews and the
     feed fragment re-render the same epoch without ticking, so tuning your taste never churns cards."""
     c = _client(store)
-    dao = store.rec_surface
+    dao = store.rec_ledger
     assert dao.card_views("wheelhouse") == 0
     c.get("/")
     c.get("/")
@@ -36,7 +36,7 @@ def test_home_is_default_route(store):
     assert "home-status" in r.text         # live status card is present
     assert "Extension connected" not in r.text  # connection alone is not useful Home content
     assert "Library synced" not in r.text  # freshness line only appears after a first sync
-    assert 'class="presync card card--featured"' in r.text  # never-synced placeholder
+    assert 'class="arrival"' in r.text  # first-run connection and import screen
 
 
 def test_next_home_visit_expires_a_day_old_theme_menu(store):
@@ -45,7 +45,7 @@ def test_next_home_visit_expires_a_day_old_theme_menu(store):
     from yt_playlist.rec import rec_params
     from yt_playlist.web.routes import home
     rec_params.set_param(store, "erosion_view_cap", 10)
-    dao = store.rec_surface
+    dao = store.rec_ledger
     dao.bump_card_view("cards", 1000.0)
     store.modes.log_impressions(0, [("wheelhouse", 1)], 1000.0)
     assert _client(store, now=1000.0 + home.MENU_MAX_AGE_S - 1).get("/").status_code == 200
@@ -105,7 +105,7 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
                                "artist": "X" if surf == "wheelhouse" and i == 0 else f"Art {surf} {i}",
                                "album": "", "thumbnail": None,
                                "plays": 0, "reason": "", "lane": "", "genre": ""} for i in range(8)]
-    store.rec_surface.put_proposals("mode_bundles", payload, now)
+    store.rec_proposals.put_proposals("mode_bundles", payload, now)
     from tests.test_mode_cards_route import prepare_home
     prepare_home(store, now)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now)
@@ -159,6 +159,8 @@ def test_home_page_has_steering_and_fingerprint(store):
     store.settings.set_setting("onboard_dismissed", "1")          # graduated user: testing the normal feed, not onboarding
     from tests.test_mode_cards_route import prepare_home
     prepare_home(store)
+    from tests.onboarding_support import publish_personal_mix
+    publish_personal_mix(store)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     html = c.get("/").text
@@ -205,20 +207,20 @@ def test_home_status_card_replaces_sync_buttons(store):
 
 
 def test_presync_shows_recs_placeholder_not_feed(store):
-    """Pre-sync, Home replaces the recommendation feed with a graphical placeholder; after the first
-    sync the placeholder is gone and the feed renders."""
+    """The arrival screen replaces the feed until the first complete library sync."""
     iid = store.identities.upsert_identity("main", "cred", None, True)
     store.tracks.upsert_track("v1", "Gem", "X", None, None)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
 
     html = c.get("/").text
-    assert 'class="presync card card--featured"' in html                    # placeholder shown
-    assert "recommendations will start appearing here" in html             # the copy
+    assert 'class="arrival"' in html
+    assert "personal mixes and find your next favorites" in html
     assert "More in your wheelhouse" not in html                           # feed hidden pre-sync
 
     store.settings.set_setting("last_sync_at", "1000")
-    assert "presync card" not in c.get("/").text                           # placeholder gone post-sync
+    assert 'id="onboarding-feed"' in c.get("/").text
+    assert 'aria-labelledby="setup-details-title"' in c.get("/").text
 
 
 def test_enrich_nudge_is_gone(store):
@@ -239,6 +241,8 @@ def test_fingerprint_bar_shows_effective_multiplier(store):
     store.settings.set_setting("onboard_dismissed", "1")       # graduated user: testing the normal feed, not onboarding
     fam = __import__("yt_playlist.util.genre_map", fromlist=["family"]).family("Techno")
     store.rec_model.set_lean(f"genre:{fam}", 1.5, 1000.0)        # standing lean, permanent still 1.0
+    from tests.onboarding_support import publish_personal_mix
+    publish_personal_mix(store)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     html = c.get("/").text

@@ -1,0 +1,17 @@
+<details class="sync-console import-details" id="library-import-details"
+         x-data="{ expanded: sessionStorage.getItem('library-import-details') === 'open' }"
+         :open="expanded" @toggle="expanded = $el.open; sessionStorage.setItem('library-import-details', expanded ? 'open' : 'closed')">
+  <summary class="sc-head">
+    <span class="sc-toggle" aria-hidden="true">{{ arrow_icon('down') }}</span>
+    <span class="sc-eye">Library import details</span>
+    <span class="sc-state" :class="{ 'is-run': running, 'is-err': failed }"
+          x-text="running ? 'Importing' : (failed ? 'Some items need a retry' : (lines.length ? 'Finished' : 'Waiting'))"></span>
+  </summary>
+  <div class="sync-log" x-ref="log" role="log" aria-label="Library import progress"
+       x-effect="lines.length; $nextTick(() => { $el.scrollTop = $el.scrollHeight })">
+    <p class="import-waiting" x-show="!lines.length">Waiting for the library import.</p>
+    <template x-for="(ln, i) in lines" :key="i">
+      <div class="sc-line" :class="ln.cls"><span class="sc-pip" x-text="ln.pip" aria-hidden="true"></span><span x-text="ln.text"></span></div>
+    </template>
+  </div>
+</details>

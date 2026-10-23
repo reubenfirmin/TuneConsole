@@ -171,6 +171,32 @@ class RadioMutations:
         accepted, substitutions, _ = self._accept_tail(target, tail, view, remote)
         return MutationResult('confirmed' if accepted else 'waiting', substitutions=substitutions)
 
+    def recover(self, target: PlaylistTarget, edits: RadioEdits, view: TailView) -> MutationResult:
+        """Recognize an owned readback without accepting or overwriting an unrelated edit."""
+        remote = self.playlists.read(target.client, target.playlist)
+        actual = tuple(t['videoId'] for t in remote)
+        expected = tuple(t['video_id'] for t in view.tracks)
+        allowed, substitutions = {expected}, ()
+        if edits.append:
+            allowed.add((*expected, edits.append.track['video_id']))
+            receipt = (edits.append.write.receipt if edits.append.write else None) or {}
+            if receipt.get('videoId'):
+                allowed.add((*expected, receipt['videoId']))
+        if edits.replacement:
+            try:
+                result = self.recover_tail(target, edits.replacement, view, remote)
+            except PlaylistChanged:
+                return MutationResult()
+            substitutions = result.substitutions
+            if result.status != 'confirmed':
+                return result
+            allowed.update(edits.replacement.allowed)
+        if actual not in allowed and not (edits.append and self.append_substitution(edits.append, view.tracks, remote)):
+            return MutationResult(substitutions=substitutions)
+        edits.conflict = None
+        log.info('Radio saved-playlist readback recovered: playlist=%s', target.playlist)
+        return MutationResult('confirmed', substitutions=substitutions)
+
     def inspect_tail(self, target: PlaylistTarget, tail: RadioPlaylistTail, view: TailView, remote) -> MutationResult:
         accepted, substitutions, known = self._accept_tail(target, tail, view, remote)
         if not accepted:

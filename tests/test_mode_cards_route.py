@@ -26,7 +26,7 @@ def _client(store, now=1000.0):
 
 def prepare_home(store, now=1000.0):
     """Seed eligible subjects, then prepare candidate pools before Home as the worker does."""
-    payload = store.rec_surface.get_proposals("mode_bundles") or {}
+    payload = store.rec_proposals.get_proposals("mode_bundles") or {}
     tracks = {item["key"]: (lane, item) for mid, bucket in payload.items() if not mid.startswith("_")
               for lane, items in bucket.items() for item in items if item.get("key")}
     owned = store.rec_query.tracks_by_keys(tracks)
@@ -43,7 +43,7 @@ def prepare_home(store, now=1000.0):
         else:
             seed_catalog_track(store, key, item["title"], item["artist"], video_id=video,
                                genre=item.get("genre"))
-    if (not payload and not store.rec_surface.get_proposals("fresh_pool")
+    if (not payload and not store.rec_proposals.get_proposals("fresh_pool")
             and store.rec_query.library_keys()):
         assert mode_surfaces.prepare_bundles(store, now) is not None
     assert home_prepared.prepare(store, now) is not None
@@ -65,7 +65,7 @@ def _seed_bundles(store):
     for surf in ms.CARD_SURFACES:
         payload["1"][surf] = items(f"{surf}h", "house")
         payload["2"][surf] = items(f"{surf}t", "techno")
-    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_proposals.put_proposals("mode_bundles", payload, 1.0)
 
 
 def test_cards_route_renders_mode_cards(store):
@@ -96,8 +96,8 @@ def test_mode_card_recipe_carries_a_journey(store):
 
 def test_fresh_mode_card_recipe_retains_lane(store):
     _seed_bundles(store)
-    bundles = store.rec_surface.get_proposals("mode_bundles")
-    store.rec_surface.put_proposals("mode_bundles", {
+    bundles = store.rec_proposals.get_proposals("mode_bundles")
+    store.rec_proposals.put_proposals("mode_bundles", {
         **{mid: {"fresh": bucket["fresh"]} for mid, bucket in bundles.items()},
         "_meta": {"full_pools": True},
     }, 1)

@@ -4,10 +4,10 @@ import os
 import signal
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from yt_playlist.core.update_lifecycle import acquire_restart_locks
+from yt_playlist.core.update_lifecycle import PendingRestart
 
 
 async def _stop_server():
@@ -18,6 +18,7 @@ async def _stop_server():
 
 def build(ctx):
     router = APIRouter()
+    ctx.pending_restart = pending = PendingRestart(ctx, _stop_server)
 
     def updater_for(request):
         updater = ctx.updater
@@ -38,42 +39,38 @@ def build(ctx):
 
     @router.get("/app-update/status")
     async def status(request: Request):
-        return response(await updater_for(request).status())
+        return response(pending.snapshot(await updater_for(request).status()))
 
     @router.post("/app-update/install")
     async def install(request: Request):
-        return response(await updater_for(request).install())
+        updater = updater_for(request)
+        if pending.phase is not None:
+            return response(pending.snapshot(updater.snapshot()), 202)
+        pending.message = ""
+        return response(await updater.install())
 
     @router.post("/app-update/restart")
-    async def restart(request: Request, background: BackgroundTasks):
+    async def restart(request: Request):
         updater = updater_for(request)
-        if updater.phase == "restarting":
-            return response(updater.snapshot(), 202)
+        if pending.phase is not None or updater.phase == "restarting":
+            return response(pending.snapshot(updater.snapshot()), 202)
         if updater.phase != "ready":
             raise HTTPException(409, "Install the update before restarting.")
-        acquired, message = acquire_restart_locks(ctx)
-        if acquired is None:
-            return response({**updater.snapshot(), "busy": True, "message": message}, 409)
         try:
             host = request.url.hostname
             port = request.url.port or (request.scope.get("server") or (None, 8765))[1]
             if host not in ("127.0.0.1", "localhost") or not 0 < port < 65536:
                 raise ValueError("Restart needs the local app address.")
-            result = await updater.restart(host, port)
-            if result.get("phase") != "restarting":
-                for held in acquired:
-                    held.release()
-                ctx.work.open()
-                return response(result)
-        except Exception:
-            for held in acquired:
-                held.release()
-            ctx.work.open()
-            ctx.logger.warning("could not launch updated TuneConsole", exc_info=True)
-            return response({**updater.snapshot(),
-                             "message": "Couldn't restart TuneConsole. Please try again."}, 503)
-        # Hold the locks until exit so no new background sync/import can start in the gap.
-        background.add_task(_stop_server)
-        return response(result, 202)
+            pending.request(host, port)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        return response(pending.snapshot(updater.snapshot()), 202)
+
+    @router.post("/app-update/restart/cancel")
+    async def cancel_restart(request: Request):
+        updater = updater_for(request)
+        if not await pending.cancel():
+            return response(pending.snapshot(updater.snapshot()), 409)
+        return response(pending.snapshot(updater.snapshot()))
 
     return router

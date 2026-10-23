@@ -1,4 +1,4 @@
-from yt_playlist.rec import embed, surfaces
+from yt_playlist.rec import content_model, embed, surfaces
 from tests import model_support
 from yt_playlist.util.matching import identity_key
 
@@ -72,30 +72,30 @@ def test_complete_playlist_uses_same_artist_and_genre_not_track_embedding(store)
 
 def test_fingerprint_is_stable_for_the_same_space():
     m = {"cat": {"rock": 0, "pop": 1}, "cont": [["bpm", 120.0, 10.0]]}
-    assert embed.content_model_fingerprint(m) == embed.content_model_fingerprint(dict(m))
+    assert content_model.content_model_fingerprint(m) == content_model.content_model_fingerprint(dict(m))
 
 
 def test_fingerprint_changes_when_a_token_is_added():
     a = {"cat": {"rock": 0, "pop": 1}, "cont": []}
     b = {"cat": {"rock": 0, "pop": 1, "jazz": 2}, "cont": []}
-    assert embed.content_model_fingerprint(a) != embed.content_model_fingerprint(b)
+    assert content_model.content_model_fingerprint(a) != content_model.content_model_fingerprint(b)
 
 
 def test_fingerprint_changes_when_columns_are_reordered():
     """Same dimension, different basis: the case a shape check cannot catch."""
     a = {"cat": {"rock": 0, "pop": 1}, "cont": []}
     b = {"cat": {"rock": 1, "pop": 0}, "cont": []}
-    assert embed.content_model_fingerprint(a) != embed.content_model_fingerprint(b)
+    assert content_model.content_model_fingerprint(a) != content_model.content_model_fingerprint(b)
 
 
 def test_fingerprint_changes_when_a_continuous_feature_drops_out():
     a = {"cat": {}, "cont": [["bpm", 120.0, 10.0], ["energy", 0.5, 0.1]]}
     b = {"cat": {}, "cont": [["bpm", 120.0, 10.0]]}
-    assert embed.content_model_fingerprint(a) != embed.content_model_fingerprint(b)
+    assert content_model.content_model_fingerprint(a) != content_model.content_model_fingerprint(b)
 
 
 def test_fingerprint_ignores_zscore_drift():
     """mu/sd move on every rebuild; treating that as a new space would retire all modes each pass."""
     a = {"cat": {"rock": 0}, "cont": [["bpm", 120.0, 10.0]]}
     b = {"cat": {"rock": 0}, "cont": [["bpm", 118.4, 11.2]]}
-    assert embed.content_model_fingerprint(a) == embed.content_model_fingerprint(b)
+    assert content_model.content_model_fingerprint(a) == content_model.content_model_fingerprint(b)

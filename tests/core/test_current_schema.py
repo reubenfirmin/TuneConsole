@@ -9,6 +9,10 @@ import pytest
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
 from yt_playlist.core.migrations import current, registry, v001_baseline
 
+# The bootstrap contract can precede later data-only or additive migrations.
+# A completed migrate() records the full registry, including that later tail.
+LATEST_VERSION = registry.MIGRATIONS[-1].version
+
 
 def connect(path=':memory:'):
     conn = sqlite3.connect(path, timeout=5)
@@ -67,7 +71,7 @@ def test_fresh_and_current_do_not_call_historical_bootstrap_or_validation(monkey
         (migration.version, migration.name) for migration in registry.MIGRATIONS]
 
 
-@pytest.mark.parametrize('version', [1, 7, 8, 10, 11, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41])
+@pytest.mark.parametrize('version', [1, 7, 8, 10, 11, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42])
 def test_every_supported_predecessor_family_matches_current_contract(tmp_path, version):
     with connect(tmp_path / 'upgrade.db') as conn:
         migrate(conn, registry=registry.MIGRATIONS[:version])
@@ -111,7 +115,7 @@ def test_v037_installed_during_home_work_upgrades_without_losing_evidence(has_co
     migrate(conn)
     assert list(map(tuple, conn.execute('SELECT * FROM listening_observations'))) == evidence
     assert tuple(conn.execute('SELECT * FROM listening_day_counts').fetchone()) == ('song|artist', 1)
-    assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == current.VERSION
+    assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == LATEST_VERSION
     before = list(conn.iterdump())
     migrate(conn)
     assert list(conn.iterdump()) == before
@@ -222,7 +226,7 @@ def test_policy_repair_refuses_invalid_values_without_discarding_them():
     "UPDATE settings SET value='99' WHERE key='catalog_identity_version'",
     "UPDATE schema_migrations SET name='wrong' WHERE version=31",
     "DELETE FROM schema_migrations WHERE version=15",
-    f"INSERT INTO schema_migrations VALUES ({current.VERSION + 1},'future',1)",
+    f"INSERT INTO schema_migrations VALUES ({LATEST_VERSION + 1},'future',1)",
     'ALTER TABLE listening_calendars DROP COLUMN confirmed',
 ])
 def test_malformed_current_database_is_rejected_without_repair(sql):
@@ -328,16 +332,16 @@ def test_later_migration_applies_to_fresh_and_upgraded_and_rolls_back(tmp_path, 
         def interrupted(connection, context):
             connection.execute('CREATE TABLE later (id INTEGER PRIMARY KEY)')
             raise ValueError('injected later failure')
-        monkeypatch.setattr(registry, 'MIGRATIONS', (*original, Migration(current.VERSION + 1, 'later', interrupted)))
+        monkeypatch.setattr(registry, 'MIGRATIONS', (*original, Migration(LATEST_VERSION + 1, 'later', interrupted)))
         with pytest.raises(MigrationError, match='injected later failure'):
             migrate(conn)
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='later'").fetchone() is None
-        assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == current.VERSION
-        monkeypatch.setattr(registry, 'MIGRATIONS', (*original, Migration(current.VERSION + 1, 'later', lambda c, x:
+        assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == LATEST_VERSION
+        monkeypatch.setattr(registry, 'MIGRATIONS', (*original, Migration(LATEST_VERSION + 1, 'later', lambda c, x:
             c.execute('CREATE TABLE later (id INTEGER PRIMARY KEY)'))))
         migrate(conn)
         migrate(conn)
-        assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == current.VERSION + 1
+        assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == LATEST_VERSION + 1
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='later'").fetchone()
 
 
@@ -359,7 +363,7 @@ def test_concurrent_current_bootstraps_create_one_history(tmp_path):
         thread.join()
     assert not errors
     with connect(path) as conn:
-        assert conn.execute('SELECT COUNT(*) FROM schema_migrations').fetchone()[0] == current.VERSION
+        assert conn.execute('SELECT COUNT(*) FROM schema_migrations').fetchone()[0] == LATEST_VERSION
 
 
 def test_legacy_schema_resource_is_frozen_and_removed_module_stays_absent():

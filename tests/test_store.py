@@ -75,7 +75,7 @@ def test_playlist_creation_date_migration_backfills_only_known_dates(legacy_stor
     dates = {p.ytm_playlist_id: p.created_at for p in store.playlists.get_playlists()}
     assert dates == {"song": 100, "generated": 50, "303": None, "Brexit List": None,
                      "planned": None, "moved": None}
-    store.rec_surface.set_recipe("generated", {"theme": "updated mix"}, 8000)
+    store.playlist_recipes.set_recipe("generated", {"theme": "updated mix"}, 8000)
     store.init_schema()
     assert {p.ytm_playlist_id: p.created_at for p in store.playlists.get_playlists()} == dates
 
@@ -211,13 +211,13 @@ def test_suppress_overlap_roundtrip(store):
 
 
 def test_theme_rows_returns_all_facets(store):
-    store.rec_surface.bump_theme("genre:jazz", 0.4, 1000.0)
-    store.rec_surface.bump_theme("era:1970", -0.3, 1000.0)
-    rows = {r["facet"]: r["score"] for r in store.rec_surface.theme_rows()}
+    store.rec_signals.bump_theme("genre:jazz", 0.4, 1000.0)
+    store.rec_signals.bump_theme("era:1970", -0.3, 1000.0)
+    rows = {r["facet"]: r["score"] for r in store.rec_signals.theme_rows()}
     assert abs(rows["genre:jazz"] - 0.4) < 1e-9
     assert abs(rows["era:1970"] - (-0.3)) < 1e-9
     # strongest magnitude first
-    assert store.rec_surface.theme_rows()[0]["facet"] == "genre:jazz"
+    assert store.rec_signals.theme_rows()[0]["facet"] == "genre:jazz"
 
 
 def test_orig_title_artist_columns_exist_and_backfill(store):

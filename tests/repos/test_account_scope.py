@@ -39,8 +39,8 @@ def test_installed_account_scope_preserves_unknown_ownership_and_curation(instal
     assert all(r['original']=={'ytm':'@legacy:LM','name':'Old likes'} for r in inherited)
     assert store.overlaps.get_suppressed_overlap_pairs()=={frozenset(('@legacy:LM','shared'))}
     assert store.overlaps.get_ignored_merges()[0]['members']==['@account:1:SE','shared']
-    assert store.rec_surface.get_recipe('shared')=={'model':'cluster'}
-    assert json.loads(store.rec_surface.get_cluster_canvas('shared'))=={'nodes':[]}
+    assert store.playlist_recipes.get_recipe('shared')=={'model':'cluster'}
+    assert json.loads(store.playlist_recipes.get_cluster_canvas('shared'))=={'nodes':[]}
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
     state = list(store.conn.iterdump())
     store.init_schema()
@@ -136,14 +136,14 @@ def test_system_curation_is_per_account_and_survives_membership_removal(store):
     store.playlists.set_playlist_group('LM','Personal',identity_id=main)
     store.overlaps.ignore_cleanup(ar,'empty',1)
     store.overlaps.ignore_overlap_playlist(br,1)
-    store.rec_surface.set_recipe(ar,{'account':'first'},1)
+    store.playlist_recipes.set_recipe(ar,{'account':'first'},1)
     store.playlists.remove_playlist(a)
     assert store.playlists.get_hidden_playlists()=={ar}
     assert store.playlists.get_playlist_groups()=={br:'Personal'}
     assert store.overlaps.get_cleanup_ignored()=={'empty':{ar}}
     restored = store.playlists.upsert_playlist(first,'LM','First likes again',0,'h',2)
     assert store.playlists.get_playlist(restored).scope_ref==ar
-    assert store.rec_surface.get_recipe(ar)=={'account':'first'}
+    assert store.playlist_recipes.get_recipe(ar)=={'account':'first'}
     with pytest.raises(ValueError,match='Choose an account'):
         store.playlists.hide_playlist('LM')
 

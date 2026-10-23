@@ -112,8 +112,10 @@ class FakeClient:
         return {"status": "STATUS_SUCCEEDED", "playlistEditResults": results}
     def remove_playlist_items(self, playlistId, videos):
         self.removed.append((playlistId, list(videos)))
-        gone = {v.get("videoId") for v in videos}
-        self._tracks[playlistId] = [t for t in self._tracks.get(playlistId, []) if t.get("videoId") not in gone]
+        handles = {v["setVideoId"] for v in videos if v.get("setVideoId")}
+        gone = {v.get("videoId") for v in videos if not v.get("setVideoId")}
+        self._tracks[playlistId] = [t for t in self._tracks.get(playlistId, [])
+                                   if t.get("setVideoId") not in handles and t.get("videoId") not in gone]
     def delete_playlist(self, playlistId): self.deleted.append(playlistId)
     def rate_song(self, videoId, rating): self.rated.append((videoId, rating))
     def search(self, query, filter="songs"): return list(self._search_results)

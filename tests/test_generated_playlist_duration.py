@@ -3,7 +3,7 @@ arrive without a duration (the rec pipeline doesn't carry one), so create_genera
 resolves it before saving and applies the Taste Model track-length limit (#44)."""
 import pytest
 
-from yt_playlist.library.executor import create_generated_playlist
+from yt_playlist.library.playlist_generated import create_generated_playlist
 from yt_playlist.rec import rec_params
 from tests.conftest import FakeClient
 
@@ -96,7 +96,7 @@ def test_all_overlong_tracks_do_not_create_an_empty_remote_playlist(store):
 
 
 def test_failed_duration_lookup_still_allows_generation(store, monkeypatch):
-    from yt_playlist.library import executor
+    from yt_playlist.library import playlist_catalog
 
     iid = store.identities.upsert_identity("main", "cred", None, True)
     calls = []
@@ -106,7 +106,7 @@ def test_failed_duration_lookup_still_allows_generation(store, monkeypatch):
             calls.append(video_id)
             raise RuntimeError("duration unavailable")
 
-    monkeypatch.setattr(executor, "with_retry", lambda fn: fn())
+    monkeypatch.setattr(playlist_catalog, "with_retry", lambda fn: fn())
     client = UnavailableClient()
     result = create_generated_playlist(store, "Gen", [{"video_id": "unknown"}], client, 100,
                                        identity_id=iid)

@@ -11,18 +11,25 @@ def update_card(monkeypatch, page, store, *, kind="flatpak"):
     })
     state = {"instance": "old-process", "phase": "available", "message": "", "progress": None}
     calls = {"install": 0, "restart": 0}
+    restart_polls = 0
 
     def respond(route):
+        nonlocal restart_polls
         operation = route.request.url.rsplit("/", 1)[-1]
         if operation == "install":
             calls["install"] += 1
             state.update(phase="installing", message="Downloading and installing the update…", progress=40)
         elif operation == "restart":
             calls["restart"] += 1
-            if calls["restart"] == 1:
-                route.fulfill(status=409, json={**state, "busy": True, "message": "Waiting for your sync to finish…"})
+            state.update(phase="draining", busy=True, can_cancel=True, message="Waiting for your sync to finish…")
+            route.fulfill(status=202, json=dict(state))
+            return
+        elif operation == "status" and state["phase"] == "draining":
+            restart_polls += 1
+            if restart_polls < 2:
+                route.fulfill(json=dict(state))
                 return
-            route.fulfill(status=202, json={**state, "phase": "restarting"})
+            route.fulfill(json={**state, "phase": "restarting", "can_cancel": False})
             state.update(instance="new-process", phase="current", message="Up to date.")
             return
         route.fulfill(json=dict(state))
@@ -48,9 +55,53 @@ def test_download_progress_then_restart_reconnects_same_tab(live_app, page, stor
     with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
         restart.click()
         expect(card.get_by_role("status")).to_contain_text("Waiting for your sync")
-    assert calls["restart"] == 2
+    assert calls["restart"] == 1
     assert len(page.context.pages) == 1
     assert not errors
+
+
+def test_lost_restart_reply_and_navigation_rejoin_pending_server_state(live_app, page, store, monkeypatch):
+    state, calls = update_card(monkeypatch, page, store)
+    state.update(phase="ready")
+
+    def accepted_but_lost(route):
+        calls["restart"] += 1
+        state.update(phase="draining", can_cancel=True, message="Waiting for your sync to finish…")
+        route.abort()
+
+    page.route("**/app-update/restart", accepted_but_lost)
+    # Keep the server pending until this test explicitly completes its work.
+    page.route("**/app-update/status", lambda route: route.fulfill(json=dict(state)))
+    page.goto(f"{live_app}/#notices")
+    card = page.locator("#update-nudge")
+    card.get_by_role("button", name="Restart to update", exact=True).click()
+    expect(card.get_by_role("status")).to_contain_text("Waiting for your sync")
+    page.goto(f"{live_app}/playlists")
+    page.goto(f"{live_app}/#notices")
+    expect(card.get_by_role("button", name="Cancel restart")).to_be_visible()
+    expect(card.get_by_role("button", name="Dismiss", exact=True)).to_be_disabled()
+    assert calls["restart"] == 1
+    with page.expect_navigation(wait_until="domcontentloaded", timeout=10000):
+        state.update(instance="new-process", phase="current", can_cancel=False)
+    assert calls["restart"] == 1
+
+
+def test_pending_restart_can_be_cancelled_from_the_card(live_app, page, store, monkeypatch):
+    state, calls = update_card(monkeypatch, page, store)
+    state.update(phase="draining", can_cancel=True, message="Waiting for background work to finish…")
+    page.route("**/app-update/status", lambda route: route.fulfill(json=dict(state)))
+
+    def cancel(route):
+        state.update(phase="ready", can_cancel=False, message="Restart cancelled.")
+        route.fulfill(json=dict(state))
+
+    page.route("**/app-update/restart/cancel", cancel)
+    page.goto(f"{live_app}/#notices")
+    card = page.locator("#update-nudge")
+    card.get_by_role("button", name="Cancel restart").click()
+    expect(card.get_by_role("button", name="Restart to update", exact=True)).to_be_visible()
+    expect(card.get_by_role("button", name="Cancel restart")).to_be_hidden()
+    assert calls["restart"] == 0
 
 
 def test_denial_opens_software_manager_fallback(live_app, page, store, monkeypatch):

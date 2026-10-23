@@ -27,6 +27,23 @@ WebSocket only from that `chrome-extension://` origin, which a web page cannot f
 
 ## What you should see
 
+- The extension toolbar icon opens a connection and setup panel. It explains that mixes, library
+  tools and listening history require the local TuneConsole app. A fresh install opens
+  `https://tuneconsole.com/extension-setup`, a dedicated page with app downloads, launch steps, and
+  Mac first-launch approval instructions. If the app is already connected, it opens the app instead.
+  Starting the app from setup replaces the install instructions with step 3: “Time to rock out!”
+  and an Open TuneConsole button. Reloading an unpacked
+  development extension also runs this check, as does
+  re-enabling the extension on Chrome 155 and newer. The toolbar and YouTube Music reminder link
+  to this same page. No extra management permission is required.
+  Setup reuses an existing TuneConsole website tab, and opening the app reuses its existing tab.
+- On YouTube Music, an app that remains disconnected for five seconds gets a setup reminder.
+  Starting the app removes it automatically. Dismissal lasts for that tab's session, including page
+  reloads; the toolbar panel stays available. Brief disconnects do not flash the reminder. Store
+  updates and browser restarts never open a setup tab. Setup does not interrupt playback.
+- The extension alone keeps YouTube Music working normally; it does not provide standalone
+  recommendations or save listening history while the app is stopped. Playback events are relayed
+  to the running local app rather than buffered for offline history.
 - The app shows the extension connection status. Routine connection and playback activity
   stays quiet in the browser console.
 - When the app makes a request (for example, a sync), the request appears in the YTM tab's
@@ -168,6 +185,9 @@ the public site's Local Player button reuses an existing app tab.
 - `worker/ratings.js`: one native desired-rating recovery on its original tab, with a deadline,
   revision checks, cancellation, and bounded pending/terminal diagnostics.
 - `worker/sensors.js`: isolated/MAIN probes, injection, resync, and idle-only reload cooldowns.
+- `worker/setup.js`: connection-only status for the toolbar panel and YouTube Music setup reminder.
+- `music_setup.js`: isolated, dismissible setup reminder on YouTube Music; no playback controls.
+- `setup.html`, `setup.js`, `setup.css`: toolbar connection and setup panel.
 - `worker/site.js`: public-site connection status and local-player tab activation, with its own
   coalesced open request. It receives no music/library state.
 - `worker/radio.js`: saved-playlist companion injection and response delivery. It borrows playback's

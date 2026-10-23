@@ -43,7 +43,7 @@ def test_unseen_confirmed_rating_survives_restart_and_teaches_without_playlist(t
     assert keys == {"unseen song|artist"}
     assert store.conn.execute("SELECT COUNT(*) FROM library_memberships").fetchone()[0] == 0
     if action == "like":
-        assert store.rec_surface.get_theme("artist:Artist") == 1
+        assert store.rec_signals.get_theme("artist:Artist") == 1
         assert store.rec_model.recent_liked_with_ts() == [("unseen song|artist", 100)]
     else:
         assert store.rec_model.disliked_with_ts() == [("unseen song|artist", 100)]
@@ -87,7 +87,7 @@ def test_unlike_arriving_during_metadata_fetch_prevents_stale_learning(store):
 
     assert ratings.reconcile_pending(store, iid, SimpleNamespace(get_song=resolve)) == set()
     assert store.rec_model.recent_liked_keys() == []
-    assert store.rec_surface.get_theme("artist:Artist") is None
+    assert store.rec_signals.get_theme("artist:Artist") is None
 
 
 def test_failed_native_request_does_not_queue_learning(store):
@@ -112,7 +112,7 @@ def test_backend_rating_retains_pending_feedback_without_waiting_for_metadata(st
         {"video_id": "unseen", "status": "LIKE", "observed_at": 100}]
     assert ratings.reconcile_pending(store, iid, SimpleNamespace(get_song=_song)) == {"unseen song|artist"}
     assert store.rec_model.recent_liked_with_ts() == [("unseen song|artist", 100)]
-    assert store.rec_surface.get_theme("artist:Artist") == 1
+    assert store.rec_signals.get_theme("artist:Artist") == 1
 
 
 @pytest.mark.parametrize("endpoint", ["/track/like", "/now-playing/rate"])

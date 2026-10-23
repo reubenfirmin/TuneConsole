@@ -13,7 +13,7 @@ from time import monotonic
 from typing import Protocol
 
 from yt_playlist.providers import deezer, lastfm, musicbrainz
-from yt_playlist.providers import genres as genre_names
+from yt_playlist.rec.road_trip_axes import canonical_genre
 from yt_playlist.util import genre_map
 from yt_playlist.util.thumbnails import best_thumb
 
@@ -50,13 +50,8 @@ def _decade(year):
     return str(int(year) // 10 * 10) if year else ""
 
 
-def _canon_genre(genre):
-    genre = (genre or "").strip()
-    return (genre_names.match_tag(genre) or genre.title()) if genre else ""
-
-
 def _candidate(video_id, title, artist, album, thumbnail, duration, source, genre, year, plays=0):
-    genre = _canon_genre(genre)
+    genre = canonical_genre(genre)
     return {"video_id": video_id, "title": title or "", "artist": artist or "",
             "album": album or "", "thumbnail": thumbnail, "duration": duration,
             "source": source, "genre": genre, "family": genre_map.family(genre) if genre else "",
@@ -79,7 +74,7 @@ def _rank_scores(cands, value_of):
 def own_candidates(store, now, state=None):
     songs = store.rec_query.library_songs()
     plays = store.rec_query.play_counts()
-    hard = store.rec_model.suppressed_keys("for_you", now) | store.rec_query.generated_track_keys()
+    hard = store.rec_model.suppressed_keys("for_you", now) | store.rec_eligibility.generated_track_keys()
     blocked = (state or {}).get("blacklist_genres") or []
     if blocked:
         hard |= store.rec_query.keys_in_genre_selection(blocked)
@@ -195,7 +190,7 @@ def _page_songs(page, fallback_name, limit=ARTIST_SONGS_LIMIT):
     return out
 
 
-def _artist_songs(client, name, limit=ARTIST_SONGS_LIMIT):
+def artist_songs(client, name, limit=ARTIST_SONGS_LIMIT):
     page, _ = _artist_page(client, name)
     return _page_songs(page, name, limit)
 
@@ -203,6 +198,12 @@ def _artist_songs(client, name, limit=ARTIST_SONGS_LIMIT):
 def _related_names(page, limit=RELATED_ARTISTS):
     rows = (((page or {}).get("related") or {}).get("results")) or []
     return [row.get("title") for row in rows[:limit] if row.get("title")]
+
+
+def artist_context(client: MusicClient, name: str) -> CandidateBatch:
+    """The seed's representative songs and neighborhood, including for legacy draft repair."""
+    page, _ = _artist_page(client, name)
+    return CandidateBatch(_page_songs(page, name, limit=5), _related_names(page, limit=GENRE_ARTISTS))
 
 
 def _genre_songs(client, genre, limit=GENRE_SEARCH_LIMIT):
@@ -272,7 +273,7 @@ def other_input_songs(client, kind, name, cap, store=None, decade=None):
     for artist in artists:
         if len(rows) >= cap:
             break
-        for row in _cap_per_artist(_artist_songs(client, artist), per_artist):
+        for row in _cap_per_artist(artist_songs(client, artist), per_artist):
             row["genre"] = row["genre"] or name
             rows.append(row)
     if not rows:

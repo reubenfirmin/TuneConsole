@@ -14,7 +14,7 @@ from yt_playlist.core.store import Store
 from yt_playlist.core.bridge import BridgeError
 from yt_playlist.core.runtime import Runtime
 from yt_playlist.web.app import create_app
-from tests.test_web import _FakeRuntime
+from tests.setup_support import _FakeRuntime
 from tests.web.test_setup_identities import CheckedClient
 
 pytestmark = pytest.mark.browser

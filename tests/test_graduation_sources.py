@@ -61,7 +61,7 @@ def test_play_source_is_weak():
     graduation.graduate_moods(s, ["song|band"], 1.0, 1000.0, source=rec_params.SOURCE_W_PLAY)
     fam = genre_map.family("Techno")
     assert f"genre:{fam}" not in s.rec_model.get_weights()   # below threshold -> no permanent nudge yet
-    assert abs(s.rec_surface.get_theme(f"genre:{fam}")) == rec_params.SOURCE_W_PLAY   # but ledger accumulated
+    assert abs(s.rec_signals.get_theme(f"genre:{fam}")) == rec_params.SOURCE_W_PLAY   # but ledger accumulated
 
 
 @pytest.mark.parametrize("legacy_pause", [False, True])
@@ -96,17 +96,17 @@ def test_explicit_genre_mute_survives_every_graduation_source(source):
         assert s.rec_model.get_weights(now=later)[axis] == 0.0
         assert scoring.discovery_facet_weight(s, "techno", later) is None
     # Each funnel actually crossed the threshold; this must not pass just because nothing learned.
-    assert any(row["axis"] == axis and row["source"] == source for row in s.rec_surface.graduation_audit_rows())
+    assert any(row["axis"] == axis and row["source"] == source for row in s.rec_signals.graduation_audit_rows())
 
 
 def test_play_exposure_idempotent_within_a_day():
     # Re-running the same fast sync the same UTC day must NOT re-count (the #46 regression guard).
     s, now, axis = _store_with_play_history("Techno", n=10)
     graduation.graduate_play_exposure(s, now)
-    score_after_first = s.rec_surface.get_theme(axis)
+    score_after_first = s.rec_signals.get_theme(axis)
     graduation.graduate_play_exposure(s, now)
     graduation.graduate_play_exposure(s, now)
-    assert s.rec_surface.get_theme(axis) == score_after_first, "same-day re-runs must not re-count"
+    assert s.rec_signals.get_theme(axis) == score_after_first, "same-day re-runs must not re-count"
 
 
 def test_play_exposure_stops_without_recent_plays():
@@ -143,18 +143,18 @@ def test_radio_only_listening_day_graduates_nothing():
     before = s.rec_model.get_weights(now=now).get(axis, 1.0)
     for d in range(8):
         graduation.graduate_play_exposure(s, now + d * day)
-    assert not s.rec_surface.get_theme(axis), "radio-only plays must not accrue ledger score"   # None = never bumped
+    assert not s.rec_signals.get_theme(axis), "radio-only plays must not accrue ledger score"   # None = never bumped
     assert s.rec_model.get_weights(now=now + 7 * day).get(axis, 1.0) == before, \
         "radio-only listening must not graduate a permanent weight"
 
 
 def test_play_graduated_day_roundtrip():
     s = _store_with_genre({"song|band": ("v1", "song", "band", "Techno")})
-    assert s.rec_surface.get_play_graduated_day("genre:techno") is None
-    s.rec_surface.set_play_graduated_day("genre:techno", "2026-06-25")
-    assert s.rec_surface.get_play_graduated_day("genre:techno") == "2026-06-25"
-    s.rec_surface.set_play_graduated_day("genre:techno", "2026-06-26")     # upsert, not duplicate
-    assert s.rec_surface.get_play_graduated_day("genre:techno") == "2026-06-26"
+    assert s.rec_signals.get_play_graduated_day("genre:techno") is None
+    s.rec_signals.set_play_graduated_day("genre:techno", "2026-06-25")
+    assert s.rec_signals.get_play_graduated_day("genre:techno") == "2026-06-25"
+    s.rec_signals.set_play_graduated_day("genre:techno", "2026-06-26")     # upsert, not duplicate
+    assert s.rec_signals.get_play_graduated_day("genre:techno") == "2026-06-26"
 
 
 def test_axis_weights_fold_standing_lean():

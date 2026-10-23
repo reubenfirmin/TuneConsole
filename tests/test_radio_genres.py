@@ -2,8 +2,8 @@
 import numpy as np
 import pytest
 
-from tests.test_radio_session import poc, play
-from yt_playlist.rec import embed, radio_tuning
+from tests.radio_session_support import poc, play
+from yt_playlist.rec import embedding_vectors as embed, radio_tuning
 from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, GENRE_POOL_LIMIT, RadioCandidates
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.rec.radio_genres import GenrePolicy, genre
@@ -32,7 +32,7 @@ def genre_pools(store):
         pools[mid] = rows
         bundles[mid] = {"wheelhouse": rows}
     store.modes.replace_modes(modes, retired_ids=[], now=1)
-    store.rec_surface.put_proposals("mode_bundles", bundles)
+    store.rec_proposals.put_proposals("mode_bundles", bundles)
     return pools
 
 

@@ -54,7 +54,7 @@ def test_similar_results_absorbs_the_row_bleed():
     container must give them room, or they overhang it, and overflow-y:auto forces overflow-x to
     compute to auto: a horizontal scrollbar. Measured: scrollWidth 500 vs clientWidth 494 before."""
     css = (Path(__file__).resolve().parents[1]
-           / "src/yt_playlist/web/static/app.css").read_text()
+           / "src/yt_playlist/web/static/song-actions.css").read_text()
     results = re.search(r"\.modal\.modal-similar #similar-results \{([^}]*)\}", css)
     assert results, "#similar-results rule missing"
     assert "padding-inline: 0.4rem" in results.group(1)

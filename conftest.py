@@ -12,6 +12,8 @@ import time
 
 import pytest
 
+pytest_plugins = ["ci_test_shards"]
+
 
 # Deliberately independent of checkout, cwd, TMPDIR, and pytest's cache directory.
 # Never unlink this file: waiters must keep referring to the same inode.

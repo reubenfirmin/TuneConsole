@@ -1,10 +1,12 @@
-from yt_playlist.rec import trend_rollups as tr
+from yt_playlist.rec import trend_insights as tr
+from yt_playlist.rec.trend_rollups import repetition_series
+from yt_playlist.rec.trend_statistics import latest_full_week_start, week_start
 
 
 def test_latest_full_week_excludes_in_progress():
     # weeks 0,7,14. now_day 21: 14+7=21<=21 -> full, latest 14. now_day 20: 14+7=21>20 -> latest 7.
-    assert tr._latest_full_week_start([0, 7, 14], 21) == 14
-    assert tr._latest_full_week_start([0, 7, 14], 20) == 7
+    assert latest_full_week_start([0, 7, 14], 21) == 14
+    assert latest_full_week_start([0, 7, 14], 20) == 7
 
 
 def test_emergence_fires_and_censors():
@@ -225,7 +227,7 @@ def test_rank_insights_drops_stale_zero_score():
 
 
 def test_detect_insights_excludes_generated_playlist_plays_from_repetition():
-    """Regression: detect_insights builds the repetition detector's series from a direct play_events
+    """Regression: the rollup builds the repetition detector's series from a direct play_events
     read, SEPARATE from the quarantined day_counts the other six detectors use. That read must apply
     the GENERATED_GROUP quarantine too, or the app's own recommendations -- played back from a
     generated playlist in machine-queued bursts with shrinking gaps -- register as the user
@@ -259,8 +261,8 @@ def test_detect_insights_excludes_generated_playlist_plays_from_repetition():
         trends = _Trends()
         history = _History()
 
-    got = tr.detect_insights(_Store(), day_counts=[], meta={}, artist_first={}, track_first={},
-                             now=29 * D)
+    got = tr.detect_insights(day_counts=[], meta={}, artist_first={}, floor_day=0,
+                             play_series=repetition_series(_Store()), now=29 * D)
     subjects = {g["subject"] for g in got if g["kind"] == "repetition"}
     assert "kr" in subjects, "user-driven repetition must still surface"
     assert "kg" not in subjects, "generated-playlist-only repetition must be quarantined"
@@ -281,7 +283,7 @@ def test_takeout_backfill_immune_to_first_day_eq_floor_day():
     # Aphex: a dramatic-looking ramp (1 play in the import week -> 40 plays in the latest full week),
     # 40 days after the import (<= EMERGENCE_MAX_AGE_DAYS(42)). Without the first_day guard this would
     # fire: 40 >= EMERGENCE_MIN_LATEST(8) and 40 >= EMERGENCE_GROWTH(3.0) * 1. It must not.
-    w0 = tr.week_start(floor_day)
+    w0 = week_start(floor_day)
     now_day = floor_day + 40
     aw = {"Aphex": {w0: 1, w0 + 35: 40}}
     assert tr.detect_emergence(aw, artist_first, floor_day=floor_day, now_day=now_day) == []

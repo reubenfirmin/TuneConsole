@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 from yt_playlist.core.store import Store
-from yt_playlist.rec import embed, taste_modes as tm
+from yt_playlist.rec import embedding_vectors as embed, taste_modes as tm
 
 
 @pytest.fixture

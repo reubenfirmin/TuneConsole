@@ -130,7 +130,7 @@ def test_edges_connect_out_of_corpus_artist():
         _playlist(s, iid, f"PA{p}", clusterA)
     model_support.build_collaborative_artist_model(s, dim=4)
     # Gamma is out of corpus (no track, no vector) but Last.fm relates A0 -> Gamma strongly.
-    s.rec_surface.cache_similar(s.artists.key("A0"), [["Gamma", 0.9]], now=1.0)
+    s.artist_similarity.cache_similar(s.artists.key("A0"), [["Gamma", 0.9]], now=1.0)
     nbrs = [a for a, _ in artist_model.artist_neighbors(s, "A0", topn=10)]
     assert normalize("Gamma") in nbrs        # edge-only candidate is reachable
 
@@ -188,7 +188,7 @@ def test_track_candidates_include_out_of_corpus():
     for p in range(3):
         _playlist(s, iid, f"PA{p}", clusterA)
     model_support.build_collaborative_artist_model(s, dim=4)
-    s.rec_surface.cache_similar(s.artists.key("A0"), [["Gamma", 0.9]], now=1.0)        # A0 -> Gamma edge
+    s.artist_similarity.cache_similar(s.artists.key("A0"), [["Gamma", 0.9]], now=1.0)        # A0 -> Gamma edge
     s.discovery.upsert_discovered_track("song x|gamma", "vg", "Song X", "Gamma", "", None, "Techno", None, "src", 1.0)
     cands = artist_model.artist_track_candidates(s, ["A0"], topn=10)
     arts = {normalize(c["artist"]) for c in cands}
@@ -228,7 +228,7 @@ def test_complete_playlist_pulls_out_of_corpus():
     s.playlists.set_playlist_tracks(target, [cluster[0]])               # playlist of just A0
     s.tracks.set_track_genre(cluster[0], "Techno")
     model_support.build_collaborative_artist_model(s, dim=4)
-    s.rec_surface.cache_similar(s.artists.key("A0"), [["Gamma", 0.9]], now=1.0)
+    s.artist_similarity.cache_similar(s.artists.key("A0"), [["Gamma", 0.9]], now=1.0)
     s.discovery.upsert_discovered_track("song x|gamma", "vg", "Song X", "Gamma", "", None, "Techno", None, "src", 1.0)
 
     sugg = surfaces.complete_playlist(s, target, now=1.0)

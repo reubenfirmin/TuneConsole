@@ -75,12 +75,12 @@ def test_quarantine_and_explicit_adoption_agree_across_all_evidence_reads(store)
     store.playlists.mark_generated_playlist('generated')
     store.playlists.set_playlist_group('generated', 'Favorites')
 
-    assert pid in store.rec_query.excluded_playlist_ids()
+    assert pid in store.rec_eligibility.excluded_playlist_ids()
     assert not store.cluster_evidence.connection(child, [path]).playlists
     assert not store.cluster_evidence.seed_matches('Ritmo generated').playlists
 
     store.playlists.adopt_generated_playlist('generated')
-    assert pid not in store.rec_query.excluded_playlist_ids()
+    assert pid not in store.rec_eligibility.excluded_playlist_ids()
     assert store.cluster_evidence.connection(child, [path]).playlists[0].playlist_id == pid
     assert store.cluster_evidence.seed_matches('Ritmo generated').playlists[0].count == 1
 

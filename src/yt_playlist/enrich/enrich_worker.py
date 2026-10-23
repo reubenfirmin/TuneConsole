@@ -143,14 +143,14 @@ class EnrichWorker:
         config = enrichment.load_config(store)
         registry = getattr(self.waterfall_fn, "keywords", {}).get("registry", REGISTRY)
         configuration = enrichment.provider_configuration(store, registry, config)
-        store.enrichment.reconcile_provider_configuration(configuration)
+        store.enrichment_state.reconcile_provider_configuration(configuration)
         providers = [name for name, p in configuration.items() if p["status"] == "available"]
         with self._lock:
             priority = list(self._priority)
             priority_revision = self._priority_revision
         stale_before = self.ctx.now_fn() - self._resweep_days() * 86400
         radio_stale_before = max(stale_before, self.ctx.now_fn() - RADIO_RETRY_SECONDS)
-        batch = store.enrichment.priority_enrich_batch(priority, min(limit, 24), radio_stale_before,
+        batch = store.enrichment_queue.priority_enrich_batch(priority, min(limit, 24), radio_stale_before,
             providers=providers, now=self.ctx.now_fn()) if priority else []
         if batch:
             scope = "radio"
@@ -163,26 +163,26 @@ class EnrichWorker:
                     on_progress=lambda event: self._record_activity(warning=event["text"]))
             finally:
                 self._busy = False
-            batch = store.enrichment.next_enrich_batch(limit, providers=providers, now=self.ctx.now_fn())
+            batch = store.enrichment_queue.next_enrich_batch(limit, providers=providers, now=self.ctx.now_fn())
         if batch:
             self._had_work = True
         else:
-            if self._had_work and not store.enrichment.queue_remaining():
+            if self._had_work and not store.enrichment_reports.queue_remaining():
                 store.settings.set_setting("enrich_caught_up_at", str(self.ctx.now_fn()))
                 self._had_work = False
             stale_before = self.ctx.now_fn() - self._resweep_days() * 86400
-            batch = store.enrichment.resweep_batch(limit, stale_before, providers=providers, now=self.ctx.now_fn())
+            batch = store.enrichment_queue.resweep_batch(limit, stale_before, providers=providers, now=self.ctx.now_fn())
             scope = "refresh"
         if not batch:
             with self._lock:
                 self._activity = ({**self._activity, "state": "waiting",
                                    "text": "Pending provider retries are deferred; other eligible work continues."}
-                                  if store.enrichment.queue_remaining() else {})
+                                  if store.enrichment_reports.queue_remaining() else {})
             return art_completed
         if scope == "queue":
             for track in batch:
                 if track.get("last_enriched_at") is not None:
-                    track["provider_jobs"] = store.enrichment.enrichment_provider_jobs(track["recording_id"])
+                    track["provider_jobs"] = store.enrichment_state.enrichment_provider_jobs(track["recording_id"])
         completed = self._run_batch(batch, scope, priority_revision)
         if completed:
             with self._lock:
@@ -211,7 +211,7 @@ class EnrichWorker:
         batch_keys = {t['job_id'] for t in batch}
 
         def mark(keys):
-            self.ctx.store.enrichment.mark_recordings_enriched(keys, self.ctx.now_fn())
+            self.ctx.store.enrichment_queue.mark_recordings_enriched(keys, self.ctx.now_fn())
 
         def sink_for(track):
             return TrackSink(self.ctx.store, track)

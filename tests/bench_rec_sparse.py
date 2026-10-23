@@ -19,7 +19,7 @@ def measure(n, dim=48):
 
     import numpy as np
     from yt_playlist.core.numerics import limit_native_threads
-    from yt_playlist.rec import embed, ppr
+    from yt_playlist.rec import embedding_training as embed, ppr
 
     limit_native_threads()
     # Album-sized groups, overlapping playlists, and shorter listening sessions;
@@ -36,7 +36,7 @@ def measure(n, dim=48):
     started = time.monotonic()
     actual_keys, vectors = embed.build_vectors_from_baskets(baskets, dim=dim)
     embedded = time.monotonic()
-    store = SimpleNamespace(rec_query=SimpleNamespace(rec_baskets=lambda: baskets))
+    store = SimpleNamespace(rec_evidence=SimpleNamespace(rec_baskets=lambda: baskets))
     _, transition, _ = ppr.build_transition(store)
     for mode in range(6):
         result = ppr.ppr_rank(transition, range(mode, n, 6), iters=50, tol=1e-6)

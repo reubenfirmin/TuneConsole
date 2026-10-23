@@ -12,7 +12,7 @@ import pytest
 
 from yt_playlist.core.activity import Activity, WorkClosing
 from yt_playlist.core.store import Store
-from yt_playlist.rec import artist_model, embed, model_refresh, mode_surfaces, rec_params, taste_modes
+from yt_playlist.rec import artist_model, embedding_training as embed, model_refresh, mode_surfaces, rec_params, taste_modes
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
 from tests import model_support

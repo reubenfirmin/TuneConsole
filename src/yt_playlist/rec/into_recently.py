@@ -17,8 +17,7 @@ from yt_playlist.providers.base import LookupUnavailable
 
 FAVORITE_TOP_N = 15        # all-time top artists treated as settled favorites (excluded)
 GENRE_OBVIOUS_SHARE = 0.20  # a genre at or above this share of the library is fully "obvious"
-PREWARM_POOL = 12          # how many top subjects RecWorker pre-fetches wiki cards for, so several
-                           # are warm at once and the card can erode through them (see subjects_for_epoch)
+PREWARM_POOL = 12          # bound cached candidates for exposure-aware, held story editions
 MAX_STORIES = 9
 MAX_SUMMARY_FETCHES = 3    # network lookups per worker pass; yield between small batches
 MAX_CANDIDATES = 48
@@ -151,38 +150,12 @@ def _variety_order(subjects, appearances, now):
     return [subject for _, subject in sorted(enumerate(subjects), key=priority)]
 
 
-def _is_warm(store, subj, now) -> bool:
-    """True if this subject already has a usable (fresh, found, non-empty) Wikipedia card cached, so
-    the route can render it without a live fetch. The RecWorker prewarm keeps the top of the pool warm."""
-    row = store.wiki.get(subj["subject"])
-    return bool(row and store.wiki.is_fresh(row, now) and row["found"] and row["extract"])
-
-
-def subjects_for_epoch(store, now, epoch=0) -> list:
-    """Ordered subject candidates for the route to try this epoch (first that resolves wins).
-
-    The card must erode like every other Home card. The buggy old behaviour only reordered the top 3
-    subjects, so when the strongest few didn't resolve to a Wikipedia page the walk collapsed onto the
-    single subject that did (e.g. 'techno' forever). Instead: rotate by `epoch` through the subjects
-    whose card is already WARM in the cache (one distinct subject per epoch), so the card cycles. Cold
-    (un-cached / stale) subjects follow in rank order as a fallback for a cold start before the prewarm
-    has run. Fresh negative-cache misses naturally fall in the tail and the route skips them."""
-    warm, rest = [], []
-    for subj in ranked_subjects(store, now):
-        (warm if _is_warm(store, subj, now) else rest).append(subj)
-    if warm:
-        off = epoch % len(warm)
-        warm = warm[off:] + warm[:off]
-    return warm + rest
-
-
 def prewarm_pool(store, now, fetch_fn=None, limit=PREWARM_POOL, *, subjects=None, fetch_limit=None) -> int:
     """Pre-fetch and cache Wikipedia cards for the top `limit` fresh subjects.
 
-    Run off the request path (by RecWorker, after a rebuild) so the Home 'into recently' card serves
-    from a warm cache instead of blocking on a live Wikipedia fetch when the rotation lands on a new
-    subject. Subjects already fresh in the cache are skipped; both hits and misses are written, so the
-    negative cache keeps the route from re-walking dead subjects. Returns the number fetched."""
+    RecWorker prepares connected story editions from these cached summaries, away from requests.
+    Subjects already fresh in the cache are skipped; both hits and misses are written, so failed
+    subjects are not fetched repeatedly. Returns the number fetched."""
     if fetch_fn is None:
         fetch_fn = wikipedia.fetch_summary
     fetched = 0
@@ -396,7 +369,7 @@ def _publish_pool(store, now):
     with store.read_snapshot() as snapshot:
         reader = snapshot.store
         ranked = ranked_subjects(reader, now)
-        previous = reader.rec_surface.get_proposals(SURFACE) or {}
+        previous = reader.rec_proposals.get_proposals(SURFACE) or {}
         if not isinstance(previous, dict):
             previous = {}
         same_edition = (previous.get('schema') == SCHEMA
@@ -404,7 +377,7 @@ def _publish_pool(store, now):
         # Freeze the exposure snapshot while this edition fills in. Seeing a
         # heading must not shuffle the article out from under someone reading it.
         edition_at = previous['edition_at'] if same_edition else now
-        appearances = previous.get('appearances', {}) if same_edition else reader.rec_surface.story_views()
+        appearances = previous.get('appearances', {}) if same_edition else reader.rec_ledger.story_views()
         familiar = _familiar_genres(reader, now)
         groups = _connected_subjects(reader, _variety_order(ranked, appearances, now), familiar, now)
         subjects = _fetch_plan(reader, groups)
@@ -450,7 +423,7 @@ def _publish_pool(store, now):
                                    if s['subject'] in appearances},
                    "cards": cards, "pending": pending}
         encoded = json.dumps(payload, separators=(",", ":"))
-        if not snapshot.publish(lambda: store.rec_surface.publish_prepared_home(encoded, now, surface=SURFACE)):
+        if not snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(encoded, now, surface=SURFACE)):
             return None
         return subjects, pending
 
@@ -475,7 +448,7 @@ def prepare(store, now, fetch_fn=None):
 def load(store, now, epoch=0, schedule=lambda: None):
     """Serve complete prepared stories; opening a tab never ranks or contacts Wikipedia."""
     try:
-        payload = store.rec_surface.get_proposals(SURFACE)
+        payload = store.rec_proposals.get_proposals(SURFACE)
         valid = (isinstance(payload, dict) and payload.get("schema") == SCHEMA
                  and isinstance(payload.get("cards"), list)
                  and len(payload["cards"]) <= PREWARM_POOL

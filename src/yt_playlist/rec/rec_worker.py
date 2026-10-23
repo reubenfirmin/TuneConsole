@@ -11,7 +11,8 @@ import time
 import traceback
 
 from yt_playlist.rec import model_selection
-from yt_playlist.core.activity import activity_for, cancellable_work, check_stopping, WorkClosing
+from yt_playlist.core.activity import (activity_for, cancellable_work, check_stopping, WorkClosing,
+                                       work_budget, WorkBudgetExceeded)
 from yt_playlist.core.work_diagnostics import work_span
 from yt_playlist.core.numerics import limit_native_threads
 from yt_playlist.rec.worker_queue import Job, PendingJobs
@@ -43,6 +44,10 @@ class RecWorker:
         self.projections = Projections(ctx.store, ctx.now_fn, ctx.logger, accepting=self._accepting,
                                        schedule=self._schedule_projections, execute=self._stage)
         self.tasks = ServingTasks(ctx, self._stage)
+        from yt_playlist.rec.progressive import Preparation
+        self.preparation = Preparation(ctx.store)
+        from yt_playlist.rec.model_refresh import FitCache
+        self._fit_cache = FitCache()
         if self.enabled:
             ctx.store.background_measurement = self.enqueue_measurement
 
@@ -76,12 +81,15 @@ class RecWorker:
         if self.busy:
             return
         now = time.monotonic()
+        if (now >= self.jobs.retry[Job.PREPARE].retry_at
+                and self.preparation.due(self.ctx.now_fn())):
+            self._schedule(full=False, prepare=True)
         state = self.jobs.retry[Job.FULL]
         if state.dirty or self.ctx.store.rec_refresh.has_pending_changes():
-            if now >= state.retry_at:
+            if now >= state.retry_at and self.preparation.full_due(self.ctx.now_fn()):
                 self.trigger()
         if (now >= self.jobs.retry[Job.BUNDLES].retry_at
-              and (not self.ctx.store.rec_surface.get_proposals('mode_bundles')
+              and (not self.ctx.store.rec_proposals.get_proposals('mode_bundles')
                    or candidate_refresh.due(self.ctx.store, self.ctx.now_fn()))):
             # Decay/expiry changes rankings, not model fitting inputs.
             self._schedule(full=False, bundles=True)
@@ -132,7 +140,7 @@ class RecWorker:
     def _gc_loop(self):
         """Daily sweep that deletes generated playlists you never played. An initial pass runs soon
         after start so a daily-restarted app still collects them, then once per gc_tick_s."""
-        from yt_playlist.library import executor
+        from yt_playlist.library import playlist_generated
         from yt_playlist.rec import discover
         if self._stop.wait(self.gc_initial_s):
             return
@@ -141,7 +149,7 @@ class RecWorker:
                 clients = self.ctx.client_provider() or {}
                 if clients:        # no clients configured (e.g. pre-setup) -> nothing to delete remotely
                     collected = self.work.wrap("generated-playlist collection",
-                        executor.gc_generated_playlists, self.ctx.store, clients, self.ctx.now_fn())()
+                        playlist_generated.gc_generated_playlists, self.ctx.store, clients, self.ctx.now_fn())()
                     if collected:
                         self.ctx.logger.info("GC: collected %d unplayed generated playlist(s): %s",
                                              len(collected), ", ".join(c["title"] for c in collected))
@@ -205,7 +213,7 @@ class RecWorker:
 
     def trigger(self):
         """Coalesce source changes into a background refresh of the existing models."""
-        self._schedule(full=True)
+        self._schedule(full=True, prepare=True)
 
     def trigger_mode_refresh(self):
         """Initialize missing genre groups and bundles; reuse an already prepared model."""
@@ -250,7 +258,7 @@ class RecWorker:
         keys.update(key for vid in video_ids if (key := self.ctx.store.tracks.identity_key_for_video(vid)))
         if keys:
             self.ctx.store.rec_refresh.enqueue()
-            self._schedule(full=True)
+            self._schedule(full=True, prepare=True)
 
     def trigger_story_refresh(self):
         """A cold reading tab queues article preparation, never a synchronous provider lookup."""
@@ -269,11 +277,11 @@ class RecWorker:
         return self._schedule(full=False, **dict.fromkeys(kinds, True))
 
     def _schedule(self, *, full, modes=False, keys=(), ratings=False, trends=False, cleanup=False, bundles=False, home=False,
-                  stories=False, artist_images=()):
+                  stories=False, artist_images=(), prepare=False):
         with self._lock:
             if not self._accepting():
                 return False
-            requested = {Job.FULL: full, Job.MODES: modes, Job.RATINGS: ratings, Job.TRENDS: trends,
+            requested = {Job.FULL: full, Job.MODES: modes, Job.RATINGS: ratings, Job.PREPARE: prepare, Job.TRENDS: trends,
                          Job.CLEANUP: cleanup, Job.BUNDLES: bundles, Job.HOME: home, Job.STORIES: stories,
                          Job.ARTWORK: artist_images, Job.CONTENT: keys}
             for job, payload in requested.items():
@@ -345,6 +353,11 @@ class RecWorker:
                 except Exception:
                     self.ctx.logger.warning("rating subject update failed", exc_info=True)
             try:
+                if Job.PREPARE in batch:
+                    self._prepare_content()
+                if full and not self.preparation.full_due(self.ctx.now_fn()):
+                    self.jobs.retry[Job.FULL].dirty = False
+                    full = False
                 if full:
                     self._do_rebuild()           # includes genre groups and Home bundles
                 elif modes:
@@ -372,7 +385,7 @@ class RecWorker:
             if keys:
                 try:
                     self.ctx.store.rec_refresh.enqueue()
-                    self._schedule(full=True)
+                    self._schedule(full=True, prepare=True)
                 except WorkClosing:
                     raise
                 except Exception:
@@ -447,10 +460,24 @@ class RecWorker:
 
     def _refresh_modes(self):
         """Serve saved results immediately; prepare missing or changed state in the worker."""
-        if self.ctx.store.rec_refresh.has_pending_changes():
+        if self.ctx.store.rec_refresh.has_pending_changes() and self.preparation.full_due(self.ctx.now_fn()):
             self._rebuild()
         else:
             self._refresh_bundles()
+
+    def _prepare_content(self):
+        """One bounded slice, then yield to ratings, summaries and foreground work."""
+        state = self.jobs.retry[Job.PREPARE]
+        if time.monotonic() < state.retry_at:
+            return
+        state.started(time.monotonic())
+        with self.model_lock:
+            now = self.ctx.now_fn()
+            captured = self._stage('content input slice', self.preparation.capture, now)
+            fitted = self._stage('content basis step', self.preparation.fit, now)
+        state.succeeded()
+        if captured or fitted:
+            self._schedule(full=False, bundles=True)
 
     def _do_rebuild(self):
         # Source removal waits for publication, then clears every derived cache
@@ -514,8 +541,20 @@ class RecWorker:
                         self.ctx.now_fn(), now_fn=self.ctx.now_fn)
             restored = store.model_selection.restore_model_selection(int(restore), self.ctx.now_fn())
             store.settings.delete_setting('rec_selection_restore')
-        result = self._stage('recommendation models', model_refresh.rebuild, store, self.ctx.now_fn(),
-                             keep_collaborative=restored)
+        checkpoint = self.preparation.full_checkpoint(self.ctx.now_fn())
+        def fit():
+            try:
+                with work_budget(20):
+                    return model_refresh.rebuild(store, self.ctx.now_fn(), keep_collaborative=restored,
+                                                memory_bytes=self.preparation.budget.full_memory_bytes,
+                                                fit_cache=self._fit_cache)
+            except model_refresh.MemoryBudgetExceeded:
+                store.maintenance_diagnostics.record('deferred', reasons=('full-fit-memory-budget',))
+                return None
+            except WorkBudgetExceeded:
+                store.maintenance_diagnostics.record('deferred', reasons=('full-fit-time-budget',))
+                return None
+        result = self._stage('recommendation models', fit)
         if result is None:
             self.ctx.logger.debug('rec models deferred: inputs changed during fitting; retaining published model')
             with self._lock:
@@ -526,6 +565,7 @@ class RecWorker:
             return
         with self._lock:
             state.succeeded()
+        self.preparation.completed_full(checkpoint)
         try:
             self._stage('model selection', model_selection.maintain, store, self.ctx.now_fn(), now_fn=self.ctx.now_fn)
         except WorkClosing:

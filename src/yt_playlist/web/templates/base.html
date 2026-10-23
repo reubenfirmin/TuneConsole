@@ -12,9 +12,26 @@
   <!-- Token layer first, then shared components and feature modules in cascade order. -->
   <link rel="stylesheet" href="/static/tokens.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/components.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/tables.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/song-actions.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/genre-controls.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/visualization-tooltips.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/playback.css?v={{ asset_v }}">
+  {% if path == '/' or path.startswith(('/playlist', '/album', '/artist', '/charts', '/generated', '/move', '/cleanup', '/merge', '/compare', '/dupe', '/taste', '/road_trip')) %}
+  <link rel="stylesheet" href="/static/library-controls.css?v={{ asset_v }}">
+  {% endif %}
   {% if path == '/' or path.startswith(('/playlist', '/album', '/artist', '/generated', '/taste', '/road_trip')) %}
+  <link rel="stylesheet" href="/static/generated-mixes.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/mix-feedback.css?v={{ asset_v }}">
+  {% endif %}
+  {% if path == '/' or path.startswith(('/playlist', '/album', '/artist')) %}
+  <link rel="stylesheet" href="/static/home-discovery.css?v={{ asset_v }}">
+  {% endif %}
+  {% if path == '/' %}
   <link rel="stylesheet" href="/static/home.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/home-board.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/home-tuning.css?v={{ asset_v }}">
   {% endif %}
   {% if path == '/' or path.startswith('/clusters') %}
   <link rel="stylesheet" href="/static/genre-combo.css?v={{ asset_v }}">
@@ -22,17 +39,43 @@
   {% if path == '/' or path.startswith('/setup') %}
   <link rel="stylesheet" href="/static/onboarding.css?v={{ asset_v }}">
   {% endif %}
-  {% if path == '/' or path.startswith(('/taste', '/charts', '/trends', '/discovery', '/enrich', '/road_trip', '/playlist', '/album', '/artist', '/generated')) %}
-  <link rel="stylesheet" href="/static/analytics.css?v={{ asset_v }}">
+  {% if path == '/' %}
+  <link rel="stylesheet" href="/static/home-observation.css?v={{ asset_v }}">
+  {% endif %}
+  {% if path.startswith('/taste') %}
+  {# Panels arrive through HTMX, so their styles belong to the initial Taste document. #}
+  <link rel="stylesheet" href="/static/visualizations.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/taste-primitives.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/taste-controls.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/taste-learning.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/taste-evidence.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/taste-profile.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/taste-health.css?v={{ asset_v }}">
+  {% endif %}
+  {% if path == '/album' or path.startswith(('/enrich', '/playlist/', '/album/', '/artist/')) %}
+  <link rel="stylesheet" href="/static/enrichment-conflicts.css?v={{ asset_v }}">
+  {% endif %}
+  {% if path.startswith('/enrich') %}
+  <link rel="stylesheet" href="/static/enrichment.css?v={{ asset_v }}">
+  {% endif %}
+  {% if path.startswith('/road_trip') %}
+  <link rel="stylesheet" href="/static/road-trip.css?v={{ asset_v }}">
   {% endif %}
   {% if path == '/' or path.startswith(('/playlist', '/album', '/artist', '/charts', '/generated')) %}
   <link rel="stylesheet" href="/static/library.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/library-tables.css?v={{ asset_v }}">
+  {% endif %}
+  {% if path in ('/artist', '/album') or path.startswith('/playlist/') %}
+  <link rel="stylesheet" href="/static/library-entities.css?v={{ asset_v }}">
   {% endif %}
   {% if path.startswith('/charts') %}
   <link rel="stylesheet" href="/static/charts.css?v={{ asset_v }}">
   {% endif %}
   {% if path.startswith(('/cleanup', '/move', '/merge', '/compare', '/dupe', '/enrich', '/actions', '/network', '/setup', '/taste', '/discovery')) %}
   <link rel="stylesheet" href="/static/workflows.css?v={{ asset_v }}">
+  {% endif %}
+  {% if path.startswith('/discovery') %}
+  <link rel="stylesheet" href="/static/discovery.css?v={{ asset_v }}">
   {% endif %}
   {% if path.startswith(('/merge', '/compare', '/dupe')) %}
   <link rel="stylesheet" href="/static/merge.css?v={{ asset_v }}">
@@ -59,9 +102,37 @@
   <!-- CSS token -> canvas bridge; must load before any script that paints. -->
   <script src="/static/theme.js?v={{ asset_v }}"></script>
   <script src="/static/playback-status.js?v={{ asset_v }}"></script>
+  {% set setup_pending = initial_setup_pending() %}
+  {% if setup_pending %}
+  <link rel="stylesheet" href="/static/setup-status.css?v={{ asset_v }}">
+  <script src="/static/setup-status.js?v={{ asset_v }}"></script>
+  {% endif %}
+  <script src="/static/playback-controls.js?v={{ asset_v }}"></script>
   <script src="/static/app.js?v={{ asset_v }}"></script>
+  <script src="/static/player-card.js?v={{ asset_v }}"></script>
   <script src="/static/song-actions.js?v={{ asset_v }}"></script>
+  {# Shared song dialogs can be opened from any page, including HTMX results. #}
+  <script src="/static/genre-dialog.js?v={{ asset_v }}"></script>
+  <script src="/static/visualization-tooltips.js?v={{ asset_v }}"></script>
+  {% if path.startswith(('/playlist', '/album', '/artist', '/cleanup', '/taste')) %}
+  <script src="/static/table-controls.js?v={{ asset_v }}"></script>
+  {% endif %}
+  {% if path.startswith(('/playlist', '/move')) %}
+  <script src="/static/library-playlists.js?v={{ asset_v }}"></script>
+  {% endif %}
+  {% if path.startswith(('/playlist/', '/album')) %}
+  <script src="/static/enrichment-panel.js?v={{ asset_v }}"></script>
+  {% endif %}
+  {% if path == '/' or path.startswith(('/playlist/', '/album', '/artist', '/taste')) %}
+  <script src="/static/track-tables.js?v={{ asset_v }}"></script>
+  {% endif %}
+  {% if path == '/' or path.startswith('/road_trip') %}
+  <script src="/static/playlist-generation.js?v={{ asset_v }}"></script>
+  {% endif %}
   {% if path == '/' %}
+  <script src="/static/home-board.js?v={{ asset_v }}"></script>
+  <script src="/static/home-tuning.js?v={{ asset_v }}"></script>
+  <script src="/static/home-discovery.js?v={{ asset_v }}"></script>
   <script src="/static/home.js?v={{ asset_v }}"></script>
   <script src="/static/app-update.js?v={{ asset_v }}"></script>
   {% endif %}
@@ -71,14 +142,17 @@
   {% if path.startswith('/setup') %}
   <script src="/static/setup.js?v={{ asset_v }}"></script>
   {% endif %}
-  {# Clusters canvas component (templates/clusters.html). Split out of app.js; a classic global script
-     like app.js, so load order between them doesn't matter as long as both precede Alpine. #}
+  {# Classic canvas owners precede their Alpine adapter; all are feature-only. #}
   {% if path.startswith('/clusters') %}
+  <script src="/static/cluster-state.js?v={{ asset_v }}"></script>
+  <script src="/static/cluster-storage.js?v={{ asset_v }}"></script>
+  <script src="/static/cluster-renderer.js?v={{ asset_v }}"></script>
   <script src="/static/cluster.js?v={{ asset_v }}"></script>
   {% endif %}
   <script defer src="/static/vendor/alpine.min.js"></script>
 </head>
 <body>
+  {% if setup_pending %}{% include "_partials/setup_status.html" %}{% endif %}
   <header class="topbar">
     <a class="brand" href="/" aria-label="TuneConsole home">
       <img class="brand-mark" src="/static/favicon.svg?v={{ asset_v }}" width="28" height="28" alt="">

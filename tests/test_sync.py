@@ -1,6 +1,7 @@
 from yt_playlist.library.sync import sync_identity, sync_all
 from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.library import sync as sync_mod
+from yt_playlist.library import playlist_generated
 from tests.conftest import FakeClient, _track
 
 
@@ -195,7 +196,7 @@ def test_sync_preserves_generated_playlist_created_during_library_fetch(store):
     class GeneratingClient(FakeClient):
         def get_library_playlists(self, limit=25):
             listing = super().get_library_playlists(limit)
-            self.generated = executor.create_generated_playlist(
+            self.generated = playlist_generated.create_generated_playlist(
                 store, same_title,
                 [{"video_id": "new-song", "title": "New song", "artist": "Artist", "duration": 200}],
                 self, now=101, identity_id=iid)
@@ -254,3 +255,56 @@ def test_failed_playlist_logs_context_preserves_tracks_and_reports_partial_sync(
     assert "RAW_RESPONSE_MARKER" not in caplog.text
     assert "2 playlists listed, 1 refreshed, 1 skipped" in caplog.text
     assert events[-1]["text"] == "Music brand: partial (1 playlists refreshed, 1 skipped)"
+
+
+def test_first_sync_prioritizes_small_seed_without_certifying_partial_reads(store, monkeypatch):
+    import json
+    from yt_playlist.util.retry import with_retry
+    from yt_playlist.library.sync_outcomes import sync_due
+
+    monkeypatch.setattr(sync_mod, "with_retry", lambda fn, **kwargs:
+                        with_retry(fn, sleep=lambda _: None, **kwargs))
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    listing = [{"playlistId": "LM", "title": "Liked Music", "count": 400},
+               {"playlistId": "BAD", "title": "Unreadable mix"},
+               {"playlistId": "LARGE", "title": "Large", "count": 300},
+               {"playlistId": "SMALL", "title": "Small", "count": "2"},
+               {"playlistId": "EMPTY", "title": "Empty", "count": 0}]
+
+    class FirstSyncClient(FakeClient):
+        def __init__(self):
+            super().__init__(playlists=listing, tracks={
+                "LM": [_track("partial", "Partial song", "Artist")],
+                "SMALL": [_track("seed", "Seed song", "Artist")],
+                "LARGE": [_track("large", "Large song", "Artist")]})
+            self.reads = []
+
+        def get_playlist(self, playlistId, limit=None):
+            self.reads.append(playlistId)
+            if playlistId == "BAD":
+                raise ValueError("unsupported response")
+            detail = super().get_playlist(playlistId, limit)
+            if playlistId == "LM":
+                detail["trackCount"] = 400
+            return detail
+
+    client = FirstSyncClient()
+    result = sync_all(store, {iid: client}, now=1000, automatic=True)
+    assert client.reads == ["SMALL", "LARGE", "BAD", "EMPTY", "LM"]
+    resources = result["accounts"][str(iid)]["resources"]
+    assert resources["playlist_listing"]["entries"] == listing
+    assert resources["playlists"]["items"]["LM"]["status"] == "partial"
+    assert resources["playlists"]["items"]["BAD"]["status"] == "failed"
+    assert result["status"] == "partial"
+    assert store.settings.get_setting("last_sync_at") is None
+    assert {row["video_id"] for row in store.conn.execute("SELECT video_id FROM playable_library_tracks")} == {
+        "seed", "large"}
+    assert not sync_due(store, 1001, 86400)
+    assert sync_due(store, 1300, 86400)
+
+    # The durable retry repairs only missing resources, with the normal retry count.
+    client.reads.clear()
+    sync_all(store, {iid: client}, now=1300, automatic=True)
+    assert client.reads == ["LM", "BAD", "BAD", "BAD"]
+    state = json.loads(store.settings.get_setting("library_sync_state"))
+    assert state["accounts"][str(iid)]["resources"]["playlists"]["items"]["SMALL"]["last_success_at"] == 1000

@@ -27,6 +27,49 @@ def _read(client, playlist_id):
     return validate_playlist(detail)["tracks"]
 
 
+def mutation_status(result):
+    """The two supported acknowledgement shapes; absent/unknown shapes require readback."""
+    if isinstance(result, dict):
+        if result.get("error"):
+            return "STATUS_FAILED"
+        result = result.get("status")
+    if result is False:
+        return "STATUS_FAILED"
+    return result if isinstance(result, str) else None
+
+
+def same_playlist_items(actual, expected):
+    """Compare ordered occurrences, including every known playlist-scoped item handle."""
+    return len(actual) == len(expected) and all(
+        item["videoId"] == before["videoId"] and (
+            not before.get("setVideoId") or item.get("setVideoId") == before["setVideoId"])
+        for item, before in zip(actual, expected))
+
+
+def confirm_playlist_write(write, read, matches, operation):
+    """Issue a write once, then reconcile a missing/lost acknowledgement with one readback."""
+    error = None
+    try:
+        result = write()
+    except Exception as exc:
+        error, result = exc, None
+    status = mutation_status(result)
+    if status == "STATUS_SUCCEEDED":
+        return
+    if status is not None:
+        raise ValueError(f"YouTube rejected a playlist {operation}. Re-sync before trying again.")
+    try:
+        confirmed = matches(read())
+    except Exception as exc:
+        raise ValueError(f"YouTube did not confirm a playlist {operation}; its outcome is unconfirmed. "
+                         "Re-sync before trying again; "
+                         "the write was not retried.") from exc
+    if not confirmed:
+        raise ValueError(f"YouTube did not confirm a playlist {operation}; its outcome is unconfirmed. "
+                         "Re-sync before trying again; "
+                         "the write was not retried.") from error
+
+
 def apply_playlist_permutation(client, playlist_id, tracks, target, *, movable=None):
     """Execute a caller-built permutation of the current occurrence indices.
 
@@ -55,22 +98,14 @@ def apply_playlist_permutation(client, playlist_id, tracks, target, *, movable=N
         following = tracks[successor].get("setVideoId") if successor is not None else None
         if not handle or (successor is not None and not following):
             raise ValueError("YouTube has not exposed playlist ordering handles. Retry to continue.")
-        result = client.edit_playlist(playlist_id, moveItem=(handle, following)
-                                      if successor is not None else handle)
-        status = result.get("status") if isinstance(result, dict) else result
-        if status is not None and status != "STATUS_SUCCEEDED":
-            raise ValueError("YouTube rejected a playlist position change. Retry to continue.")
         expected = [occurrence for occurrence in order if occurrence != item]
         expected.insert(expected.index(successor) if successor is not None else len(expected), item)
-        if status is None:
-            confirmed = _read(client, playlist_id)
-            # Video IDs alone cannot distinguish repeated occurrences. Check every known handle.
-            if len(confirmed) != len(expected) or any(
-                    actual["videoId"] != tracks[occurrence]["videoId"] or (
-                        tracks[occurrence].get("setVideoId") and
-                        actual.get("setVideoId") != tracks[occurrence]["setVideoId"])
-                    for actual, occurrence in zip(confirmed, expected)):
-                raise ValueError("YouTube did not confirm a playlist position change. Retry to continue.")
+        confirm_playlist_write(
+            lambda: client.edit_playlist(playlist_id, moveItem=(handle, following)
+                                         if successor is not None else handle),
+            lambda: _read(client, playlist_id),
+            lambda actual: same_playlist_items(actual, [tracks[occurrence] for occurrence in expected]),
+            "position change")
         order = expected
 
 

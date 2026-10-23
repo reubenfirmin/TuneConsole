@@ -50,7 +50,7 @@ def test_resolve_overwrites_column_and_clears_conflict(store):
     # canonical column overwritten with the user's pick...
     assert store.conn.execute("SELECT genre FROM tracks WHERE id=?", (tid,)).fetchone()["genre"] == "Art Pop"
     # ...and the conflict no longer counts
-    assert store.enrichment.conflict_count_for_playlist(a) == 0
+    assert store.enrichment_reports.conflict_count_for_playlist(a) == 0
     assert "Nothing left to resolve" in r.text
 
 

@@ -37,9 +37,9 @@ def test_two_dislikes_do_not_graduate_artist_genre_or_era(store):
 
     w = store.rec_model.get_weights(now=100.0)
     for axis in ("artist:Billy Idol", "genre:jazz", "era:1980"):
-        assert store.rec_surface.get_theme(axis) is None
+        assert store.rec_signals.get_theme(axis) is None
         assert w.get(axis, 1.0) == 1.0
-    assert store.rec_surface.recent_graduations(limit=50) == []
+    assert store.rec_signals.recent_graduations(limit=50) == []
     assert store.rec_model.disliked_identity_keys() == {k1, k2}
 
 
@@ -57,8 +57,8 @@ def test_positive_graduate_moods_still_graduates_artist(store):
 
     w = store.rec_model.get_weights(now=2.0)
     assert w.get("artist:Coltrane", 1.0) > 1.0
-    assert store.rec_surface.get_theme("artist:Coltrane") == pytest.approx(0.8)   # 2.0 - 1.2 remainder
-    rows = store.rec_surface.recent_graduations(limit=50)
+    assert store.rec_signals.get_theme("artist:Coltrane") == pytest.approx(0.8)   # 2.0 - 1.2 remainder
+    rows = store.rec_signals.recent_graduations(limit=50)
     assert any(r["axis"] == "artist:Coltrane" for r in rows)
 
 
@@ -70,9 +70,9 @@ def test_negative_vibe_tap_also_leaves_permanent_facets_alone(store):
     graduation.graduate_moods(store, [k2], -1, now=2.0, source=source_w_vibe, source_label="mood")
 
     for axis in ("artist:Billy Idol", "genre:jazz", "era:1980"):
-        assert store.rec_surface.get_theme(axis) is None
+        assert store.rec_signals.get_theme(axis) is None
         assert store.rec_model.get_weights(now=2.0).get(axis, 1.0) == 1.0
-    assert store.rec_surface.recent_graduations(limit=50) == []
+    assert store.rec_signals.recent_graduations(limit=50) == []
 
 
 def test_repeat_dislikes_preserve_original_evidence_time(store):
@@ -80,7 +80,7 @@ def test_repeat_dislikes_preserve_original_evidence_time(store):
     graduation.apply_dislikes(store, {k1: "DISLIKE", k2: "DISLIKE"}, now=100.0)
     graduation.apply_dislikes(store, {k1: "DISLIKE", k2: "DISLIKE"}, now=200.0)
     assert set(store.rec_model.disliked_with_ts()) == {(k1, 100.0), (k2, 100.0)}
-    assert store.rec_surface.get_theme("genre:jazz") is None
+    assert store.rec_signals.get_theme("genre:jazz") is None
 
 
 def test_deliberate_negative_facet_steering_still_graduates(store):

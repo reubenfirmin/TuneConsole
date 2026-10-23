@@ -1,0 +1,49 @@
+/* Taste Model page */
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: 1.2rem; }
+.stat-grid > div { display: flex; flex-direction: column; gap: 0.2rem; }
+.stat-grid strong { font-family: var(--font-sans); font-size: 1.7rem; }
+.stat-grid span { color: var(--dim); font-size: var(--type-sm); }
+.bar-row { display: grid; grid-template-columns: 9rem 1fr 3rem; align-items: center; gap: 0.7rem; padding: 0.25rem 0; }
+.bar-label { color: var(--dim); font-size: var(--type-ui); }
+.bar-row .bar { height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+.bar-row .bar > i { display: block; height: 100%; background: var(--control-primary); }
+.bar-val { font-family: var(--font-mono); font-size: var(--type-xs); color: var(--faint); text-align: right; }
+.weight-row { display: flex; align-items: center; gap: 0.7rem; padding: 0.3rem 0; }
+.weight-row label { width: 9rem; text-transform: capitalize; }
+.weight-row input { width: 6rem; background: var(--bg-2); color: var(--text); border: 1px solid var(--border-2); border-radius: 6px; padding: 0.3rem 0.5rem; }
+
+/* --- Taste Model control panel (sliders, genre shares, live sample) --- */
+.knob-list { display: grid; gap: 1.125rem; }
+.knob { display: grid; gap: 0.35rem; }
+.knob-head { display: flex; align-items: center; gap: 0.6rem; }
+.knob-head label { font-weight: 600; min-width: 11rem; }
+.knob-sub { font-weight: 400; color: var(--faint); font-size: var(--type-sm); }
+.knob-head output { font-family: var(--font-mono); color: var(--accent-2); min-width: 3ch; text-align: right; }
+.knob-help { margin: 0; color: var(--dim); font-size: var(--type-ui); }
+.knob-reset { margin-left: auto; background: none; border: 1px solid var(--border-2); color: var(--faint);
+  border-radius: var(--radius-sm); cursor: pointer; padding: 0 0.45rem; line-height: 1.6; }
+.knob-reset:hover { color: var(--accent-2); border-color: var(--accent); }
+.knob-reset { display: inline-flex; align-items: center; justify-content: center;
+  min-width: 2rem; min-height: 2rem; }
+
+details.advanced { margin-top: 0.3rem; }
+details.advanced > summary { cursor: pointer; color: var(--accent-2); font-weight: 600; padding: 0.3rem 0; }
+details.advanced[open] > summary { margin-bottom: .9375rem; }
+details.advanced .knob { margin-bottom: 1.125rem; }
+
+.foryou-sample.stale #sample-body { opacity: 0.35; filter: grayscale(0.7); pointer-events: none; transition: opacity .2s ease; }
+.foryou-sample.stale .sample-note { color: var(--accent-2); }
+.sample-head { display: flex; align-items: center; gap: .8125rem; margin-bottom: .8125rem; }
+.sample-note { color: var(--dim); font-size: var(--type-ui); }
+.preview-list { margin: 0; padding-left: 1.2rem; display: grid; gap: 0.45rem; }
+.preview-list .preview-lane { display: inline-block; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--accent); background: var(--accent-soft); border-radius: 5px; padding: 0 0.4rem; margin-right: 0.5rem; }
+.preview-list .preview-reason { color: var(--dim); font-size: var(--type-ui); margin-left: 0.4rem; }
+.score-trace { margin: .35rem 0 .2rem; font-size: var(--type-ui); }
+.score-trace summary { color: var(--accent-2); cursor: pointer; }
+.trace-grid { display: grid; grid-template-columns: minmax(11rem, 1fr) auto; gap: .2rem .8rem;
+  max-width: 34rem; margin-top: .45rem; }
+.trace-grid strong { font-family: var(--font-mono); font-weight: 500; text-align: right; }
+.trace-contexts, .trace-note { margin: .4rem 0 0; }
+.routing-list .routing-row { grid-template-columns: 7rem minmax(13rem, .8fr) minmax(16rem, 1fr); }
+

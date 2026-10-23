@@ -8,6 +8,7 @@ from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.rec.radio_policy import CandidateView, FeedbackContext, FeedbackUpdate, PlaybackHistory
 from yt_playlist.web.radio_edits import RadioEdits
+from yt_playlist.web.radio_playlist_tail import TailView
 
 
 class Phase(StrEnum):
@@ -110,6 +111,40 @@ class Session:
         self.directions.feedback = update.strengths
         self.feedback_seen = set(update.seen)
         self.feedback_dirty = self.feedback_dirty or update.changed
+
+    def accept_tracks(self, tracks, now):
+        """Apply a confirmed queue under the caller's state lock, preserving heard positions."""
+        if [t['video_id'] for t in tracks] == [t['video_id'] for t in self.tracks]:
+            return
+        self.edits.recent_states = [state for state in self.edits.recent_states if now - state['at'] < 60]
+        self.edits.recent_states.append({'ids': [t['video_id'] for t in self.tracks], 'at': now})
+        current = self.tracks[self.position]['video_id'] if self.position >= 0 else None
+        past = {t['video_id'] for t in self.tracks[:self.furthest + 1]}
+        self.position = next((i for i, t in enumerate(tracks) if t['video_id'] == current), -1)
+        self.furthest = max((i for i, t in enumerate(tracks) if t['video_id'] in past), default=-1)
+        self.tracks = list(tracks)
+        self.selected = list(tracks)
+
+    def accept_mutation(self, result, now):
+        """Apply transaction results and transfer choice credit to an accepted upload."""
+        for substitution in result.substitutions:
+            requested, accepted = substitution.requested, substitution.accepted
+            self.candidates.retain([accepted])
+            self.rejected.add(requested['video_id'])
+            if self.directions:
+                self.directions.blocked.add(requested['video_id'])
+            choice = self.choices.pop(requested['video_id'], None)
+            if choice:
+                self.choices[accepted['video_id']] = choice
+        if result.tracks is not None:
+            self.accept_tracks(result.tracks, now)
+
+    def playlist_view(self, now):
+        self.edits.recent_states = [state for state in self.edits.recent_states if now - state['at'] < 60]
+        return TailView(tuple(self.tracks), self.position, self.furthest,
+                        frozenset(self.directions.blocked) if self.directions else frozenset(),
+                        self.candidates.by_video,
+                        tuple(tuple(state['ids']) for state in self.edits.recent_states), self.skip_requested)
 
     @property
     def starting(self):

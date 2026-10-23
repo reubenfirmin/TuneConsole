@@ -2,6 +2,7 @@
 <section class="home-status card card--status is-live global-now-playing" x-data="playerStatus()"
          x-init="$nextTick(() => mountNowPlayingDock())"
          @bridge-status.window="apply($event.detail)"
+         @playback-progress.window="applyProgress($event.detail)"
          @hashchange.window="currentLocation = location.href"
          @track-like-requested.window="requestLike($event)"
          @song-metadata-updated.window="updateMetadata($event.detail)"
@@ -21,6 +22,16 @@
           <span class="hs-now-title" x-text="nowPlaying.title || ''" :title="nowPlaying.title || ''"></span>
           <span class="hs-now-artist" x-show="nowPlaying.artist" x-text="nowPlaying.artist || ''" :title="nowPlaying.artist || ''"></span>
         </span>
+        <div class="hs-progress" role="group" aria-label="Track timing">
+          <progress x-show="timing.position !== null && timing.duration !== null"
+                    :value="timing.position ?? 0" :max="timing.duration || 1" aria-label="Track progress"
+                    :aria-valuetext="timeLabel(timing.position) + ' of ' + timeLabel(timing.duration)"></progress>
+          <span class="hs-times">
+            <span aria-label="Elapsed time" x-text="timeLabel(timing.position)"></span>
+            <span :aria-label="timing.duration === null ? 'Total duration unavailable' : 'Total duration'"
+                  x-text="timeLabel(timing.duration)"></span>
+          </span>
+        </div>
         <template x-if="sourceLinkVisible()">
           <a class="hs-source" :href="nowPlaying.source.url"
              :title="'Back to ' + sourceName() + ': ' + nowPlaying.source.title"
@@ -33,7 +44,7 @@
         </template>
         <span class="hs-rate-group" role="group" aria-label="Playback and ratings">
           <button type="button" class="hs-playpause btn-primary" @click="toggle()"
-                  :title="nowPlaying.paused ? 'Play' : 'Pause'"
+                  :title="nowPlaying.paused ? 'Play (Space)' : 'Pause (Space)'"
                   :aria-label="nowPlaying.paused ? 'Play' : 'Pause'">
             <svg x-show="!nowPlaying.paused" x-cloak viewBox="0 0 24 24" aria-hidden="true" focusable="false">
               <path d="M6 4h4v16H6zm8 0h4v16h-4z"/>

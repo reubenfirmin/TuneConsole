@@ -22,7 +22,7 @@ def test_publication_summaries_are_bounded_and_keep_phase_reason_and_progress_co
                     snapshot.store.settings.get_setting('input')
                     if attempt % 2 == 0:
                         store.settings.set_setting('input', str(clock[0]))
-                    published = snapshot.publish(lambda: store.rec_surface.publish_prepared_home(
+                    published = snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(
                         str(int(clock[0])), clock[0], surface='logging-probe'))
                     assert published == (attempt % 2 == 1)
             store.maintenance_diagnostics.record('deferred', phase='rec: Home collections',
@@ -43,7 +43,7 @@ def test_publication_summaries_are_bounded_and_keep_phase_reason_and_progress_co
             'rec: Home collections': {'time_budget': 60},
         }
         assert waiting == {'rec: Home collections': (index + 1) * 60}
-    assert store.rec_surface.get_proposals('logging-probe') == 179
+    assert store.rec_proposals.get_proposals('logging-probe') == 179
     assert any('Maintenance publication deferred:' in r.message and r.levelno == logging.DEBUG
                for r in caplog.records)
     assert any('work start:' in r.message and r.levelno == logging.DEBUG for r in caplog.records)
@@ -52,7 +52,7 @@ def test_publication_summaries_are_bounded_and_keep_phase_reason_and_progress_co
 def test_home_budget_is_counted_once_and_keeps_last_good_collections(store, monkeypatch, caplog):
     clock = [0.0]
     store.maintenance_diagnostics = work_diagnostics.MaintenanceDiagnostics(clock=lambda: clock[0])
-    store.rec_surface.put_proposals('home_prepared', {'last-good': True}, 0)
+    store.rec_proposals.put_proposals('home_prepared', {'last-good': True}, 0)
 
     def exhausted(*args):
         raise WorkBudgetExceeded('budget exhausted')
@@ -70,7 +70,7 @@ def test_home_budget_is_counted_once_and_keeps_last_good_collections(store, monk
     assert len(caplog.records) == 1
     assert caplog.records[0].args[2] == 30
     assert caplog.records[0].args[5] == {'rec: Home collections': {'time_budget': 30}}
-    assert store.rec_surface.get_proposals('home_prepared') == {'last-good': True}
+    assert store.rec_proposals.get_proposals('home_prepared') == {'last-good': True}
 
 
 def test_fast_phase_details_are_debug_and_slow_work_remains_visible(monkeypatch, caplog):
@@ -96,7 +96,7 @@ def test_explicit_user_action_announcements_remain_at_info(caplog):
 
 
 def test_bundle_failure_preserves_traceback_retry_and_last_good_pool(store, monkeypatch, caplog):
-    store.rec_surface.put_proposals('mode_bundles', {'last-good': True}, 1)
+    store.rec_proposals.put_proposals('mode_bundles', {'last-good': True}, 1)
 
     def failed(*args):
         raise RuntimeError('forced preparation failure')
@@ -110,6 +110,6 @@ def test_bundle_failure_preserves_traceback_retry_and_last_good_pool(store, monk
         assert len(warnings) == 1
         assert warnings[0].exc_info and 'retry_backoff=' in warnings[0].message
         assert 'forced preparation failure' in caplog.text
-        assert store.rec_surface.get_proposals('mode_bundles') == {'last-good': True}
+        assert store.rec_proposals.get_proposals('mode_bundles') == {'last-good': True}
     finally:
         worker.shutdown()

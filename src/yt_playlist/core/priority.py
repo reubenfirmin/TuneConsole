@@ -9,7 +9,9 @@ from contextvars import ContextVar
 import threading
 import time
 
-from yt_playlist.core.db_diagnostics import database_lock_wait
+from yt_playlist.core.db_diagnostics import (
+    LockWaitDiagnostics, cooperative_lock_yield, database_lock_wait,
+)
 
 
 _BACKGROUND = ContextVar("tuneconsole_background_priority", default=None)
@@ -47,7 +49,8 @@ class RequestPriority:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return
-                self._condition.wait(min(0.025, remaining))
+                with cooperative_lock_yield():
+                    self._condition.wait(min(0.025, remaining))
 
     @contextmanager
     def background(self, checkpoint):
@@ -70,9 +73,13 @@ class ServingLock:
         self._priority = priority
         self._lock = threading.RLock()
         self._local = threading.local()
+        self._diagnostics = LockWaitDiagnostics()
 
     def acquire(self, blocking=True, timeout=-1):
-        return database_lock_wait(self._acquire, blocking, timeout)
+        background = _BACKGROUND.get()
+        return database_lock_wait(self._acquire, blocking, timeout,
+            background=background is not None and background[0] is self._priority,
+            diagnostics=self._diagnostics)
 
     def _acquire(self, blocking, timeout):
         priority = self._priority

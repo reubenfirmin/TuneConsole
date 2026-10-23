@@ -1,4 +1,4 @@
-"""Typed discovery evidence. Callers own transactions and the Store lock."""
+"""Discovery provenance and lifecycle evidence. Callers own transactions and the Store lock."""
 import json
 
 
@@ -24,6 +24,49 @@ def reconcile_artist_sources(conn, previous, target):
                      'ON CONFLICT(artist_id,source) DO UPDATE SET score=MAX(score,excluded.score)',
                      (target,row['source'],row['identity_id'],row['score']))
     conn.execute('DELETE FROM discovery_artist_sources WHERE artist_id=?', (previous,))
+
+
+def reconcile_artist(conn, previous, target, *, source):
+    """Fold scan/candidate lifecycles, retaining pre-merge evidence and distinct visible offers."""
+    reconcile_artist_sources(conn,previous,target)
+    for table,clock in (('artist_scans','scanned_at'),('discovered_artists','found_at')):
+        rows = [dict(r) for r in conn.execute(f'SELECT * FROM {table} WHERE artist_id IN (?,?)',
+                                             (previous,target))]
+        if not rows:
+            continue
+        for row in rows:
+            conn.execute('INSERT OR IGNORE INTO identity_state_archive VALUES (?,?,?,?)',
+                ('artist_reconcile:'+table,json.dumps([previous,target,row['artist']]),json.dumps(row),source))
+        winner = max(rows,key=lambda r:(r[clock] if r[clock] is not None else float('-inf'),
+                                       r['artist_id']==target,json.dumps(r,sort_keys=True)))
+        if table=='discovered_artists':
+            # Impression evidence outlives membership. Only overlapping surviving lifecycles
+            # double-count a view; retained impressions from a prior GC cycle do not.
+            lifecycles = {r['artist_id']:r['first_shown'] for r in rows}
+            duplicates = conn.execute("SELECT COUNT(*) FROM discovery_visible_impressions a "
+                "JOIN discovery_visible_impressions b ON a.view_id=b.view_id AND a.kind=b.kind "
+                "WHERE a.kind='artist' AND a.item_id=? AND b.item_id=? "
+                "AND a.shown_at>=? AND b.shown_at>=?",
+                (str(previous),str(target),lifecycles.get(previous),lifecycles.get(target))).fetchone()[0]
+            for field in ('found_at','first_shown','legacy_first_shown'):
+                winner[field] = min((r[field] for r in rows if r[field] is not None),default=None)
+            for field in ('last_shown','legacy_last_shown'):
+                winner[field] = max((r[field] for r in rows if r[field] is not None),default=None)
+            winner['offered_count'] = max(0,sum(r['offered_count'] or 0 for r in rows)-duplicates)
+            winner['legacy_offered_count'] = sum(r['legacy_offered_count'] or 0 for r in rows)
+        winner.update(artist_id=target,artist=f'@artist:{target}')
+        conn.execute(f'DELETE FROM {table} WHERE artist_id IN (?,?)',(previous,target))
+        columns = ','.join(winner)
+        conn.execute(f'INSERT INTO {table} ({columns}) VALUES ({",".join("?" for _ in winner)})',
+                     tuple(winner.values()))
+
+    impressions = conn.execute("SELECT view_id,shown_at FROM discovery_visible_impressions "
+                               "WHERE kind='artist' AND item_id=?",(str(previous),)).fetchall()
+    for row in impressions:
+        conn.execute("INSERT INTO discovery_visible_impressions VALUES (?,'artist',?,?) "
+            'ON CONFLICT(view_id,kind,item_id) DO UPDATE SET shown_at=MIN(shown_at,excluded.shown_at)',
+            (row['view_id'],str(target),row['shown_at']))
+    conn.execute("DELETE FROM discovery_visible_impressions WHERE kind='artist' AND item_id=?",(str(previous),))
 
 
 def remove_spotify_artists(conn):
