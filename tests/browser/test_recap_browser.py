@@ -21,6 +21,9 @@ def _serve_recap(port, data_dir):
     from yt_playlist.web import app as web_app
     web_app._UI_STARTUP_GRACE_S = 1
     web_app._UI_CLOSE_GRACE_S = 5
+    # Keep the seeded recap; spawned processes do not inherit pytest's worker patches.
+    # The real idle monitor still runs independently of background preparation.
+    web_app.BACKGROUND_WORK = False
     client, _ = _client(_STORY)
     uvicorn.run(client.app, host="127.0.0.1", port=port, log_level="warning")
 

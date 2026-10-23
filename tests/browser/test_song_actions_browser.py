@@ -411,9 +411,11 @@ def test_generated_playlist_keeps_contextual_mood_actions(song_app, page):
 
 def test_mix_track_menu_stays_above_card_and_opens_playlist_dialog(live_app, store, page, tmp_path):
     from tests.test_home_other_genres import seed_genres
+    from tests.test_mode_cards_route import prepare_home
     seed_genres(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
+    prepare_home(store, 1)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(live_app + "/")
     card = page.locator("#gen-wheelhouse")
@@ -635,6 +637,6 @@ def test_metadata_save_updates_player_and_suggestion_without_reload(song_app, pa
     # The extension still reports the provider's title; polling must keep the saved override.
     page.evaluate('status => window.dispatchEvent(new CustomEvent("bridge-status", {detail: status}))', status)
     expect(dock.locator('.hs-now-title')).to_have_text('Fixed <title>')
-    dock.get_by_role('button', name='More actions for Fixed <title>').click()
+    tile.get_by_role('button', name='More actions for Fixed <title>').click()
     page.get_by_role('menuitem', name='Create playlist from song').click()
     expect(page.get_by_label('Playlist name')).to_have_value('Fixed <title>')

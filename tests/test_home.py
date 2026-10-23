@@ -144,8 +144,8 @@ def test_steering_panel_hidden_until_genres_exist(store):
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
-    from yt_playlist.rec import home_prepared
-    home_prepared.prepare(store, 1000)
+    from tests.test_mode_cards_route import prepare_home
+    prepare_home(store, 1000)
     assert 'id="fingerprint"' in c.get("/home/feed").text          # genres present -> panel appears  # persisted
 
 

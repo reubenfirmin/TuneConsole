@@ -2,11 +2,11 @@
 from yt_playlist.core.activity import activity_for
 
 
-def acquire_restart_locks(ctx, *, reason="restart"):
+def acquire_restart_locks(ctx, *, reason="restart", wait_for_update=True):
     work = activity_for(ctx)
     work.close_admission(reason)
     updater = getattr(ctx, "updater", None)
-    if updater is not None and updater.busy:
+    if wait_for_update and updater is not None and updater.busy:
         return None, "Waiting for the update to finish…"
     if work.active:
         return None, "Waiting for background work to finish…"

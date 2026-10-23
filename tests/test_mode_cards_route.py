@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from yt_playlist.core.store import Store
-from yt_playlist.rec import home_prepared, journeys
+from yt_playlist.rec import home_prepared, journeys, mode_surfaces
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, seed_catalog_track
 
@@ -25,7 +25,7 @@ def _client(store, now=1000.0):
 
 
 def prepare_home(store, now=1000.0):
-    """Retained bundle fixtures need real eligible subjects and a worker preparation pass."""
+    """Seed eligible subjects, then prepare candidate pools before Home as the worker does."""
     payload = store.rec_surface.get_proposals("mode_bundles") or {}
     tracks = {item["key"]: (lane, item) for mid, bucket in payload.items() if not mid.startswith("_")
               for lane, items in bucket.items() for item in items if item.get("key")}
@@ -43,6 +43,9 @@ def prepare_home(store, now=1000.0):
         else:
             seed_catalog_track(store, key, item["title"], item["artist"], video_id=video,
                                genre=item.get("genre"))
+    if (not payload and not store.rec_surface.get_proposals("fresh_pool")
+            and store.rec_query.library_keys()):
+        assert mode_surfaces.prepare_bundles(store, now) is not None
     assert home_prepared.prepare(store, now) is not None
 
 

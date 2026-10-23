@@ -337,7 +337,7 @@ def test_learning_settings_share_compact_layout_and_preserve_edits(live_app, sto
     memory.focus()
     page.keyboard.press("End")
     expect(navigation.get_by_role("tab", name="Learning rates", exact=True)).to_be_focused()
-    expect(settings.get_by_role("slider")).to_have_count(7)
+    expect(settings.get_by_role("slider")).to_have_count(6)
     page.get_by_role("tab", name="Recommendations", exact=True).click()
     page.get_by_role("tab", name="Recent & learning", exact=True).click()
     expect(navigation.get_by_role("tab", name="Learning rates", exact=True)).to_have_attribute("aria-selected", "true")

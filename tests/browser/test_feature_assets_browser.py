@@ -55,7 +55,7 @@ def test_connected_player_keeps_shared_layout_without_home_assets(page, live_app
     expect(artwork).to_be_visible()
     page.wait_for_function("document.querySelector('.global-now-playing .hs-art').naturalWidth === 300")
     box = artwork.bounding_box()
-    assert 50 <= box["width"] <= 55
+    assert box["width"] == pytest.approx(48)
     assert box["height"] == pytest.approx(box["width"])
     styles = page.locator('link[rel="stylesheet"]').evaluate_all(
         "els => els.map(el => new URL(el.href).pathname.split('/').pop())")
@@ -72,6 +72,7 @@ def test_connected_player_keeps_shared_layout_without_home_assets(page, live_app
 
 def test_removed_home_status_does_not_reopen_pending_sync_stream(page):
     page.goto("about:blank")
+    page.add_script_tag(path=str(Path(__file__).parents[2] / "src/yt_playlist/web/static/playback-status.js"))
     page.add_script_tag(path=str(Path(__file__).parents[2] / "src/yt_playlist/web/static/home.js"))
     assert page.evaluate("""async () => {
         let resolveScan;

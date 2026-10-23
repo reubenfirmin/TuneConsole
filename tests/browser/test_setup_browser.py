@@ -175,15 +175,15 @@ def test_invalid_identity_stays_editable_and_explains_how_to_fix_it(live_identit
     expect(help_panel.get_by_role("button")).to_have_count(0)
     expect(page.get_by_role("link", name="Open Pairing", exact=True)).to_have_count(0)
     expect(page.get_by_label("Brand account ID for identity 2", exact=True)).to_have_value("123456789012345678901")
-    # Editing hides the previous result; leaving the field saves and checks the correction.
+    # Editing hides the previous result; saving cannot retarget the stored account.
     page.get_by_label("Brand account ID for identity 2", exact=True).fill("99999")
     expect(page.get_by_text("Cannot access this brand account", exact=True)).to_be_hidden()
     expect(page.get_by_role("button", name="Brand: authentication updates after editing", exact=True)).to_be_disabled()
     expect(page.get_by_role("button", name="Save and check", exact=True)).to_have_count(0)
-    t.clients["Brand"].error = None
     page.get_by_label("Brand account ID for identity 2", exact=True).blur()
-    expect(page.locator(".identity-auth--valid")).to_have_count(2)
-    assert next(i for i in t.store.identities.get_identities() if i.label == "Brand").brand_account_id == "99999"
+    expect(page.get_by_role("alert")).to_contain_text(
+        "An existing account cannot be retargeted; add the other account separately")
+    assert next(i for i in t.store.identities.get_identities() if i.label == "Brand").brand_account_id == "123456789012345678901"
 
 
 def test_disconnected_identity_is_checked_automatically_after_reconnecting(live_identity_setup, page):
@@ -345,6 +345,8 @@ def test_changes_during_an_autosave_are_saved_in_order(live_identity_setup, page
     t = live_identity_setup
     _add_identity(page, t.base)
     expect(page.locator(".identity-auth--valid")).to_have_count(2)
+    original = next(i for i in t.store.identities.get_identities() if i.label == "Brand")
+    t.clients["First label"] = t.clients["Second label"] = t.clients["Brand"]
     held = []
 
     def hold_first(route):
@@ -354,20 +356,21 @@ def test_changes_during_an_autosave_are_saved_in_order(live_identity_setup, page
             route.continue_()
 
     page.route("**/setup?tab=identities", hold_first)
-    brand = page.get_by_label("Brand account ID for identity 2", exact=True)
-    brand.fill("11111")
-    brand.blur()
+    label = page.get_by_label("Label for identity 2", exact=True)
+    label.fill("First label")
+    label.blur()
     expect(page.locator('form[x-ref="form"]')).to_have_attribute("aria-busy", "true")
     assert len(held) == 1
-    brand.fill("22222")
-    brand.blur()
+    label.fill("Second label")
+    label.blur()
     if first_fails:
         held[0].fulfill(status=503, content_type="application/json", body='{"error":"Temporary failure"}')
     else:
         held[0].fulfill(response=held[0].fetch())
     expect(page.locator('form[x-ref="form"]')).to_have_attribute("aria-busy", "false")
-    assert next(i for i in t.store.identities.get_identities() if i.label == "Brand").brand_account_id == "22222"
-    expect(brand).to_have_value("22222")
+    saved = next(i for i in t.store.identities.get_identities() if i.label == "Second label")
+    assert (saved.id, saved.brand_account_id) == (original.id, original.brand_account_id)
+    expect(label).to_have_value("Second label")
     expect(page.locator(".identity-auth--valid")).to_have_count(2)
     expect(page.get_by_role("alert")).to_have_count(0)
 

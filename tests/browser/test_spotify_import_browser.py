@@ -12,7 +12,7 @@ import uvicorn
 from playwright.sync_api import expect
 
 from tests.conftest import FakeClient, _track
-from yt_playlist.rec import rec_params
+from yt_playlist.rec import mode_surfaces, rec_params
 from yt_playlist.web.app import create_app
 
 pytestmark = pytest.mark.browser
@@ -42,7 +42,8 @@ def spotify_app(store, request):
         time.sleep(.02)
     try:
         yield SimpleNamespace(base=f"http://127.0.0.1:{port}", store=store,
-                              first=first_client, second=second_client, destination=second)
+                              first=first_client, second=second_client, destination=second,
+                              worker=app.state.ctx.rec_worker)
     finally:
         server.should_exit = True
         thread.join(timeout=5)
@@ -143,6 +144,13 @@ def test_history_upload_health_learning_and_removal(spotify_app, page):
     assert len(store.history.play_events_since(0)) == 1
 
     page.goto(f'{spotify_app.base}/')
+    assert store.rec_model.get_weights(now=1000) == {}
+    # The worker prepares candidates before Home and applies imported listening evidence.
+    assert mode_surfaces.prepare_bundles(store, 1000) is not None
+    spotify_app.worker.enabled = True
+    spotify_app.worker.debounce_s = 0
+    spotify_app.worker.trigger_home_refresh(force=True)
+    spotify_app.worker.join(5)
     weights = store.rec_model.get_weights(now=1000)
     assert weights and all(weight > 1.0 for weight in weights.values())
     page.goto(f'{spotify_app.base}/taste#health')

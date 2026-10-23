@@ -87,7 +87,10 @@ class MacOSUpdater:
         with self._lock:
             if not self._quitting or self.server is None or self._held_locks is not None:
                 return
-            locks, message = acquire_restart_locks(self.server.config.app.state.ctx)
+            # Cocoa owns this quit, including Sparkle's install-and-relaunch handoff.
+            # Our own busy flag must not prevent the server's work from draining.
+            locks, message = acquire_restart_locks(
+                self.server.config.app.state.ctx, wait_for_update=False)
             if locks is None:
                 self.message = message
                 return

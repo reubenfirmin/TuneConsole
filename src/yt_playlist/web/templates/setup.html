@@ -234,7 +234,8 @@
 
   {# ── Tab 4: Identities ────────────────────────────────────────────────────────────── #}
   <form method="post" action="/setup?tab=identities" x-ref="form"
-        @change="saveIdentities()" @submit.prevent="saveIdentities()" :aria-busy="String(saving)">
+        @change="if ($event.target.type === 'radio') saveIdentities()"
+        @submit.prevent="saveIdentities()" :aria-busy="String(saving)">
     <div class="tab-panel" role="tabpanel" x-show="tab === 'identities'" x-cloak>
       <div class="card" x-ref="identityCard">
         <h2 class="section section-flush">Your identities</h2>
@@ -279,7 +280,7 @@
           </span></th><th class="col-master">Main identity</th><th class="col-actions"></th></tr></thead>
           <tbody>
             <template x-for="(row, i) in rows" :key="i">
-              <tr>
+              <tr @focusout="saveIdentityOnBlur(row, $event)">
                 <td>
                   <input type="hidden" name="identity_id" :value="row.id || ''">
                   <div class="identity-label">
@@ -414,6 +415,12 @@ function setupForm(rows, masterIdx, configured, savedIdentities, initialMessage,
       guide.style.top = top + 'px';
       guide.style.bottom = 'auto';
       guide.style.maxHeight = height + 'px';
+    },
+    saveIdentityOnBlur(row, event) {
+      // Finish a new row's account fields before saving its immutable account identity.
+      if (!row.id && event.target.name === 'label' && event.relatedTarget?.name === 'brand_account_id'
+          && event.currentTarget.contains(event.relatedTarget)) return;
+      this.saveIdentities();
     },
     saveIdentities() {
       if (this.removingIdentity) return Promise.resolve();

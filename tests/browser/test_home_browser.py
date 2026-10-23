@@ -450,7 +450,8 @@ def test_mix_controls_automatically_reset_an_open_page_after_four_hours(live_app
     slider = panel.locator(".fp-breadth-slider")
     with page.expect_response("**/home/breadth"):
         slider.fill("0.5")
-        slider.dispatch_event("change")
+    # fill dispatches change; wait for its swap before advancing the expiry clock.
+    expect(panel.locator("#home-preference-status")).to_have_text("Freshly adjusted. Find your next mix.")
     expect(slider).to_have_value("0.5")
     # The fixture's server clock is fixed at 1; age its persisted timestamp as the browser advances.
     store.settings.set_setting(mix_tuning.UPDATED_AT_SETTING, str(1 - mix_tuning.TTL_S))

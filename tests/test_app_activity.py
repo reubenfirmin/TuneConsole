@@ -23,6 +23,17 @@ def _ctx(store=None):
         client_provider=lambda: {1: object()}, logger=logging.getLogger(__name__))
 
 
+@pytest.mark.parametrize("reason", ["restart", "idle"])
+def test_restart_waits_for_platform_update(reason):
+    ctx = _ctx()
+    ctx.updater = SimpleNamespace(busy=True)
+    locks, message = acquire_restart_locks(ctx, reason=reason)
+    assert locks is None
+    assert "update" in message
+    assert not ctx.work.accepting
+    assert not ctx.sync_lock.locked() and not ctx.spotify_import_lock.locked()
+
+
 def test_restart_closes_admission_before_the_activity_check():
     ctx = _ctx()
     release = ctx.work.admit("Road Trip build")

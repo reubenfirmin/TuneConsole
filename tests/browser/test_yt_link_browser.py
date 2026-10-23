@@ -1,5 +1,4 @@
-"""#107(b) live behavior: informational links (song titles) must open a second tab and leave the
-playing YouTube Music tab alone, while play controls still route through /play to the deck tab.
+"""Album song titles are display-only; play controls route through /play to the deck tab.
 
 Needs a real browser: the behavior under test is app.js's capture-phase click interceptor, which
 TestClient cannot run.
@@ -10,6 +9,7 @@ import time
 
 import pytest
 import uvicorn
+from playwright.sync_api import expect
 
 from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
@@ -54,14 +54,15 @@ def _wire(page, plays):
                                                  route.fulfill(json={"ok": True})))
 
 
-def test_song_title_opens_second_tab_without_touching_playback(live_album_app, page):
+def test_album_song_title_does_not_navigate_or_change_playback(live_album_app, page):
     plays = []
     _wire(page, plays)
     page.goto(f"{live_album_app}/album?browse=MPREb_x")
-    with page.context.expect_page() as popup:      # a real second tab opens
-        page.click("a.ptitle")
-    assert popup.value is not None
-    assert plays == []                             # playback was never redirected
+    expect(page.locator("a.ptitle")).to_have_count(0)
+    page.locator(".ptitle").click()
+    assert page.url == f"{live_album_app}/album?browse=MPREb_x"
+    assert len(page.context.pages) == 1
+    assert plays == []
 
 
 def test_play_button_still_routes_to_the_existing_tab(live_album_app, page):

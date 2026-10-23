@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient, _track
-from yt_playlist.rec import rec_params, transient
+from yt_playlist.rec import mode_surfaces, rec_params, transient
 from yt_playlist.web.app import create_app
 
 
@@ -123,6 +123,8 @@ def test_history_upload_reaches_home_learning_and_requests_model_refresh(store, 
     assert client.get('/').status_code == 200
     assert store.rec_model.get_weights(now=now) == {}
 
+    # Candidate pools precede Home in the worker; HTTP reads must not prepare either.
+    assert mode_surfaces.prepare_bundles(store, now) is not None
     # Daily exposure belongs to background Home preparation, including after an import.
     worker = app.state.ctx.rec_worker
     worker.enabled = True

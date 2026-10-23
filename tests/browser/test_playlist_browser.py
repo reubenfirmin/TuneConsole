@@ -83,8 +83,8 @@ def test_set_year_from_song_menu(live_playlist_app, page):
     page.get_by_role('menuitem', name='Edit Metadata').click()
     dialog = page.get_by_role('dialog', name='Edit Metadata')
     dialog.get_by_label('Year', exact=True).fill('1999')
-    with page.expect_navigation():
-        dialog.get_by_role('button', name='Save changes').click()
+    dialog.get_by_role('button', name='Save changes').click()
+    expect(dialog).not_to_be_visible()
     expect(row.get_by_text("1999")).to_be_visible()        # cell shows the new year
     page.goto(f"{base}/playlist/{pid}")                    # persisted
     expect(page.get_by_role("row").filter(has_text="Song B").get_by_text("1999")).to_be_visible()
@@ -127,8 +127,8 @@ def test_song_menu_metadata_accepts_custom_genre(live_playlist_app, page):
     dialog = page.get_by_role('dialog', name='Edit Metadata')
     expect(dialog.get_by_label('Title', exact=True)).to_have_value('Song B')
     dialog.get_by_label('Genre', exact=True).fill('Jazz Fusion')
-    with page.expect_navigation():
-        dialog.get_by_role('button', name='Save changes').click()
+    dialog.get_by_role('button', name='Save changes').click()
+    expect(dialog).not_to_be_visible()
     expect(page.get_by_role("heading", name="Mix")).to_be_visible()
     row = page.get_by_role("row").filter(has_text="Song B")
     expect(row.get_by_text("Jazz Fusion", exact=True)).to_be_visible()
@@ -189,6 +189,10 @@ def test_playing_track_heart_uses_backend_and_survives_stale_sensor(live_playlis
         target = heart if control == "table" else widget.locator(".hs-heart")
         with page.expect_response(lambda r: r.url.endswith("/now-playing/rate"), timeout=5000) as response:
             target.click()
+            native = json.loads(extension.recv(timeout=5))
+            assert native == {"id": native["id"], "type": "rate", "action": "like",
+                              "videoId": "v0", "likeStatus": desired_status, "brandId": "", "skip": False}
+            extension.send(json.dumps({"id": native["id"], "status": 200, "body": json.dumps({"ok": True})}))
         assert response.value.json()["ok"] is True
         expect(heart).to_have_attribute("aria-pressed", pressed)
         assert live_playlist_app["client"].rated == [("v0", desired_status)]
