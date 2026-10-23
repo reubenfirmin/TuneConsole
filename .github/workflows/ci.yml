@@ -7,6 +7,7 @@ name: Tests
 
 on:
   push:
+    tags-ignore: ['v*']  # Release commits have already passed CI before tagging.
   pull_request:
   workflow_dispatch:
   workflow_call:

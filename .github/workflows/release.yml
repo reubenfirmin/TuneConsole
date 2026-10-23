@@ -15,9 +15,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: python3 packaging/release_policy.py "$RELEASE_TAG"
-  checks:
-    needs: version
-    uses: ./.github/workflows/ci.yml
+  # Unit and browser suites run in CI before the release is tagged.
   containers:
     needs: version
     permissions:
@@ -92,7 +90,7 @@ jobs:
             packaging/flatpak/TuneConsole*.flatpak
             packaging/flatpak/flatpak-repo-*.tar
   promote:
-    needs: [version, checks, wheel, flatpak, macos, containers]
+    needs: [version, wheel, flatpak, macos, containers]
     runs-on: ubuntu-latest
     # All tags share this owner. Do not cancel a promotion already changing channels.
     concurrency:

@@ -13,7 +13,7 @@ def workflow(name):
 def test_only_coordinator_can_publish_and_every_required_platform_blocks_promotion():
     release = workflow("release")
     promote = release["jobs"]["promote"]
-    assert set(promote["needs"]) == {"version", "checks", "wheel", "flatpak", "macos", "containers"}
+    assert set(promote["needs"]) == {"version", "wheel", "flatpak", "macos", "containers"}
     assert "if" not in promote  # default success guard also excludes failed/cancelled builds
     assert promote["concurrency"] == {"group": "release-production", "cancel-in-progress": "false"}
     for name in ("macos", "container"):
@@ -23,6 +23,16 @@ def test_only_coordinator_can_publish_and_every_required_platform_blocks_promoti
         content = (ROOT / f".github/workflows/{name}.yml").read_text()
         assert "action-gh-release" not in content
         assert "pages deploy" not in content and ":latest" not in content
+
+
+def test_release_does_not_restart_unit_or_browser_suites():
+    jobs = workflow("release")["jobs"]
+    assert all(job.get("uses") != "./.github/workflows/ci.yml" for job in jobs.values())
+    assert all("pytest" not in step.get("run", "")
+               for job in jobs.values() for step in job.get("steps", []))
+    ci = workflow("ci")
+    assert ci["on"]["push"]["tags-ignore"] == ["v*"]
+    assert "pull_request" in ci["on"]
 
 
 def test_containers_stage_the_image_only_after_smoke_and_never_rebuild_for_publication():
