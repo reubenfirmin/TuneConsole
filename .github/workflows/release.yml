@@ -2,8 +2,19 @@ name: Release coordinator
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      candidate_tag:
+        description: Existing release tag to finish publishing
+        required: true
+        type: string
+      candidate_run_id:
+        description: Release run with all candidate builds completed successfully
+        required: true
+        type: string
 permissions:
   contents: read
+  actions: read
 jobs:
   version:
     runs-on: ubuntu-latest
@@ -11,12 +22,24 @@ jobs:
       version: ${{ steps.policy.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - id: policy
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.candidate_tag || github.ref_name }}
         run: python3 packaging/release_policy.py "$RELEASE_TAG"
+      - name: Verify the original candidate builds before resuming publication
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          candidate_sha=$(git rev-parse "$CANDIDATE_TAG^{commit}")
+          python3 packaging/release_candidate.py "$CANDIDATE_RUN_ID" "$CANDIDATE_TAG" "$candidate_sha"
   # Unit and browser suites run in CI before the release is tagged.
   containers:
+    if: github.event_name != 'workflow_dispatch'
     needs: version
     permissions:
       contents: read
@@ -25,6 +48,7 @@ jobs:
     with:
       version: ${{ needs.version.outputs.version }}
   macos:
+    if: github.event_name != 'workflow_dispatch'
     needs: version
     uses: ./.github/workflows/macos.yml
     secrets: inherit
@@ -32,6 +56,7 @@ jobs:
       version: ${{ needs.version.outputs.version }}
       tag: ${{ github.ref_name }}
   wheel:
+    if: github.event_name != 'workflow_dispatch'
     needs: version
     runs-on: ubuntu-latest
     env:
@@ -47,6 +72,7 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
   flatpak:
+    if: github.event_name != 'workflow_dispatch'
     needs: [version, wheel]
     strategy:
       fail-fast: false
@@ -90,6 +116,11 @@ jobs:
             packaging/flatpak/TuneConsole*.flatpak
             packaging/flatpak/flatpak-repo-*.tar
   promote:
+    if: >-
+      ${{ !cancelled() && needs.version.result == 'success' &&
+          (github.event_name == 'workflow_dispatch' ||
+           (needs.wheel.result == 'success' && needs.flatpak.result == 'success' &&
+            needs.macos.result == 'success' && needs.containers.result == 'success')) }}
     needs: [version, wheel, flatpak, macos, containers]
     runs-on: ubuntu-latest
     # All tags share this owner. Do not cancel a promotion already changing channels.
@@ -99,6 +130,7 @@ jobs:
     permissions:
       contents: write
       packages: write
+      actions: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -106,6 +138,8 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: candidate
+          run-id: ${{ inputs.candidate_run_id || github.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -134,5 +168,5 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.candidate_tag || github.ref_name }}
         run: python3 packaging/promote_release.py candidate "$RELEASE_TAG"

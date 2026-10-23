@@ -133,7 +133,20 @@ class Backend:
         return subprocess.run(args, check=True, capture_output=True, text=True).stdout.strip()
 
     def existing(self, tag):
-        return self.api(f"repos/{self.repository}/releases/tags/{tag}")
+        release = self.api(f"repos/{self.repository}/releases/tags/{tag}")
+        if release is not None:
+            return release
+        # The tag endpoint only returns published releases. Authenticated listings
+        # include drafts, which staging and interrupted-publication retries need.
+        page = 1
+        while True:
+            releases = self.api(f"repos/{self.repository}/releases?per_page=100&page={page}") or []
+            for release in releases:
+                if release["tag_name"] == tag:
+                    return release
+            if len(releases) < 100:
+                return None
+            page += 1
 
     def latest(self):
         release = self.api(f"repos/{self.repository}/releases/latest")
@@ -153,6 +166,8 @@ class Backend:
         paths = [str(root / name) for name in manifest["sha256"]] + [str(path)]
         self.run("gh", "release", "upload", tag, "--repo", self.repository, "--clobber", *paths)
         staged = self.existing(tag)
+        if staged is None:
+            raise ValueError("Uploaded draft release could not be found")
         if not staged["draft"]:
             raise ValueError("Release became public during staging")
         assets = {a["name"]: a for a in staged["assets"]}

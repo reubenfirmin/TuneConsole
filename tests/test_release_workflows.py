@@ -14,7 +14,10 @@ def test_only_coordinator_can_publish_and_every_required_platform_blocks_promoti
     release = workflow("release")
     promote = release["jobs"]["promote"]
     assert set(promote["needs"]) == {"version", "wheel", "flatpak", "macos", "containers"}
-    assert "if" not in promote  # default success guard also excludes failed/cancelled builds
+    guard = promote["if"]
+    assert "!cancelled()" in guard and "needs.version.result == 'success'" in guard
+    for name in ("wheel", "flatpak", "macos", "containers"):
+        assert f"needs.{name}.result == 'success'" in guard
     assert promote["concurrency"] == {"group": "release-production", "cancel-in-progress": "false"}
     for name in ("macos", "container"):
         definition = workflow(name)
@@ -33,6 +36,24 @@ def test_release_does_not_restart_unit_or_browser_suites():
     ci = workflow("ci")
     assert ci["on"]["push"]["tags-ignore"] == ["v*"]
     assert "pull_request" in ci["on"]
+
+
+def test_publication_retry_checks_the_original_builds_and_reuses_their_artifacts():
+    release = workflow("release")
+    inputs = release["on"]["workflow_dispatch"]["inputs"]
+    assert inputs["candidate_tag"]["required"] == "true"
+    assert inputs["candidate_run_id"]["required"] == "true"
+    jobs = release["jobs"]
+    for name in ("wheel", "flatpak", "macos", "containers"):
+        assert jobs[name]["if"] == "github.event_name != 'workflow_dispatch'"
+    verify = next(step for step in jobs["version"]["steps"]
+                  if "release_candidate.py" in step.get("run", ""))
+    assert verify["if"] == "github.event_name == 'workflow_dispatch'"
+    assert 'git rev-parse "$CANDIDATE_TAG^{commit}"' in verify["run"]
+    download = next(step for step in jobs["promote"]["steps"]
+                    if step.get("uses", "").startswith("actions/download-artifact"))
+    assert download["with"]["run-id"] == "${{ inputs.candidate_run_id || github.run_id }}"
+    assert jobs["promote"]["concurrency"]["group"] == "release-production"
 
 
 def test_containers_stage_the_image_only_after_smoke_and_never_rebuild_for_publication():

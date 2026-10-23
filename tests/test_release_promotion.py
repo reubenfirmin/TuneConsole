@@ -171,6 +171,45 @@ def test_backend_promotes_the_two_tested_digests_without_rebuilding(monkeypatch)
     ]
 
 
+@pytest.mark.parametrize("published", [True, False])
+def test_backend_finds_published_releases_and_drafts(monkeypatch, published):
+    backend = promotion.Backend("reubenfirmin/TuneConsole")
+    release = {"id": 42, "tag_name": "v1.2.3", "draft": not published}
+    paths = []
+
+    def api(path):
+        paths.append(path)
+        if "/releases/tags/" in path:
+            return release if published else None
+        return [release]
+
+    monkeypatch.setattr(backend, "api", api)
+    assert backend.existing("v1.2.3") == release
+    assert len(paths) == (1 if published else 2)
+
+
+def test_backend_finds_a_draft_beyond_the_first_page(monkeypatch):
+    backend = promotion.Backend("reubenfirmin/TuneConsole")
+    draft = {"id": 42, "tag_name": "v1.2.3", "draft": True}
+
+    def api(path):
+        if "/releases/tags/" in path:
+            return None
+        if path.endswith("page=1"):
+            return [{"tag_name": f"v0.0.{i}"} for i in range(100)]
+        assert path.endswith("page=2")
+        return [draft]
+
+    monkeypatch.setattr(backend, "api", api)
+    assert backend.existing("v1.2.3") == draft
+
+
+def test_backend_distinguishes_a_missing_release_from_a_draft(monkeypatch):
+    backend = promotion.Backend("reubenfirmin/TuneConsole")
+    monkeypatch.setattr(backend, "api", lambda path: None if "/tags/" in path else [])
+    assert backend.existing("v1.2.3") is None
+
+
 def test_backend_restores_both_channels_even_if_one_rollback_fails(monkeypatch):
     backend = promotion.Backend("reubenfirmin/TuneConsole")
     monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "account")
