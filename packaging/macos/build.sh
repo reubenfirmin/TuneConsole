@@ -31,7 +31,8 @@ export SPARKLE_PUBLIC_ED_KEY
 # 1. Isolated build environment with the app + PyInstaller installed (so data/metadata collect).
 export UV_PROJECT_ENVIRONMENT="$ROOT/packaging/macos/.build-venv"
 uv sync --project "$ROOT" --frozen --no-dev --group build --group macos --python 3.12 --no-install-project
-uv sync --project "$ROOT" --frozen --no-dev --group build --group macos --python 3.12 --no-build-isolation
+# Freeze a regular installed wheel, using only the locked build dependencies.
+uv sync --project "$ROOT" --frozen --no-dev --group build --group macos --python 3.12 --no-build-isolation --no-editable
 # shellcheck disable=SC1091
 . "$UV_PROJECT_ENVIRONMENT/bin/activate"
 

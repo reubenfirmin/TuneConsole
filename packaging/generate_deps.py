@@ -75,7 +75,7 @@ def render(lock, config, exported):
         pins = " ".join(f"{name}=={version}" for name, version in sorted(selected.items()))
         modules.append({"name": f"python3-deps-{arch}", "only-arches": [arch],
                         "buildsystem": "simple", "build-commands": [
-                            "pip3 install --no-index --no-deps --no-build-isolation "
+                            "pip3 install --no-index --no-deps --no-build-isolation --ignore-installed "
                             "--find-links=file://${PWD} --prefix=${FLATPAK_DEST} " + pins],
                         "sources": sources})
     return json.dumps({"name": "python3-requirements", "buildsystem": "simple",
