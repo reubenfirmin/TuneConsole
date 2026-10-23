@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from yt_playlist.rec import mode_surfaces as ms
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.test_mode_cards_route import prepare_home
 
 
 def _client(store):
@@ -27,6 +28,7 @@ def test_fresh_cold_item_gets_feedback_radio_does_not(store):
              "plays": 0, "reason": "New", "lane": "cold", "genre": ""} for i in range(6)]
     payload = {"1": {surf: (cold if surf == "fresh" else []) for surf in ms.CARD_SURFACES}}
     store.rec_surface.put_proposals("mode_bundles", payload, 1000.0)
+    prepare_home(store)
     c = _client(store)
     html = c.get("/home/cards").text
     assert "Cold Song 0" in html

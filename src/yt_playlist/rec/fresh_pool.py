@@ -55,10 +55,7 @@ def populate(ctx, include_genres=(), avoid_genres=(), on_progress=lambda message
 
 def prepare(store, now):
     """Refresh both Fresh caches in the discovery/enrichment job, never during rendering."""
-    pool = surfaces.cold_candidates(store, now, limit=None)
-    store.rec_surface.put_proposals("fresh_pool", measurement.stamp_pool(
-        store, [surfaces._item_to_fresh_dict(t) for t in pool], now, "cold"), now)
-    mode_surfaces.refresh_fresh(store, pool, now)
+    return mode_surfaces.prepare_bundles(store, now)
 
 
 def pick(store, now, include_genres=(), avoid_genres=(), size=12, *, minimum=4):
@@ -78,7 +75,8 @@ def pick(store, now, include_genres=(), avoid_genres=(), size=12, *, minimum=4):
     if not candidates:
         return []
     dao = store.rec_query
-    blocked = dao.library_keys() | set(dao.generated_track_keys()) | store.rec_model.suppressed_keys("for_you", now)
+    keys = [t['key'] for t in candidates if t.get('key')]
+    blocked = set(dao.tracks_by_keys(keys)) | dao.suppressed_candidate_keys(keys, now)
     muted = store.rec_model.muted_artists()
     weights = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     unique = {}

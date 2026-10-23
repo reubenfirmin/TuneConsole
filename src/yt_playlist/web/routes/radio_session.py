@@ -19,7 +19,7 @@ def build(ctx):
     def playlist(request: Request):
         state = radio.status()
         pid = state["local_id"]
-        tracks = ctx.store.charts.playlist_tracks_detail(pid) if pid else []
+        tracks = ctx.store.charts.video_tracks_detail([t["video_id"] for t in state["history"]]) if pid else []
         return ctx.templates.TemplateResponse(request, "_partials/radio_playlist.html", {
             "session": state, "tracks": tracks,
         })

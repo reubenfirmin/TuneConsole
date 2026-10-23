@@ -115,22 +115,112 @@ def test_remote_create_failure_is_reported_without_local_playlist(songs, monkeyp
     assert songs["store"].playlists.get_playlists() == before
 
 
-def test_rejected_song_reports_partial_creation_and_failed_add(songs, monkeypatch):
+@pytest.mark.parametrize('unknown', [False, True])
+def test_new_song_playlist_seeds_before_first_readable_page(songs, monkeypatch, unknown):
+    import json
+    from tests.core.test_playlist_page_accounting import first
+    from tests.test_saved_album_snapshot import _production_client
+    from yt_playlist.library import executor, undo_capture
+    from yt_playlist.util.action_kinds import COPY_PLAYLIST
+
+    # Representative of the reported first-page shape: a message inside the playlist shelf,
+    # a continuation, and no verifiable zero-count header. Use the production reader/parser.
+    response = first([{'messageRenderer': {}}])
+    columns = response['contents']['twoColumnBrowseResultsRenderer']
+    header = columns['tabs'][0]['tabRenderer']['content']['sectionListRenderer']['contents'][0]
+    del header['musicResponsiveHeaderRenderer']['secondSubtitle']
+    columns['secondaryContents']['sectionListRenderer']['contents'][0]['musicPlaylistShelfRenderer'][
+        'continuations'] = [{'nextContinuationData': {'continuation': 'not-ready'}}]
+    reader, bridge = _production_client([response] * 3)
+    client, store = songs['main'], songs['store']
+    attempts = []
+
+    def seed(playlist_id, videos, **kwargs):
+        assert not bridge.calls, 'A just-created destination must not require a baseline read'
+        creation = next(a for a in store.actions.get_actions() if a.kind == COPY_PLAYLIST)
+        assert creation.status == 'pending'
+        assert json.loads(creation.undo_json)['new_ytm'] == playlist_id
+        attempts.append((playlist_id, videos))
+        if unknown:
+            raise TimeoutError('Lost seed reply')
+        return {'status': 'STATUS_SUCCEEDED'}
+
+    monkeypatch.setattr(client, 'add_playlist_items', seed)
+    monkeypatch.setattr(client, 'get_playlist', reader.get_playlist)
+    monkeypatch.setattr(executor, '_capture_post',
+                        lambda *a, **kw: undo_capture.capture_post(*a, **kw, sleep=lambda _: None))
+    result = songs['http'].post('/songs/create-playlist', json={'name': 'Mix', 'song': SONG})
+    assert result.status_code == 200
+    data = result.json()
+    assert data['added'] is (not unknown)
+    assert len(client.created) == len(attempts) == 1
+    assert len(bridge.calls) == 3
+    playlist = store.playlists.get_playlist(int(data['url'].rsplit('/', 1)[1]))
+    assert playlist.track_count == (0 if unknown else 1)
+    actions = [a for a in store.actions.get_actions() if a.kind == COPY_PLAYLIST]
+    assert len(actions) == 1 and actions[0].status == 'executed'
+    assert json.loads(actions[0].undo_json)['new_ytm'] == playlist.ytm_playlist_id
+    assert json.loads(actions[0].undo_json)['post'] is None
+    if unknown:
+        assert data['status'] == 'partial' and data['uncertain'] == 1
+        assert data['recovery_url'] == '/actions'
+    # A later successful read does not establish ownership or authorize deleting this copy.
+    from yt_playlist.library.undo_conflicts import require_unchanged_copy
+    with pytest.raises(ValueError, match='preserved'):
+        require_unchanged_copy(json.loads(actions[0].undo_json)['post'], {'videos': []})
+    assert not client.deleted and len(client.created) == 1
+
+
+def test_creation_retains_remote_destination_when_local_materialization_fails(songs, monkeypatch):
+    import json
+    from yt_playlist.util.action_kinds import COPY_PLAYLIST
+
+    def fail(*args, **kwargs):
+        raise RuntimeError('Local materialization failed')
+
+    monkeypatch.setattr(songs['store'].playlists, 'upsert_playlist', fail)
+    response = songs['http'].post('/songs/create-playlist', json={'name': 'Mix', 'song': SONG})
+    assert response.status_code == 200
+    data = response.json()
+    assert data['status'] == 'partial' and data['recovery_url'] == '/actions'
+    assert data['url'].startswith('https://music.youtube.com/playlist?list=')
+    assert len(songs['main'].created) == 1 and not songs['main'].added
+    creation = next(a for a in songs['store'].actions.get_actions() if a.kind == COPY_PLAYLIST)
+    assert creation.status == 'executed'
+    assert json.loads(creation.undo_json)['post'] is None
+    assert json.loads(creation.params_json)['partial'] is True
+
+
+@pytest.mark.parametrize('unknown', [False, True])
+def test_song_creation_retains_destination_for_rejected_and_unconfirmed_additions(songs, monkeypatch, unknown):
     def fail(*args):
-        raise RuntimeError("Song unavailable")
+        if unknown:
+            raise RuntimeError("Song response lost")
+        return {"status": "STATUS_FAILED"}
     monkeypatch.setattr(songs["main"], "add_playlist_items", fail)
     monkeypatch.setattr(songs["other"], "add_playlist_items", fail)
     response = songs["http"].post("/songs/create-playlist", json={"name": "Mix", "song": SONG})
     assert response.status_code == 200
-    assert "couldn't add" in response.json()["message"]
-    assert response.json()["added"] is False
+    data = response.json()
+    assert ("has not confirmed" if unknown else "couldn't add") in data["message"]
+    assert data["added"] is False
+    if unknown:
+        assert data['status'] == 'partial' and data['uncertain'] == 1 and data['rejected'] == 0
+        assert data['recovery_url'] == '/actions'
+        assert 'Creating again makes another playlist' in data['guidance']
     assert len(songs["main"].created) == 1
     playlist = songs["store"].playlists.get_playlist(int(response.json()["url"].split("/")[-1]))
     assert playlist.title == "Mix" and playlist.track_count == 0
-    assert playlist.thumbnail is None  # A rejected song must not become the cover.
+    assert playlist.thumbnail is None  # An undelivered song must not become the cover.
     response = songs["http"].post("/songs/add-to-playlist", json={"playlist_id": songs["destination"], "song": SONG})
-    assert response.status_code == 422 and "couldn't add" in response.json()["detail"]
+    if unknown:
+        assert response.status_code == 200 and response.json()['status'] == 'partial'
+        assert response.json()['uncertain'] == 1 and response.json()['rejected'] == 0
+    else:
+        assert response.status_code == 422 and "couldn't add" in response.json()["detail"]
     assert not songs["store"].playlists.get_playlist_track_ids(songs["destination"])
+    assert len(songs['main'].created) == 1
+    assert songs['store'].actions.get_actions()
 
 
 def test_metadata_loads_current_values_originals_and_genre_sources(songs):

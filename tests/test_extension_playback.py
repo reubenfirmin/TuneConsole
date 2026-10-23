@@ -74,6 +74,7 @@ const chrome = {
     },
     sendMessage: async (id, msg) => {
       messages.push({id, ...msg});
+      if(msg.type==='sensor-ping')return {ok:true,receiverRevision:3,mainVersion:4,mainRevision:4,mainAgeMs:0};
       if(scenario==='rating_handoff' && msg.type==='rate')
         return {ok:msg.videoId===(id===2?'A':'B'),error:'The playing song changed'};
       return {ok: true};
@@ -152,7 +153,9 @@ const next = 'https://music.youtube.com/watch?list=PL_new';
     assert.equal(frames.length, count, 'muted playback must not replace the audible card');
     await playback.playPause();
     await playback.rate('like', 'v');
-    assert.deepEqual(messages.map(m => [m.id, m.type]), [[2, 'playpause'], [2, 'rate']]);
+    await playback.next('v');
+    assert.deepEqual(messages.filter(m=>m.type!=='sensor-ping').map(m => [m.id, m.type]),
+      [[2, 'playpause'], [2, 'rate'], [2, 'next']]);
     assert.equal(messages.at(-1).videoId,'v');
     // A real ownership change follows current mute state, then preserves that owner while paused.
     old.mutedInfo = {muted: true};
@@ -187,7 +190,11 @@ const next = 'https://music.youtube.com/watch?list=PL_new';
   if (['audible', 'heartbeat'].includes(scenario)) {
     await playback.playPause();
     await playback.rate('like', 'v');
-    assert.deepEqual(messages.map(m => [m.id, m.type]), [[2, 'playpause'], [2, 'rate']]);
+    await sockets[0].onmessage({data:JSON.stringify({id:78,type:'next',videoId:'v'})});
+    assert.deepEqual(messages.filter(m=>m.type!=='sensor-ping').map(m => [m.id, m.type]),
+      [[2, 'playpause'], [2, 'rate'], [2, 'next']]);
+    assert.equal(frames.at(-1).id,78);
+    assert.equal(JSON.parse(frames.at(-1).body).ok,true);
   }
   if (scenario === 'pending') {
     const ready = musicTabs.ensure();
@@ -217,6 +224,108 @@ const next = 'https://music.youtube.com/watch?list=PL_new';
     assert(messages.some(m => m.id === 3 && m.type === 'pause'), 'silence the other music tab');
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+    result = subprocess.run([node, "-e", script, scenario], cwd=Path(__file__).resolve().parents[1],
+                            text=True, capture_output=True, check=False, timeout=10)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("scenario", [
+    "ready", "missing_sensor", "missing_receiver", "old_receiver", "newer_rating", "song_changed",
+    "account_changed", "tab_closed", "tab_selection_changed", "uncertain_delivery", "expired", "legacy_toggle",
+    "persistent_binding", "deadline_inflight", "old_exit_event",
+])
+def test_native_rating_recovers_only_explicitly_undispatched_desired_states(scenario):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to exercise the extension service worker")
+    script = r"""
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const scenario=process.argv[1],timers=new Map(),messages=[],injected=[],frames=[];
+let serial=0,clock=1000,selected=2,release;
+const context=vm.createContext({URL,Date:class extends Date{static now(){return clock;}},
+  setTimeout(fn){const id=++serial;timers.set(id,fn);return id;},clearTimeout(id){timers.delete(id);},
+  isMissingReceiver:error=>error.message==='missing receiver',
+  chrome:{tabs:{async sendMessage(id,message){
+    if(message.type==='cancel-rating')return;
+    messages.push({tabId:id,...message});
+    if(messages.length===1){
+      if(scenario==='missing_receiver')throw Error('missing receiver');
+      return {ok:false,retryable:true,error:'No rating binding',diagnostics:{control:''}};
+    }
+    if(scenario==='uncertain_delivery')throw new Error('Reply channel closed');
+    if(scenario==='deadline_inflight')return new Promise(resolve=>release=resolve);
+    if(scenario==='song_changed')return {ok:false,error:'The playing song changed'};
+    if(scenario==='persistent_binding')return {ok:false,retryable:true,error:'No rating binding',diagnostics:{control:''}};
+    return {ok:true};
+  }}},
+});
+vm.runInContext(fs.readFileSync('extension/worker/ratings.js','utf8'),context);
+const playback=vm.runInContext('createNativeRatings',context)({
+  pickTab:async()=>({id:selected}),
+  sensors:{inject:async id=>injected.push(id),ping:async()=>{
+    if(scenario==='old_receiver')return {ok:false,outdatedReceiver:true,error:'Outdated receiver'};
+    return {ok:!(['missing_sensor','missing_receiver'].includes(scenario)&&!injected.length&&
+      (scenario==='missing_sensor'||messages.length>0))};
+  }},send:frame=>frames.push(frame),
+});
+(async()=>{
+  const result=await playback.rate('like','A',scenario==='legacy_toggle'?undefined:'LIKE',false,'brand');
+  if(['legacy_toggle','old_receiver'].includes(scenario)){
+    assert.equal(result.ok,false);
+    assert.equal(timers.size,0,'a toggle or obsolete receiver has no safe retry state');
+    if(scenario==='old_receiver')assert.equal(messages.length,0,'never dispatch to an obsolete receiver');
+    return;
+  }
+  assert.equal(result.ok,true);
+  assert.equal(result.pending,true,'deferred native updates do not block the saved rating or skip');
+  assert.equal(timers.size,1);
+  const [timer,attempt]=[...timers.entries()][0];
+  timers.delete(timer);
+  if(scenario==='newer_rating'){
+    await playback.rate('like','A','INDIFFERENT',false,'brand');
+    await attempt();
+    assert.equal(messages.length,2,'cancel an older retry even if its timer was already dispatched');
+    assert.equal(messages.at(-1).likeStatus,'INDIFFERENT');
+  }else if(['account_changed','tab_closed'].includes(scenario)){
+    if(scenario==='account_changed')playback.observe({type:'now-heartbeat',videoId:'A',brandKnown:true,brandId:'other'},2);
+    else playback.removed(2);
+    await attempt();
+    assert.equal(messages.length,1,'cancel without another delivery');
+    assert.equal(frames.at(-1).state,'cancelled');
+  }else if(scenario==='deadline_inflight'){
+    const waiting=attempt();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(typeof release,'function');
+    clock+=31000;
+    const [id,expire]=[...timers.entries()][0];timers.delete(id);expire();
+    release({ok:true});await waiting;
+    assert.equal(frames.at(-1).state,'failed','ignore a late success after the deadline');
+  }else if(scenario==='persistent_binding'){
+    await attempt();
+    while(timers.size){
+      const [id,fn]=[...timers.entries()][0];timers.delete(id);clock+=2000;await fn();
+    }
+    assert.equal(frames.length,2,'one pending and one terminal diagnostic despite repeated missing bindings');
+    assert.equal(frames.at(-1).state,'failed');
+    assert.match(frames.at(-1).error,/deadline expired/);
+    assert.equal(frames.at(-1).first.diagnostics.control,'');
+  }else{
+    if(scenario==='expired')clock+=31000;
+    if(scenario==='tab_selection_changed')selected=3;
+    if(scenario==='old_exit_event')playback.observe({type:'pevent',kind:'track_exit',videoId:'preceding'},2);
+    await attempt();
+    assert.equal(messages.length,scenario==='expired'?1:2);
+    assert(messages.every(message=>message.videoId==='A'&&message.brandId==='brand'&&message.likeStatus==='LIKE'));
+    assert(messages.every(message=>message.tabId===2),'recovery stays in its original tab');
+  }
+  assert.equal(timers.size,0,'settled, changed, expired, or uncertain commands cannot keep retrying');
+  assert.deepEqual(injected,['missing_sensor','missing_receiver'].includes(scenario)?[2]:[]);
+  if(scenario!=='newer_rating'){
+    assert.equal(frames.length,2);
+    assert.equal(frames[0].state,'pending');
+  }
+})().catch(error=>{console.error(error);process.exitCode=1;});
 """
     result = subprocess.run([node, "-e", script, scenario], cwd=Path(__file__).resolve().parents[1],
                             text=True, capture_output=True, check=False, timeout=10)

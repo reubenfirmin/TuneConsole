@@ -2,6 +2,7 @@
 import json
 import time
 
+from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.discovery_sources import reconcile_artist_sources
 from yt_playlist.util.matching import normalize
 
@@ -207,3 +208,30 @@ def public_key(conn, artist_id):
     ids = {canonical_id(conn,r['artist_id']) for r in conn.execute('SELECT artist_id,alias FROM artist_aliases')
            if normalize(r['alias']) == normalized}
     return normalized if len(ids) == 1 else token(artist_id)
+
+
+def public_keys(conn, artist_ids):
+    """Resolve a batch with one alias scan, preserving homonyms and retired handles.
+
+    Calling public_key for every library artist repeatedly normalizes the entire alias catalog.
+    The batch shares that work while retaining the single-artist ambiguity rules.
+    """
+    requested = set(artist_ids)
+    if not requested:
+        return {}
+    redirects = (dict(conn.execute('SELECT retired_id,artist_id FROM artist_redirects'))
+                 if conn.execute("SELECT 1 FROM sqlite_master WHERE name='artist_redirects'").fetchone()
+                 else {})
+    canonical = {aid: redirects.get(aid, aid) for aid in requested}
+    wanted = set(canonical.values())
+    names = {row['id']: normalize(row['name']) for row in conn.execute('SELECT id,name FROM artists')
+             if row['id'] in wanted}
+    aliases = {name: set() for name in names.values()}
+    for i, row in enumerate(conn.execute('SELECT artist_id,alias FROM artist_aliases')):
+        if i % 64 == 0:
+            check_cancellable_work()
+        name = normalize(row['alias'])
+        if name in aliases:
+            aliases[name].add(redirects.get(row['artist_id'], row['artist_id']))
+    return {aid: (names[target] if target in names and len(aliases[names[target]]) == 1
+                  else token(target)) for aid, target in canonical.items()}

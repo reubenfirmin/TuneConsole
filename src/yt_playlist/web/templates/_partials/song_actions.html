@@ -37,9 +37,9 @@
     <form @submit.prevent="submit()" :aria-busy="busy">
       <header class="song-dialog-head">
         <h2 id="song-playlist-title" x-show="!result" x-text="mode === 'metadata' ? 'Edit Metadata' : mode === 'create' ? 'Create playlist' : 'Add to playlist'"></h2>
-        <p class="song-dialog-status" role="status" x-show="result" :class="{ 'is-incomplete': result?.added === false }">
-          <svg x-show="result?.added !== false" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/></svg>
-          <svg x-show="result?.added === false" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6m0 3v1"/></svg>
+        <p class="song-dialog-status" role="status" x-show="result" :class="{ 'is-incomplete': result?.status === 'partial' || result?.added === false }">
+          <svg x-show="result?.status !== 'partial' && result?.added !== false" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/></svg>
+          <svg x-show="result?.status === 'partial' || result?.added === false" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6m0 3v1"/></svg>
           <span x-text="result?.message"></span>
         </p>
         <button type="button" class="song-dialog-close" :aria-label="mode === 'metadata' ? 'Close metadata dialog' : 'Close playlist dialog'" @click="closeDialog()" :disabled="busy">
@@ -126,13 +126,15 @@
         </div>
       </div>
       <p class="song-action-error" role="alert" x-show="error" x-text="error"></p>
+      <p class="song-dialog-note" x-show="result?.guidance" x-text="result?.guidance"></p>
       <footer class="song-dialog-actions">
         <button type="button" class="btn-ghost" @click="closeDialog()" :disabled="busy" x-text="result ? 'Done' : 'Cancel'"></button>
         <button type="submit" class="btn-primary" x-show="!result"
                 :disabled="busy || loading || (mode === 'metadata' ? !metadataLoaded || !metadata.title.trim() : mode === 'create' ? !name.trim() : !selected)"
                 x-text="busy ? 'Saving…' : mode === 'metadata' ? 'Save changes' : mode === 'create' ? 'Create playlist' : 'Add song'"></button>
+        <a class="btn-ghost" x-show="result?.recovery_url" :href="result?.recovery_url">Action Log and recovery</a>
         <a class="btn btn-primary" x-show="result" x-ref="resultLink" :href="result?.url">
-          Open playlist
+          <span x-text="result?.status === 'partial' ? 'Review playlist' : 'Open playlist'"></span>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h16m-6-6 6 6-6 6"/></svg>
         </a>
       </footer>

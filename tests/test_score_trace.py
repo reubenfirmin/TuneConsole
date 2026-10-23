@@ -1,6 +1,7 @@
 import pytest
 
 from yt_playlist.rec import embed, graduation, scoring, surfaces
+from tests import model_support
 
 
 def _model(store, album=None, thumbnail=None):
@@ -14,7 +15,7 @@ def _model(store, album=None, thumbnail=None):
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "Night drive", 8, "a", 1.0), a)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "Sunday", 8, "b", 1.0), b)
     store.history.record_history_plays(iid, 100.0, [f"a{i}|alpha" for i in range(4)], source_timezone="UTC")
-    embed.build_and_store(store, dim=4)
+    model_support.build_track_model(store, dim=4)
     keys, V, idx = embed.load_vectors(store)
     return scoring.playlist_taste(store), keys, V, idx
 

@@ -1,4 +1,5 @@
 from yt_playlist.rec import embed, surfaces
+from tests import model_support
 
 
 def test_mood_demotes_but_does_not_banish_cluster_in_for_you(store):
@@ -11,7 +12,7 @@ def test_mood_demotes_but_does_not_banish_cluster_in_for_you(store):
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(8)]
     pid = store.playlists.upsert_playlist(iid, "P", "P", 16, "h", 0.0)
     store.playlists.set_playlist_tracks(pid, A + B)
-    embed.build_and_store(store, dim=4)
+    model_support.build_track_model(store, dim=4)
     now = 1000.0
 
     def neighbourhood(items):

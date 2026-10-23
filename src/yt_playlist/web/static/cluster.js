@@ -36,7 +36,8 @@ function clusterCanvas() {
     nodes: [], nextId: 1, rootId: null,
     query: '', results: [], seedSel: -1, genreSel: -1,
     editingSeeds: false, seedBusy: false, randomSeed: Math.floor(Math.random() * 0x100000000),
-    clusterError: '', retryAction: null, _seedChangeToken: null,
+    clusterError: '', retryAction: null, _seedChangeToken: null, _canvasRevision: 0,
+    _searchToken: null, _deepLinkToken: null, _loadStateToken: null,
     _centerHeight: 90,
     _pendingView: null,
     playlistName: '', saveMode: 'all',
@@ -70,7 +71,7 @@ function clusterCanvas() {
         .cooldownTime(2500).d3AlphaDecay(0.1).d3VelocityDecay(0.4)
         .onNodeHover(n => this._onHover(n))
         .onNodeClick((n, e) => this._click(n, e))   // near a mid-edge dot → explain; else open the action menu
-        .onNodeDragEnd(n => { n.fx = n.x; n.fy = n.y; this.persist(); })    // pin where dropped; no graph-wide reheat
+        .onNodeDragEnd(n => { n.fx = n.x; n.fy = n.y; n._userPinned = true; this._canvasRevision++; this.persist(); })
         .onBackgroundClick(e => this._click(null, e))   // dot → explain; else dismiss
         .onRenderFramePre((ctx, gs) => this._drawGridBG(ctx, gs))
         .onRenderFramePost((ctx, gs) => { this._drawDots(ctx, gs); this._positionOverlays(); })
@@ -132,10 +133,7 @@ function clusterCanvas() {
       this._refreshSwitcher();
       if (from) {
         history.replaceState(null, '', location.pathname);
-        fetch('/clusters/state/' + encodeURIComponent(from))
-          .then(r => r.ok ? r.json() : null)
-          .then(s => this._afterInit(s && this._applyState(s)))
-          .catch(() => this._afterInit(false));
+        this._loadFrom(from);
       } else if (seed) {
         // Deep-link from the "Explore [X] in your catalog" card: auto-seed and grow a few rings,
         // optionally focused on a genre family, so the user lands on a ready-built cluster. This
@@ -152,11 +150,25 @@ function clusterCanvas() {
         .then(d => { this.families = d.families || []; this.genres = d.genres || []; }).catch(() => {});
     },
     _afterInit(restored) {
+      const context = this._graphContext();
       this.$nextTick(() => {
+        if (!this._currentGraph(context)) return;
         if (restored) return;                  // saved view is restored in _applyState
         this.resetView();
         this.$refs.seedInput && this.$refs.seedInput.focus();
       });
+    },
+    async _loadFrom(from) {
+      const context = this._graphContext(), token = rawColl({});
+      this._loadStateToken = token;
+      const current = () => this._loadStateToken === token && this._currentGraph(context);
+      try {
+        const response = await fetch('/clusters/state/' + encodeURIComponent(from));
+        const state = response.ok ? await response.json() : null;
+        if (!current()) return;
+        this._afterInit(state && this._applyState(state));
+      } catch (e) { if (current()) this._afterInit(false); }
+      finally { if (this._loadStateToken === token) this._loadStateToken = null; }
     },
     // Auto-build a cluster from a deep link: name it `label`, focus an optional genre, resolve the
     // seed term to its best library match, add it (root + its ring), then grow a couple more rings.
@@ -165,23 +177,38 @@ function clusterCanvas() {
     // per level so the cluster stays tight around the seed instead of sprawling.
     async _deepLink(seed, genre, depth, label) {
       const settle = () => new Promise(res => setTimeout(res, 700));
+      const token = rawColl({});
+      this._deepLinkToken = token;
+      let context;
+      const current = () => this._deepLinkToken === token && this._currentGraph(context);
       try {
         if (label) this.playlistName = label;  // name the canvas before addSeed so it sticks (badge)
         // The linked artist/song is the seed; the optional genre only filters its ring.
         if (genre) this.allowedFamilies = [genre];
         this.query = seed;
-        await this.search();
-        const r = this.results[0];
-        if (!r) return;
-        await this.addSeed(r);                 // root + its immediate ring
+        context = this._graphContext();
+        // Use this request's returned results, never the live suggestion list of another search.
+        const results = await this.search();
+        if (!current() || !results?.length) return;
+        const seeded = await this.addSeed(results[0]); // root + its immediate ring
+        if (this._deepLinkToken !== token || !seeded || !this._currentGraph(seeded)) return;
+        context = seeded;                     // advance only to a state published by our operation
         for (let lvl = 1; lvl < Math.max(1, depth || 1); lvl++) {
           await settle();
+          if (!current()) return;
           const frontier = this.nodes.filter(n => n.depth === lvl && n.state !== 'pruned').slice(0, 3);
-          for (const node of frontier) await this.grow(node.id);
+          for (const node of frontier) {
+            if (!current()) return;
+            const grown = await this.grow(node.id);
+            if (this._deepLinkToken !== token || !grown || !this._currentGraph(grown)) return;
+            context = grown;
+          }
         }
         await settle();                        // let the final layout relax before fitting the view
+        if (!current()) return;
         this.resetView();
-      } catch (e) { /* deep link is best-effort; leave the user on an empty canvas on failure */ }
+      } catch (e) { /* owned leaf operations report failures; a cancelled link has no side effects */ }
+      finally { if (this._deepLinkToken === token) this._deepLinkToken = null; }
     },
     _resize() {
       const el = document.getElementById('cluster-canvas'); if (!el || !this._fg) return;
@@ -476,6 +503,7 @@ function clusterCanvas() {
     _flushState() { if (this._persistT) { clearTimeout(this._persistT); this._persistT = 0; this._writeState(); } },
     _applyState(s) {
       if (!s || s.v !== 1 || !Array.isArray(s.nodes) || !s.nodes.length) return false;
+      this._canvasRevision++;
       this.nodes = s.nodes; this.nextId = s.nextId; this.rootId = s.rootId; this.trunk = s.trunk || [];
       this.subHues = s.subHues || {}; this._subHueN = s.subHueN || 0;
       this.allowedFamilies = s.allowedFamilies || []; this.boosted = s.boosted || [];
@@ -488,9 +516,14 @@ function clusterCanvas() {
       this._pendingView = s.view || null;
       // restore positions without re-layout: pin every node, feed, release tracks after it settles (instant)
       for (const n of this.nodes) { if (n.x != null) { n.fx = n.x; n.fy = n.y; } }
+      const restored = this.nodes;
       this._feed();
       this.$nextTick(() => {
-        setTimeout(() => { for (const n of this.nodes) if (n.kind !== 'central' && n.fx != null && !n._userPinned) { n.fx = null; n.fy = null; } }, 60);
+        if (this.nodes !== restored) return;
+        setTimeout(() => {
+          if (this.nodes !== restored) return;
+          for (const n of this.nodes) if (n.kind !== 'central' && n.fx != null && !n._userPinned) { n.fx = null; n.fy = null; }
+        }, 60);
         if (this.boosted.length) this._animBoost();   // resume the fire animation for restored 🔥 picks
       });
       return true;
@@ -535,12 +568,14 @@ function clusterCanvas() {
       } catch (e) {}
     },
     _resetMem() {
+      this._canvasRevision++;
       this.nodes = []; this.nextId = 1; this.rootId = null; this.trunk = [];
       this.subHues = {}; this._subHueN = 0; this.exhaustedIds = []; this.boosted = [];
       this.allowedFamilies = []; this.genreQuery = ''; this.genreOpen = false;
       this.query = ''; this.results = []; this.playlistName = ''; this.saveMode = 'all';
       this.editingSeeds = false; this.seedBusy = false;
       this.clusterError = ''; this.retryAction = null; this._seedChangeToken = null;
+      this._searchToken = null; this._deepLinkToken = null; this._loadStateToken = null;
       this._autofit = false;
       this._pendingView = null;
       this.randomSeed = Math.floor(Math.random() * 0x100000000);
@@ -555,7 +590,7 @@ function clusterCanvas() {
     _loadActive(id) {
       this._setActive(id); this._resetMem();
       let s; try { s = JSON.parse(localStorage.getItem(this._canvasKey(id))); } catch (e) { s = null; }
-      if (s) this._applyState(s); else this.$nextTick(() => this.resetView());
+      if (s) this._applyState(s); else this._afterInit(false);
       this._refreshSwitcher();
     },
     switchCanvas(id) {
@@ -566,7 +601,7 @@ function clusterCanvas() {
     newCanvas() {
       this._flushState();                    // persist the current canvas; new one is added on first write
       this._setActive(this._genId()); this._resetMem(); this._refreshSwitcher();
-      this.$nextTick(() => { this.resetView(); this.$refs.seedInput && this.$refs.seedInput.focus(); });
+      this._afterInit(false);
     },
     reset() {
       // "reset" clears the CURRENT canvas, then jumps to another saved one if there is one.
@@ -576,16 +611,29 @@ function clusterCanvas() {
       this._saveList(list); this._setActive(null);
       if (list.length) { this._loadActive(list[list.length - 1].id); return; }
       this._resetMem(); this._refreshSwitcher();
-      this.$nextTick(() => { this.resetView(); this.$refs.seedInput && this.$refs.seedInput.focus(); });
+      this._afterInit(false);
     },
 
     // --- search / seeding -------------------------------------------------------------------------
     async search() {
       const q = this.query.trim();
-      if (!q) { this.results = []; this.seedSel = -1; return; }
-      try { const r = await fetch('/clusters/search?q=' + encodeURIComponent(q)); this.results = await r.json(); }
-      catch (e) { this.results = []; }
-      this.seedSel = -1;
+      const context = this._graphContext(), token = rawColl({});
+      this._searchToken = token;
+      if (!q) { this.results = []; this.seedSel = -1; return []; }
+      const current = () => this._searchToken === token && this._currentGraph(context) && this.query.trim() === q;
+      try {
+        const r = await fetch('/clusters/search?q=' + encodeURIComponent(q));
+        if (!r.ok) throw new Error('Could not search');
+        const results = await r.json();
+        if (!current()) return;
+        this.results = results;
+        this.seedSel = -1;
+        return results;
+      } catch (e) {
+        if (!current()) return;
+        this.results = []; this.seedSel = -1;
+        return [];
+      }
     },
     seedMove(d) { if (this.results.length) this.seedSel = (this.seedSel + d + this.results.length) % this.results.length; },
     seedChoose() { const r = this.results[this.seedSel >= 0 ? this.seedSel : 0]; if (r) this.addSeed(r); },
@@ -596,25 +644,31 @@ function clusterCanvas() {
     },
     editSeeds() {
       this.editingSeeds = true;
-      this.$nextTick(() => this.$refs.seedInput.focus());
+      const context = this._graphContext();
+      this.$nextTick(() => { if (this._currentGraph(context)) this.$refs.seedInput.focus(); });
     },
     async removeSeed(index) {
-      await this._changeSeeds({type: 'remove', index});
+      return await this._changeSeeds({type: 'remove', index});
     },
     async addSeed(seed) {
-      await this._changeSeeds({type: 'add', seed});
+      return await this._changeSeeds({type: 'add', seed});
     },
     _curationSignature() {
       // Simulation positions and camera movement can change while requests are in flight.
       // A user's edits to the graph must never be overwritten by an older refinement.
       return JSON.stringify([this.activeId, this.nodes.map(n =>
-        [n.id, n.parentId, n.state, n.fx, n.fy, n.seeds]), this.trunk, this.boosted,
+        [n.id, n.parentId, n.state, n._userPinned ? [n.fx, n.fy] : null, n.seeds]), this.trunk, this.boosted,
         this.allowedFamilies, this.playlistName, this.randomSeed]);
+    },
+    _graphContext() { return { revision: this._canvasRevision, signature: this._curationSignature() }; },
+    _currentGraph(context) {
+      return this._canvasRevision === context.revision && this._curationSignature() === context.signature;
     },
     async _changeSeeds(action) {
       if (this.seedBusy) return;
-      const signature = this._curationSignature(), token = rawColl({});
+      const context = this._graphContext(), token = rawColl({});
       this._seedChangeToken = token;
+      const current = () => this._seedChangeToken === token && this._currentGraph(context);
       this.seedBusy = true;
       this.clusterError = ''; this.retryAction = null;
       this.query = ''; this.results = [];
@@ -628,13 +682,13 @@ function clusterCanvas() {
         const expandRing = draft.expandRing.bind(draft);
         draft.expandRing = async (...args) => {
           const ring = await expandRing(...args);
-          if (this._seedChangeToken !== token) throw new Error('Refinement cancelled');
+          if (!current()) throw new Error('Refinement cancelled');
           return ring;
         };
         if (action.type === 'add') await draft._addSeed(action.seed);
         else await draft._removeSeed(action.index);
-        if (this._seedChangeToken !== token) return;
-        if (this._curationSignature() !== signature) throw new Error('Canvas changed during refinement');
+        if (!current()) return;
+        this._canvasRevision++;
         // Keep the current simulation positions and any drag pins for surviving nodes.
         for (const n of draft.nodes) {
           const current = this.nodeById(n.id);
@@ -645,8 +699,9 @@ function clusterCanvas() {
         if (this.explain && !this.nodes.some(n => n.id === this.explain.childId)) this.explain = null;
         this._autofit = true;
         this._reheat();
+        return this._graphContext();
       } catch (e) {
-        if (this._seedChangeToken === token) {
+        if (current()) {
           this.clusterError = 'Couldn’t update suggestions. Your canvas is still here. Try again.';
           this.retryAction = action;
         }
@@ -713,28 +768,37 @@ function clusterCanvas() {
     isBoosted(n) { return !!n && !!n.key && this.boosted.includes(n.key); },
     toggleBoost(n) {
       if (!n || !n.key) return;
+      this._canvasRevision++;
       this.boosted = this.boosted.includes(n.key) ? this.boosted.filter(k => k !== n.key) : [...this.boosted, n.key];
       this._kick(); this._animBoost(); this.persist();
     },
     async grow(nodeId) {
+      if (this.seedBusy) return;
+      const context = this._graphContext();
       try {
-        await this._grow(nodeId);
-        this.clusterError = ''; this.retryAction = null;
+        const published = await this._grow(nodeId, context);
+        if (published && this._currentGraph(published)) {
+          this.clusterError = ''; this.retryAction = null;
+          return published;
+        }
       } catch (e) {
+        if (!this._currentGraph(context)) return;
         this.clusterError = 'Couldn’t load suggestions. Try again.';
         this.retryAction = {type: 'grow', nodeId};
       }
     },
-    async _grow(nodeId) {
+    async _grow(nodeId, context = this._graphContext()) {
       const node = this.nodeById(nodeId);
-      if (!node || node.state === 'pruned') return;
+      if (!node || node.state === 'pruned') return false;
       const ring = await this.expandRing(node, 6);
+      if (!this._currentGraph(context)) return false;
       if (!ring.length) {
         if (this.allowedFamilies.length && !this.exhaustedIds.includes(nodeId)) this.exhaustedIds = [...this.exhaustedIds, nodeId];
-        return;
+        return this._graphContext();
       }
       if (node.kind !== 'central' && !this.trunk.includes(nodeId)) this.trunk = [...this.trunk, nodeId];
       this.addChildren(node, ring);
+      return this._graphContext();
     },
     async _refineTree() {
       const parents = this.nodes.filter(n => this.children(n.id).length);
@@ -744,17 +808,21 @@ function clusterCanvas() {
         const keep = kids.filter(k => k.state === 'pruned' || k.fx != null || this.isBoosted(k) || this.children(k.id).length);
         const slots = kids.length - keep.length;
         if (slots <= 0) continue;
+        const context = this._graphContext();
+        const ring = await this.expandRing(parent, slots);
+        if (!this._currentGraph(context)) return;
         const dropIds = new Set(kids.filter(k => !keep.includes(k)).map(k => k.id));
         this.nodes = this.nodes.filter(n => !dropIds.has(n.id));
         this.trunk = this.trunk.filter(id => !dropIds.has(id));
         if (this.explain && dropIds.has(this.explain.childId)) this.explain = null;
-        this.addChildren(parent, await this.expandRing(parent, slots));
+        this.addChildren(parent, ring);
       }
       this.exhaustedIds = [];
       this._reheat();
     },
     addChildren(parent, ring) {
       if (!ring.length) return;
+      this._canvasRevision++;
       if (!(parent.id in this.subHues)) this.subHues[parent.id] = Math.round((this._subHueN++ * 137.508) % 360);
       const gp = parent.parentId != null ? this.nodeById(parent.parentId) : null;
       const outward = gp ? Math.atan2(parent.y - gp.y, parent.x - gp.x) : 0;
@@ -771,6 +839,7 @@ function clusterCanvas() {
     },
     prune(id) {
       const n = this.nodeById(id); if (!n || n.kind === 'central') return;
+      this._canvasRevision++;
       if (n.state === 'pruned') { n.state = 'neutral'; n.gpruned = false; this._kick(); this.persist(); return; }
       n.state = 'pruned'; n.gpruned = false;
       this.trunk = this.trunk.filter(t => t !== id);
@@ -787,7 +856,7 @@ function clusterCanvas() {
         if (n.kind !== 'track' || this.trunk.includes(n.id) || this.isBoosted(n)) continue;
         if (n.state !== 'pruned') { n.state = 'pruned'; n.gpruned = false; changed = true; }
       }
-      if (changed) { this._kick(); this.persist(); }
+      if (changed) { this._canvasRevision++; this._kick(); this.persist(); }
     },
     play(n) {
       if (!n || !n.vid) return;
@@ -806,7 +875,7 @@ function clusterCanvas() {
       const q = (this.genreQuery || '').trim().toLowerCase();
       return this.genreOptions().filter(o => !this.allowedFamilies.includes(o.name) && (!q || o.name.toLowerCase().includes(q))).slice(0, 10);
     },
-    _genreChanged() { this.exhaustedIds = []; this.applyGenrePrune(); this._kick(); this.persist(); },
+    _genreChanged() { this._canvasRevision++; this.exhaustedIds = []; this.applyGenrePrune(); this._kick(); this.persist(); },
     pickFamily(fam) {
       if (this.rootId == null) { this._seedFromGenre(fam); return; }
       if (!this.allowedFamilies.includes(fam)) this.allowedFamilies = [...this.allowedFamilies, fam];
@@ -907,12 +976,15 @@ function clusterCanvas() {
       const child = this.nodeById(childId); if (!child) return;
       const parent = this.nodeById(child.parentId); if (!parent) return;
       if (this.explain && this.explain.childId === childId) { this.explain = null; return; }
-      this.explain = { childId, loading: true, data: null }; this._positionOverlays();   // place now (graph may be idle)
+      const pending = rawColl({ childId, loading: true, data: null });
+      const revision = this._canvasRevision;
+      this.explain = pending; this._positionOverlays();   // place now (graph may be idle)
       try {
         const r = await fetch('/clusters/explain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: child.key, path_keys: this.posKeys(parent) }) });
         const data = await r.json();
-        if (this.explain && this.explain.childId === childId) this.explain = { childId, loading: false, data };
-      } catch (e) { if (this.explain && this.explain.childId === childId) this.explain = null; }
+        if (this.explain === pending) this.explain = this._canvasRevision === revision
+          ? { childId, loading: false, data } : null;
+      } catch (e) { if (this.explain === pending) this.explain = null; }
     },
     closeExplain() { this.explain = null; },
     _explainGraphPt() {

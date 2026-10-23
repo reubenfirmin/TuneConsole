@@ -3,6 +3,7 @@
 function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
   const playingTabs = new Set(), mediaMutedTabs = new Set(), pendingPlays = new Map();
   let playbackTabId = null, rescue = null, relay = Promise.resolve();
+  const ratings = createNativeRatings({pickTab, sensors, send});
   const RESCUE_WAIT_MS = 2500, RESCUE_DWELL_MS = 600, RESCUE_RETRY_MS = 500, RESCUE_TIMEOUT_MS = 6000;
 
   async function pickTab() {
@@ -36,7 +37,7 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
     mediaMutedTabs.delete(tabId);
     pendingPlays.delete(tabId);
     const target = new URL(url);
-    rescue = {tabId, videoId: target.searchParams.get('v') || '',
+    rescue = {tabId, url: target.href, videoId: target.searchParams.get('v') || '',
       playlist: target.searchParams.get('list') || '',
       foregrounded: false, timer: setTimeout(() => runRescue(tabId), RESCUE_WAIT_MS)};
   }
@@ -78,7 +79,7 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
     episode.inFlight = true;
     try {
       const reply = await chrome.tabs.sendMessage(episode.tabId, {type: "ensure-playing",
-        videoId: episode.videoId, playlist: episode.playlist});
+        url: episode.url, videoId: episode.videoId, playlist: episode.playlist});
       if (rescue !== episode || episode.finishing || !reply?.playing || !matchesRescue(episode, reply)) return;
       playingTabs.add(episode.tabId);
       episode.confirmed = true;
@@ -152,11 +153,12 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
     }).catch(e => warn("Navigate failed", e));
   }
 
-  async function rate(action, videoId, likeStatus) {
+  async function next(videoId) {
+    const message = {type: "next", videoId};
     if (!videoId) return {ok: false, error: "Displayed song is missing"};
     const tab = await pickTab();
     if (!tab) return {ok: false, error: "No music player is available"};
-    const deliver = () => chrome.tabs.sendMessage(tab.id, {type: "rate", action, videoId, likeStatus});
+    const deliver = () => chrome.tabs.sendMessage(tab.id, message);
     try { return await deliver() || {ok: false}; }
     catch (e) {
       if (!isMissingReceiver(e)) return {ok: false, error: String(e)};
@@ -240,10 +242,12 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
 
   function receive(msg, sender) {
     if (!msg || !["play", "now-heartbeat", "pevent"].includes(msg.type)) return;
+    ratings.observe(msg, sender?.tab?.id);
     relay = relay.then(() => relayMessage(msg, sender)).catch(error => warn("Playback relay failed", error));
   }
 
   function removed(tabId) {
+    ratings.removed(tabId);
     playingTabs.delete(tabId);
     mediaMutedTabs.delete(tabId);
     pendingPlays.delete(tabId);
@@ -251,6 +255,6 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
     if (rescue && rescue.tabId === tabId) cancelRescue();
   }
 
-  return {pickTab, navigate, rate, playPause, refreshView, receive, removed, cancelRescue,
+  return {pickTab, navigate, rate: ratings.rate, next, playPause, refreshView, receive, removed, cancelRescue,
     get drained() { return relay; }};
 }

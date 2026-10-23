@@ -16,14 +16,14 @@ def test_cooc_weighting_scales_pair_contributions():
     assert w[ia, ib] == base[ia, ib] * 2.0                         # pair (a,b): gain 1*2
     assert w[ib, ic] == base[ib, ic] * 2.0                         # pair (b,c): gain 2*1
     assert base[ia, ic] == 0.0 and w[ia, ic] == 0.0               # a and c never co-occur
-    assert np.allclose(w, w.T)                                     # stays symmetric
+    assert np.allclose(w.toarray(), w.T.toarray())                 # stays symmetric
 
 
 def test_cooc_weighting_off_matches_binary():
     keys = ["a", "b", "c"]
     baskets = [["a", "b", "c"]]
-    assert np.array_equal(embed._cooc_matrix(baskets, keys),
-                          embed._cooc_matrix(baskets, keys, weights=None))
+    assert np.array_equal(embed._cooc_matrix(baskets, keys).toarray(),
+                          embed._cooc_matrix(baskets, keys, weights=None).toarray())
 
 
 def test_cooc_weights_grow_with_playcount(monkeypatch):

@@ -4,10 +4,12 @@ The existing recommendation engines own ranking. This module assembles their fin
 offers and owns discovery counts, mode/served impressions and diagnostic auditing.
 Job admission stays behind the small PoolJobs port; the web adapter owns execution.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from logging import Logger
 from typing import Any, Protocol
+import hashlib
+import json
 import uuid
 
 from yt_playlist.rec import (arc_energy, home_audit, home_themes, home_vibe, journeys,
@@ -57,6 +59,9 @@ class CardsRequest:
     regenerating: bool = False
     use_genre_request: bool = True
     genre_notice: str | None = None
+    epoch: int | None = None
+    mode_order: tuple | None = None
+    record: bool = True
 
 
 @dataclass
@@ -77,6 +82,15 @@ class PoolResult:
     pool: dict | None = None
 
 
+def experiment_id(proto):
+    """Identity of the choice, independent of its current track order or cache generation."""
+    recipe = proto.get("recipe") or {}
+    choice = {"lane": proto["lane"], "mode": proto.get("mode_id"),
+              "ranker": proto.get("ranker"), "genres": recipe.get("genre_request"),
+              "vibe": recipe.get("vibe"), "facets": recipe.get("facets")}
+    return hashlib.sha256(json.dumps(choice, sort_keys=True).encode()).hexdigest()[:24]
+
+
 def _proto(store, lane, label, items, now):
     when = datetime.fromtimestamp(now).strftime("%B %-d %Y")
     tracks = items[:PROTO_SIZE]
@@ -86,14 +100,16 @@ def _proto(store, lane, label, items, now):
             "genres": list(genres), "feedback_surface": "for_you" if lane == "fresh" else None}
 
 
-def _order_by_journey(store, items, journey, seed):
+def _order_by_journey(store, items, journey, seed, selection_data=None):
     items = ordering.attach_genres(store, items)
     field = ordering._field
     keys = [field(it, "key") or "" for it in items]
     dao = store.rec_query
-    decades, lastp, plays = dao.track_decades(keys), dao.track_last_played(keys), dao.play_counts()
+    decades, lastp = dao.track_decades(keys), dao.track_last_played(keys)
+    plays = selection_data["plays"] if selection_data is not None else dao.play_counts()
     genres = {(field(it, "key") or ""): (field(it, "genre") or "") for it in items}
-    arc = arc_energy.arc_energies(keys, genres, dao.track_audio_features())
+    audio = selection_data["audio"] if selection_data is not None else dao.track_audio_features()
+    arc = arc_energy.arc_energies(keys, genres, audio)
 
     def feat(it):
         key, genre = field(it, "key") or "", field(it, "genre") or ""
@@ -140,6 +156,7 @@ def _carded(store, lane, label, pool, now):
 
 def _record_served_cards(store, protos, now):
     """Record only final served tracks, with paired counterfactuals where available."""
+    offers = []
     for card_position, proto in enumerate(protos, 1):
         rows = []
         ranker = proto.get("ranker") or "lane"
@@ -157,13 +174,13 @@ def _record_served_cards(store, protos, now):
                                              "recipe": proto.get("recipe", {})}})
         share = experiment["share"] if experiment else None
         propensity = (share if ranker == "ppr" else 1 - share) if share is not None else 1.0
-        measurement.record_recommendations(store, "home", rows, now, ranker=ranker,
-            request_id=comparison + ":live", experiment=experiment, propensity=propensity)
+        offers.append({"items": rows, "ranker": ranker,
+            "request_id": comparison + ":live", "experiment": experiment, "propensity": propensity})
         if experiment and (shadow := proto.get("counterfactual")):
-            measurement.record_recommendations(store, "home", shadow["tracks"], now,
-                lane=proto["lane"], mode_id=proto.get("mode_id"), ranker=shadow["ranker"],
-                request_id=comparison + ":counterfactual", experiment=experiment,
-                policy_kind="counterfactual", propensity=0.0, provenance={"recipe": proto.get("recipe", {})})
+            offers.append({"items": shadow["tracks"], "lane": proto["lane"], "mode_id": proto.get("mode_id"),
+                "ranker": shadow["ranker"], "request_id": comparison + ":counterfactual", "experiment": experiment,
+                "policy_kind": "counterfactual", "propensity": 0.0, "provenance": {"recipe": proto.get("recipe", {})}})
+    measurement.record_offers(store, "home", offers, now)
 
 
 def _one_card(store, card, now, *, avoid_genres=(), include_genres=(), exclude_keys=()):
@@ -189,8 +206,13 @@ def _one_card(store, card, now, *, avoid_genres=(), include_genres=(), exclude_k
 
 
 class HomeCards:
-    def __init__(self, store: HomeRepositories, jobs: PoolJobs, logger: Logger):
+    def __init__(self, store: HomeRepositories, jobs: PoolJobs, logger: Logger, *, genre_options=None,
+                 selection_data=None):
         self.store, self.jobs, self.logger = store, jobs, logger
+        self.genre_options, self.selection_data = genre_options, selection_data
+
+    def options(self):
+        return self.genre_options if self.genre_options is not None else home_themes.genre_options(self.store)
 
     def audit(self, protos: list[dict], now: float, source: str) -> None:
         try:
@@ -208,9 +230,9 @@ class HomeCards:
         store, now = self.store, request.now
         from yt_playlist.rec import mode_surfaces
         mix_tuning.expire(store, now)
-        epoch = _epoch(store, "cards")
+        epoch = _epoch(store, "cards") if request.epoch is None else request.epoch
         genres = store.rec_surface.get_proposals("home_genre_request") or {}
-        active = request.use_genre_request and genres.get("epoch") == epoch
+        active = request.use_genre_request and genres.get("epoch") == _epoch(store, "cards")
         avoid = set(genres.get("avoid_genres", [])) if active else set()
         include = set(genres.get("include_genres", [])) if active else set()
         filters = {}
@@ -218,28 +240,51 @@ class HomeCards:
             filters["avoid_genres"] = avoid
         if include:
             filters["include_genres"] = include
-        cards = mode_surfaces.assemble_cards(store, now, epoch, **filters)
+        prepared = (self.selection_data or {}).get('preparation')
+        cards = mode_surfaces.assemble_cards(store, now, epoch, **filters,
+                                             **({"mode_order": request.mode_order} if request.mode_order is not None else {}),
+                                             **({'preparation': prepared} if prepared is not None else {}))
+        assembly = (prepared or {}).get('assembly')
+        bundles = assembly['bundles'] if assembly is not None else store.rec_surface.get_proposals('mode_bundles')
         if include:
             cards = [c for c in cards if c["lane"] != "fresh"]
         if cards:
             protos = []
             for card in cards:
-                rolled = recipes.roll_recipe(store, card["lane"], seed=f"{epoch}:{card['mode_id']}", now=now)
+                rolled = recipes.roll_recipe(store, card["lane"], seed=f"{epoch}:{card['mode_id']}", now=now,
+                    **({'leans': prepared['leans'], 'dists': prepared['dists']} if prepared is not None else {}))
                 journey, dj = rolled.get("journey", "shuffle"), rolled.get("dj", {})
-                tracks = _order_by_journey(store, card["tracks"], journey, dj.get("seed", 0))
+                tracks = _order_by_journey(store, card["tracks"], journey, dj.get("seed", 0), self.selection_data)
                 shadow = card.get("counterfactual")
                 if shadow:
-                    shadow = {**shadow, "tracks": _order_by_journey(store, shadow["tracks"], journey, dj.get("seed", 0))}
+                    shadow = {**shadow, "tracks": _order_by_journey(store, shadow["tracks"], journey,
+                                                                  dj.get("seed", 0), self.selection_data)}
                 protos.append(_proto(store, card["lane"], card["label"], tracks, now)
                               | {"mode_id": card["mode_id"], "ranker": card["ranker"],
                                  "experiment": card.get("experiment"), "counterfactual": shadow,
                                  "recipe": {"model": "mode", "lane": card["lane"], "mode_id": card["mode_id"],
                                             "ranker": card["ranker"], "journey": journey, "dj": dj}})
-            try:
-                store.modes.log_impressions(epoch, [(c["lane"], c["mode_id"], c["ranker"]) for c in cards], now)
-            except Exception:
-                self.logger.warning("mode-impression log failed", exc_info=True)
-        elif filters and store.rec_surface.get_proposals("mode_bundles") and store.modes.list_modes(active_only=True):
+            if request.record:
+                self.record_modes(protos, epoch, now)
+        elif assembly is not None and not assembly['modes']:
+            # Cold imports have prepared library pools before modes can be fitted.
+            # This only assembles cached candidates; ranking stays in the worker.
+            protos = []
+            inputs = assembly
+            for lane in _ROW_LANES:
+                if lane == 'fresh':
+                    continue  # built_fresh applies discovery ownership and eligibility below
+                pool = [t for t in bundles.get('all', {}).get(lane, [])
+                        if t['key'] not in inputs['blocked'] and t['artist'] not in inputs['muted']]
+                pool = home_themes.matching_genres(store, pool, include=include, avoid=avoid)
+                if lane == 'explore':
+                    used = {t['key'] for p in protos for t in p['tracks']}
+                    pool = [t for t in pool if t['key'] not in used]
+                if len(pool) >= 4:
+                    proto = _carded(store, lane, _CARD_LABELS[lane], pool[:ROTATION_POOL], now)
+                    if len(proto['tracks']) >= 4:
+                        protos.append(proto)
+        elif (prepared is not None or (filters and bundles and store.modes.list_modes(active_only=True))):
             protos = []
         else:
             protos = []
@@ -250,8 +295,8 @@ class HomeCards:
                 if proto := _one_card(store, name, now, **options):
                     protos.append(proto)
         if filters and not protos and not include:
-            return self.cards(CardsRequest(now, request.regenerating, False,
-                              "No other genre themes are ready yet. Here are your usual mixes."))
+            return self.cards(replace(request, use_genre_request=False,
+                              genre_notice="No other genre themes are ready yet. Here are your usual mixes."))
         parameters = {"include_genres": sorted(include), "avoid_genres": sorted(avoid)}
         pool_job = self.jobs.latest("fresh_pool", parameters)
         if include:
@@ -259,7 +304,7 @@ class HomeCards:
         if not any(p["lane"] == "fresh" for p in protos):
             if fresh := self.built_fresh(parameters, now):
                 protos.append(fresh)
-        meta = (store.rec_surface.get_proposals("mode_bundles") or {}).get("_meta", {})
+        meta = (bundles or {}).get("_meta", {})
         fourth = ("comfort" if meta.get("comfort_pool", 0) >= rec_params.get_param(store, "comfort_min_pool")
                   or not meta.get("year_cuts") else "temporal")
         fourth = next((p["lane"] for p in protos if p["lane"] in ("comfort", "temporal")), fourth)
@@ -285,13 +330,33 @@ class HomeCards:
         for proto in protos:
             if vibe:
                 proto["recipe"] = {**(proto.get("recipe") or {}), "vibe": vibe}
+            proto["experiment_id"] = experiment_id(proto)
+            proto["recipe"] = {**(proto.get("recipe") or {}), "experiment_id": proto["experiment_id"]}
+        if request.record:
+            self.record_offer(protos, now)
+        return CardsResult(protos, slots, notice, notice if not filters else None,
+                           self.options(), sorted(include), epoch, vibe)
+
+    def record_modes(self, protos, epoch, now):
+        try:
+            store = self.store
+            store.modes.log_impressions(epoch, [(p["lane"], p["mode_id"], p.get("ranker"))
+                                                for p in protos if p.get("mode_id") is not None], now)
+        except Exception:
+            self.logger.warning("mode-impression log failed", exc_info=True)
+
+    def record_offer(self, protos, now, *, epoch=None):
+        if epoch is not None:
+            signatures = [hashlib.sha256(json.dumps({"choice": experiment_id(p),
+                "tracks": [ordering._field(t, "key") for t in p["tracks"]]},
+                sort_keys=True).encode()).hexdigest() for p in protos]
+            unseen = self.store.rec_surface.claim_home_offers(epoch, signatures, now)
+            protos = [p for p, signature in zip(protos, signatures) if signature in unseen]
         self.offered(protos, now)
         try:
-            _record_served_cards(store, protos, now)
+            _record_served_cards(self.store, protos, now)
         except Exception:
             self.logger.warning("served-impression log failed", exc_info=True)
-        return CardsResult(protos, slots, notice, notice if not filters else None,
-                           home_themes.genre_options(store), sorted(include), epoch, vibe)
 
     @staticmethod
     def pool_label(parameters):
@@ -299,7 +364,7 @@ class HomeCards:
         return (_CARD_LABELS[lane] if lane != "temporal"
                 else {0: "Throwback", 1: "Time Flies", 2: "Recent Picks"}[parameters["epoch"] % 3])
 
-    def pool_view(self, parameters, job=None):
+    def pool_view(self, parameters, job=None, *, genre_options=None):
         lane = parameters.get("lane", "fresh")
         fresh = lane == "fresh"
         building = job is not None and not job.done
@@ -307,7 +372,7 @@ class HomeCards:
         if job and job.done:
             message = job.error or ("Not enough matching songs yet. Try another search or adjust your genres."
                                     if fresh else "Not enough matching songs in your library. Try adjusting your genres.")
-        labels = {o["family"]: o["label"] for o in home_themes.genre_options(self.store)}
+        labels = {o["family"]: o["label"] for o in (self.options() if genre_options is None else genre_options)}
         label = self.pool_label(parameters)
         return {"parameters": parameters, "job": job, "building": building, "message": message,
                 "lane": lane, "label": label,
@@ -362,8 +427,9 @@ class HomeCards:
             proto = (self.built_fresh(job.parameters, now) if job.kind == "fresh_pool"
                      else self.built_library(job.parameters, now, job.exclude_keys))
         if proto:
-            self.offered([proto], now)
-            _record_served_cards(self.store, [proto], now)
+            proto["experiment_id"] = experiment_id(proto)
+            proto["recipe"]["experiment_id"] = proto["experiment_id"]
+            self.record_offer([proto], now, epoch=_epoch(self.store, "cards"))
             self.audit([proto], now, source)
             return PoolResult(proto=proto)
         return PoolResult(pool=self.pool_view(job.parameters, job))

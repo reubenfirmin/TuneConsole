@@ -1,6 +1,7 @@
 import numpy as np
 
 from yt_playlist.rec import embed
+from tests import model_support
 
 
 def test_item2vec_builds_unit_vectors(store):
@@ -11,7 +12,7 @@ def test_item2vec_builds_unit_vectors(store):
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", 8, "h2", 0.0), B)
     store.settings.set_setting("rec_embed_method", "item2vec")
 
-    assert embed.build_and_store(store, dim=8) == 16
+    assert model_support.build_track_model(store, dim=8) == 16
     keys, V, idx = embed.load_vectors(store)
     assert V.shape == (16, 8)
     assert np.allclose(np.linalg.norm(V, axis=1), 1.0, atol=1e-3)   # L2-normalized
@@ -24,6 +25,6 @@ def test_method_setting_switches_builder(store):
     A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(14)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 14, "h", 0.0), A)
     store.settings.set_setting("rec_embed_method", "svd")
-    assert embed.build_and_store(store, dim=8) == 14
+    assert model_support.build_track_model(store, dim=8) == 14
     store.settings.set_setting("rec_embed_method", "item2vec")
-    assert embed.build_and_store(store, dim=8) == 14      # both methods build cleanly
+    assert model_support.build_track_model(store, dim=8) == 14  # both methods build cleanly

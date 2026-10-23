@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.test_mode_cards_route import prepare_home
 
 
 def _seed(store):
@@ -29,10 +30,11 @@ def test_home_proto_curation_not_pre_listen_taste_chips(store):
     ], retired_ids=[], now=1000.0)
     payload = {"1": {}}
     for surf in ms.CARD_SURFACES:
-        payload["1"][surf] = [{"key": f"{surf}k", "video_id": "v", "title": f"Song {surf}",
-                               "artist": "Art", "album": "", "thumbnail": None,
-                               "plays": 0, "reason": "", "lane": "", "genre": ""}]
+        payload["1"][surf] = [{"key": f"{surf}{i}", "video_id": f"{surf}{i}", "title": f"Song {surf} {i}",
+                               "artist": f"Art {i}", "album": "", "thumbnail": None,
+                               "plays": 0, "reason": "", "lane": "", "genre": ""} for i in range(4)]
     store.rec_surface.put_proposals("mode_bundles", payload, 1000.0)
+    prepare_home(store)
     html = c.get("/home/cards").text
     assert "gen-rm" in html and "Remove from this playlist" in html
     for chip in ("More like this", "Not the vibe", "Wrong era", "Too mainstream", "Already know it"):

@@ -50,7 +50,7 @@ def test_tiles_navigate_and_conflict_choice_is_saved(live_app, store, page):
 
 
 def test_counts_advance_without_reloading_and_fit_mobile(live_app, store, page):
-    _, second = _seed(store)
+    first, second = _seed(store)
     page.set_viewport_size({"width": 390, "height": 844})
     page.goto(f"{live_app}/enrich")
     status = page.locator(".enrich-status-card")
@@ -64,6 +64,26 @@ def test_counts_advance_without_reloading_and_fit_mobile(live_app, store, page):
     expect(status.get_by_text("Paused", exact=True)).to_be_visible()
     status.get_by_role("button", name="Resume worker").click()
     expect(status.get_by_text("Caught up", exact=True)).to_be_visible()
+    configuration = {"musicbrainz": {"fingerprint": "old", "status": "available"}}
+    store.enrichment.reconcile_provider_configuration(configuration)
+    store.enrichment.reconcile_provider_configuration({
+        "musicbrainz": {"fingerprint": "new", "status": "available"}})
+    queue = page.locator('.metric[href="/enrich/queue"]')
+    expect(queue.locator(".v")).to_have_text("2", timeout=6000)
+    expect(queue).to_contain_text("0 awaiting first enrichment")
+    expect(queue).to_contain_text("2 queued for re-enrichment")
+    queue.click()
+    expect(page.get_by_role("cell", name="Re-enrichment", exact=True)).to_have_count(2)
+    track = store.tracks.catalog_subject(first)
+    store.enrichment.record_enrichment_attempt(track["identity_key"], "musicbrainz", {}, now=10.0)
+    store.enrichment.mark_enriched([first], 10.0)
+    page.goto(f"{live_app}/enrich")
+    expect(page.locator('.metric[href="/enrich/queue"] .v')).to_have_text("1")
+    expect(page.locator('.metric[href="/enrich/processed"] .v')).to_have_text("50%")
+    expect(page.locator(".spark-refresh")).to_be_visible()
+    expect(page.locator(".enrich-chart-legend")).to_contain_text("Latest re-enrichment")
+    assert page.locator(".spark rect").last.evaluate(
+        "el => JSON.parse(el.dataset.tip).rows.map(row => row.v)") == [2, 1]
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
 
 

@@ -12,11 +12,9 @@
 </div>
 <div class="card workflow-console">
   {% if view == 'queue' %}
-  <p>Library and discovery tracks wait here for a pass through your available metadata providers. New arrivals come first, then your most-played songs, then tracks from playlists, albums, and artists you play.</p>
-  <p class="section-note">Each completed track leaves the queue immediately. Several provider requests may be needed per track. This list is a snapshot; <a href="/enrich/queue?page={{ page }}">refresh the list</a> or <a href="/enrich">watch live activity</a>.</p>
+  <p class="section-note"><a href="/enrich/queue?page={{ page }}">Refresh the queue</a></p>
   {% elif view == 'processed' %}
-  <p>These tracks have had a provider pass. A check can finish without finding every field, or without finding a match. Missing metadata is retried periodically after the queue clears.</p>
-  <p class="section-note">Most recently checked first. Field coverage shows the metadata currently saved for each track.</p>
+  <p class="section-note">Most recently checked first.</p>
   {% else %}
   <p>A conflict means providers returned different values for the same field. One track can have several conflicts. These are review choices and do not stop the queue.</p>
   <p class="enrich-conflict-help">You can always fix these later from an album or playlist page: click the <span class="conflict-help-icon">{{ conflict_icon() }}</span> disagreement icon.</p>
@@ -32,14 +30,16 @@
   {% elif view != 'conflicts' %}
   <div class="enrich-table-wrap">
     <table class="enrich-table">
-      <thead><tr><th scope="col">Track</th><th scope="col">Artist</th>{% if view == 'processed' %}<th scope="col">Field coverage</th><th scope="col">Last checked</th>{% endif %}</tr></thead>
+      <thead><tr><th scope="col">Track</th><th scope="col">Artist</th><th scope="col">{{ 'Pass' if view == 'queue' else 'Field coverage' }}</th><th scope="col">Last checked</th></tr></thead>
       <tbody>
       {% for track in rows %}
       <tr><td>{{ track.title }}</td><td>{{ track.artist or 'Unknown artist' }}</td>
-        {% if view == 'processed' %}
+        {% if view == 'queue' %}
+        <td>{{ 'Re-enrichment' if track.last_enriched_at is not none else 'First enrichment' }}</td>
+        {% else %}
         <td>{% set fields = [] %}{% for key, label in [('genre', 'Genre'), ('mb_year', 'Year'), ('bpm', 'BPM'), ('energy', 'Energy'), ('danceability', 'Danceability')] %}{% if track[key] is not none and track[key] != '' %}{% set _ = fields.append(label) %}{% endif %}{% endfor %}{{ fields|join(', ') or 'No core fields found' }}</td>
-        <td>{{ age(track.last_enriched_at) }}</td>
         {% endif %}
+        <td>{{ age(track.last_enriched_at) }}</td>
       </tr>
       {% endfor %}
       </tbody>

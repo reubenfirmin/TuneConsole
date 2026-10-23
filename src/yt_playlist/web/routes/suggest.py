@@ -1,11 +1,12 @@
 """Recommendation-serving endpoints, returned as lazy htmx fragments."""
 import json
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from yt_playlist.rec import embed, graduation, rec_params, scoring, surfaces
 from yt_playlist.util import genre_map
+from yt_playlist.web.context import request_form
 
 # feedback kinds that suppress an item (vs 'more'/'less' which only nudge future weights)
 _SNOOZE_DAYS = 14
@@ -86,19 +87,17 @@ def build(ctx) -> APIRouter:
     @router.post("/recs/rebuild")
     def recs_rebuild():
         """Kick off a model rebuild + proposal materialization. Dispatched to the background worker
-        (coalesced) so a hung YTM/Last.fm call during materialization can't tie up a request worker;
-        falls back to a synchronous rebuild only when no worker is configured."""
+        (coalesced) so a hung YTM/Last.fm call during materialization can't tie up a request worker."""
         if ctx.rec_worker:
             ctx.rec_worker.trigger()
         else:
-            embed.build_and_store(store)
+            return JSONResponse({'ok': False, 'queued': False, 'error': 'Recommendation worker unavailable'}, status_code=503)
         return JSONResponse({"ok": True, "queued": bool(ctx.rec_worker),
                              "count": store.rec_model.rec_vectors_count()})
 
     @router.post("/recs/feedback")
-    async def recs_feedback(request: Request):
+    def recs_feedback(request: Request, form=Depends(request_form)):
         """Persist a feedback event. htmx removes the card by swapping in the empty response."""
-        form = await request.form()
         item = form.get("item")
         if not item:
             return HTMLResponse("", status_code=422)
@@ -130,14 +129,13 @@ def build(ctx) -> APIRouter:
         return HTMLResponse("")
 
     @router.post("/recs/mood")
-    async def recs_mood(request: Request):
+    def recs_mood(request: Request, form=Depends(request_form)):
         """Transient mood feedback: tilts the Home lanes toward (+) or away (-) from a vibe. #85: it
         fades on the wall clock (mood_halflife_d), reactive, but NOT a permanent taste signal. Two
         shapes:
           - whole-mix (simple panel): `pid` -> seeds with the whole playlist; swaps in a confirmation.
           - facet/track levers: explicit `keys` (JSON list) of just that subset; returns a light ack.
         `intensity=lot` doubles the magnitude (a stronger tilt)."""
-        form = await request.form()
         try:
             direction = int(form.get("dir", 1))
         except (TypeError, ValueError):
@@ -170,11 +168,10 @@ def build(ctx) -> APIRouter:
         return HTMLResponse("")                        # no swap: the panel stays put (Advanced reachable)
 
     @router.post("/recs/journey")
-    async def recs_journey(request: Request):
+    def recs_journey(request: Request, form=Depends(request_form)):
         """Permanent feedback on a generated mix's JOURNEY (its ordering shape). 👍/👎 nudges that
         journey's weight via the same graduation ledger as genres/eras, so preferred flows roll more
         often. Reads the journey from the playlist's stored recipe."""
-        form = await request.form()
         try:
             pid = int(form.get("pid"))
             direction = int(form.get("dir", 1))

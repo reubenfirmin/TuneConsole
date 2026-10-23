@@ -11,7 +11,7 @@
 <div class="album-grid" id="album-grid">
   {% for a in albums %}
   {{ tile('album', a.thumbnail, a.title, a.artist ~ (' · ' ~ a.year if a.year else ''),
-          "/album?browse=" ~ a.browse_id, discovery_id=a.browse_id) }}
+          "/album?browse=" ~ a.browse_id, discovery_id=a.browse_id, badge=false) }}
   {% endfor %}
 </div>
 {# Always 3 rows tall: columns flow with the viewport, and anything past row 3 is hidden. #}

@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from yt_playlist.library import executor
 from yt_playlist.web import radio_session
 from yt_playlist.web.radio_session import PlaylistRadio
-from yt_playlist.web.radio_playlist_tail import PlaylistChanged, PlaylistPending
+from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending
 from yt_playlist.web.routes import radio_session as radio_routes
 
 
@@ -88,9 +88,11 @@ def poc(monkeypatch, store):
         track["key"] = store.tracks.catalog_subject(tid)["identity_key"]
 
     class Candidates:
-        def __init__(self, store, now, tuning=None):
+        def __init__(self, store, now, tuning=None, *, now_source=None):
             self.tuning = radio_session.radio_tuning.controls(tuning or radio_session.radio_tuning.DEFAULTS)
             self.now_sampled_at = now
+            self.encoding_model = store.settings.get_setting("rec_content_model")
+            self.now_posterior, self.now_gain = {}, 0.
             self.by_video = {t["video_id"]: t for t in pool}
             self.by_key = {t["key"]: t for t in pool}
             self.fingerprint = "fixed-test-candidates"
@@ -118,7 +120,7 @@ def poc(monkeypatch, store):
         def seed_offer(self, n=16):
             return pool[:n]
 
-        def next_track(self, history, *, target=None, feedback=None, excluded=()):
+        def next_track(self, history, *, target=None, feedback=None, excluded=(), current=None):
             used = {t["video_id"] for t in history} | set(excluded)
             ordered = list(reversed(pool)) if self.tuning["comfort"] < .5 else pool
             return next((t for t in ordered if t["video_id"] not in used), None)
@@ -150,6 +152,37 @@ def play(controller, video, playlist="PLSESSION", **extra):
     controller.ctx.bridge.now_playing_seen_at = time.monotonic()
     controller._browser(controller.session)
     controller.advance(controller.session)
+
+
+@pytest.mark.parametrize("prior_titles", [
+    [],
+    ["Radio Session · 2026-10-22"],
+    ["Radio Session · 2026-10-22 #1", "Radio Session · 2026-10-22 #2"],
+])
+def test_radio_session_titles_are_numbered_per_local_day(poc, prior_titles):
+    c, *_ = poc
+    store = c.ctx.store
+    identity = store.identities.get_master_identity().id
+    for index, title in enumerate([*prior_titles, "Radio Session · 2026-10-21 #9",
+                                   "Fresh songs - October 22 2026 #9"]):
+        store.playlists.upsert_playlist(identity, f"PLPREVIOUS{index}", title, 0, "", 0)
+
+    title = f"Radio Session · 2026-10-22 #{len(prior_titles) + 1}"
+    result = c.start(local_date="2026-10-22")
+    assert result["ok"] and result["title"] == title
+    assert store.playlists.get_playlist(result["local_id"]).title == title
+    joined = c.start(local_date="2026-10-22")
+    assert joined["joined"] and joined["title"] == title
+
+    c.stop()
+    result = c.start(local_date="2026-10-22")
+    assert result["ok"]
+    assert result["title"] == f"Radio Session · 2026-10-22 #{len(prior_titles) + 2}"
+    assert store.playlists.get_playlist(result["local_id"]).title == result["title"]
+
+    c.stop()
+    result = c.start(local_date="2026-10-23")
+    assert result["ok"] and result["title"] == "Radio Session · 2026-10-23 #1"
 
 
 def test_three_to_start_then_one_append_per_song_and_no_playback_queue_commands(poc):
@@ -408,6 +441,42 @@ def test_latest_direction_choice_updates_only_future_and_waits_for_native_ack(po
     assert bridge.now_playing["position"] == 30
 
 
+@pytest.mark.parametrize("failure", ["rejected", "lost_response"])
+def test_direction_switch_skips_an_unavailable_track_and_preserves_played_history(poc, failure):
+    c, remote, *_ = poc
+    clock = [1234.]
+    c.ctx.now_fn = lambda: clock[0]
+    c.start()
+    play(c, "v2")
+    state = c.status()
+    branch = state["directions"][2]
+    unavailable = branch["tracks"][0]["video_id"]
+    following = branch["tracks"][1]["video_id"]
+    add = remote.add_playlist_items
+    def fail_one(playlist, ids):
+        if ids == [unavailable]:
+            remote.adds.append(list(ids))
+            if failure == "lost_response":
+                raise RuntimeError("Response lost")
+            return {"status": "STATUS_FAILED"}
+        return add(playlist, ids)
+    remote.add_playlist_items = fail_one
+    assert c.select(branch["id"], state["menu_id"])["ok"]
+    c.advance(c.session)
+    if failure == "lost_response":
+        assert c.status()["updating"]
+        clock[0] += 31
+        c.advance(c.session)
+    assert remote.ids == ["v1", "v2", following]
+    assert remote.adds == [[unavailable], [following]]
+    assert remote.removes == [["v3"]]
+    assert c.session.replacement is None
+    assert c.session.directions.active == 2
+    assert unavailable in c.session.rejected
+    assert c.session.directions.feedback == {}
+    assert c.ctx.bridge.now_playing["video_id"] == "v2"
+
+
 @pytest.mark.parametrize("presence", ["missing", "other_playlist", "paused", "stale", "disconnected", "matching"])
 def test_saved_session_is_restored_only_for_fresh_matching_playback(poc, presence):
     c, remote, frames, workers, *_ = poc
@@ -434,6 +503,40 @@ def test_saved_session_is_restored_only_for_fresh_matching_playback(poc, presenc
     assert len(workers) == (2 if presence == "matching" else 1)
     assert len(frames) == 1
     assert remote.adds == []
+
+
+@pytest.mark.parametrize("presence", ["missing", "matching", "paused", "other_playlist", "no_music_tab", "stopped"])
+def test_saved_session_keeps_loading_only_for_confirmed_playback_until_join(poc, presence):
+    c, *_ = poc
+    c.start()
+    play(c, "v2")
+    c._persist(c.session)
+    bridge = c.ctx.bridge
+    if presence == "missing":
+        bridge.now_playing = None
+        bridge.now_playing_seen_at = None
+    elif presence == "paused":
+        bridge.now_playing["paused"] = True
+    elif presence == "other_playlist":
+        bridge.now_playing["playlist_ytm_id"] = "OTHER"
+    elif presence == "no_music_tab":
+        bridge.now_playing = None
+        bridge.now_playing_seen_at = None
+        bridge.sensor_health = {"ytm_tabs": 0, "recovering": False}
+    elif presence == "stopped":
+        c.stop()
+    restored = PlaylistRadio(c.ctx)
+    before = restored.bootstrap()["state"]
+    assert before["resolving"] is (presence == "matching")
+    assert before["active"] is (presence == "matching")
+    if presence in {"missing", "matching"}:
+        if presence == "missing":
+            bridge.now_playing = {"video_id": "v2", "playlist_ytm_id": "PLSESSION", "paused": False}
+            bridge.now_playing_seen_at = time.monotonic()
+        restored.join()
+        after = restored.bootstrap()["state"]
+        assert not after.get("resolving")
+        assert after["active"]
 
 
 def test_observer_negotiates_legacy_command_only_for_allowlist_rejection(poc):
@@ -489,17 +592,180 @@ def test_uncertain_read_after_append_is_recovered_before_another_write(poc):
     assert c.status()["ahead"] == 1
 
 
-def test_rejected_append_stays_pending_until_confirmed(poc):
+def test_rejected_append_skips_the_candidate_and_adds_the_next_track(poc):
     c, remote, *_ = poc
     c.start()
-    remote.fail_add = True
+    add = remote.add_playlist_items
+    def reject_first(playlist, ids):
+        remote.fail_add = ids == ["v4"]
+        return add(playlist, ids)
+    remote.add_playlist_items = reject_first
     play(c, "v3")
-    assert len(c.status()["tracks"]) == 3
-    assert c.session.pending["video_id"] == "v4"
-    remote.fail_add = False
-    play(c, "v3")
-    assert remote.adds == [["v4"], ["v4"]]
+    assert remote.ids == ["v1", "v2", "v3", "v5"]
+    assert remote.adds == [["v4"], ["v5"]]
+    assert c.session.pending is None
+    assert "v4" in c.session.rejected
+    assert c.session.directions.feedback == {}, "delivery failure is not a taste signal"
     assert c.status()["ahead"] == 1
+
+
+@pytest.mark.parametrize("reply", ["success_without_row", "lost_reply"])
+def test_unconfirmed_append_has_a_bounded_wait_then_skips_without_repeating_the_write(poc, reply):
+    c, remote, *_ = poc
+    clock = [1234.]
+    c.ctx.now_fn = lambda: clock[0]
+    c.start()
+    add = remote.add_playlist_items
+    def unconfirmed_first(playlist, ids):
+        if ids == ["v4"]:
+            remote.adds.append(list(ids))
+            if reply == "lost_reply":
+                raise RuntimeError("Response lost")
+            return {"status": "STATUS_SUCCEEDED"}
+        return add(playlist, ids)
+    remote.add_playlist_items = unconfirmed_first
+    play(c, "v3")
+    clock[0] += 29
+    play(c, "v3")
+    assert remote.adds == [["v4"]]
+    clock[0] += 2
+    play(c, "v3")
+    assert remote.ids == ["v1", "v2", "v3", "v5"]
+    assert remote.adds == [["v4"], ["v5"]]
+    assert c.session.pending is None and not c.session.halted
+
+
+@pytest.mark.parametrize("lost_read", [False, True])
+def test_acknowledged_upload_substitution_is_confirmed_without_merging_recordings(poc, lost_read):
+    c, remote, *_ = poc
+    c.start()
+    original_key = c.session.candidates.by_video["v4"]["key"]
+    def substitute(playlist, ids):
+        assert ids == ["v4"]
+        remote.adds.append(list(ids))
+        remote.ids.append("v31")
+        remote.fail_read = lost_read
+        return {"status": "STATUS_SUCCEEDED", "playlistEditResults": [
+            {"videoId": "v31", "setVideoId": "set-v31"}]}
+    remote.add_playlist_items = substitute
+    if lost_read:
+        with pytest.raises(RuntimeError, match="Read response lost"):
+            play(c, "v3")
+        saved = json.loads(c.ctx.store.settings.get_setting("radio_current_session"))
+        assert saved["pending_result"]["videoId"] == "v31"
+        restored = PlaylistRadio(c.ctx)
+        restored.join()
+        c = restored
+    play(c, "v3")
+    assert remote.adds == [["v4"]]
+    assert c.status()["tracks"][-1]["video_id"] == "v31"
+    assert c.status()["tracks"][-1]["key"] != original_key
+    assert c.session.pending is None and c.status()["ahead"] == 1
+    assert "v4" in c.session.rejected
+    assert c.status()["error"] is None
+
+
+def test_an_unacknowledged_different_tail_is_not_claimed_as_our_substitution(poc):
+    c, remote, *_ = poc
+    c.start()
+    def unrelated_tail(playlist, ids):
+        remote.adds.append(list(ids))
+        remote.ids.append("v31")
+        return {"status": "STATUS_SUCCEEDED", "playlistEditResults": [
+            {"videoId": "v31", "setVideoId": "different-handle"}]}
+    remote.add_playlist_items = unrelated_tail
+    with pytest.raises(PlaylistPending):
+        play(c, "v3")
+    assert [t["video_id"] for t in c.status()["tracks"]] == ["v1", "v2", "v3"]
+    assert remote.ids == ["v1", "v2", "v3", "v31"]
+    assert not remote.removes
+
+
+@pytest.mark.parametrize("lost_read", [False, True])
+def test_direction_replacement_recovers_an_acknowledged_substitution(poc, lost_read):
+    from yt_playlist.web.radio_playlist_tail import RadioPlaylistTail
+
+    c, remote, *_ = poc
+    c.start()
+    requested = c.session.candidates.by_video["v4"]
+    c.session.edits.begin(RadioPlaylistTail(c.session.tracks, [requested], 0))
+
+    def substitute(playlist, ids):
+        assert ids == ["v4"]
+        remote.adds.append(list(ids))
+        remote.ids.append("v31")
+        remote.fail_read = lost_read
+        return {"status": "STATUS_SUCCEEDED", "playlistEditResults": [
+            {"videoId": "v31", "setVideoId": "set-v31"}]}
+
+    remote.add_playlist_items = substitute
+    if lost_read:
+        with pytest.raises(RuntimeError, match="Read response lost"):
+            play(c, "v3")
+        saved = json.loads(c.ctx.store.settings.get_setting("radio_current_session"))
+        assert saved["replacement"]["receipt"]["videoId"] == "v31"
+        restored = PlaylistRadio(c.ctx)
+        restored.join()
+        c = restored
+    play(c, "v3")
+    assert remote.adds == [["v4"]]
+    assert c.session.replacement is None
+    assert c.status()["tracks"][-1]["video_id"] == "v31"
+    assert c.status()["ahead"] == 1
+    assert "v4" in c.session.rejected
+    assert c.status()["error"] is None
+
+
+def test_playing_song_moves_into_history_even_while_radio_is_halted(poc):
+    from yt_playlist.web.radio_state import Phase
+
+    c, remote, *_ = poc
+    c.start()
+    play(c, "v1")
+    c.session.move(Phase.CONFLICT)
+    c.ctx.bridge.now_playing = {"video_id": "v3", "playlist_ytm_id": "PLSESSION", "paused": False}
+    c.ctx.bridge.now_playing_seen_at = time.monotonic()
+    c._browser(c.session)
+    assert c.status()["position"] == 2
+    assert c.status()["history_count"] == 3
+    assert c.session.halted
+    assert not remote.adds
+    assert all(t["video_id"] != "v3" for branch in c.status()["directions"] for t in branch["tracks"])
+
+
+@pytest.mark.parametrize("kind", ["equivalent", "remix", "missing_duration"])
+def test_lost_substitution_reply_requires_complete_matching_recording_metadata(poc, kind):
+    c, remote, *_ = poc
+    c.start()
+    original = c.session.candidates.by_video["v4"]
+    original["duration"] = 239
+    read = remote.get_playlist
+    def metadata(playlist, limit=None):
+        detail = read(playlist, limit)
+        for row in detail["tracks"]:
+            if row["videoId"] == "v31":
+                row.update(title=original["title"] + (" (Remix)" if kind == "remix" else ""),
+                           artists=[{"name": original["artist"]}])
+                if kind != "missing_duration":
+                    row["duration_seconds"] = 239
+        return detail
+    remote.get_playlist = metadata
+    def substitute(playlist, ids):
+        remote.adds.append(list(ids))
+        remote.ids.append("v31")
+        raise RuntimeError("Lost response")
+    remote.add_playlist_items = substitute
+    if kind == "equivalent":
+        play(c, "v3")
+        assert c.status()["tracks"][-1]["video_id"] == "v31"
+        assert c.status()["tracks"][-1]["key"] != original["key"]
+        assert c.session.pending is None
+        assert c.status()["ahead"] == 1
+    else:
+        with pytest.raises(PlaylistPending):
+            play(c, "v3")
+        assert c.session.pending["video_id"] == "v4"
+    assert remote.adds == [["v4"]] and not remote.removes
 
 
 def test_playback_can_reach_an_append_whose_confirmation_was_lost(poc):
@@ -542,6 +808,9 @@ def test_external_edits_pause_writes_and_preserve_confirmed_radio_view(poc, monk
     c._monitor(c.session)
     assert c.status()["active"]
     assert c.session.halted
+    assert "changed elsewhere" in c.status()["error"]
+    c._browser(c.session)
+    assert "changed elsewhere" in c.status()["error"], "a healthy observer must not hide a halted playlist"
     assert remote.ids == ["v1", "v2", "v3", "manual-song"]
     assert remote.adds == []
 
@@ -584,6 +853,7 @@ def test_tuning_preserves_history_and_waits_for_native_future_ack(poc):
     assert result["ok"] and result["updating"]
     assert s.candidates is s.directions.candidates
     assert result["tuning"] == controls
+    assert [b["decay_remaining"] for b in result["directions"] if not b["active"]] == [5, 4, 3]
     assert s.heard == history and s.choices == choices
     assert remote.ids == ["v1", "v2", "v3"]
     assert remote.adds == remote.removes == []
@@ -603,6 +873,60 @@ def test_tuning_preserves_history_and_waits_for_native_future_ack(poc):
     assert len(set(saved["directions"]["decay"].values())) == 3
 
 
+@pytest.mark.parametrize("observe_before_publish", [False, True])
+@pytest.mark.parametrize("retune", [False, True])
+def test_native_transition_during_tail_removal_stays_in_history(poc, monkeypatch, observe_before_publish, retune):
+    c, remote, frames, *_ = poc
+    c.start()
+    play(c, "v1")
+    if retune:
+        c.tune({"comfort": .1, "theme": .9, "energy": .2})
+    else:
+        branch = c.status()["directions"][1]
+        c.select(branch["id"], c.status()["menu_id"])
+    target = c.session.requested_direction["tracks"][0]["video_id"]
+    remove = remote.remove_playlist_items
+
+    def transition(playlist, tracks):
+        assert tracks[0]["videoId"] == "v2"
+        c.ctx.bridge.now_playing["video_id"] = "v2"
+        if observe_before_publish:
+            c._browser(c.session)
+        return remove(playlist, tracks)
+
+    monkeypatch.setattr(remote, "remove_playlist_items", transition)
+    c.advance(c.session)
+    state = c.status()
+    assert remote.ids == ["v1", "v3", target]
+    assert [t["video_id"] for t in state["tracks"]] == remote.ids
+    assert [t["video_id"] for t in state["history"]] == ["v1", "v2"]
+    assert state["history_count"] == 2
+    assert state["position"] == -1 and c.session.furthest == 0
+    assert state["browser"]["player"]["video_id"] == "v2"
+    assert "v2" in c.session.directions.retired
+    assert all(t["video_id"] != "v2" for b in state["directions"] for t in b["tracks"])
+    assert PlaylistRadio(c.ctx).bootstrap()["state"]["history"] == state["history"]
+
+    # The history endpoint must load metadata by playback identity, even though
+    # v2 no longer has membership in the saved playlist.
+    c.ctx.templates = Jinja2Templates(directory="src/yt_playlist/web/templates")
+    app = FastAPI()
+    app.include_router(radio_routes.build(c.ctx))
+    with TestClient(app) as client:
+        html = client.get("/radio/playlist").text
+    assert 'data-vid="v2"' in html and "Song 2" in html
+    assert 'data-vid="v3"' not in html
+    assert f'data-vid="{target}"' not in html
+
+    play(c, "v3")
+    state = c.status()
+    assert not state["updating"]
+    assert state["browser"]["playback_synced"]
+    assert [t["video_id"] for t in state["history"]] == ["v1", "v2", "v3"]
+    assert state["ahead"] == 1
+    assert len(frames) == 1
+
+
 def test_tuning_honors_a_pending_explicit_stream_selection(poc):
     c, *_ = poc
     c.start()
@@ -612,10 +936,155 @@ def test_tuning_honors_a_pending_explicit_stream_selection(poc):
     choice = dict(c.session.requested_direction["choice"])
     result = c.tune({"comfort": .1, "theme": .9, "energy": .2})
     assert result["ok"] and result["pending_slot"] == 2
+    assert [b["decay_remaining"] for b in result["directions"] if not b["active"]] == [5, 4, 3]
     assert c.session.requested_direction["choice"] == choice
     c.advance(c.session)
     assert c.session.directions.active == 2
     assert c.ctx.bridge.now_playing["video_id"] == "v2"
+
+
+@pytest.mark.parametrize("retuned", [False, True])
+def test_bootstrap_preserves_staggered_decay_progress(poc, retuned):
+    c, *_ = poc
+    c.start()
+    play(c, "v2")
+    if retuned:
+        c.tune({"comfort": .1, "theme": .9, "energy": .2})
+    c._persist(c.session)
+    current = c.status()["directions"]
+    restored = PlaylistRadio(c.ctx).bootstrap()["state"]["directions"]
+    assert [(b["decay_remaining"], b["decay_total"]) for b in restored] == [
+        (b["decay_remaining"], b["decay_total"]) for b in current]
+    assert [b["decay_remaining"] for b in restored if not b["active"]] == [5, 4, 3]
+
+
+def prepare_radio_styles(controller, pool, monkeypatch):
+    """Publish four real prepared regions after a session has already started cold."""
+    import numpy as np
+    from yt_playlist.rec import embed
+    from yt_playlist.rec.radio_candidates import RadioCandidates
+    from tests.model_support import build_content_model
+
+    store = controller.ctx.store
+    ids = store.tracks.track_ids_for_videos([t["video_id"] for t in pool])
+    bundles, modes = {}, []
+    genres = ("Ambient", "Techno", "Jazz", "Rock")
+    for index, track in enumerate(pool):
+        store.tracks.set_track_enrichment(ids[track["video_id"]], genres[index // 8], "2001")
+    build_content_model(store)
+    keys = [pool[index * 8]["key"] for index in range(4)]
+    vectors = store.rec_model.content_vectors_by_keys(keys)
+    for index, genre in enumerate(genres):
+        mid = index + 1
+        tracks = [{**t, "genre": genre, "year": "2001"} for t in pool[index * 8:(index + 1) * 8]]
+        bundles[str(mid)] = {"wheelhouse": tracks}
+        modes.append({"mode_id": mid, "label": genre, "families": [[genre.casefold(), 1]],
+            "centroid": np.frombuffer(vectors[keys[index]], dtype=np.float32), "size": 8,
+            "rep_keys": [keys[index]], "space": embed.content_space_id(store)})
+    store.modes.replace_modes(modes, retired_ids=[], now=1234)
+    store.rec_surface.put_proposals("mode_bundles", bundles, 1234)
+    monkeypatch.setattr(radio_session, "RadioCandidates", RadioCandidates)
+
+
+def test_monitor_upgrades_fallback_to_distinct_prepared_streams_without_changing_playback(poc, monkeypatch):
+    from yt_playlist.rec import embed
+
+    c, remote, frames, _, pool = poc
+    c.start()
+    play(c, "v2")
+    s, original = c.session, c.session.candidates
+    tracks, heard, choices = list(s.tracks), list(s.heard), dict(s.choices)
+    active = s.directions.slots[s.directions.active]
+    queue = list(active["tracks"])
+    prepare_radio_styles(c, pool, monkeypatch)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Radio recovery must reuse prepared pools without loading or fitting the full model")
+
+    monkeypatch.setattr(embed, "load_content_vectors", forbidden)
+    monkeypatch.setattr(embed, "build_vectors", forbidden)
+    monkeypatch.setattr(embed, "build_content_vectors", forbidden)
+    monkeypatch.setattr(c.ctx.store.rec_model, "content_generation", forbidden)
+    waits = iter([False, True])
+    monkeypatch.setattr(s.stop, "wait", lambda _: next(waits))
+    c._monitor(s)
+
+    assert s.candidates is not original and s.candidates is s.directions.candidates
+    assert len(s.candidates.modes) == 4
+    assert len({b["cluster_id"] for b in c.status()["directions"]}) == 4
+    assert c.status()["active"]
+    assert s.tracks == tracks and s.heard == heard and s.choices == choices
+    assert s.directions.slots[s.directions.active]["id"] == active["id"]
+    assert s.directions.slots[s.directions.active]["tracks"] == queue
+    assert c.ctx.bridge.now_playing["video_id"] == "v2"
+    assert remote.ids == [t["video_id"] for t in tracks]
+    assert not remote.adds and not remote.removes and len(frames) == 1
+    saved = json.loads(c.ctx.store.settings.get_setting("radio_current_session"))
+    assert saved["fingerprint"] == s.candidates.fingerprint
+
+
+def test_pool_recovery_waits_for_an_explicit_stream_switch_to_finish(poc, monkeypatch):
+    c, remote, _, _, pool = poc
+    c.start()
+    play(c, "v2")
+    s, original = c.session, c.session.candidates
+    branch = c.status()["directions"][2]
+    c.select(branch["id"], c.status()["menu_id"])
+    requested = s.requested_direction
+    prepare_radio_styles(c, pool, monkeypatch)
+    c._refresh_candidates(s)
+    assert s.candidates is original and s.requested_direction is requested
+    c.advance(s)
+    assert s.requested_direction is None and s.replacement is None
+    assert s.directions.active == 2
+    selected = list(s.directions.slots[2]["tracks"])
+    saved_ids = list(remote.ids)
+    c._refresh_candidates(s)
+    assert s.candidates is not original
+    assert s.directions.active == 2 and s.directions.slots[2]["tracks"] == selected
+    assert remote.ids == saved_ids
+    assert c.ctx.bridge.now_playing["video_id"] == "v2"
+
+
+def test_missing_pools_keep_the_menu_stable_and_request_preparation_once(poc):
+    c, remote, *_ = poc
+    c.start()
+    play(c, "v2")
+    s, original = c.session, c.session.candidates
+    menu = c.status()["menu_id"]
+    requested = []
+    c.ctx.rec_worker = SimpleNamespace(busy=False, trigger_mode_refresh=lambda: requested.append(True))
+    c._refresh_candidates(s)
+    s.candidates_checked_at = 0
+    c._refresh_candidates(s)
+    assert requested == [True]
+    assert s.candidates is original and c.status()["menu_id"] == menu
+    assert remote.ids == ["v1", "v2", "v3"] and not remote.adds and not remote.removes
+
+
+def test_failed_pool_upgrade_preserves_the_existing_streams_until_retry(poc, monkeypatch):
+    c, remote, _, _, pool = poc
+    c.start()
+    play(c, "v2")
+    s, candidates = c.session, c.session.candidates
+    directions, menu = s.directions, c.status()["menu_id"]
+    prepare_radio_styles(c, pool, monkeypatch)
+    update = radio_session.RadioDirections.update
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("Temporary preparation failure")
+
+    monkeypatch.setattr(radio_session.RadioDirections, "update", fail)
+    with pytest.raises(RuntimeError, match="Temporary preparation failure"):
+        c._refresh_candidates(s)
+    assert s.candidates is candidates and s.directions is directions
+    assert c.status()["menu_id"] == menu
+    assert len(c.status()["directions"]) == 4
+    monkeypatch.setattr(radio_session.RadioDirections, "update", update)
+    s.candidates_checked_at = 0
+    c._refresh_candidates(s)
+    assert s.candidates is not candidates and len(s.candidates.modes) == 4
+    assert remote.ids == ["v1", "v2", "v3"] and not remote.adds and not remote.removes
 
 
 def test_temporary_unrecognized_readback_retries_without_writing_over_it(poc):
@@ -638,7 +1107,7 @@ def test_temporary_unrecognized_readback_retries_without_writing_over_it(poc):
 def test_metadata_enrichment_is_requested_only_after_render_and_bad_fit_is_replaced(poc, monkeypatch):
     c, *_ = poc
     requests = []
-    c.ctx.enrich_worker = SimpleNamespace(prioritize=lambda keys: requests.append(set(keys)))
+    c.ctx.enrich_worker = SimpleNamespace(prioritize=lambda keys: requests.append(list(keys)))
     c.start()
     play(c, "v1")
     assert not requests
@@ -646,6 +1115,7 @@ def test_metadata_enrichment_is_requested_only_after_render_and_bad_fit_is_repla
     c.seen(s.directions.menu_id)
     c.seen(s.directions.menu_id)
     assert len(requests) == 1
+    assert requests[0][0] == s.tracks[0]["key"]
     old = s.directions.slots[1]["tracks"][0]
     monkeypatch.setattr(s.candidates, "refresh_metadata", lambda tracks: old.update(genre="Metal", year="2000") or True)
     monkeypatch.setattr(s.candidates, "fits", lambda track, anchor: track["video_id"] != old["video_id"])
@@ -654,6 +1124,35 @@ def test_metadata_enrichment_is_requested_only_after_render_and_bad_fit_is_repla
     c.advance(s)
     assert all(old["video_id"] not in [t["video_id"] for t in b["tracks"]] for b in s.directions.slots)
     assert s.observed_video == "v1"
+
+
+def test_radio_refreshes_metadata_for_current_and_played_table_rows(poc, monkeypatch):
+    from yt_playlist.rec.radio_candidates import RadioCandidates
+
+    c, *_ = poc
+    requests = []
+    c.ctx.enrich_worker = SimpleNamespace(prioritize=lambda keys: requests.append(list(keys)))
+    c.start()
+    play(c, "v1")
+    play(c, "v2")
+    s = c.session
+    c.seen(s.directions.menu_id)
+    assert requests[0][:2] == [s.tracks[1]["key"], s.tracks[0]["key"]]
+    ids = c.ctx.store.tracks.track_ids_for_videos([t["video_id"] for t in s.tracks[:2]])
+    for track in s.tracks[:2]:
+        tid = ids[track["video_id"]]
+        c.ctx.store.tracks.set_track_enrichment(tid, "Techno", "2001")
+    # Use the production catalog refresh against the fixture's deterministic sampler.
+    s.candidates.store = c.ctx.store
+    s.candidates.affinities = {}
+    monkeypatch.setattr(s.candidates, "_energy", lambda tracks: None, raising=False)
+    monkeypatch.setattr(s.candidates, "refresh_metadata",
+                        lambda tracks: RadioCandidates.refresh_metadata(s.candidates, tracks))
+    c._refresh_metadata(s)
+    state = c.status()
+    assert state["metadata_revision"] == 1
+    assert all(t["genre"] == "Techno" and t["year"] == "2001" for t in state["tracks"][:2])
+    assert state["position"] == 1
 
 
 @pytest.mark.parametrize("values", [{}, {"comfort": 2, "theme": .5, "energy": .5},
@@ -870,8 +1369,10 @@ def test_radio_page_is_registered_and_assets_are_served(store):
         assert response.status_code == 200
         assert 'data-dash="radio"' in response.text
         assert 'class="radio-home"' in response.text
+        assert response.text.index('/static/radio-artwork.js?v=') < response.text.index('/static/radio.js?v=')
         assert '/static/radio.js?v=' in response.text
         assert '/static/radio.css?v=' in response.text
         assert client.get("/static/radio.js").status_code == 200
+        assert client.get("/static/radio-artwork.js").status_code == 200
         assert client.get("/static/radio.css").status_code == 200
         assert not client.get("/radio/status").json()["active"]

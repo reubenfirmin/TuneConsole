@@ -4,9 +4,18 @@ from uuid import uuid4
 
 from yt_playlist.util import genre_map
 from yt_playlist.core.work_diagnostics import work_span
+from yt_playlist.rec.radio_genres import GenrePolicy, genre
 
 DEPTH = 6
 DECAY_TRANSITIONS = 3
+INITIAL_DECAY_TRANSITIONS = (5, 4, 3)
+
+
+def decay_progress(branch, deadline, transition):
+    if deadline is None:
+        return {"decay_remaining": DECAY_TRANSITIONS, "decay_total": DECAY_TRANSITIONS}
+    return {"decay_remaining": max(0, deadline - transition),
+            "decay_total": max(DECAY_TRANSITIONS, deadline - branch.get("born", transition))}
 
 
 class RadioDirections:
@@ -27,11 +36,14 @@ class RadioDirections:
     def _allowed(self, track):
         return track["video_id"] not in self.blocked
 
-    def _extend(self, history, prefix, anchor, excluded):
-        proposal = list(prefix)
+    def continue_sequence(self, history, prefix, anchor, excluded):
+        """Extend an unsent branch using the current candidate and feedback policy."""
+        current = history[-1] if history else anchor
+        genres = GenrePolicy(getattr(self.candidates, "tuning", {}).get("theme", .5), history, current=current)
+        proposal = [t for t in prefix if genres.allows(t)]
         while len(proposal) < DEPTH:
             pick = self.candidates.next_track(history + proposal, target=anchor,
-                feedback=self.feedback, excluded=set(excluded) | self.blocked | self.retired)
+                feedback=self.feedback, excluded=set(excluded) | self.blocked | self.retired, current=current)
             if pick is None:
                 break
             proposal.append(pick)
@@ -52,20 +64,22 @@ class RadioDirections:
         """Advance the active plan; age alternatives on song changes, never on polling."""
         context = (tuple(t["video_id"] for t in history[-8:]),
                    tuple(t["video_id"] for t in scheduled), transition, self.active,
-                   frozenset(self.blocked), frozenset(self.retired))
+                   frozenset(self.blocked), frozenset(self.retired), genre(history[-1]) if history else "")
         if not force and context == self.context:
             return False
         self.transition = transition
-        if force:
-            self.decay.clear()
-        self.decay.pop(self.active, None)
+        if force or not self.decay:
+            unused = [slot for slot in range(4) if slot != self.active]
+            self.decay = {slot: transition + takes
+                          for slot, takes in zip(unused, INITIAL_DECAY_TRANSITIONS)}
+        vacant = self.decay.pop(self.active, None)
         # Preserve the other deadlines when switching streams. A demoted active
         # stream takes the vacant beat; it does not reset all three timers.
         occupied = set(self.decay.values())
         for slot in range(4):
             if slot == self.active or slot in self.decay:
                 continue
-            deadline = transition + 1
+            deadline = vacant if vacant is not None and vacant > transition else transition + 1
             while deadline in occupied:
                 deadline += 1
             self.decay[slot] = deadline
@@ -76,6 +90,9 @@ class RadioDirections:
         played = {t["video_id"] for t in history}
         active = self.slots[self.active]
         anchor = active["anchor"] if active else self.seed
+        genres = GenrePolicy(getattr(self.candidates, "tuning", {}).get("theme", .5), history)
+        if genres.pinned and history:
+            anchor = history[-1]
         old = active["tracks"] if active else []
         scheduled_ids = {t["video_id"] for t in scheduled}
         prefix = list(scheduled)
@@ -84,9 +101,9 @@ class RadioDirections:
                        and self._allowed(t)]
         reserved = {t["video_id"] for slot, branch in enumerate(self.slots)
                     if slot != self.active and branch and not force for t in branch["tracks"]}
-        proposal = self._extend(history, prefix[:DEPTH], anchor, reserved)
+        proposal = self.continue_sequence(history, prefix[:DEPTH], anchor, reserved)
         if len(proposal) < DEPTH:
-            proposal = self._extend(history, proposal, anchor, ())
+            proposal = self.continue_sequence(history, proposal, anchor, ())
         if active is None or [t["video_id"] for t in old] != [t["video_id"] for t in proposal] or force:
             self.slots[self.active] = self._proposal(anchor, proposal, transition)
             changed = True
@@ -97,6 +114,8 @@ class RadioDirections:
                 continue
             old = self.slots[slot]
             stale = (old is None or force or slot == refresh_slot
+                     or genres.pinned and (not genres.allows(old["anchor"])
+                                           or any(not genres.allows(t) for t in old["tracks"]))
                      or any(t["video_id"] in played | self.retired or not self._allowed(t)
                             for t in old["tracks"])
                      or changed and any(t["video_id"] in used for t in old["tracks"]))
@@ -116,7 +135,7 @@ class RadioDirections:
                     tracks = []
                     target = anchor
                 else:
-                    tracks = self._extend(history, [target], target, exclusions)
+                    tracks = self.continue_sequence(history, [target], target, exclusions)
                 self.slots[slot] = self._proposal(target, tracks, transition)
                 if old is not None and not force:
                     occupied = {deadline for other, deadline in self.decay.items() if other != slot}
@@ -153,9 +172,7 @@ class RadioDirections:
         saved = {t["video_id"] for t in scheduled}
         return [{"id": branch["id"], "slot": slot, "active": slot == self.active,
                  "cluster_id": branch.get("cluster_id"),
-                 "decay_remaining": (DECAY_TRANSITIONS if slot == self.active else
-                     max(0, self.decay.get(slot, self.transition + DECAY_TRANSITIONS) - self.transition)),
-                 "decay_total": DECAY_TRANSITIONS,
+                 **decay_progress(branch, self.decay.get(slot), self.transition),
                  "label": branch["label"], "artists": branch["artists"],
                  "tracks": [{**t, "saved": t["video_id"] in saved} for t in branch["tracks"]]}
                 for slot, branch in enumerate(self.slots) if branch]

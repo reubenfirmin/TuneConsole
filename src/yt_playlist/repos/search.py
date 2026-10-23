@@ -3,7 +3,7 @@
 LinkedIn-style: a query that matches an artist pivots into that artist's tracks /
 albums / playlists; direct title matches on songs and playlists get their own
 sections. Read-only and LIKE-based (no FTS). Escaping mirrors
-RecQuery.cluster_search, and Generated playlists are excluded the same way.
+ClusterEvidenceRepo.seed_matches, and generated playlists use the same quarantine view.
 
 The result is a generic {query, primary_artist, sections:[{kind,title,rows}]} shape
 so the Jinja partial stays dumb. Note the section key is `rows`, not `items`:

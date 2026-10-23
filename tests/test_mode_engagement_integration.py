@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
+from tests.test_mode_cards_route import prepare_home
 from yt_playlist.library import live_plays, player_events
 from yt_playlist.library.listen_derive import classify_exit
 from yt_playlist.rec import mode_eval
@@ -56,6 +57,7 @@ def engagement(store):
             for i in range(20)]}
     store.rec_surface.put_proposals("mode_bundles", payload, 1)
     clock = [1_700_000_000.0]
+    prepare_home(store, clock[0])
     fake = FakeClient()
     client = TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: clock[0]),
                         base_url="http://127.0.0.1")

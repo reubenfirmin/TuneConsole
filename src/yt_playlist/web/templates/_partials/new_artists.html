@@ -7,13 +7,12 @@
 {% from "_macros.html" import tile %}
 <div{% if stale %} hx-get="/home/new-artists" hx-trigger="intersect once delay:3s" hx-swap="outerHTML"{% endif %}>
 <h2 class="section">New artists for you{% if stale %} <span class="refreshing">refreshing…</span>{% endif %}</h2>
-<p class="section-note">Pinned to your taste - artists similar to the ones you actually play, fitting the playlists you actually listen to.</p>
+<p class="section-note">Artists connected to the music you save, play, and revisit.</p>
 <div class="tile-grid" id="new-artist-grid">
   {% for a in artists %}
-  {{ tile('artist', a.thumbnail, a.artist,
-          ('because you play ' ~ a.because|join(', ')) if a.because else none,
-          "/artist?name=" ~ a.artist|urlencode ~ ("&artist_id=" ~ a.artist_id if a.artist_id else ""), none,
-          ('fits your ' ~ a.fits|join(', ')) if a.fits else none, discovery_id=('@artist:' ~ a.artist_id) if a.artist_id else a.artist) }}
+  {{ tile('artist', a.thumbnail, a.artist, none,
+          "/artist?name=" ~ a.artist|urlencode ~ ("&artist_id=" ~ a.artist_id if a.artist_id else ""),
+          discovery_id=('@artist:' ~ a.artist_id) if a.artist_id else a.artist, badge=false) }}
   {% endfor %}
 </div>
 {# Always 2 rows tall: columns flow with the viewport (capped at 5), anything past row 2 is hidden. #}

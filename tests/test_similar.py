@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from yt_playlist.rec import embed
+from tests import model_support
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 
@@ -16,7 +17,7 @@ def test_songs_like_this_renders_neighbours(store):
     A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(6)]
     [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(6)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "P", "P", 12, "h", 0.0), A)
-    embed.build_and_store(store, dim=4)
+    model_support.build_track_model(store, dim=4)
 
     r = c.get("/track/a0/similar")              # a0's video_id
     assert r.status_code == 200

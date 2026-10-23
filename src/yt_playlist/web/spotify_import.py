@@ -63,13 +63,22 @@ def save_job(store, job: dict) -> None:
 def current_job(ctx) -> dict | None:
     """Return current state, turning a pre-restart running marker into a retryable failure."""
     job = load_job(ctx.store)
-    if (job and job.get("status") in ACTIVE_STATUSES
-            and not ctx.spotify_import_lock.locked()):
-        job = {**job, "status": "error", "finished_at": ctx.now_fn(),
-               "error": "TuneConsole stopped before the import finished. Upload the same export "
-                        "again to resume recorded transfers."}
-        save_job(ctx.store, job)
-    return job
+    if not job or job.get("status") not in ACTIVE_STATUSES:
+        return job
+    if not ctx.spotify_import_lock.acquire(blocking=False):
+        return job
+    try:
+        # The worker may have finished, or another operation may have replaced/deleted
+        # the report, since the first read. Recovery owns and checks the latest state.
+        job = load_job(ctx.store)
+        if job and job.get("status") in ACTIVE_STATUSES:
+            job = {**job, "status": "error", "finished_at": ctx.now_fn(),
+                   "error": "TuneConsole stopped before the import finished. Upload the same export "
+                            "again to resume recorded transfers."}
+            save_job(ctx.store, job)
+        return job
+    finally:
+        ctx.spotify_import_lock.release()
 
 
 def estimate(parsed: dict) -> dict:

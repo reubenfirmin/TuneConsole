@@ -84,7 +84,7 @@ def test_prepare_empty_when_no_modes(store):
     assert store.rec_surface.get_proposals("mode_bundles") == {}
 
 
-def test_fresh_refresh_removes_stale_candidates_and_preserves_library_caches(store):
+def test_fresh_refresh_discards_pools_without_live_models_or_candidates(store):
     from yt_playlist.rec import fresh_pool
 
     old = [{"key": "stale", "artist": "Artist", "genre": "house"}]
@@ -99,11 +99,8 @@ def test_fresh_refresh_removes_stale_candidates_and_preserves_library_caches(sto
     fresh_pool.prepare(store, 10)  # No discoveries remain.
 
     assert fresh_pool.pick(store, 10) == []
-    bundles = store.rec_surface.get_proposals("mode_bundles")
-    assert bundles["1"] == {"fresh": [], "wheelhouse": library}
-    assert bundles["all"] == {"fresh": [], "wheelhouse": library}
-    assert bundles["_meta"] == {"full_pools": True}
-    assert bundles["_ppr"] == {"1": ["owned"]}
+    assert store.rec_surface.get_proposals("mode_bundles") == {}
+    assert store.rec_surface.get_proposals("fresh_pool") == []
 
 
 def test_prepare_reaches_genres_below_the_old_global_pool_cutoff(monkeypatch, store):

@@ -24,10 +24,50 @@
     <a class="taste-detail-link" href="#profile" @click="select('profile')">Explore taste profile {{ arrow_icon('right') }}</a>
   </section>
 
-  <section class="card card--data taste-summary">
-    <header class="taste-summary-head"><div><h2>What’s changed recently?</h2></div></header>
-    <p class="section-note">The biggest shifts in the last 24 hours from your library’s usual balance. Tracks are grouped by genre, era, and sound; fresher plays count more.</p>
+  <section class="card card--data taste-summary taste-recent-summary">
+    <header class="taste-summary-head"><h2>What’s changed recently?</h2><span class="taste-recent-period">Last 7 days</span></header>
+    {% set ratings = viz.recent.ratings %}
+    <div class="taste-recent-grid">
+      <div class="taste-recent-preferences">
+        <h3>Saved preference changes</h3>
+        {% if viz.recent.changes %}
+        <ul class="taste-preference-steps" aria-label="Latest saved preference changes in the last 7 days">
+          {% for change in viz.recent.changes %}
+          <li>
+            <span class="taste-preference-axis">{{ {'artist': 'Artist', 'era': 'Era', 'genre': 'Genre'}.get(change.axis, 'Preference') }}</span>
+            <span class="taste-preference-name"><strong>{{ change.name }}</strong><time
+              :datetime="new Date({{ change.updated_at | tojson }} * 1000).toISOString()"
+              x-text="new Date({{ change.updated_at | tojson }} * 1000).toLocaleDateString(undefined, {month: 'short', day: 'numeric'})">Within the last 7 days</time></span>
+            <span class="taste-preference-direction {{ change.direction }}">{% if change.direction == 'boost' %}Increased{% elif change.direction == 'reduction' %}Reduced{% else %}Updated{% endif %}</span>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="taste-recent-quiet">No saved preference changes this week. Your established preferences still guide recommendations.</p>
+        {% endif %}
+        <a class="taste-detail-link" href="#learning" @click="select('learning')">See learning activity {{ arrow_icon('right') }}</a>
+      </div>
+      <div class="taste-recent-feedback">
+        <h3>Feedback added to your model</h3>
+        {% if ratings.likes or ratings.synced_likes or ratings.dislikes %}
+        <dl class="taste-feedback-stats" aria-label="Rating inputs added in the last 7 days">
+          {% if ratings.likes %}<div><dt>Like{{ '' if ratings.likes == 1 else 's' }} recorded<small>From your ratings</small></dt><dd>{{ ratings.likes }}</dd></div>{% endif %}
+          {% if ratings.synced_likes %}<div><dt>Existing like{{ '' if ratings.synced_likes == 1 else 's' }}<small>Found by sync</small></dt><dd>{{ ratings.synced_likes }}</dd></div>{% endif %}
+          {% if ratings.dislikes %}<div><dt>Dislike{{ '' if ratings.dislikes == 1 else 's' }} added</dt><dd>{{ ratings.dislikes }}</dd></div>{% endif %}
+        </dl>
+        <details class="taste-feedback-note">
+          <summary>How these counts work</summary>
+          <p>Ratings on radio songs count too. These are retained inputs first recorded in the last 7 days, not a count of every rating action. Existing likes were discovered by sync; their original rating dates aren’t known. Likes can build lasting preferences; a dislike steers away from that song, not its whole genre.</p>
+        </details>
+        {% else %}
+        <p class="taste-recent-quiet">No new rating inputs in the last 7 days.</p>
+        {% endif %}
+      </div>
+    </div>
+    <div class="taste-recent-listening">
+    <div class="taste-recent-listening-head"><h3>Listening balance <span>Last 24 hours</span></h3><a href="#profile" @click="select('profile')">Compare music groups</a></div>
     {% if viz.recent.shifts %}
+    <p class="taste-recent-quiet">Compared with your library’s usual balance. Fresher plays count more; automatic radio selections are excluded.</p>
     <div class="taste-shifts" role="table" aria-label="Recent listening compared with library music groups">
       <div class="taste-shift-head" role="row"><span role="columnheader">Music group</span><span aria-hidden="true"></span><span role="columnheader">Library</span><span role="columnheader">Last 24h</span></div>
       {% for r in viz.recent.shifts %}
@@ -44,15 +84,23 @@
     </div>
     <p class="taste-shift-key"><i class="taste-shift-library" aria-hidden="true"></i> Share of grouped library <i class="taste-shift-recent" aria-hidden="true"></i> Share of recent listening</p>
     {% elif refreshing_groups %}
-    <p class="taste-ribbon-empty" role="status">Updating your music groups automatically. This comparison will appear when they’re ready.</p>
+    <p class="taste-recent-quiet" role="status">Updating your music groups automatically. This comparison will appear when they’re ready.</p>
     {% elif viz.recent.has_styles and not viz.recent.styles_current %}
-    <p class="taste-ribbon-empty">Recent plays can’t be compared yet: the music groups need to be updated for the current model.</p>
+    <p class="taste-recent-quiet">The listening comparison will return when your music groups are up to date.</p>
     {% elif not viz.recent.has_styles %}
-    <p class="taste-ribbon-empty">This comparison appears once your library has been grouped by genre, era, and sound.</p>
+    <p class="taste-recent-quiet">This comparison appears once your library has been grouped by genre, era, and sound.</p>
     {% else %}
-    <p class="taste-ribbon-empty">{{ viz.recent.evidence.mapped }} matched tracks in the last 24 hours. At least {{ viz.recent.min_events }} are needed to show a shift.</p>
+      {% if viz.recent.coverage.tracks and not viz.recent.coverage.eligible_tracks %}
+    <p class="taste-recent-quiet">Recent radio listening is recorded. Automatic selections are excluded from this comparison.</p>
+      {% elif viz.recent.coverage.eligible_tracks %}
+    <p class="taste-recent-quiet">Recent listening is recorded, but there isn’t enough comparable music yet.</p>
+      {% elif viz.recent.coverage.latest_day %}
+    <p class="taste-recent-quiet">Listening recorded through <time datetime="{{ viz.recent.coverage.latest_day }}">{{ viz.recent.coverage.latest_day }}</time>; precise times aren’t available for this comparison.</p>
+      {% else %}
+    <p class="taste-recent-quiet">A recent listening comparison isn’t available yet.</p>
+      {% endif %}
     {% endif %}
-    <a class="taste-detail-link" href="#profile" @click="select('profile')">Compare all music groups {{ arrow_icon('right') }}</a>
+    </div>
   </section>
 
   <section class="card card--data taste-summary taste-choice-summary">

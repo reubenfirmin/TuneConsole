@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from collections import Counter, defaultdict, deque
 from typing import Literal
 
-from yt_playlist.library.playlist_writes import add_items_resilient
 from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.util.retry import with_retry
 
@@ -26,6 +25,53 @@ class PlaylistResult:
 def _read(client, playlist_id):
     detail = with_retry(lambda: client.get_playlist(playlist_id, limit=None))
     return validate_playlist(detail)["tracks"]
+
+
+def apply_playlist_permutation(client, playlist_id, tracks, target, *, movable=None):
+    """Execute a caller-built permutation of the current occurrence indices.
+
+    Callers own membership and target construction, and verify their final ordering contract.
+    ``movable`` restricts writes to selected occurrences without changing the full target order.
+    An absent acknowledgement requires readback before advancing the working order; ambiguous
+    writes are never retried with potentially stale handles.
+    """
+    target = list(target)
+    order = list(range(len(tracks)))
+    if sorted(target) != order:
+        raise ValueError("Playlist target must contain each occurrence exactly once")
+    movable = set(order) if movable is None else set(movable)
+    if not movable <= set(order):
+        raise ValueError("Movable playlist occurrences must belong to the current playlist")
+    for index in range(len(target) - 1, -1, -1):
+        item = target[index]
+        if item not in movable:
+            continue
+        successor = target[index + 1] if index + 1 < len(target) else None
+        position = order.index(item)
+        if (successor is None and position == len(order) - 1) or (
+                successor is not None and position + 1 < len(order) and order[position + 1] == successor):
+            continue
+        handle = tracks[item].get("setVideoId")
+        following = tracks[successor].get("setVideoId") if successor is not None else None
+        if not handle or (successor is not None and not following):
+            raise ValueError("YouTube has not exposed playlist ordering handles. Retry to continue.")
+        result = client.edit_playlist(playlist_id, moveItem=(handle, following)
+                                      if successor is not None else handle)
+        status = result.get("status") if isinstance(result, dict) else result
+        if status is not None and status != "STATUS_SUCCEEDED":
+            raise ValueError("YouTube rejected a playlist position change. Retry to continue.")
+        expected = [occurrence for occurrence in order if occurrence != item]
+        expected.insert(expected.index(successor) if successor is not None else len(expected), item)
+        if status is None:
+            confirmed = _read(client, playlist_id)
+            # Video IDs alone cannot distinguish repeated occurrences. Check every known handle.
+            if len(confirmed) != len(expected) or any(
+                    actual["videoId"] != tracks[occurrence]["videoId"] or (
+                        tracks[occurrence].get("setVideoId") and
+                        actual.get("setVideoId") != tracks[occurrence]["setVideoId"])
+                    for actual, occurrence in zip(confirmed, expected)):
+                raise ValueError("YouTube did not confirm a playlist position change. Retry to continue.")
+        order = expected
 
 
 def restore_playlist_sequence(client, playlist_id, desired_video_ids):
@@ -73,25 +119,7 @@ def restore_playlist_sequence(client, playlist_id, desired_video_ids):
         for index, track in enumerate(tracks):
             occurrences[track["videoId"]].append(index)
         target = [occurrences[vid].popleft() for vid in desired]
-        order = list(range(len(tracks)))
-        for index in range(len(target) - 1, -1, -1):
-            item = target[index]
-            successor = target[index + 1] if index + 1 < len(target) else None
-            pos = order.index(item)
-            if (successor is None and pos == len(order) - 1) or (
-                    successor is not None and pos + 1 < len(order) and order[pos + 1] == successor):
-                continue
-            handle = tracks[item].get("setVideoId")
-            next_handle = tracks[successor].get("setVideoId") if successor is not None else None
-            if not handle or (successor is not None and not next_handle):
-                raise ValueError("YouTube has not exposed playlist ordering handles. Retry Undo to continue.")
-            result = client.edit_playlist(playlist_id, moveItem=(handle, next_handle)
-                                          if successor is not None else handle)
-            status = result.get("status") if isinstance(result, dict) else result
-            if status is not None and status != "STATUS_SUCCEEDED":
-                raise ValueError("YouTube rejected a playlist position change. Retry Undo to continue.")
-            order.remove(item)
-            order.insert(order.index(successor) if successor is not None else len(order), item)
+        apply_playlist_permutation(client, playlist_id, tracks, target)
     except Exception as exc:
         error = str(exc) or type(exc).__name__
     try:
@@ -102,56 +130,3 @@ def restore_playlist_sequence(client, playlist_id, desired_video_ids):
         return PlaylistResult("complete", confirmed)
     return PlaylistResult("partial", confirmed, error=error or
                           "YouTube did not restore the saved playlist order. Retry Undo to continue.")
-
-
-def reconcile_playlist(client, playlist_id, desired_video_ids):
-    """Apply an ordered queue and report only state confirmed by a fresh remote read.
-
-    Readback matters even when the transport returns success: additions can skip unavailable
-    uploads, removals can fail silently, and a set comparison would miss a wrong playback order.
-    A failed final read never upgrades the requested queue to confirmed state.
-    """
-    desired = list(dict.fromkeys(v for v in desired_video_ids if v))
-    skipped, error = [], None
-    try:
-        tracks = _read(client, playlist_id)
-        current = {t["videoId"] for t in tracks}
-        _, skipped = add_items_resilient(client, playlist_id,
-                                        [v for v in desired if v not in current])
-        seen, extras = set(), []
-        for track in tracks:
-            vid = track["videoId"]
-            if vid not in desired or vid in seen:
-                extras.append(track)
-            seen.add(vid)
-        if extras:
-            client.remove_playlist_items(playlist_id, extras)
-        tracks = _read(client, playlist_id)
-        order = [t["videoId"] for t in tracks]
-        handles = {t["videoId"]: t.get("setVideoId") for t in tracks}
-        target = [v for v in desired if v in order]
-        # Work from the end: moveItem places an upload immediately before its successor.
-        for index in range(len(target) - 1, -1, -1):
-            vid = target[index]
-            successor = target[index + 1] if index + 1 < len(target) else None
-            pos = order.index(vid)
-            if (successor is None and pos == len(order) - 1) or (
-                    successor is not None and pos + 1 < len(order) and order[pos + 1] == successor):
-                continue
-            if not handles.get(vid) or (successor and not handles.get(successor)):
-                raise ValueError("YouTube did not return playlist ordering handles")
-            client.edit_playlist(playlist_id, moveItem=(handles[vid], handles[successor])
-                                 if successor else handles[vid])
-            order.remove(vid)
-            order.insert(order.index(successor) if successor else len(order), vid)
-    except Exception as exc:  # the caller needs an honest result even after a partial write
-        error = str(exc) or type(exc).__name__
-    try:
-        confirmed = tuple(t["videoId"] for t in _read(client, playlist_id))
-    except Exception as exc:
-        return PlaylistResult("failed", None, tuple(skipped), str(exc) or type(exc).__name__)
-    missing = tuple(v for v in desired if v not in confirmed)
-    if list(confirmed) == desired:
-        return PlaylistResult("complete", confirmed)
-    return PlaylistResult("partial", confirmed, missing,
-                          error or "YouTube did not apply the complete ordered queue")

@@ -196,6 +196,54 @@ def test_worlds_delayed_metadata_and_ratings_keep_account_and_video_identity(ins
         ("first", h.brand), ("second", h.brand)]
 
 
+@pytest.mark.parametrize("settlement", ["binding_ready", "song_changed", "account_changed", "newer_rating"])
+def test_native_rating_waits_for_bound_controls_and_cancels_old_intent(installed_bridge, settlement):
+    h = installed_bridge
+    page = _music(h)
+    _sample(h, page)
+    h.worker.evaluate("""() => {
+        globalThis.ratingFrames = [];
+        const send = tuneConsole.transport.send;
+        tuneConsole.transport.send = frame => {
+            if (frame.type === 'rating-reconciliation') ratingFrames.push(frame);
+            return send(frame);
+        };
+    }""")
+    page.evaluate("""() => {
+        document.querySelector('ytmusic-player-bar').data = undefined;
+        document.querySelector('ytmusic-like-button-renderer').data = undefined;
+        fixture.sample();
+    }""")
+
+    def rate(desired):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(asyncio.run, h.bridge.request_control({
+                "type": "rate", "action": "like", "videoId": "first",
+                "likeStatus": desired, "brandId": "brand-A"}))
+            h.eventually(result.done)
+            return json.loads(result.result()[1])
+
+    assert rate("LIKE") == {"ok": True, "pending": True}
+    assert page.evaluate("fixture.clicks") == []
+    first_id = h.worker.evaluate("ratingFrames[0].ratingId")
+    if settlement == "newer_rating":
+        assert rate("INDIFFERENT")["pending"]
+    page.evaluate("""settlement => {
+        if (settlement === 'song_changed') fixture.videoId = 'second';
+        if (settlement === 'account_changed') fixture.brand = 'brand-B';
+        fixture.setBar(); fixture.setRating(); fixture.sample();
+    }""", settlement)
+    h.eventually(lambda: h.worker.evaluate("ratingFrames.at(-1)?.state") in ("recovered", "cancelled"))
+    frames = h.worker.evaluate("ratingFrames")
+    first = [frame for frame in frames if frame["ratingId"] == first_id]
+    assert [frame["state"] for frame in first] == [
+        "pending", "recovered" if settlement == "binding_ready" else "cancelled"]
+    assert first[0]["first"]["diagnostics"]["binding"]["targetIds"] == []
+    if settlement == "binding_ready":
+        assert rate("LIKE")["ok"]  # Reapplying a confirmed desired state sends no second click.
+    assert page.evaluate("fixture.clicks") == (["like"] if settlement == "binding_ready" else [])
+
+
 def test_extension_reload_reconnect_and_throttled_main_repair_preserve_playback(installed_bridge):
     h = installed_bridge
     page = _music(h)
@@ -289,6 +337,31 @@ def test_multiple_tabs_control_routing_navigation_and_removal(installed_bridge):
     browsing.wait_for_function("!document.querySelector('video').paused")
     h.eventually(lambda: any(p["video_id"] == "browsing" for p in _plays(h)))
     assert browsing.evaluate("fixture.clicks") == ["playpause"]
+
+
+def test_dislike_updates_native_thumb_then_skips_the_radio_queue(installed_bridge):
+    h = installed_bridge
+    owner = _music(h, "?playing=true&v=radio-song&list=PL_radio")
+    h.eventually(lambda: len(_plays(h)) == 1)
+    _sample(h, owner)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        result = pool.submit(asyncio.run, h.bridge.request_control({
+            "type": "rate", "action": "dislike", "videoId": "radio-song",
+            "likeStatus": "DISLIKE", "brandId": "brand-A", "skip": True}))
+        h.eventually(result.done, "dislike-and-skip did not round-trip")
+        assert json.loads(result.result()[1])["ok"]
+    h.eventually(lambda: h.bridge.now_playing.get("video_id") == "radio-song-next")
+    assert owner.evaluate("fixture.clicks") == ["dislike", "next"]
+    h.eventually(lambda: h.store.tracks.item_rating(h.brand, "radio-song") is not None)
+    assert h.store.tracks.item_rating(h.brand, "radio-song")["status"] == "DISLIKE"
+    assert h.store.tracks.item_rating(h.brand, "radio-song-next") is None
+    assert owner.evaluate("fixture.playlist") == "PL_radio"
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        result = pool.submit(asyncio.run, h.bridge.request_control({
+            "type": "next", "videoId": "radio-song"}))
+        h.eventually(result.done)
+        assert not json.loads(result.result()[1])["ok"]
+    assert owner.evaluate("fixture.clicks") == ["dislike", "next"]
 
 
 @pytest.mark.parametrize("first", ["launch", "fetch"])

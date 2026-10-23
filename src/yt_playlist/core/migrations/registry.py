@@ -9,7 +9,10 @@ from . import (v001_baseline, v002_enrichment, v003_discovery_audit, v004_playli
                v025_relationships,v026_listening_observations,v027_artist_identity_redirects,
                v028_discovery_representatives,v029_artist_provisional_names,
                v030_account_scope_preservation,v031_spotify_history,v032_generated_play_policy,
-               v033_capture_evidence)
+               v033_capture_evidence,v034_progressive_learning,v035_progressive_source_members,
+               v036_progressive_signals,v037_home_query_plans,v038_listening_day_counts,
+               v039_background_refresh,v040_player_refresh_inputs,v041_scorecard_lookups,
+               v042_foreign_calendar_scopes)
 
 MIGRATIONS = (
     Migration(1, 'legacy_baseline', v001_baseline.apply),
@@ -45,4 +48,13 @@ MIGRATIONS = (
     Migration(31, 'spotify_history_provenance', v031_spotify_history.apply),
     Migration(32, 'generated_play_policy_constraint', v032_generated_play_policy.apply),
     Migration(33, 'capture_evidence', v033_capture_evidence.apply),
+    Migration(34, 'progressive_learning', v034_progressive_learning.apply, replaces_data=False),
+    Migration(35, 'progressive_source_members', v035_progressive_source_members.apply, replaces_data=False),
+    Migration(36, 'progressive_signals', v036_progressive_signals.apply, replaces_data=False),
+    Migration(37, 'home_query_plans', v037_home_query_plans.apply, replaces_data=False),
+    Migration(38, 'listening_day_counts', v038_listening_day_counts.apply, replaces_data=False),
+    Migration(39, 'background_model_refresh', v039_background_refresh.apply, replaces_data=False),
+    Migration(40, 'player_refresh_inputs', v040_player_refresh_inputs.apply, replaces_data=False),
+    Migration(41, 'scorecard_attribution_lookups', v041_scorecard_lookups.apply, replaces_data=False),
+    Migration(42, 'foreign_calendar_scopes', v042_foreign_calendar_scopes.apply, replaces_data=False),
 )

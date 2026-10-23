@@ -101,6 +101,22 @@ def source_weights(store, now):
     return {"lanes": lanes, "lane_weight_halflife_days": halflife}
 
 
+def _graduation_change(entry):
+    axis, _, name = entry["axis"].partition(":")
+    if axis == "genre":
+        name = name.removeprefix("other:")
+    elif axis == "era" and name.isdigit():
+        name += "s"
+    source_labels = {"play": "Listening", "like": "Likes", "dislike": "Dislikes",
+                     "mood": "Mood feedback", "vibe": "Mood feedback",
+                     "feedback": "Recommendation feedback", "slider": "Held adjustments"}
+    return {"id": entry["id"], "name": name or entry["axis"], "axis": axis,
+            "direction": "boost" if entry["factor"] > 1 else "reduction" if entry["factor"] < 1 else "neutral",
+            "factor": entry["factor"], "new_weight": entry["new_weight"],
+            "source": source_labels.get(entry["source"], "Other feedback"),
+            "updated_at": entry["created_at"]}
+
+
 def overview(store, now, profiles=None):
     """Only the three Overview readings; no training baskets, pools, or ranking diagnostics."""
     bd = taste_analysis.taste_breadth(store)
@@ -116,12 +132,18 @@ def overview(store, now, profiles=None):
             shifts.append({"label": label, "color_idx": color,
                            "recent": recent, "library": saved, "delta": recent - saved})
     shifts.sort(key=lambda r: -abs(r["delta"]))
+    week_start = now - 7 * 86400
+    changes = [_graduation_change(entry) for entry in
+               store.rec_surface.recent_graduations(limit=3, since=week_start, until=now)]
     return {"genres": [{"name": name, "share": share} for name, share in
                        sorted(bd["families"].items(), key=lambda x: -x[1])],
             "breadth_word": _breadth_word(bd["breadth"]),
             "recent": {"shifts": shifts[:3], "n": n, "styles_current": bool(current_modes),
-                       "has_styles": bool(modes), "evidence": layers.evidence_coverage(store, now)["session"],
-                       "min_events": int(rec_params.get_param(store, "now_min_events"))}}
+                       "has_styles": bool(modes),
+                       "coverage": store.history.listening_comparison_coverage(
+                           now - 86400, now, exclude_list_ids=transient.radio_list_ids(store)),
+                       "ratings": store.rec_model.recent_rating_inputs(week_start, now),
+                       "changes": changes}}
 
 
 def _attach_graduation(rows, prefix, theme, thr):
@@ -284,21 +306,7 @@ def learning_progress(store, now) -> dict:
     weight_sources["lanes"].sort(key=lambda row: (row["updated_at"] is None,
                                                 -(row["updated_at"] or 0), row["label"]))
     weight_sources["maximum"] = rec_params.LANE_MAX
-    changes = []
-    source_labels = {"play": "Listening", "like": "Likes", "dislike": "Dislikes",
-                     "mood": "Mood feedback", "vibe": "Mood feedback",
-                     "feedback": "Recommendation feedback", "slider": "Held adjustments"}
-    for entry in store.rec_surface.recent_graduations(limit=50):
-        axis, _, name = entry["axis"].partition(":")
-        if axis == "genre":
-            name = name.removeprefix("other:")
-        elif axis == "era" and name.isdigit():
-            name += "s"
-        changes.append({"id": entry["id"], "name": name or entry["axis"], "axis": axis,
-                        "direction": "boost" if entry["factor"] > 1 else "reduction" if entry["factor"] < 1 else "neutral",
-                        "factor": entry["factor"], "new_weight": entry["new_weight"],
-                        "source": source_labels.get(entry["source"], "Other feedback"),
-                        "updated_at": entry["created_at"]})
+    changes = [_graduation_change(entry) for entry in store.rec_surface.recent_graduations(limit=50)]
     return {"groups": list(groups.values()), "activity": activity,
             "choices": {"rows": choices, "total": len(choices),
                         "offered": sum(row["offered"] for row in choices),

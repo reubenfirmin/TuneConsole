@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from tests.conftest import FakeClient
 from yt_playlist.core.store import Store
 from yt_playlist.library import player_events, ratings, sync
-from yt_playlist.rec import content_updates, rec_worker
+from yt_playlist.rec import rec_worker
 from yt_playlist.web.app import create_app
 
 
@@ -149,7 +149,7 @@ def test_later_catalog_observation_resolves_pending_rating_without_network(store
     assert store.rec_model.disliked_with_ts() == [("unseen song|artist", 100)]
 
 
-def test_rating_worker_coalesces_and_resolves_without_full_rebuild(store, monkeypatch):
+def test_rating_worker_coalesces_and_resolves_before_background_refresh(store, monkeypatch):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     ratings.record_confirmed(store, iid, "unseen", "LIKE", 100)
     calls = []
@@ -158,11 +158,12 @@ def test_rating_worker_coalesces_and_resolves_without_full_rebuild(store, monkey
         logger=logging.getLogger("test")), debounce_s=0)
     queued = []
     monkeypatch.setattr(worker, "_start_loop", lambda: queued.append(worker._loop))
-    monkeypatch.setattr(content_updates, "update_tracks", lambda s, keys, now: calls.append((keys, now)))
+    monkeypatch.setattr(worker, '_do_rebuild', lambda: calls.append('refresh'))
     worker.trigger_rating_update()
     worker.trigger_rating_update()
     assert len(queued) == 1
     assert store.tracks.identity_key_for_video("unseen") is None
     queued.pop()()
-    assert calls == [({"unseen song|artist"}, 200)]
+    assert calls == ['refresh']
+    assert store.rec_refresh.revision() is not None
     assert not worker.busy

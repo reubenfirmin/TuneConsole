@@ -79,7 +79,7 @@ def test_invalid_genre_request_does_not_advance_rotation(store):
 
 
 def test_genre_filter_uses_families_and_artist_fallback(store, monkeypatch):
-    monkeypatch.setattr(store.rec_query, "artist_genre_years", lambda: {"A": {"genre": "Jazz"}})
+    monkeypatch.setattr(store.rec_query, "artist_genre_years_for", lambda names: {"A": {"genre": "Jazz"}})
     items = [{"key": "known", "genre": "Jazz"}, {"key": "inferred", "artist": "A"},
              {"key": "unknown"}, {"key": "new", "genre": "Techno"}]
     assert home_themes.other_genres(store, items, {genre_map.family("Jazz")}) == [items[-1]]
@@ -212,7 +212,7 @@ def test_chosen_genres_keep_a_fresh_skeleton_when_the_pool_cannot_fill_a_mix(sto
 def test_available_genres_follow_current_metadata_and_artist_fallback(store, monkeypatch):
     tid = store.tracks.upsert_track("v", "Song", "Artist", None, None)
     store.tracks.set_track_genre(tid, "Techno")
-    monkeypatch.setattr(store.rec_query, "artist_genre_years", lambda: {"A": {"genre": "Jazz"}})
+    monkeypatch.setattr(store.rec_query, "artist_genre_years_for", lambda names: {"A": {"genre": "Jazz"}})
     items = [{"key": identity_key("Song", "Artist"), "genre": "Ambient"},
              {"key": "inferred", "artist": "A"}, {"key": "unknown"}]
     store.rec_surface.put_proposals("mode_bundles", {"all": {"wheelhouse": items}}, 1.0)

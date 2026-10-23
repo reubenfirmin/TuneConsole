@@ -8,6 +8,7 @@ import pytest
 
 from yt_playlist.core.store import Store
 from yt_playlist.rec import embed, layers, mode_surfaces, ppr, rec_params, surfaces, taste_modes
+from tests import model_support
 
 
 def _seed(store):
@@ -15,7 +16,7 @@ def _seed(store):
     store.tracks.set_track_genre(tid, "Techno")
     store.discovery.upsert_discovered_track("cold|artist", "cold", "Cold", "Artist", "", None,
                                   "Techno", None, "source", 0)
-    embed.build_content_and_store(store)
+    model_support.build_content_model(store)
     return tid
 
 
@@ -41,7 +42,7 @@ def test_discovery_encoder_retries_against_competing_library_generation(store, m
         if not switched:
             switched = True
             store.tracks.set_track_genre(tid, "Folk")
-            embed.build_content_and_store(store)
+            model_support.build_content_model(store)
         return encode(rows, model)
 
     monkeypatch.setattr(embed, "_encode_discovered", competing_encode)
@@ -150,7 +151,18 @@ def test_bundles_keep_ppr_in_candidate_generation_during_pool_rebuild(store, mon
     monkeypatch.setattr(ppr, "build_transition", lambda _store: (
         keys, np.eye(len(keys)), {key: i for i, key in enumerate(keys)}))
 
-    payload = mode_surfaces.prepare_bundles(store, 100_000)
+    calculated = []
+    calculate = mode_surfaces._calculate_bundles
+
+    def capture(*args):
+        result = calculate(*args)
+        calculated.append(result[0])
+        return result
+
+    monkeypatch.setattr(mode_surfaces, "_calculate_bundles", capture)
+    assert mode_surfaces.prepare_bundles(store, 100_000) is None
+    assert store.rec_surface.get_proposals("mode_bundles") is None
+    payload = calculated[0]
     assert payload["_ppr"]["1"][0] == keys[0]
     assert payload["_ppr"]["2"][0] == keys[1]
 

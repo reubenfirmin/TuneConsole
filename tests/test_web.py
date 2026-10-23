@@ -1,3 +1,4 @@
+import json
 import urllib.error
 from urllib.parse import parse_qs, urlsplit
 
@@ -320,14 +321,24 @@ def test_sync_events_unknown_job_404(store):
 
 def test_sync_reports_failure_in_stream(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
-    class Boom:
+    class Boom(FakeClient):
         def get_library_playlists(self, limit=None): raise RuntimeError("api down")
     app = create_app(store, lambda: {iid: Boom()}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     jid = c.post("/sync").json()["job_id"]
     with c.stream("GET", f"/sync/events/{jid}") as s:
         body = "".join(s.iter_text())
-    assert "sync failed" in body and "api down" in body
+    events = [json.loads(line.removeprefix("data: ")) for line in body.splitlines()
+              if line.startswith("data: ")]
+    assert any(event["type"] == "err" and "api down" in event["text"] for event in events)
+    terminal = events[-1]
+    assert terminal["type"] == "end" and terminal["outcome"] == "partial"
+    assert terminal["error"]
+    resources = terminal["result"]["accounts"][str(iid)]["resources"]
+    assert resources["playlist_listing"]["status"] == "failed"
+    assert "api down" in resources["playlist_listing"]["message"]
+    assert resources["history"]["status"] == resources["saved_albums"]["status"] == "complete"
+    assert store.settings.get_setting("last_sync_at") is None
 
 
 def test_identical_pair_opens_editor(store):

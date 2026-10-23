@@ -70,6 +70,7 @@ def test_track_genre_returns_row_fragment(store):
     assert "Jazz" in r.text                                          # rendered into the genre cell
     assert 'watch?v=v0&amp;list=PL1' in r.text
     assert {t["video_id"]: t["genre"] for t in store.charts.playlist_tracks_detail(a)} == {"v0": "Jazz"}
+    assert r.headers['hx-trigger'] == 'playlist-metadata-changed'
 
 
 def test_track_genre_no_vid_returns_toast(store):
@@ -86,6 +87,7 @@ def test_track_year_returns_row_fragment(store):
     assert r.status_code == 200
     assert 'data-vid="v0"' in r.text and "1991" in r.text
     assert store.charts.playlist_tracks_detail(a)[0]["year"] == "1991"
+    assert r.headers['hx-trigger'] == 'playlist-metadata-changed'
 
 
 def test_track_title_updates_and_returns_row(store):
@@ -445,6 +447,38 @@ def test_generated_playlist_unenriched_nudges_to_enrich(store):
     assert "Detailed feedback" in html                   # the section is shown, not hidden
     assert "enrich it" in html.lower()                   # ...with a nudge to enrich
     assert "By genre" not in html                        # no empty levers
+
+
+def test_generated_feedback_fragment_tracks_metadata_changes(store):
+    iid, pid = _seed_one_track(store)
+    store.playlists.mark_generated_playlist('PL1')
+    c = _client(store, lambda: {iid: FakeClient()})
+    initial = c.get(f'/playlist/{pid}/cells').json()['feedback_version']
+    fragment = c.get(f'/playlist/{pid}/feedback-facets')
+    assert fragment.status_code == 200
+    assert f'data-metadata-version="{initial}"' in fragment.text
+    assert 'These tracks need genre and release-year information.' in fragment.text
+
+    tid = store.charts.playlist_tracks_detail(pid)[0]['track_id']
+    store.tracks.set_track_genre(tid, 'Techno')
+    store.tracks.set_track_year(tid, '1995')
+    current = c.get(f'/playlist/{pid}/cells').json()
+    assert current['pending'] == 0
+    assert current['feedback_version'] != initial
+    fragment = c.get(f'/playlist/{pid}/feedback-facets')
+    assert f'data-metadata-version="{current["feedback_version"]}"' in fragment.text
+    assert 'More techno' in fragment.text and 'More 1990s' in fragment.text
+    assert 'These tracks need' not in fragment.text
+    assert '<!doctype html>' not in fragment.text.lower()
+    assert 'More of this vibe' not in fragment.text  # keep the containing panel and its state
+    assert c.get(f'/playlist/{pid}/cells').json()['feedback_version'] == current['feedback_version']
+
+
+def test_feedback_fragment_requires_generated_playlist(store):
+    iid, pid = _seed_one_track(store)
+    c = _client(store, lambda: {iid: FakeClient()})
+    assert c.get(f'/playlist/{pid}/feedback-facets').status_code == 404
+    assert c.get('/playlist/999999/feedback-facets').status_code == 404
 
 
 def test_generated_playlist_shows_stored_recipe(store):

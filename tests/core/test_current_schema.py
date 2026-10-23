@@ -67,7 +67,7 @@ def test_fresh_and_current_do_not_call_historical_bootstrap_or_validation(monkey
         (migration.version, migration.name) for migration in registry.MIGRATIONS]
 
 
-@pytest.mark.parametrize('version', [1, 7, 8, 10, 11, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33])
+@pytest.mark.parametrize('version', [1, 7, 8, 10, 11, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41])
 def test_every_supported_predecessor_family_matches_current_contract(tmp_path, version):
     with connect(tmp_path / 'upgrade.db') as conn:
         migrate(conn, registry=registry.MIGRATIONS[:version])
@@ -86,7 +86,7 @@ def test_every_supported_predecessor_family_matches_current_contract(tmp_path, v
         migrate(conn)
         assert list(conn.iterdump()) == before
     backups = list((tmp_path / 'backups').glob('*.db'))
-    assert len(backups) == (version < current.VERSION)
+    assert len(backups) == any(m.replaces_data for m in registry.MIGRATIONS[version:])
     if backups:
         with connect(backups[0]) as backup:
             assert backup.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
@@ -94,6 +94,28 @@ def test_every_supported_predecessor_family_matches_current_contract(tmp_path, v
             backup_version = next(m.version - 1 for m in registry.MIGRATIONS[version:] if m.replaces_data)
             assert backup.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == backup_version
             assert backup.execute("SELECT value FROM settings WHERE key='personal-setting'").fetchone()[0] == 'retain'
+
+
+@pytest.mark.parametrize('has_counts_view', [False, True])
+def test_v037_installed_during_home_work_upgrades_without_losing_evidence(has_counts_view, monkeypatch):
+    monkeypatch.setenv('TZ', 'UTC')
+    conn = connect()
+    migrate(conn, registry=registry.MIGRATIONS[:37])
+    populate(conn, 37)
+    if has_counts_view:
+        conn.execute('CREATE VIEW listening_day_counts AS SELECT identity_key,COUNT(*) plays '
+                     'FROM (SELECT DISTINCT identity_id,identity_key,day FROM eligible_listening_evidence) '
+                     'GROUP BY identity_key')
+        conn.commit()
+    evidence = list(map(tuple, conn.execute('SELECT * FROM listening_observations')))
+    migrate(conn)
+    assert list(map(tuple, conn.execute('SELECT * FROM listening_observations'))) == evidence
+    assert tuple(conn.execute('SELECT * FROM listening_day_counts').fetchone()) == ('song|artist', 1)
+    assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == current.VERSION
+    before = list(conn.iterdump())
+    migrate(conn)
+    assert list(conn.iterdump()) == before
+    conn.close()
 
 
 def test_unversioned_early_schema_matches_fresh(tmp_path):

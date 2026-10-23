@@ -9,6 +9,8 @@ Use semantic tokens for colors and shared control sizes. A page may use local di
 
 `base.html` selects assets from the request path. Home owns its board, tuning controls and
 discovery observation in `home.js`/`home.css`; Road Trip and Setup own their script files.
+Radio's session controls live in `radio.js`; `radio-artwork.js` owns its contour geometry,
+session-specific motion and saved drawing state.
 Library indexes/details use `library.css`, Charts adds `charts.css`, and operational pages
 use `workflows.css`; Merge adds `merge.css`. The reusable genre combo has its own stylesheet.
 The graph vendor scripts, renderer and graph CSS load only in Clusters. Generating and the

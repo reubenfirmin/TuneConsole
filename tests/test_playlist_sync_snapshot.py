@@ -50,7 +50,8 @@ def test_partial_reads_preserve_complete_cache_and_success_timestamp(store, cach
     assert resource["incomplete"] == 1 and "1 incomplete" in resource["message"]
     assert resource["last_success_at"] == 100 and resource["last_attempt_at"] == 200
     assert store.settings.get_setting("last_sync_at") == "100"
-    assert sync_due(store, 201, 86400)
+    assert not sync_due(store, 201, 86400)
+    assert sync_due(store, 500, 86400)
     assert events[-1]["outcome"] == "partial"
 
 

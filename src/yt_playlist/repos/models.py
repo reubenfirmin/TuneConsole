@@ -28,6 +28,24 @@ class Playlist:
 
 
 @dataclass
+class PlaylistMemberships:
+    """A detached read model; recording keys and upload kinds share one snapshot."""
+    playlists: list[Playlist]
+    keys: dict[int, frozenset[str]]
+    kinds: dict[str, str]
+    excluded: set[int]
+
+
+@dataclass
+class CleanupPreferences:
+    ignored: dict[str, set[str]]
+    suppressed: list[tuple[str, str, float]]
+    ignored_ytm: set[str]
+    kept: set[frozenset[str]]
+    merges: list[dict]
+
+
+@dataclass
 class Track:
     id: int; video_id: str | None; title: str; artist: str
     album: str | None; duration_s: int | None; identity_key: str

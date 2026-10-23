@@ -1,8 +1,9 @@
 from fastapi.testclient import TestClient
 
-from yt_playlist.rec import embed
+from yt_playlist.rec import surfaces
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.test_mode_cards_route import _seed_bundles, prepare_home
 
 
 def _client(store, iid):
@@ -10,11 +11,16 @@ def _client(store, iid):
                       base_url="http://127.0.0.1")
 
 
-def test_refresh_card_advances_rotation_and_rerenders(store):
+def test_refresh_card_advances_rotation_and_rerenders(store, monkeypatch):
     iid = store.identities.upsert_identity("main", "cred", None, True)
-    tracks = [store.tracks.upsert_track(f"v{i}", f"T{i}", f"Art{i}", None, None) for i in range(40)]
-    store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "P", "P", 40, "h", 0.0), tracks)
-    embed.build_and_store(store, dim=4)
+    _seed_bundles(store)
+    prepare_home(store)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Card rotation must use prepared offers")
+
+    monkeypatch.setattr(surfaces, "for_you", forbidden)
+    monkeypatch.setattr(surfaces, "explore_for_you", forbidden)
     c = _client(store, iid)
 
     before = store.rec_surface.card_views("wheelhouse")

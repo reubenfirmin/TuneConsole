@@ -6,7 +6,7 @@ these lock the CURRENT Alpine behavior (select -> modal -> confirm -> reload) an
 must keep passing after the bulk actions move to htmx. The client-side list (sort,
 multi-select, split, prefs) is unchanged Alpine and is exercised incidentally here.
 """
-import os
+import math
 import re
 import socket
 import threading
@@ -17,6 +17,7 @@ import uvicorn
 from playwright.sync_api import expect
 
 from yt_playlist.core.store import Store
+from yt_playlist.core import paths
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
 
@@ -32,10 +33,9 @@ def _free_port():
 
 
 @pytest.fixture
-def live_pl_data(tmp_path):
-    # delete backs up to disk first, so point YT_PLAYLIST_HOME at a temp dir for this server.
-    old_home = os.environ.get("YT_PLAYLIST_HOME")
-    os.environ["YT_PLAYLIST_HOME"] = str(tmp_path)
+def live_pl_data(tmp_path, monkeypatch):
+    # Delete backs up to disk first; isolate its data directory without changing the environment.
+    monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
 
     s = Store(":memory:")
     s.init_schema()
@@ -60,10 +60,6 @@ def live_pl_data(tmp_path):
     yield {"base": f"http://127.0.0.1:{port}", "store": s, "identity": iid}
     server.should_exit = True
     thread.join(timeout=5)
-    if old_home is None:
-        os.environ.pop("YT_PLAYLIST_HOME", None)
-    else:
-        os.environ["YT_PLAYLIST_HOME"] = old_home
 
 
 @pytest.fixture
@@ -160,9 +156,8 @@ class _SlowDeleteClient(FakeClient):
 
 
 @pytest.fixture
-def live_slow_delete_app(tmp_path):
-    old_home = os.environ.get("YT_PLAYLIST_HOME")
-    os.environ["YT_PLAYLIST_HOME"] = str(tmp_path)
+def live_slow_delete_app(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
 
     s = Store(":memory:")
     s.init_schema()
@@ -184,10 +179,6 @@ def live_slow_delete_app(tmp_path):
     yield f"http://127.0.0.1:{port}"
     server.should_exit = True
     thread.join(timeout=5)
-    if old_home is None:
-        os.environ.pop("YT_PLAYLIST_HOME", None)
-    else:
-        os.environ["YT_PLAYLIST_HOME"] = old_home
 
 
 def test_delete_shows_spinner_while_batch_is_in_flight(live_slow_delete_app, page):
@@ -332,3 +323,51 @@ def test_recent_and_generated_layout_and_promotion(recent_pl_app, page, width, t
 def test_no_recent_playlists_hides_the_section(live_pl_app, page):
     page.goto(f"{live_pl_app}/playlists")
     expect(page.get_by_role("region", name="New playlists")).to_be_hidden()
+
+
+def test_activity_normalization_is_linear_and_tracks_live_changes(recent_pl_app, page):
+    page.goto(f"{recent_pl_app}/playlists")
+    result = page.evaluate("""() => {
+        let reads = 0;
+        const rows = Array.from({ length: 10000 }, (_, index) => ({
+            id: index, title: String(index),
+            get listens() { reads++; return index % 1000; }
+        }));
+        const component = playlistsTab(rows);
+        component.$watch = () => {};
+        component.init();
+        const values = rows.map(row => component.activity(row));
+        return { reads, values };
+    }""")
+    assert result["reads"] <= 4 * 10000
+    assert result["values"] == pytest.approx([
+        math.log1p(index % 1000) / math.log1p(999) for index in range(10000)
+    ])
+
+    page.evaluate("""() => {
+        const state = Alpine.$data(document.querySelector('[x-data^="playlistsTab"]'));
+        state.rows.find(row => row.title.startsWith('Zulu')).listens = 9;
+        state.rows.find(row => row.title === 'Alpha').listens = 99;
+    }""")
+    meters = page.locator('tr').filter(has=page.get_by_role("link", name="Zulu work in progress")).locator('.pl-activity i')
+    expect(meters).to_have_count(2)
+    for meter in meters.all():
+        expect(meter).to_have_attribute("style", "--heat: 0.5;")
+    page.evaluate("""() => {
+        const state = Alpine.$data(document.querySelector('[x-data^="playlistsTab"]'));
+        state.rows.find(row => row.title === 'Alpha').listens = 999;
+    }""")
+    for meter in meters.all():
+        expect(meter).to_have_attribute("style", "--heat: 0.33333333333333337;")
+    page.evaluate("""() => {
+        const state = Alpine.$data(document.querySelector('[x-data^="playlistsTab"]'));
+        state.rows = state.rows.map(row => ({ ...row, listens: 0 }));
+    }""")
+    for meter in meters.all():
+        expect(meter).to_have_attribute("style", "--heat: 0;")
+    assert page.evaluate("""() => {
+        const empty = playlistsTab([]);
+        empty.$watch = () => {};
+        empty.init();
+        return empty.activity({ listens: 0 });
+    }""") == 0

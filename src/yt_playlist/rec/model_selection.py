@@ -6,6 +6,7 @@ the number of alternatives. Daily shadow forecasts are saved BEFORE their outcom
 syncs score both setups against the same eligible, independently played tracks.
 """
 import math
+import json
 from datetime import datetime, timezone
 
 import numpy as np
@@ -168,10 +169,11 @@ def _build(store, setup):
 
 def _forecast(store, previous, selected, now):
     """Save both top-20 predictions on the same candidate universe, before observing outcomes."""
-    with store._lock:
-        baskets = store.rec_query.rec_baskets()
-        weights = embed._cooc_weights(store) if store.settings.get_setting("rec_cooc_weighting") == "1" else None
-        context = store.history.history_keys_before(now) | store.model_selection.selection_play_keys(0, now)
+    with store.read_snapshot() as snapshot:
+        reader = snapshot.store
+        baskets = reader.rec_query.rec_baskets()
+        weights = embed._cooc_weights(reader) if reader.settings.get_setting("rec_cooc_weighting") == "1" else None
+        context = reader.history.history_keys_before(now) | reader.model_selection.selection_play_keys(0, now)
     old_keys, old_vectors = embed.build_vectors_from_baskets(baskets, dim=previous["dim"], method=previous["method"], weights=weights)
     if previous == selected:
         keys, vectors = old_keys, old_vectors
@@ -236,8 +238,8 @@ def run(store, now, *, now_fn=None):
     run_id = store.model_selection.start_selection(now, result)
     completed = False
     try:
-        with store._lock:
-            windows, result["evidence_end"] = _windows(store, now)
+        with store.read_snapshot() as snapshot:
+            windows, result["evidence_end"] = _windows(snapshot.store, now)
         baseline = _evaluate(previous, windows)
         candidates = [dict(method=method, dim=dim) for method, dim in CONFIGS if (method, dim) != (previous["method"], previous["dim"])]
         baseline_check = _paired(baseline, baseline, len(candidates))
@@ -258,13 +260,19 @@ def run(store, now, *, now_fn=None):
             if best and store.settings.get_setting("rec_selection_paused") != "1":
                 selected = {k: best[k] for k in ("method", "dim")}
                 # Fit in memory, then publish exactly once. A failed fit leaves the live model alone.
-                keys, vectors = _build(store, selected)
-                if not keys:
-                    raise ValueError("Selected setup could not build a serving model")
-                published = {**result, "status": "applied", "selected": selected, "comparison": best,
-                             "reason": "Improved predictions across multiple test periods."}
-                store.model_selection.save_selection(run_id, published, rows=[(k, vectors[i].tobytes()) for i, k in enumerate(keys)])
-                result = published
+                with store.read_snapshot() as snapshot:
+                    keys, vectors = _build(snapshot.store, selected)
+                    if not keys:
+                        raise ValueError("Selected setup could not build a serving model")
+                    published = {**result, "status": "applied", "selected": selected, "comparison": best,
+                                 "reason": "Improved predictions across multiple test periods."}
+                    rows = [(k, vectors[i].tobytes()) for i, k in enumerate(keys)]
+                    encoded = json.dumps(published)
+                    if snapshot.publish(lambda: store.model_selection.publish_selection(
+                            run_id, encoded, rows, selected)):
+                        result = published
+                    else:
+                        result.update(status="failed", reason="Inputs changed during fitting. Your current setup was kept.")
             else:
                 result.update(status="retained", comparison=baseline_check,
                               reason="No alternative showed a reliable improvement. Your current setup was kept.")

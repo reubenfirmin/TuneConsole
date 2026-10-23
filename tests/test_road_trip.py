@@ -402,48 +402,18 @@ def _fake_artist_songs(count, prefix="ArtistA"):
     return fake
 
 
-def test_build_other_pool_cap_scales_with_demand(monkeypatch):
+def test_artist_input_cap_scales_with_demand(monkeypatch):
     """A single named artist must be able to fill their whole half. A fixed per-artist cap is what
     made a 50% "theirs" recipe come back almost entirely "mine"."""
     monkeypatch.setattr(candidates, "_page_songs",
                         lambda page, name, limit=30: _fake_artist_songs(25)(None, name))
     monkeypatch.setattr(candidates, "_artist_page", lambda client, name: ({}, "UC1"))
 
-    pool = candidates.build_other_pool(FakeClient(), ["ArtistA"], [], limit=20)
+    cap = candidates.other_cap(['ArtistA'], [], limit=20)
+    batch = candidates.acquire_input(FakeClient(), None, candidates.InputRequest('artist', 'ArtistA', cap))
 
-    assert len(pool) == 20
-    assert all(t["source"] == "theirs" for t in pool)
-
-
-def test_build_other_pool_dedupes_and_spreads_across_inputs(monkeypatch):
-    monkeypatch.setattr(candidates, "_page_songs",
-                        lambda page, name, limit=30: _fake_artist_songs(6)(None, name))
-    monkeypatch.setattr(candidates, "_artist_page", lambda client, name: ({}, "UC1"))
-    monkeypatch.setattr(candidates, "_genre_songs", lambda client, genre, limit=30: [
-        {"video_id": "ArtistA_0", "title": "ArtistA Song 0", "artist": "ArtistA",     # a dup
-         "album": "", "thumbnail": None, "duration": 300, "genre": genre},
-        {"video_id": "syn_1", "title": "Synth Song", "artist": "Synth Band", "album": "",
-         "thumbnail": None, "duration": 300, "genre": genre}])
-
-    pool = candidates.build_other_pool(FakeClient(), ["ArtistA", "ArtistB"], ["synthpop"], limit=12)
-
-    ids = [t["video_id"] for t in pool]
-    assert len(ids) == len(set(ids))
-    assert ids.count("ArtistA_0") == 1
-    assert {"ArtistA", "ArtistB", "Synth Band"} <= {t["artist"] for t in pool}
-
-
-def test_build_other_pool_widens_to_related_artists_when_thin(monkeypatch):
-    page = {"related": {"results": [{"title": "Cousin Band"}]}}
-    monkeypatch.setattr(candidates, "_artist_page", lambda client, name: (page, "UC1"))
-    monkeypatch.setattr(candidates, "_page_songs",
-                        lambda p, name, limit=30: _fake_artist_songs(2)(None, name))
-    monkeypatch.setattr(candidates, "_artist_songs",
-                        lambda client, name, limit=30: _fake_artist_songs(6)(None, name))
-
-    pool = candidates.build_other_pool(FakeClient(), ["ArtistA"], [], limit=8)
-
-    assert "Cousin Band" in {t["artist"] for t in pool}
+    assert len(batch.rows) == 20
+    assert {row['artist'] for row in batch.rows} == {'ArtistA'}
 
 
 # --------------------------------------------------------------------------- draft picking

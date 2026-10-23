@@ -1,6 +1,7 @@
 import pytest
 
 from yt_playlist.rec import embed, eval_recs
+from tests import model_support
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
 
@@ -13,7 +14,7 @@ def test_recall_recovers_held_out_cluster_track(store):
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None, created_at=0) for i in range(8)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 8, "h", 0.0), A)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", 8, "h2", 0.0), B)
-    embed.build_and_store(store, dim=4)
+    model_support.build_track_model(store, dim=4)
 
     res = eval_recs.recall_at_k(store, k=5, min_size=5)
     assert res["trials"] == 2
@@ -32,7 +33,7 @@ def _two_cluster_playlists(store):
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None, created_at=0) for i in range(8)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 8, "h", 0.0), A)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", 8, "h2", 0.0), B)
-    embed.build_and_store(store, dim=4)
+    model_support.build_track_model(store, dim=4)
     return iid
 
 
@@ -171,7 +172,7 @@ def test_projection_recall_breakdown_by_family_and_coverage(store):
         store.tracks.set_track_genre(t, "Folk")      # cluster B has no year (coverage band: genre only)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 10, "h", 0.0), A)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", 10, "h2", 0.0), B)
-    embed.build_and_store(store, dim=8)
+    model_support.build_track_model(store, dim=8)
 
     r = eval_recs.projection_recall(store, k=10)
     bd = r["breakdown"]

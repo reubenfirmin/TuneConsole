@@ -131,17 +131,83 @@ def test_watch_navigation_waits_for_the_requested_song_and_queue(paused_player, 
     assert page.evaluate("document.querySelector('video').paused") is False
 
 
-def test_browse_page_starts_its_header_queue_instead_of_resuming_the_previous_song(paused_player):
+@pytest.mark.parametrize("path", ["/browse/album", "/playlist?list=ALBUM"])
+@pytest.mark.parametrize("previous_playing", [False, True])
+def test_browse_page_starts_its_header_queue_instead_of_resuming_the_previous_song(paused_player, path, previous_playing):
     page = paused_player
-    page.evaluate("""() => {
-      history.replaceState({}, '', '/browse/album');
+    page.evaluate("""async ({path, previousPlaying}) => {
+      history.replaceState({}, '', path);
+      if (previousPlaying) await nativePlay();
       const header = document.createElement('ytmusic-responsive-header-renderer');
       header.innerHTML = '<ytmusic-play-button-renderer><button>Play album</button></ytmusic-play-button-renderer>';
       document.body.append(header);
       window.headerClicks = 0;
-      header.querySelector('button').onclick = () => { headerClicks++; nativePlay(); };
+      header.querySelector('button').onclick = () => {
+        headerClicks++;
+        document.querySelector('ytmusic-player-bar a').href = '/watch?v=album-first&list=ALBUM';
+        nativePlay();
+      };
       document.querySelector('video').play = () => { throw Error('Must start the requested album'); };
-    }""")
-    assert page.evaluate("ensurePlayback()")["playing"] is True
+    }""", {"path": path, "previousPlaying": previous_playing})
+    target = {"url": "https://music.youtube.com" + path}
+    if path.startswith("/playlist"):
+        target["playlist"] = "ALBUM"
+    assert page.evaluate("target => ensurePlayback(target)", target)["playing"] is True
+    assert page.evaluate("target => ensurePlayback(target)", target)["playing"] is True
     assert page.evaluate("headerClicks") == 1
     assert page.evaluate("barClicks + shelfClicks") == 0
+
+
+def test_album_launch_waits_for_its_header_and_then_for_its_player(paused_player):
+    page = paused_player
+    page.evaluate("history.replaceState({}, '', '/playlist?list=ALBUM')")
+    target = {"url": "https://music.youtube.com/playlist?list=ALBUM", "playlist": "ALBUM"}
+    assert page.evaluate("target => ensurePlayback(target)", target)["playing"] is False
+    assert page.evaluate("barClicks + shelfClicks") == 0
+    page.evaluate("""() => {
+      const header = document.createElement('ytmusic-responsive-header-renderer');
+      header.innerHTML = '<ytmusic-play-button-renderer><button>Play album</button></ytmusic-play-button-renderer>';
+      document.body.append(header);
+      window.headerClicks = 0;
+      header.querySelector('button').onclick = () => headerClicks++;
+    }""")
+    assert page.evaluate("target => ensurePlayback(target)", target)["playing"] is False
+    assert page.evaluate("target => ensurePlayback(target)", target)["playing"] is False
+    assert page.evaluate("headerClicks") == 1
+    assert page.evaluate("barClicks + shelfClicks") == 0
+
+    page.eval_on_selector("ytmusic-player-bar a", "link => link.href = '/watch?v=album-first&list=ALBUM'")
+    assert page.evaluate("target => ensurePlayback(target)", target)["playing"] is True
+    assert page.evaluate("headerClicks") == 1
+
+
+def test_album_launch_does_not_click_a_different_browse_page(paused_player):
+    page = paused_player
+    page.evaluate("history.replaceState({}, '', '/playlist?list=OTHER')")
+    target = {"url": "https://music.youtube.com/playlist?list=ALBUM", "playlist": "ALBUM"}
+    assert page.evaluate("target => ensurePlayback(target)", target)["playing"] is False
+    assert page.evaluate("barClicks + shelfClicks") == 0
+
+
+def test_album_launch_retries_a_disabled_header_then_recovers_blocked_playback(paused_player):
+    page = paused_player
+    page.evaluate("""() => {
+      history.replaceState({}, '', '/playlist?list=ALBUM');
+      const header = document.createElement('ytmusic-responsive-header-renderer');
+      header.innerHTML = '<ytmusic-play-button-renderer><button disabled>Play album</button></ytmusic-play-button-renderer>';
+      document.body.append(header);
+      window.headerClicks = 0;
+      header.querySelector('button').onclick = () => {
+        headerClicks++;
+        document.querySelector('ytmusic-player-bar a').href = '/watch?v=album-first&list=ALBUM';
+      };
+      document.querySelector('video').play = () => Promise.reject(new DOMException('blocked', 'NotAllowedError'));
+    }""")
+    target = {"url": "https://music.youtube.com/playlist?list=ALBUM", "playlist": "ALBUM"}
+    assert page.evaluate("target => ensurePlayback(target)", target)["playing"] is False
+    assert page.evaluate("headerClicks + barClicks + shelfClicks") == 0
+    page.eval_on_selector("ytmusic-responsive-header-renderer button", "button => button.disabled = false")
+    assert page.evaluate("target => ensurePlayback(target)", target)["playing"] is True
+    assert page.evaluate("headerClicks") == 1
+    assert page.evaluate("barClicks") == 1
+    assert page.evaluate("shelfClicks") == 0

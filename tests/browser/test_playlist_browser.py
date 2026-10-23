@@ -308,3 +308,72 @@ def test_enrich_updates_cells_live(live_playlist_app, page, monkeypatch):
     row = page.get_by_role("row").filter(has_text="Song B")
     expect(row.get_by_text("Electronic")).to_be_visible(timeout=5000)   # live SSE cell update
     expect(row.get_by_text("1998")).to_be_visible()
+
+
+def test_generated_feedback_updates_after_background_enrichment(live_playlist_app, page):
+    store, pid = live_playlist_app['store'], live_playlist_app['pid']
+    tracks = store.charts.playlist_tracks_detail(pid)
+    for track in tracks:
+        store.tracks.set_track_genre(track['track_id'], '')
+    store.playlists.set_playlist_group('PL1', 'Generated')
+    store.playlists.mark_generated_playlist('PL1')
+    page.goto(f"{live_playlist_app['base']}/playlist/{pid}")
+    page.get_by_role('button', name='Detailed feedback', exact=True).click()
+    expect(page.get_by_text('These tracks need genre and release-year information.')).to_be_visible()
+    page.get_by_role('button', name='More of this vibe', exact=True).click()
+    for track in tracks:
+        store.tracks.set_track_genre(track['track_id'], 'Techno')
+        store.tracks.set_track_year(track['track_id'], '1995')
+    row = page.get_by_role('row').filter(has_text='Song B')
+    expect(row.get_by_text('Techno', exact=True)).to_be_visible(timeout=6000)
+    expect(page.get_by_role('button', name='More techno', exact=True)).to_be_visible(timeout=6000)
+    expect(page.get_by_role('button', name='More 1990s', exact=True)).to_be_visible()
+    expect(page.get_by_role('button', name='Detailed feedback', exact=True)).to_have_attribute('aria-expanded', 'true')
+    expect(page.get_by_role('button', name='More of this vibe', exact=True)).to_have_attribute('aria-pressed', 'true')
+    with page.expect_response(lambda r: r.url.endswith('/recs/mood') and r.request.method == 'POST') as mood:
+        page.get_by_role('button', name='More techno', exact=True).click()
+    assert mood.value.ok
+    expect(page.get_by_role('button', name='More techno', exact=True)).to_have_attribute('aria-pressed', 'true')
+    assert set(store.rec_surface.recent_mood_events()[0][2]) == {t['identity_key'] for t in tracks}
+
+
+def test_generated_feedback_updates_after_enrich_and_metadata_edit(live_playlist_app, page, monkeypatch):
+    import yt_playlist.providers.musicbrainz as mb
+    from tests.conftest import only_provider
+
+    store, pid = live_playlist_app['store'], live_playlist_app['pid']
+    # Keep the untagged track: a manually chosen blank genre would correctly override the provider.
+    track = next(t for t in store.charts.playlist_tracks_detail(pid) if t['video_id'] == 'v1')
+    store.playlists.set_playlist_tracks(pid, [track['track_id']])
+    store.playlists.set_playlist_group('PL1', 'Generated')
+    store.playlists.mark_generated_playlist('PL1')
+    only_provider(store, 'musicbrainz')
+    monkeypatch.setattr(mb, 'enrich_full', lambda *args, **kwargs: ('Techno', '1995', None, []))
+    page.goto(f"{live_playlist_app['base']}/playlist/{pid}")
+    page.get_by_role('button', name='Detailed feedback', exact=True).click()
+    expect(page.get_by_text('These tracks need genre and release-year information.')).to_be_visible()
+    page.get_by_role('button', name='Enrich', exact=True).click()
+    expect(page.get_by_role('button', name='More techno', exact=True)).to_be_visible()
+    expect(page.get_by_role('button', name='More 1990s', exact=True)).to_be_visible()
+    response = page.wait_for_event('response', predicate=lambda r: r.url.endswith(f'/playlist/{pid}/cells'))
+    assert response.json()['pending'] == 0
+    # Once metadata is complete the polling loop stops. Editing the shared song dialog must
+    # still update the facet controls without reloading or collapsing Detailed feedback.
+    row = page.get_by_role('row').filter(has_text='Song B')
+    row.get_by_role('button', name='More actions for Song B').click()
+    page.get_by_role('menuitem', name='Edit Metadata').click()
+    dialog = page.get_by_role('dialog', name='Edit Metadata')
+    expect(dialog.get_by_label('Genre', exact=True)).to_have_value('Techno')
+    dialog.get_by_label('Genre', exact=True).fill('Ambient')
+    dialog.get_by_label('Year', exact=True).fill('2004')
+    dialog.get_by_role('button', name='Save changes').click()
+    expect(row.get_by_text('Ambient', exact=True)).to_be_visible()
+    expect(page.get_by_role('button', name='More ambient', exact=True)).to_be_visible()
+    expect(page.get_by_role('button', name='More 2000s', exact=True)).to_be_visible()
+    expect(page.get_by_role('button', name='Detailed feedback', exact=True)).to_have_attribute('aria-expanded', 'true')
+    with page.expect_response(lambda r: r.url.endswith('/recs/mood') and r.request.method == 'POST') as mood:
+        page.get_by_role('button', name='More ambient', exact=True).click()
+    assert mood.value.ok
+    expect(page.get_by_role('button', name='More ambient', exact=True)).to_have_attribute('aria-pressed', 'true')
+    key = track['identity_key']
+    assert store.rec_surface.recent_mood_events()[0][2] == [key]

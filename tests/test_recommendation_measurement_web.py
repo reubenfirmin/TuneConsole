@@ -77,7 +77,11 @@ def test_save_counts_only_successful_adoption_and_promotion_preserves_play_prove
         raise RuntimeError("remote failed")
 
     monkeypatch.setattr(remote, "add_playlist_items", fail)
-    assert http.post("/songs/add-to-playlist", json=body).status_code == 422
+    response = http.post("/songs/add-to-playlist", json=body)
+    assert response.status_code == 200
+    assert response.json()["status"] == "partial"
+    assert response.json()["added"] is False
+    assert response.json()["uncertain"] == 1
     assert store.conn.execute("SELECT COUNT(*) FROM rec_response_events").fetchone()[0] == 0
     monkeypatch.setattr(remote, "add_playlist_items", original_add)
     assert http.post("/songs/add-to-playlist", json=body).status_code == 200

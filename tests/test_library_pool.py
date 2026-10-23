@@ -149,6 +149,9 @@ def test_catalog_build_reaches_unmodeled_library_beyond_other_genres(store):
         keys.append(identity_key(title, artist))
     parameters = {"lane": "explore", "epoch": "0", "include_genres": ["jazz"],
                   "exclude_keys": json.dumps(keys[310:322])}
+    # Ordinary Home waits for candidate dependencies; model the worker's pass
+    # before exercising the explicit library-pool request.
+    assert mode_surfaces.prepare_bundles(store, 1000) is not None
     client = _client(store)
     response = client.post("/home/library-pool", data=parameters)
     for _ in range(200):

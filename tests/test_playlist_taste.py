@@ -1,4 +1,5 @@
 from yt_playlist.rec import embed, scoring
+from tests import model_support
 
 
 def test_playlist_taste_weights_by_play_and_scores(store):
@@ -12,7 +13,7 @@ def test_playlist_taste_weights_by_play_and_scores(store):
     for _ in range(5):                                    # you live in the techno playlist
         store.history.record_history_plays(iid, 1.0, ["t0|technoband"], source_timezone="UTC")
     store.history.record_history_plays(iid, 1.0, ["f0|folkband"], source_timezone="UTC")
-    embed.build_and_store(store, dim=4)
+    model_support.build_track_model(store, dim=4)
 
     pt_model = scoring.playlist_taste(store)
     assert pt_model                                       # non-empty

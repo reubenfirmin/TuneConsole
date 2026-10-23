@@ -520,9 +520,32 @@ def compute_overlay_series(day_counts, meta, weeks, top_artists=8, top_genres=6)
                        for f in top_g]}
 
 
-def build(store, now) -> dict:
-    """Precompute the whole Trends rollup + spotlight candidate and materialize it. Rec-worker only."""
-    _build_first_play_index(store)
+def build(store, now) -> dict | None:
+    """Calculate on a private read snapshot and publish matching output atomically.
+
+    Return None when concurrent source changes require another worker pass. The last published
+    rollup and index remain intact; a stale calculation must not undo source removal or a reset.
+    """
+    import json
+
+    with store.read_snapshot() as snapshot:
+        reader = snapshot.store
+        first_play = reader.trends.prepare_first_play()
+        imported = reader.settings.get_setting("takeout_imported_at")
+        payload = _calculate(reader, now)
+        review, spotlight = payload["review"], payload["spotlight"]
+        # Only consume a review when it won the spotlight cascade.
+        review_month = (review["month"] if review is not None and spotlight is not None
+                        and spotlight["signature"] == f"month_review:{review['month']}" else None)
+        encoded = json.dumps(payload)
+        if not snapshot.publish(lambda: store.trends.publish_rollup(
+                first_play, encoded, now, imported, review_month)):
+            return None
+        return payload
+
+
+def _calculate(store, now) -> dict:
+    """Read and compute only; the caller supplies its privately prepared first-play index."""
     day_counts = day_counts_source(store)
     meta = store.trends.track_meta()
     artist_first = store.trends.first_play_map("artist")
@@ -547,15 +570,6 @@ def build(store, now) -> dict:
                "overlays": compute_overlay_series(day_counts, meta, weeks),
                "insights": insights, "review": review, "health": health_snapshot(store, now),
                "story": story, "spotlight": spotlight}
-    store.rec_surface.put_proposals("trend_rollups", payload, now)
-    # Only mark the review month "consumed" when its month-rollover candidate is the one that actually
-    # won the spotlight cascade. detect_spotlight lets insights (priority 0) outrank the month-rollover
-    # detector, so on a week where an insight fires, the review would otherwise be silently burned
-    # without ever reaching Home -- the review keeps re-competing for the spotlight on every subsequent
-    # build until a build finally has no higher-priority insight to beat it.
-    if (review is not None and spotlight is not None
-            and spotlight["signature"] == f"month_review:{review['month']}"):
-        store.settings.set_setting("trend_spotlight_review_month", review["month"])
     return payload
 
 

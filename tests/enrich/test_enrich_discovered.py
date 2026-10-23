@@ -30,19 +30,15 @@ def test_drain_processes_discovered(store):
 
 
 def test_mixed_batch_follows_shared_order_and_refreshes_fresh(monkeypatch, store):
-    from yt_playlist.rec import content_updates
-
     store.settings.set_setting("enrich_caught_up_at", "50")
     store.tracks.upsert_track("older", "Older library song", "Artist", None, 200, created_at=1.0)
     newest = store.tracks.upsert_track("newest", "Newest library song", "Artist", None, 200, created_at=200.0)
     store.discovery.upsert_discovered_track("new|artist", "new", "New", "Artist", None, None,
                                   None, None, "radio:seed", 100.0)
     seen, prepared = [], []
-    def update(s, keys, now):
-        prepared.append((set(keys), now,
-            s.discovery.discovered_tracks_by_keys(["new|artist"])["new|artist"]))
-
-    monkeypatch.setattr(content_updates, "update_tracks", update)
+    def update(keys):
+        prepared.append((set(keys), 500.0,
+            store.discovery.discovered_tracks_by_keys(["new|artist"])["new|artist"]))
 
     def waterfall(s, batch, cfg, on_progress, should_stop=None, sink_for=None, **kwargs):
         seen.append([track["title"] for track in batch])
@@ -51,6 +47,7 @@ def test_mixed_batch_follows_shared_order_and_refreshes_fresh(monkeypatch, store
             sink_for(track).set_audio(bpm=128.0, energy=.8, danceability=.7)
 
     ctx = SimpleNamespace(store=store, now_fn=lambda: 500.0,
+                          rec_worker=SimpleNamespace(trigger_content_update=update),
                           logger=SimpleNamespace(warning=lambda *a, **k: None))
     worker = EnrichWorker(ctx, waterfall_fn=waterfall)
     assert worker.drain_once(limit=2) == 2
@@ -71,7 +68,6 @@ def test_mixed_batch_follows_shared_order_and_refreshes_fresh(monkeypatch, store
 def test_mixed_waterfall_commits_each_track_and_keeps_unfinished_work(store, monkeypatch, interrupt):
     from yt_playlist.rec import embed, fresh_pool
 
-    monkeypatch.setattr(embed, "maybe_rebuild_content_vectors", lambda s: None)
     monkeypatch.setattr(embed, "build_discovered_content_vectors", lambda s: None)
     monkeypatch.setattr(fresh_pool, "prepare", lambda s, now: None)
     store.settings.set_setting("enrich_caught_up_at", "1")

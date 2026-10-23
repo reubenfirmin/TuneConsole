@@ -128,6 +128,8 @@ def test_live_continuation_replaces_saved_suffix_and_is_played(request, tmp_path
             age = current.get("browser_age")
             assert current.get("playlist_id") == before["playlist_id"], "The session playlist changed"
             assert ids[:len(history)] == history, "The saved playback history changed"
+            if age is None or age >= 8 or not player.get("video_id"):
+                return False
             assert player.get("video_id") == playing, "The current song changed during suffix replacement"
             return (not current.get("updating") and ids == desired and age is not None and age < 8
                     and browser.get("playback_synced") and browser.get("page_synced")

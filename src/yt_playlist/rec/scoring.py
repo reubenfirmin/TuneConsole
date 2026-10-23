@@ -10,46 +10,12 @@ import numpy as np
 from yt_playlist.util import genre_map
 from yt_playlist.rec import embed, layers, mix_tuning, negative, rec_params, transient
 from yt_playlist.rec.taste_analysis import taste_breadth
+from yt_playlist.rec.taste_context import PlaylistTaste
 
 
 # Added to an L2 norm before dividing so a zero/degenerate vector normalises to ~0 rather than raising
 # or producing NaNs. Tiny relative to any real unit vector, so it never perturbs a result.
 _NORM_EPS = 1e-9
-
-
-class PlaylistTaste:
-    """Play-weighted per-playlist taste model: each playlist is one taste *context* (its embedding
-    centroid), weighted by how much you actually listen to it. Scoring a candidate against this
-    rewards fit to the contexts you play, so a low-play playlist (the 'vacation with Dad' problem)
-    can't drag in off-taste recommendations, and distinct high-play contexts aren't blurred into one
-    average. Catch-all playlists (too big to be a coherent context) are excluded.
-    """
-
-    def __init__(self, titles, centroids, weights, pids=()):
-        self.titles = list(titles)               # playlist titles, one per context
-        self.centroids = centroids               # (n, dim) L2-normalised rows, or empty
-        self.weights = weights                   # (n,) sums to 1, or empty
-        self.pids = list(pids)                   # playlist ids, aligned with titles (for the viz)
-
-    def __bool__(self):
-        return len(self.titles) > 0
-
-    def score(self, vec, top=3):
-        """(total, [(playlist_title, contribution), ...]) for a candidate taste vector."""
-        if not self.titles:
-            return 0.0, []
-        v = vec / (np.linalg.norm(vec) + _NORM_EPS)
-        contrib = self.weights * (self.centroids @ v)        # play-weighted cosine per context
-        order = np.argsort(-contrib)[:top]
-        because = [(self.titles[i], float(contrib[i])) for i in order if contrib[i] > 0]
-        return float(contrib.sum()), because
-
-    def score_all(self, V):
-        """Per-context taste score for every row of V (N, dim) -> (N,). Vectorized."""
-        if not self.titles or len(V) == 0:
-            return np.zeros(len(V))
-        Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
-        return self.weights @ (self.centroids @ Vn.T)        # (P,)·(P,N) -> (N,)
 
 
 def _playlist_centroids(store, M, idx) -> PlaylistTaste:
@@ -136,20 +102,6 @@ def content_taste(store, *, snapshot=None) -> PlaylistTaste:
     if CV is None:
         return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
     return _playlist_centroids(store, CV, cidx)
-
-
-def genre_adjusted_scores(scores, genre_of, gweights):
-    """Re-weight per-track taste scores by the user's per-genre-family preferences.
-
-    `gweights` maps genre family -> weight (1.0 = neutral, 0 = mute, >1 = favor). #86: weights
-    apply to a rank/percentile base (see embed.percentile_scores), not a shift-by-min base, which
-    BOUNDS how much the pool's worst score can distort the effect of a weight (it no longer warps
-    it without limit; see the base's docstring for the residual). A muted family sinks to 0, a
-    boosted one rises. Returns a new {key: score}; a pure no-op when all weights are neutral."""
-    if not scores or not gweights or all(w == 1.0 for w in gweights.values()):
-        return scores
-    base = embed.percentile_scores(scores)
-    return {k: base[k] * gweights.get(genre_of.get(k), 1.0) for k in scores}
 
 
 # The largest preference multiplier the axes can produce: four axes, each clamped to GENRE_MAX. At
@@ -334,7 +286,7 @@ def _apply_axis_weights(store, sims, now=None):
     return axis_adjusted_scores(sims, mult, cap=rec_params.get_param(store, "axis_weight_cap"))
 
 
-def discovery_facet_weight(store, family, now):
+def discovery_facet_weight(store, family, now, *, leans=None):
     """#18: the facet overlay for OUTWARD discovery (new artists/albums), at genre-family granularity.
 
     Returns a positive multiplier to scale a candidate's surfacing score by, or None to HARD-EXCLUDE
@@ -350,31 +302,11 @@ def discovery_facet_weight(store, family, now):
     if perm == 0:
         return None
     standing = store.rec_model.get_lean(f"genre:{family}")
-    lean = transient.facet_leans(store, now).get(f"genre:{family}", 0.0)
+    lean = (transient.facet_leans(store, now) if leans is None else leans).get(f"genre:{family}", 0.0)
     tmult = transient.facet_multiplier(lean * rec_params.DISCOVERY_TRANSIENT_DAMP,
                                        rec_params.FACET_GAIN, rec_params.FACET_MULT_MIN,
                                        rec_params.FACET_MULT_MAX)
     return max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, perm * standing * tmult))
-
-
-def genre_distance_fn(store, alpha=0.5):
-    """A genre-distance function blending the static meta-genre map with this library's own
-    co-occurrence: genres you repeatedly playlist together are pulled closer. alpha = static
-    weight. Falls back to the static map for pairs you've never grouped. Spec §2.1/§5.3.
-    """
-    co = store.rec_query.genre_cooccurrence()
-    pairs, occ = co["pairs"], co["occ"]
-
-    def dist(g1, g2):
-        base = genre_map.distance(g1, g2)
-        a, b = (g1, g2) if g1 <= g2 else (g2, g1)
-        c = pairs.get((a, b), 0)
-        if c == 0 or not occ.get(g1) or not occ.get(g2):
-            return base
-        jaccard = c / (occ[g1] + occ[g2] - c)
-        return alpha * base + (1 - alpha) * (1 - jaccard)
-
-    return dist
 
 
 MOOD_ALPHA = 0.35   # how hard a mood event tilts the lanes, relative to the taste score

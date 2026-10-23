@@ -221,7 +221,7 @@ def test_refinement_does_not_overwrite_curation_during_fetch(page, curated_canva
       await pending;
       c._flushState();
     }}""")
-    expect(page.locator(".cluster-error")).to_be_visible()
+    expect(page.locator(".cluster-error")).not_to_be_visible()
     shape = page.evaluate("canvasShape(false)")
     assert next(n for n in shape["nodes"] if n["id"] == 5)["state"] == "pruned"
     assert len(shape["nodes"][0]["seeds"]) == 2
@@ -280,6 +280,177 @@ def test_refinement_does_not_overwrite_a_new_canvas(page, curated_canvas):
     saved = page.evaluate("id => JSON.parse(localStorage.getItem('tc:canvas:' + id))", old_id)
     assert len(saved["nodes"]) == len(before["nodes"])
     assert saved["trunk"] == before["trunk"]
+
+
+@pytest.mark.parametrize("change", ["replace", "roundtrip", "prune"])
+@pytest.mark.parametrize("failure", [False, True])
+def test_growth_discards_stale_success_and_failure(page, curated_canvas, change, failure):
+    pending = []
+    page.route("**/clusters/expand", lambda route: pending.append(route))
+    with page.expect_request("**/clusters/expand"):
+        page.evaluate(f"() => {{ window.pendingGrowth = {DATA}.grow(2); }}")
+    page.evaluate(f"""change => {{
+      const c = {DATA}, oldId = c.activeId, state = c._stateBlob();
+      if (change === 'prune') c.prune(2);
+      else {{
+        c.newCanvas();
+        if (change === 'roundtrip') c.switchCanvas(oldId);
+        else c._applyState(state); // A different canvas reuses the same numeric node IDs.
+      }}
+      c.clusterError = 'Current error';
+      c.retryAction = {{type: 'grow', nodeId: 5}};
+    }}""", change)
+    before = page.evaluate("canvasShape(false)")
+    pending[0].fulfill(status=503 if failure else 200, json={"ring": [
+        {"key": "late", "title": "Late response", "artist": "Artist", "video_id": "late"}]})
+    page.evaluate("pendingGrowth")
+    assert page.evaluate("canvasShape(false)") == before
+    assert page.evaluate(f"{DATA}.clusterError") == "Current error"
+    assert page.evaluate(f"{DATA}.retryAction") == {"type": "grow", "nodeId": 5}
+    assert page.evaluate(f"{DATA}.exhaustedIds") == []
+    page.evaluate(f"{DATA}.persist(); {DATA}._flushState()")
+    assert page.evaluate("canvasShape(true)") == before
+
+
+@pytest.mark.parametrize("change", ["empty", "replace", "roundtrip", "prune"])
+def test_deep_link_search_cannot_seed_a_replacement_canvas(page, curated_canvas, change):
+    pending, expansions = [], []
+    page.route("**/clusters/search?*", lambda route: pending.append(route))
+
+    def expand(route):
+        expansions.append(route.request.post_data_json)
+        route.fulfill(json={"ring": []})
+
+    page.route("**/clusters/expand", expand)
+    with page.expect_request("**/clusters/search?*"):
+        page.evaluate(f"""() => {{
+          window.pendingDeepLink = {DATA}._deepLink('Old linked artist', null, 1, 'Old link');
+        }}""")
+    page.evaluate(f"""change => {{
+      const c = {DATA};
+      const oldId = c.activeId, state = c._stateBlob();
+      if (change === 'prune') c.prune(2);
+      else {{
+        c.newCanvas();
+        if (change === 'roundtrip') c.switchCanvas(oldId);
+        else if (change === 'replace') c._applyState(state);
+      }}
+      // The user has searched on the replacement canvas, but has not selected its result.
+      c.query = 'Replacement artist';
+      c.results = [{{kind: 'artist', label: 'Replacement artist', keys: ['replacement']}}];
+      c.clusterError = 'Current error'; c.retryAction = {{type: 'grow', nodeId: 5}};
+    }}""", change)
+    before = page.evaluate("canvasShape(false)")
+    pending[0].fulfill(json=[{"kind": "artist", "label": "Old linked artist", "keys": ["old"]}])
+    page.evaluate("pendingDeepLink")
+    assert page.evaluate("canvasShape(false)") == before
+    assert expansions == []
+    assert page.evaluate(f"{DATA}.query") == 'Replacement artist'
+    assert page.evaluate(f"{DATA}.results[0].label") == 'Replacement artist'
+    assert page.evaluate(f"{DATA}.clusterError") == 'Current error'
+    assert page.evaluate(f"{DATA}.retryAction") == {"type": "grow", "nodeId": 5}
+    if change != "empty":
+        page.evaluate(f"{DATA}.persist(); {DATA}._flushState()")
+        assert page.evaluate("canvasShape(true)") == before
+
+
+@pytest.mark.parametrize("phase", ["seed", "growth"])
+@pytest.mark.parametrize("change", ["replace", "roundtrip"])
+def test_deep_link_stops_after_stale_seed_or_growth(page, curated_canvas, phase, change):
+    pending, expansions = [], []
+    page.route("**/clusters/search?*", lambda route: route.fulfill(json=[
+        {"kind": "artist", "label": "Linked artist", "keys": ["seed"]}]))
+
+    def expand(route):
+        expansions.append(route.request.post_data_json)
+        if phase == "seed" or len(expansions) == 2:
+            pending.append(route)
+        else:
+            route.fulfill(json={"ring": [
+                {"key": "first", "title": "First song", "artist": "Artist", "video_id": "first"}]})
+
+    page.route("**/clusters/expand", expand)
+    with page.expect_request(lambda request: request.url.endswith('/clusters/expand') and (
+            phase == 'seed' or 'first' in request.post_data_json['pos_keys'])):
+        page.evaluate(f"""() => {{
+          const c = {DATA}; window.replacementState = JSON.parse(JSON.stringify(c._stateBlob()));
+          c.newCanvas();
+          window.pendingDeepLink = c._deepLink('Linked artist', null, 3, 'Linked canvas');
+        }}""")
+    page.evaluate(f"""change => {{
+      const c = {DATA}, oldId = c.activeId;
+      c.newCanvas();
+      if (change === 'roundtrip') c.switchCanvas(oldId);
+      else c._applyState(window.replacementState); // includes IDs reused by the old operation
+      c.clusterError = 'Current error'; c.retryAction = {{type: 'grow', nodeId: 5}};
+    }}""", change)
+    before = page.evaluate("canvasShape(false)")
+    assert pending
+    count = len(expansions)
+    pending[0].fulfill(json={"ring": [
+        {"key": "late", "title": "Late song", "artist": "Artist", "video_id": "late"}]})
+    page.evaluate("pendingDeepLink")
+    assert len(expansions) == count
+    assert page.evaluate("canvasShape(false)") == before
+    assert page.evaluate(f"{DATA}.clusterError") == 'Current error'
+    assert page.evaluate(f"{DATA}.retryAction") == {"type": "grow", "nodeId": 5}
+    assert page.evaluate(f"{DATA}.seedBusy") is False
+    page.evaluate(f"{DATA}.persist(); {DATA}._flushState()")
+    if before["nodes"]:
+        assert page.evaluate("canvasShape(true)") == before
+
+
+def test_deep_link_settle_cannot_change_the_replacement_view(page, curated_canvas):
+    page.route("**/clusters/search?*", lambda route: route.fulfill(json=[
+        {"kind": "artist", "label": "Linked artist", "keys": ["seed"]}]))
+    page.route("**/clusters/expand", lambda route: route.fulfill(json={"ring": []}))
+    page.evaluate(f"""() => {{
+      const c = {DATA};
+      window.replacementState = JSON.parse(JSON.stringify(c._stateBlob()));
+      c.newCanvas();
+      window.realTimeout = window.setTimeout; window.settles = [];
+      window.setTimeout = (fn, ms, ...args) => ms === 700
+        ? (window.settles.push(() => fn(...args)), 0) : realTimeout(fn, ms, ...args);
+      window.pendingDeepLink = c._deepLink('Linked artist', null, 1, 'Linked canvas');
+    }}""")
+    page.wait_for_function("window.settles.length === 1")
+    page.evaluate(f"""() => {{
+      const c = {DATA}; c.newCanvas(); c._applyState(window.replacementState);
+      c._autofit = false;
+    }}""")
+    page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+    page.evaluate(f"""() => {{
+      const c = {DATA}; window.viewResets = 0; c.resetView = () => viewResets++;
+      window.setTimeout = realTimeout; window.settles.shift()();
+    }}""")
+    page.evaluate("pendingDeepLink")
+    assert page.evaluate("viewResets") == 0
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_shared_state_load_cannot_overwrite_a_replacement_canvas(page, curated_canvas, failure):
+    state = page.evaluate(f"{DATA}._stateBlob()")
+    pending = []
+    page.route("**/clusters/state/SHARED", lambda route: pending.append(route))
+    with page.expect_request("**/clusters/state/SHARED"):
+        page.evaluate(f"() => {{ window.pendingStateLoad = {DATA}._loadFrom('SHARED'); }}")
+    page.evaluate(f"""state => {{
+      const c = {DATA}; c.newCanvas(); c._applyState(state);
+      c.clusterError = 'Current error'; c.retryAction = {{type: 'grow', nodeId: 5}};
+      c.persist(); c._flushState();
+      window.beforeState = JSON.stringify(c._stateBlob().nodes.map(n => [n.id, n.key, n.state]));
+      window.viewResets = 0; c.resetView = () => viewResets++;
+    }}""", state)
+    assert pending
+    pending[0].fulfill(status=503 if failure else 200, json={**state, "playlistName": "Stale shared name"})
+    page.evaluate("pendingStateLoad")
+    assert page.evaluate(f"{DATA}.playlistName") == state["playlistName"]
+    assert page.evaluate(f"JSON.stringify({DATA}._stateBlob().nodes.map(n => [n.id, n.key, n.state])) === beforeState")
+    assert page.evaluate(f"{DATA}.clusterError") == 'Current error'
+    assert page.evaluate(f"{DATA}.retryAction") == {"type": "grow", "nodeId": 5}
+    assert page.evaluate("viewResets") == 0
+    saved = page.evaluate(f"JSON.parse(localStorage.getItem({DATA}._canvasKey({DATA}.activeId)))")
+    assert saved["playlistName"] == state["playlistName"]
 
 
 def test_linked_artist_and_genre_seed_together_without_competing_requests(page, cluster_library):

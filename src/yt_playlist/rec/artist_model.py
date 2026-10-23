@@ -1,22 +1,16 @@
 """#28 Artist-relationship model: relate artists by this user's co-curation (+ content + Last.fm edges).
 
 Mirrors the track model (embed.py) at the artist level; the vocabulary uses canonical artist IDs.
-Names are resolved only at display and provider boundaries. So far this
-module implements the collaborative (co-occurrence) block (spec §A): reduce the track model's baskets to
-distinct-artist sets and run them through the same PPMI + truncated SVD (embed._svd).
-
-Model only: nothing in the recommendation/discovery surfaces consumes this yet (#28 is model-first).
+Names are resolved only at display and provider boundaries. Collaborative vectors reduce the track
+model's baskets to distinct-artist sets and use the same PPMI + truncated SVD (embed._svd).
+Content vectors and Last.fm edges also contribute to related-artist and completion candidates.
+The background model_refresh lifecycle owns fitting and coherent publication.
 """
-import json
-
 import numpy as np
 
 from yt_playlist.rec import embed, rec_params
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import normalize
-
-_ARTIST_CONTENT_MODEL_SETTING = "rec_artist_content_model"
-
 
 def artist_baskets(store):
     """Reduce the track model's co-occurrence baskets (playlists / albums / sessions / genre family /
@@ -42,13 +36,6 @@ def build_collab_artist_vectors(store, dim=embed.DIM):
     if len(artists) < dim + embed._MIN_VOCAB_MARGIN:
         return [], np.zeros((0, dim), dtype=np.float32)
     return embed._svd(baskets, artists, dim)
-
-
-def build_collab_and_store(store, dim=embed.DIM) -> int:
-    """Build and persist the collaborative artist vectors. Returns the number of artists embedded."""
-    artists, V = build_collab_artist_vectors(store, dim)
-    store.rec_model.replace_rec_artist_vectors([(a, V[i].tobytes()) for i, a in enumerate(artists)])
-    return len(artists)
 
 
 def load_artist_vectors(store):
@@ -152,24 +139,6 @@ def _discovered_artist_profiles(store):
     return out
 
 
-def build_content_and_store(store) -> int:
-    """Build the artist-content model + per-artist content vectors and persist both (vectors table +
-    model JSON in settings). Covers in-corpus artists AND the out-of-corpus discovered-artist pool, all
-    in one shared space. Returns the number of artists with a content vector."""
-    profiles = artist_content_profiles(store)
-    for artist, p in _discovered_artist_profiles(store).items():
-        profiles.setdefault(artist, p)          # add OOC artists; keep the richer in-corpus profile if both
-    model = build_artist_content_model(profiles)
-    rows = []
-    for artist in sorted(profiles):
-        v = encode_artist_content(model, profiles[artist])
-        if v is not None:
-            rows.append((artist, v.tobytes()))
-    store.rec_model.replace_rec_artist_content_vectors(rows)
-    store.settings.set_setting(_ARTIST_CONTENT_MODEL_SETTING, json.dumps(model))
-    return len(rows)
-
-
 def load_artist_content_vectors(store):
     """(artists, V, idx) from persisted artist content vectors, or ([], None, {}) if none built."""
     return embed._load_vector_rows(store.rec_model.get_rec_artist_content_vectors())
@@ -232,8 +201,11 @@ def artist_neighbors(store, artist, topn=12, exclude=None):
     space and has no edges (model unbuilt or seed unknown)."""
     seed = store.artists.key(artist)
     excluded = {store.artists.key(a) for a in (exclude or ())} | {seed}
-    return [(store.artists.public_key(a),score) for a,score in
-            _ranked(_blended_set_scores(store, {seed}), excluded, topn)] if seed else []
+    if not seed:
+        return []
+    ranked = _ranked(_blended_set_scores(store, {seed}), excluded, topn)
+    public = store.artists.public_keys(a for a, _ in ranked)
+    return [(public[a], score) for a, score in ranked]
 
 
 def related_artists(store, seed_artists, topn=12, exclude_owned=True):
@@ -245,8 +217,9 @@ def related_artists(store, seed_artists, topn=12, exclude_owned=True):
     excl = set(seeds)
     if exclude_owned:
         excl |= {a for refs in store.artists.track_keys(library=True).values() for a in refs}
-    return [(store.artists.public_key(a),score) for a,score in
-            _ranked(_blended_set_scores(store, seeds), excl, topn)]
+    ranked = _ranked(_blended_set_scores(store, seeds), excl, topn)
+    public = store.artists.public_keys(a for a, _ in ranked)
+    return [(public[a], score) for a, score in ranked]
 
 
 def artist_track_candidates(store, seed_artists, topn=24, include_out_of_corpus=True):
@@ -274,12 +247,3 @@ def artist_track_candidates(store, seed_artists, topn=24, include_out_of_corpus=
                             "genre": r.get("genre") or "", "artist_score": max(scores[a] for a in matches),
                             "out_of_corpus": True})
     return out
-
-
-def build_artist_model_and_store(store, dim=embed.DIM) -> int:
-    """Build and persist the full artist model: §A collaborative vectors + §B content model/vectors
-    (the latter also covering the out-of-corpus discovered-artist pool). Returns the §A artist count.
-    Driven on the same rebuild trigger as the track embedding (rec_worker._do_rebuild)."""
-    n = build_collab_and_store(store, dim)
-    build_content_and_store(store)
-    return n

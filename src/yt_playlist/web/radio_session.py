@@ -4,86 +4,35 @@ Start with three songs in a new YouTube playlist; then keep one song ahead of
 the currently playing song. Ask Music's native refresh handler to fetch the saved
 playlist, without supplying playback items or reloading the tab.
 """
-import asyncio
 import json
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
 from datetime import date, datetime
-from urllib.parse import urlencode
 from uuid import uuid4
 
-from yt_playlist.core.activity import activity_for
+from yt_playlist.core.activity import activity_for, cancellable_work, check_stopping
 from yt_playlist.core.accounts import client_for
-from yt_playlist.core.bridge import BridgeError
+from yt_playlist.core.work_diagnostics import work_span
 from yt_playlist.library import executor
-from yt_playlist.library.playlist_metadata import content_hash
-from yt_playlist.library.playlist_snapshot import validate_playlist
-from yt_playlist.library.listen_derive import classify_exit
+from yt_playlist.library.playlist_metadata import versioned_title
 from yt_playlist.rec import measurement
 from yt_playlist.rec.radio_candidates import RadioCandidates
+from yt_playlist.rec.radio_policy import RadioPolicy
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.rec import radio_tuning
-from yt_playlist.web.radio_playlist_tail import LOOKAHEAD, PlaylistChanged, PlaylistPending, RadioPlaylistTail
+from yt_playlist.web.radio_edits import AppendOperation
+from yt_playlist.web.radio_mutations import MutationResult, PlaylistTarget, RadioMutations
+from yt_playlist.web.radio_playlist_tail import LOOKAHEAD, RadioPlaylistTail, TailView
+from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending, RadioPlaylistIO
+from yt_playlist.web.radio_playback import (PlaybackObservation, PlaybackRequest, PlaybackUnavailable, RadioPlayback)
+from yt_playlist.web.radio_persistence import PREPARATION_TIMEOUT, RadioPersistence, restore
+from yt_playlist.web.radio_projection import saved_view, status_view
+from yt_playlist.web.radio_state import Phase, Session, selected_slot
 
 logger = logging.getLogger(__name__)
 INITIAL_TRACKS = 3
-PREPARATION_TIMEOUT = 60
-
-
-@dataclass
-class Session:
-    client: object
-    candidates: RadioCandidates
-    identity: object
-    title: str
-    stop: threading.Event = field(default_factory=threading.Event)
-    selected: list = field(default_factory=list)
-    playlist: str | None = None
-    local_id: int | None = None
-    tracks: list = field(default_factory=list)
-    position: int = -1
-    furthest: int = -1
-    pending: dict | None = None
-    pending_sent: bool = False
-    initial_tracks: list = field(default_factory=list)
-    recent_states: list = field(default_factory=list)
-    error: str | None = None
-    exhausted: bool = False
-    starting: bool = True
-    browser: dict | None = None
-    browser_seen_at: float | None = None
-    refresh_needed: bool = False
-    directions: RadioDirections | None = None
-    replacement: RadioPlaylistTail | None = None
-    requested_direction: dict | None = None
-    episode_id: str = field(default_factory=lambda: uuid4().hex)
-    started_at: float = 0
-    transition: int = 0
-    observed_video: str | None = None
-    starts: dict = field(default_factory=dict)
-    feedback_seen: set = field(default_factory=set)
-    seen_menus: set = field(default_factory=set)
-    choices: dict = field(default_factory=dict)
-    mutation_windows: list = field(default_factory=list)
-    heard: list = field(default_factory=list)
-    rejected: set = field(default_factory=set)
-    stopped_by_user: bool = False
-    halted: bool = False
-    monitoring: bool = False
-    feedback_dirty: bool = False
-    observer_error: str | None = None
-    observer_report: tuple | None = None
-    launch_deadline: float = 0
-    preparation_deadline: float = 0
-    playback_confirmed: bool = False
-    readback_conflict: tuple | None = None
-    readback_conflict_at: float = 0
-    enrichment_requested: set = field(default_factory=set)
-    metadata_checked_at: float = 0
-    metadata_revision: int = 0
-    metadata_rejected: set = field(default_factory=set)
+PREPARATION_SETTLE = 4
 
 
 class PlaylistRadio:
@@ -95,19 +44,17 @@ class PlaylistRadio:
         self.session = None
         self.offer = None
         self.offer_id = None
-        self.saved_state = None
+        self.persistence = RadioPersistence(ctx.store.settings)
+        self.playback = RadioPlayback(ctx.bridge)
+        self.playlists = RadioPlaylistIO(ctx.store.playlists)
+        self.mutations = RadioMutations(self.playlists, self.persistence, ctx.store.tracks, lambda: self.ctx.now_fn())
+        self.policy = RadioPolicy(ctx.store, lambda: self.ctx.now_fn())
         self.preparing = False
         self.checked_playlist = None
 
     def _playing(self):
         """The extension's fresh playback presence is authoritative, not saved state."""
-        bridge = self.ctx.bridge
-        playing = bridge.now_playing or {}
-        seen = getattr(bridge, "now_playing_seen_at", None)
-        if (not bridge.connected or seen is None or time.monotonic() - seen > 8
-                or playing.get("paused") or not playing.get("video_id")):
-            return {}
-        return playing
+        return self.playback.current()
 
     def _is_current(self, s):
         if not s or s.stopped_by_user or (s.halted and not s.playback_confirmed):
@@ -130,31 +77,25 @@ class PlaylistRadio:
         # Restoring a saved session never launches playback or receives this grace.
         return s.playback_confirmed or s.starting or time.monotonic() < s.launch_deadline
 
-    @staticmethod
-    def _selected_slot(s):
-        if s.requested_direction:
-            return s.requested_direction["slot"]
-        if s.replacement:
-            return s.replacement.slot
-        return s.directions.active if s.directions else None
-
     def prepare(self):
-        """Warm recommendations and reattach off the page-rendering path."""
-        with self.lock:
+        """Schedule preparation without waiting on session work or browser replies."""
+        # Playback heartbeats call this from the WebSocket response pump. A busy
+        # session can retry on the next heartbeat; it must not hold up its own replies.
+        if not self.lock.acquire(blocking=False):
+            return
+        try:
             playing = self._playing().get("playlist_ytm_id")
             settled = (self.session and (self.session.monitoring or self.session.stopped_by_user
                         or not self._is_current(self.session))) or (
                         self.session is None and playing == self.checked_playlist)
-            policy_due = bool(self.session and not self.session.stopped_by_user
-                and self.ctx.now_fn() - self.session.candidates.now_sampled_at >= radio_tuning.NOW_REFRESH_SECONDS)
-            if self.preparing or not self.work.accepting or (self.offer is not None and settled and not policy_due):
+            if self.preparing or not self.work.accepting or (self.offer is not None and settled):
                 return
             self.preparing = True
+        finally:
+            self.lock.release()
         def warm():
             try:
                 self.join()
-                if policy_due and self.session:
-                    self.session.candidates.refresh_now(self.ctx.now_fn())
                 self.checked_playlist = playing
                 if self.offer is None:
                     self.seeds()
@@ -174,32 +115,17 @@ class PlaylistRadio:
         if self.session is not None:
             state = self.status()
         else:
-            raw = self.ctx.store.settings.get_setting("radio_current_session")
             try:
-                saved = json.loads(raw) if raw else {}
-            except (ValueError, TypeError):
+                saved = self.persistence.load() or {}
+            except (ValueError, KeyError, TypeError):
                 saved = {}
-            plan = saved.get("directions") or {}
-            tracks = saved.get("tracks", [])
-            scheduled = {t["video_id"] for t in tracks[max(0, saved.get("furthest", -1)) + 1:]}
-            replacement = saved.get("requested_direction") or saved.get("replacement")
             active = bool(saved.get("playlist") and self._playing().get("playlist_ytm_id") == saved["playlist"]
                           and not saved.get("stopped"))
-            selected = replacement["slot"] if replacement else plan.get("active", 0)
-            state = {"active": active,
-                "starting": bool(active and saved.get("initial_tracks")), "local_id": saved.get("local_id"),
-                "playlist_id": saved.get("playlist"), "title": saved.get("title"), "tracks": tracks,
-                "position": saved.get("position", -1), "menu_id": plan.get("menu_id"),
-                "tuning": saved.get("tuning", radio_tuning.DEFAULTS), "metadata_revision": 0,
-                "history_count": min(len(tracks), max(1, saved.get("furthest", -1) + 1,
-                                                     saved.get("position", -1) + 1)),
-                "updating": bool(replacement), "pending_slot": replacement["slot"] if replacement else None,
-                "directions": [{**branch, "slot": slot, "active": slot == selected,
-                    "decay_total": 3, "decay_remaining": (3 if slot == plan.get("active", 0) else
-                        max(0, plan.get("decay", {}).get(str(slot), saved.get("transition", 0) + 3)
-                            - saved.get("transition", 0))),
-                    "tracks": [{**t, "saved": t["video_id"] in scheduled} for t in branch["tracks"]]}
-                    for slot, branch in enumerate(plan.get("slots", [])) if branch]}
+            state = saved_view(saved, active=active)
+            # A checkpoint alone is not evidence that radio is playing. Heartbeat
+            # gaps must not replace the seed grid with a speculative restore loader.
+            # A confirmed playing session waits for join to restore its full view.
+            state["resolving"] = active
         try:
             offer = json.loads(self.ctx.store.settings.get_setting("radio_seed_offer") or "{}")
         except (ValueError, TypeError):
@@ -215,31 +141,8 @@ class PlaylistRadio:
         with self.lock:
             if s is not self.session:
                 return
-            directions, replacement = s.directions, s.replacement
-            state = {"version": 1, "playlist": s.playlist, "local_id": s.local_id,
-                "identity": s.identity, "title": s.title, "episode_id": s.episode_id,
-                "started_at": s.started_at, "tracks": s.tracks, "position": s.position,
-                "furthest": s.furthest,
-                "fingerprint": s.candidates.fingerprint,
-                "heard": s.heard, "transition": s.transition, "pending": s.pending,
-                "pending_sent": s.pending_sent, "initial_tracks": s.initial_tracks,
-                "tuning": s.candidates.tuning,
-                "recent_states": s.recent_states,
-                "requested_direction": s.requested_direction,
-                "choices": s.choices, "rejected": sorted(s.rejected),
-                "stopped": s.stopped_by_user, "halted": s.halted,
-                "directions": {"active": directions.active, "slots": directions.slots,
-                    "revision": directions.revision, "menu_id": directions.menu_id,
-                    "feedback": directions.feedback, "decay": directions.decay} if directions else None,
-                "replacement": {"allowed": [list(ids) for ids in replacement.allowed],
-                    "confirmed": list(replacement.confirmed),
-                    "waiting": list(replacement.waiting) if replacement.waiting is not None else None,
-                    "proposed": replacement.proposed, "slot": replacement.slot,
-                    "choice_id": replacement.choice_id} if replacement else None}
-            encoded = json.dumps(state, sort_keys=True)
-            if encoded != self.saved_state:
-                self.ctx.store.settings.set_setting("radio_current_session", encoded)
-                self.saved_state = encoded
+            s.settle()
+            self.persistence.save(s)
 
     def join(self):
         """Attach the page to the saved session without navigation or playlist creation."""
@@ -249,65 +152,29 @@ class PlaylistRadio:
                 return self.status()
         with self.operation:
             if self.session is None:
-                raw = self.ctx.store.settings.get_setting("radio_current_session")
-                if raw:
-                    try:
-                        state = json.loads(raw)
+                try:
+                    state = self.persistence.load()
+                    if state:
+                        # Stop ends ownership even while YouTube keeps playing.
+                        # Legacy adoption must not revive that stopped checkpoint.
+                        if state.get("stopped") and state.get("playlist") == self._playing().get("playlist_ytm_id"):
+                            return self.status()
                         clients = self.ctx.client_provider() or {}
                         # JSON can round-trip a numeric identity as a string in some
                         # older settings; match the provider's actual identity key.
                         identity = next((key for key in clients if str(key) == str(state["identity"])), None)
-                        if (state.get("version") == 1 and identity is not None
+                        if (identity is not None
                                 and not state.get("stopped")
                                 and state.get("playlist") and state["playlist"] == self._playing().get("playlist_ytm_id")
                                 and (state.get("tracks") or state.get("initial_tracks"))):
                             candidates = RadioCandidates(self.ctx.store, self.ctx.now_fn(), state.get("tuning"))
-                            s = Session(clients[identity], candidates, identity, state["title"])
-                            for key in ("playlist", "local_id", "episode_id", "started_at", "tracks",
-                                        "position", "heard", "transition", "pending", "choices"):
-                                setattr(s, key, state[key])
-                            s.selected = list(s.tracks) + ([s.pending] if s.pending else [])
-                            s.furthest = state.get("furthest", s.position)
-                            s.pending_sent = state.get("pending_sent", False)
-                            s.initial_tracks = state.get("initial_tracks", [])
-                            s.recent_states = state.get("recent_states", [])
-                            s.requested_direction = state.get("requested_direction")
-                            s.rejected = set(state.get("rejected", []))
-                            s.stopped_by_user = state.get("stopped", False)
-                            s.halted = state.get("halted", False)
-                            s.starting = bool(s.initial_tracks)
-                            if s.initial_tracks:
-                                s.preparation_deadline = time.monotonic() + PREPARATION_TIMEOUT
-                            s.playback_confirmed = True
-                            s.directions = RadioDirections(candidates, (s.tracks or s.initial_tracks)[0])
-                            saved_directions = state.get("directions")
-                            if saved_directions:
-                                for key in ("active", "slots", "revision", "menu_id", "feedback"):
-                                    setattr(s.directions, key, saved_directions[key])
-                                s.directions.decay = {int(k): v for k, v in saved_directions.get("decay", {}).items()}
-                                s.directions.transition = s.transition
-                            # Historical songs may now be disliked or outside the
-                            # candidate pool. Retain their metadata for readback.
-                            metadata = list(s.tracks) + s.initial_tracks + ([s.pending] if s.pending else [])
-                            metadata += [t for branch in s.directions.slots if branch for t in branch["tracks"]]
-                            candidates.retain(metadata)
-                            pending = state.get("replacement")
-                            if pending:
-                                s.replacement = RadioPlaylistTail(s.tracks, pending["proposed"], pending["slot"],
-                                                                  choice_id=pending.get("choice_id"))
-                                s.replacement.allowed = {tuple(ids) for ids in pending["allowed"]}
-                                s.replacement.confirmed = tuple(pending.get("confirmed", [t["video_id"] for t in s.tracks]))
-                                waiting = pending.get("waiting")
-                                s.replacement.waiting = tuple(waiting) if waiting is not None else None
-                                candidates.retain(pending["proposed"])
-                            if s.stopped_by_user:
-                                s.stop.set()
+                            s = restore(state, clients[identity], identity, candidates)
                             self.session = s
                             if s.tracks:
                                 self._update_directions(s, force=not s.replacement and
                                     state.get("fingerprint") != candidates.fingerprint)
-                    except (ValueError, KeyError, TypeError):
-                        logger.warning("Could not restore the saved Radio Session", exc_info=True)
+                except (ValueError, KeyError, TypeError):
+                    logger.warning("Could not restore the saved Radio Session", exc_info=True)
                 if self.session is None:
                     self._adopt_playing()
             s = self.session
@@ -343,8 +210,9 @@ class PlaylistRadio:
         s.position = next((i for i, track in enumerate(s.tracks)
                            if track["video_id"] == now_playing.get("video_id")), -1)
         s.furthest = s.position
-        s.starting = False
+        s.move(Phase.AWAITING_PLAYBACK)
         s.playback_confirmed = True
+        s.settle()
         s.started_at = self.ctx.now_fn()
         s.directions = RadioDirections(candidates, s.tracks[0])
         self.session = s
@@ -382,44 +250,15 @@ class PlaylistRadio:
     def status(self):
         with self.lock:
             s = self.session
-            directions = s.directions.public(s.tracks[max(0, s.furthest) + 1:]) if s and s.directions else []
-            selected = self._selected_slot(s) if s else None
-            for branch in directions:
-                branch["active"] = branch["slot"] == selected
-            return {
-                "active": bool(self._is_current(s)),
-                "starting": bool(s and (s.starting or time.monotonic() < s.launch_deadline)),
-                "playlist_id": s.playlist if s else None,
-                "local_id": s.local_id if s else None,
-                "title": s.title if s else None,
-                "playlist_url": (f"https://music.youtube.com/playlist?list={s.playlist}"
-                                 if s and s.playlist else None),
-                "position": s.position if s else -1,
-                "ahead": max(0, len(s.tracks) - s.position - 1) if s and s.position >= 0 else None,
-                "tracks": list(s.tracks) if s else [],
-                "history_count": min(len(s.tracks), max(1, s.furthest + 1, s.position + 1)) if s else 0,
-                "error": s.error if s else None,
-                "observer_error": s.observer_error if s else None,
-                "exhausted": bool(s and s.exhausted),
-                "connected": self.ctx.bridge.connected,
-                "browser": s.browser if s else None,
-                "browser_age": (time.monotonic() - s.browser_seen_at
-                                if s and s.browser_seen_at is not None else None),
-                "directions": directions,
-                "menu_id": s.directions.menu_id if s and s.directions else None,
-                "revision": s.directions.revision if s and s.directions else 0,
-                "tuning": dict(s.candidates.tuning) if s else dict(radio_tuning.DEFAULTS),
-                "metadata_revision": s.metadata_revision if s else 0,
-                "updating": bool(s and (s.replacement or s.requested_direction)),
-                "pending_slot": (s.requested_direction["slot"] if s and s.requested_direction else
-                                 s.replacement.slot if s and s.replacement else None),
-            }
+            return status_view(s, active=bool(self._is_current(s)),
+                               connected=self.ctx.bridge.connected, now=time.monotonic())
 
     def stop(self):
         with self.lock:
             if self.session:
-                self.session.stopped_by_user = True
-                self.session.stop.set()
+                self.session.request_stop()
+                if not self.session.monitoring:
+                    self.session.move(Phase.STOPPED)
                 self._persist(self.session)
         return {"ok": True, **self.status()}
 
@@ -429,69 +268,50 @@ class PlaylistRadio:
             if self.session:
                 self.session.stop.set()
 
-    def _pick(self, s):
-        if s.directions:
-            used = {t["video_id"] for t in s.selected} | s.directions.blocked
-            active = s.directions.slots[s.directions.active]
-            pick = next((t for t in active["tracks"] if t["video_id"] not in used), None)
-        else:
-            pick = s.candidates.next_track(s.selected)
-        if pick is not None:
-            s.selected.append(pick)
-        return pick
+    @staticmethod
+    def _target(s):
+        return PlaylistTarget(s.client, s.playlist, s.local_id, s.title, s.episode_id, s.stop)
+
+    def _apply_mutation_result(self, s, result: MutationResult):
+        """Apply confirmed state and attribution; transaction I/O belongs to RadioMutations."""
+        for substitution in result.substitutions:
+            requested, accepted = substitution.requested, substitution.accepted
+            s.candidates.retain([accepted])
+            s.rejected.add(requested['video_id'])
+            if s.directions:
+                s.directions.blocked.add(requested['video_id'])
+            choice = s.choices.pop(requested['video_id'], None)
+            if choice:
+                s.choices[accepted['video_id']] = choice
+        if result.tracks is not None:
+            self._accept_tracks(s, result.tracks)
 
     def _mirror(self, s, tracks):
-        """Publish only confirmed saved-playlist contents through existing repo APIs."""
-        store, now = self.ctx.store, self.ctx.now_fn()
-        track_ids = [store.tracks.upsert_track(
-            t["video_id"], t.get("title") or "", t.get("artist") or "",
-            t.get("album") or "", t.get("duration"), thumbnail=t.get("thumbnail"))
-            for t in tracks]
-        keys = [store.tracks.catalog_subject(tid)["identity_key"] for tid in track_ids]
-        store.playlists.upsert_playlist(s.identity, s.playlist, s.title, len(track_ids),
-                                       content_hash(list(dict.fromkeys(keys))), now)
-        store.playlists.set_playlist_tracks(s.local_id, track_ids)
+        """Atomically publish confirmed contents, retaining an unchanged prefix."""
+        self.playlists.publish(s.local_id, s.title, s.tracks, tracks, self.ctx.now_fn())
 
     def _remote_tracks(self, s, *, expected=None):
-        detail = s.client.get_playlist(s.playlist, limit=None)
-        # A newly created playlist's header count can lag behind its contents.
-        # An exact readback of every accepted upload, in order, proves readiness
-        # without relying on that header. Keep normal mutation reads strict.
-        if (expected is not None and isinstance(detail, dict) and isinstance(detail.get("tracks"), list)
-                and all(isinstance(t, dict) for t in detail["tracks"])
-                and [t.get("videoId") for t in detail["tracks"]] == expected):
-            detail = {**detail, "trackCount": len(expected)}
-        try:
-            return validate_playlist(detail)["tracks"]
-        except ValueError as exc:
-            # Counts and rows can disagree immediately after a write. Retain the
-            # last complete snapshot and let the observer read again quietly.
-            if s.initial_tracks:
-                report = ("preparing", str(exc), detail.get("trackCount") if isinstance(detail, dict) else None)
-                if report != s.observer_report:
-                    logger.info("Radio playlist preparation pending: playlist=%s reason=%s count=%s",
-                                s.playlist, exc, report[2])
-                    s.observer_report = report
-            else:
-                logger.debug("Radio playlist readback pending: %s", exc)
-            raise PlaylistPending() from exc
+        return self.playlists.read(s.client, s.playlist, expected=expected)
 
     def _remote_ids(self, s):
         return [t["videoId"] for t in self._remote_tracks(s)]
-
-    def _stale_read(self, s, ids):
-        now = self.ctx.now_fn()
-        s.recent_states = [state for state in s.recent_states if now - state["at"] < 60]
-        return any(state["ids"] == ids for state in s.recent_states)
 
     def _publish(self, s, tracks):
         """Only complete, confirmed remote reads can become the local playlist UI."""
         if [t["video_id"] for t in tracks] != [t["video_id"] for t in s.tracks]:
             self._mirror(s, tracks)
+            self._accept_tracks(s, tracks)
+
+    def _accept_tracks(self, s, tracks):
+        if [t['video_id'] for t in tracks] != [t['video_id'] for t in s.tracks]:
             with self.lock:
                 now = self.ctx.now_fn()
-                s.recent_states = [state for state in s.recent_states if now - state["at"] < 60]
-                s.recent_states.append({"ids": [t["video_id"] for t in s.tracks], "at": now})
+                s.edits.recent_states = [state for state in s.edits.recent_states if now - state["at"] < 60]
+                s.edits.recent_states.append({"ids": [t["video_id"] for t in s.tracks], "at": now})
+                current = s.tracks[s.position]["video_id"] if s.position >= 0 else None
+                past = {t["video_id"] for t in s.tracks[:s.furthest + 1]}
+                s.position = next((i for i, t in enumerate(tracks) if t["video_id"] == current), -1)
+                s.furthest = max((i for i, t in enumerate(tracks) if t["video_id"] in past), default=-1)
                 s.tracks = list(tracks)
                 s.selected = list(tracks)
 
@@ -500,31 +320,20 @@ class PlaylistRadio:
         # native player to fetch the playlist after the final state is saved.
         refresh = s.refresh_needed and not s.requested_direction and (not s.replacement or s.replacement.saved)
         refresh_at = self.ctx.now_fn() if refresh else None
-        payload = {"playlist": s.playlist, "videoIds": [t["video_id"] for t in s.tracks],
-                   "refresh": refresh}
         try:
-            status, body = asyncio.run(self.ctx.bridge.request_control({"type": "radio-session", **payload}))
-            result = json.loads(body)
-            # An already running service worker can still use the previous
-            # command name. Negotiate it without asking the user to reload.
-            if status == 0 and result.get("error") == "blocked by allowlist":
-                status, body = asyncio.run(self.ctx.bridge.request_control({"type": "playlist-session-poc", **payload}))
-                result = json.loads(body)
-            if status != 200 or not result.get("ok"):
-                reason = result.get("error") or f"observer response {status}"
-                if reason != s.observer_error:
-                    logger.warning("Radio observer pending: %s", reason)
-                s.observer_error = reason
-                raise PlaylistPending()
-        except (BridgeError, ValueError) as exc:
+            observation = self.playback.observe(PlaybackRequest(
+                s.playlist, tuple(t["video_id"] for t in s.tracks), refresh))
+        except PlaybackUnavailable as exc:
             s.observer_error = str(exc)
             logger.debug("Radio observer reconnecting: %s", exc)
             raise PlaylistPending() from exc
+        result = observation.state
         with self.lock:
             s.observer_error = None
-            s.error = None
+            if not s.halted:
+                s.error = None
             s.browser = result
-            s.browser_seen_at = time.monotonic()
+            s.browser_seen_at = observation.seen_at
             player = result.get("player") or {}
             if (player.get("playlist_ytm_id") == s.playlist and player.get("video_id")
                     and not player.get("paused")):
@@ -534,8 +343,25 @@ class PlaylistRadio:
             # actual future, including if a late response restores an older one.
             s.refresh_needed = not bool(result.get("playback_synced"))
             if refresh_at is not None and result.get("refresh") in {"clicked", "requested"}:
-                s.mutation_windows.append([refresh_at, self.ctx.now_fn() + 3])
+                s.edits.windows.append([refresh_at, self.ctx.now_fn() + 3])
             self._report_playback(s, result)
+        # Playback observation must not wait for a playlist mutation to settle.
+        # Otherwise a halted/uncertain tail leaves the playing song in proposals.
+        position = next((i for i, track in enumerate(s.tracks)
+                         if player.get("playlist_ytm_id") == s.playlist
+                         and track["video_id"] == player.get("video_id")), None)
+        if position is not None and (position != s.position or s.observed_video != player.get("video_id")):
+            self._observe(s, position)
+            self._update_directions(s)
+        elif position is None and player.get("playlist_ytm_id") == s.playlist:
+            video = player.get("video_id")
+            # A saved suffix write can finish after native playback entered the
+            # removed song. Only accept uploads previously owned by this session.
+            owned = {t["video_id"] for t in s.heard}
+            owned.update(video for state in s.edits.recent_states for video in state["ids"])
+            if video in owned and video in s.candidates.by_video:
+                self._observe(s, -1, track=s.candidates.by_video[video])
+                self._update_directions(s)
 
     def _report_playback(self, s, result):
         """Log changed native state once; routine two-second polls stay quiet."""
@@ -567,42 +393,48 @@ class PlaylistRadio:
                     *report)
 
     def _player(self, s):
-        player = s.browser.get("player", {}) if s.browser else {}
-        if (player.get("paused") or player.get("playlist_ytm_id") != s.playlist
-                or s.browser_seen_at is None or time.monotonic() - s.browser_seen_at > 8):
+        if s.browser_seen_at is None:
             return None
-        return player
+        return PlaybackObservation(s.browser or {}, s.browser_seen_at).player(s.playlist, allow_paused=s.skip_requested)
 
-    def _observe(self, s, position):
-        video = s.tracks[position]["video_id"]
+    def _observe(self, s, position, *, track=None):
+        track = track if track is not None else s.tracks[position]
+        video = track["video_id"]
         now = self.ctx.now_fn()
         with self.lock:
             s.position = position
             s.furthest = max(s.furthest, position)
             if s.directions:
-                s.directions.retired = {t["video_id"] for t in s.tracks[:s.furthest + 1]}
+                s.directions.retired = {t["video_id"] for t in s.tracks[:s.furthest + 1] + s.heard} | {video}
             if s.observed_video == video:
                 return
             if s.observed_video:
                 s.transition += 1
             s.observed_video = video
             s.starts[video] = now
-            s.heard.append(s.tracks[position])
+            s.heard.append(track)
             choice = s.choices.pop(video, None)
         # Count an explicit seed/branch choice once when its first song starts.
         # Passive continuation tracks remain generated listening in the live-play pipeline.
         if choice:
             measurement.record_action(self.ctx.store, "start", now,
-                keys=[s.tracks[position]["key"]],
+                keys=[track["key"]],
                 event_id=f"radio:{s.episode_id}:{choice['menu_id']}:{choice['id']}")
 
     def _update_directions(self, s, *, force=False):
         with self.lock:
-            position = max(0, s.furthest)
-            s.directions.retired = {t["video_id"] for t in s.tracks[:position + 1]}
-            s.directions.update(s.heard or s.tracks[:1], s.tracks[position + 1:],
-                                s.transition, force=force or s.feedback_dirty)
+            self.policy.update_directions(s.candidate_view(), s.history_view(), force=force or s.feedback_dirty)
             s.feedback_dirty = False
+
+    def _feedback(self, s):
+        update = self.policy.feedback(s.candidate_view(), s.feedback_context())
+        s.accept_feedback(update)
+        return update.changed
+
+    def _reject(self, s, track):
+        s.rejected = set(self.policy.reject(s.candidate_view(), track))
+        if s.directions:
+            s.directions.blocked.add(track['video_id'])
 
     def seen(self, menu_id):
         """Record the visible menu once, with branch/sequence positions and episode ID.
@@ -633,93 +465,174 @@ class PlaylistRadio:
                     "choice_unit": "radio_session"})
             s.seen_menus.add(menu_id)
             worker = getattr(self.ctx, "enrich_worker", None)
-            keys = {t["key"] for branch in branches for t in branch["tracks"]
-                    if not t.get("genre") or not t.get("year")}
-            missing = keys - s.enrichment_requested
-            if worker and missing:
-                worker.prioritize(missing)
-                s.enrichment_requested.update(missing)
+            keys = list(dict.fromkeys(t["key"] for t in self.policy.metadata_tracks(
+                        s.candidate_view(), s.history_view(), selected_slot(s))
+                        if not t.get("genre") or not t.get("year")))
+            if worker and keys:
+                worker.prioritize(keys)
             return {"ok": True}
 
     def _refresh_metadata(self, s):
-        if not s.seen_menus or time.monotonic() - s.metadata_checked_at < 6:
+        now = time.monotonic()
+        if not s.seen_menus or now - s.metadata_checked_at < 6:
             return
-        s.metadata_checked_at = time.monotonic()
-        tracks = [t for branch in s.directions.slots if branch for t in branch["tracks"]]
-        tracks += s.tracks[max(0, s.furthest) + 1:]
-        if not s.candidates.refresh_metadata(tracks):
+        s.metadata_checked_at = now
+        view, history = s.candidate_view(), s.history_view()
+        rejected = self.policy.refresh_metadata(view, history, self.policy.metadata_tracks(view, history, selected_slot(s)))
+        if rejected is not None:
+            s.metadata_revision += 1
+            s.metadata_rejected = set(rejected)
+            if rejected - s.directions.blocked:
+                s.directions.blocked.update(rejected)
+                s.feedback_dirty = True
+
+    def _refresh_candidates(self, s):
+        """Upgrade a cold session from prepared pools, without changing its saved queue.
+
+        Runs under the operation lock in the monitor. A pending user choice or
+        playlist transaction settles first; playback and the active plan stay put.
+        """
+        if (s is not self.session or s.stop.is_set() or not s.directions or s.candidates.modes
+                or s.initial_tracks or s.pending or s.replacement or s.requested_direction
+                or time.monotonic() - s.candidates_checked_at < 6):
             return
-        s.metadata_revision += 1
-        for branch in s.directions.slots:
-            if branch:
-                s.metadata_rejected.update(t["video_id"] for t in branch["tracks"]
-                    if not s.candidates.fits(t, branch["anchor"]))
-        if s.metadata_rejected - s.directions.blocked:
-            s.directions.blocked.update(s.metadata_rejected)
-            s.feedback_dirty = True
+        s.candidates_checked_at = time.monotonic()
+        store = self.ctx.store
+        with store._lock:
+            ready = bool(store.settings.get_setting("rec_content_model")
+                         and store.rec_surface.get_proposals("mode_bundles"))
+        if not ready:
+            worker = getattr(self.ctx, "rec_worker", None)
+            if worker and not worker.busy and not s.preparation_requested:
+                worker.trigger_mode_refresh()
+                s.preparation_requested = True
+            return
+        candidates = RadioCandidates(store, self.ctx.now_fn(), s.candidates.tuning,
+                                     now_source=s.candidates)
+        if not candidates.modes:
+            return
+        directions = self.policy.upgrade_directions(s.candidate_view(), s.history_view(), candidates, force=s.feedback_dirty)
+        with self.lock:
+            if s is not self.session or s.stop.is_set():
+                return
+            s.candidates, s.directions = candidates, directions
+            s.exhausted = False
+            s.feedback_dirty = False
+            self._persist(s)
+        logger.info("Radio upgraded fallback candidates: regions=%d", len(candidates.modes))
 
-    def _feedback(self, s):
-        """Read existing feedback/events; no new schema or inferred pause/disconnect skips."""
-        store, now = self.ctx.store, self.ctx.now_fn()
-        directions = s.directions
-        changed = False
-        disliked = store.rec_model.disliked_identity_keys()
-        muted = {a.casefold() for a in store.rec_model.muted_artists()}
-        suppressed = store.rec_model.suppressed_keys("for_you", now)
-        blocked = s.rejected | s.metadata_rejected | {t["video_id"] for t in s.candidates.by_video.values()
-            if t["key"] in disliked | suppressed
-            or (t.get("artist") or "").casefold() in muted}
-        if directions.blocked != blocked:
-            directions.blocked = blocked
-            changed = True
-        ratings = [(key, at, .45, "like") for key, at in store.rec_model.recent_liked_with_ts(limit=200)]
-        ratings += [(key, at, -.7, "dislike") for key, at in store.rec_model.disliked_with_ts()]
-        for key, at, strength, kind in ratings:
-            token = (kind, key, at)
-            if at >= s.started_at and key in s.candidates.by_key and token not in s.feedback_seen:
-                s.feedback_seen.add(token)
-                directions.feedback[key] = strength
-                changed = True
-        for event in store.player_events.player_events_since(max(s.started_at, now - 45), kind="track_exit"):
-            video, at = event["video_id"], event["at"]
-            token = ("exit", video, at, event["position"], event["duration"])
-            if (event["playlist_ytm_id"] != s.playlist or event["identity_id"] != s.identity
-                    or video not in s.starts or at < s.starts[video] or video == s.observed_video
-                    or token in s.feedback_seen):
-                continue
-            s.feedback_seen.add(token)
-            if any(start <= at <= end for start, end in s.mutation_windows):
-                continue
-            if classify_exit(event["position"], event["duration"]) != "skip":
-                continue
-            key = s.candidates.by_video[video]["key"]
-            directions.feedback[key] = max(-.6, directions.feedback.get(key, 0) - .18)
-            changed = True
-        s.feedback_dirty = s.feedback_dirty or changed
-        return changed
+    def _refresh_now(self, s):
+        """Schedule one bounded-cadence sample even when no Radio page is polling."""
+        now = self.ctx.now_fn()
+        with self.lock:
+            candidates = s.candidates
+            if (s is not self.session or s.stop.is_set() or not self.work.accepting
+                    or not candidates.modes or s.now_refreshing
+                    or now - candidates.now_sampled_at < radio_tuning.NOW_REFRESH_SECONDS
+                    or (s.now_requested_at is not None
+                        and now - s.now_requested_at < radio_tuning.NOW_REFRESH_SECONDS)):
+                return
+            s.now_refreshing, s.now_requested_at = True, now
 
-    def _invalid(self, s, track):
-        if track["video_id"] in s.directions.blocked:
-            return True
-        if track["key"] not in s.candidates.by_key:
-            return True
-        # One observed skip is a soft preference. Several nearby skips can
-        # invalidate a scheduled continuation without banning a whole genre.
-        negative = sum(-strength * max(0, (s.candidates.similarity(
-            track, s.candidates.by_key[key]) - .55) / .45)
-            for key, strength in s.directions.feedback.items()
-            if strength < 0 and key in s.candidates.by_key)
-        return negative >= .32
+        def refresh():
+            try:
+                store = self.ctx.store
+                with (store.priority.background(check_stopping),
+                      cancellable_work(lambda: s.stop.is_set() or not self.work.accepting),
+                      work_span("radio: current listening"), store.read_snapshot() as snapshot):
+                    sample = candidates.sample_now(now, store=snapshot.store)
+                    with self.operation, self.lock:
+                        if s is self.session and s.candidates is candidates and not s.stop.is_set():
+                            snapshot.publish(lambda: candidates.apply_now(sample))
+            except Exception:
+                logger.debug("Radio current-listening refresh deferred", exc_info=True)
+            finally:
+                with self.lock:
+                    s.now_refreshing = False
+        try:
+            self.work.start_thread(refresh, name="radio-now")
+        except Exception:
+            with self.lock:
+                s.now_refreshing = False
+            raise
+
+    def _tail_view(self, s):
+        now = self.ctx.now_fn()
+        s.edits.recent_states = [state for state in s.edits.recent_states if now - state["at"] < 60]
+        return TailView(tuple(s.tracks), s.position, s.furthest,
+                        frozenset(s.directions.blocked) if s.directions else frozenset(),
+                        s.candidates.by_video, tuple(tuple(state["ids"]) for state in s.edits.recent_states),
+                        s.skip_requested)
+
+    def _accept_tail(self, s, tail, remote):
+        result = self.mutations.recover_tail(self._target(s), tail, self._tail_view(s), remote)
+        self._apply_mutation_result(s, result)
+        self._persist(s)
+        return result.status == 'confirmed'
+
+    def _reject_tail(self, s, tail, track):
+        self._reject(s, track)
+        tail.clear_wait()
+        tail.proposed = self.policy.replenish(s.candidate_view(), s.history_view(), tail.proposed, tail.slot)
+        self._persist(s)
+
+    def _apply_tail(self, s, tail):
+        """Coordinate policy/playback between confirmed transactions, bounded for Stop."""
+        tail.saved = False
+        for _ in range(7):
+            if s.stop.is_set():
+                return False
+            result = self.mutations.read_tail(self._target(s), tail, self._tail_view(s))
+            self._apply_mutation_result(s, result)
+            self._persist(s)
+            if result.rejected:
+                self._reject_tail(s, tail, result.rejected)
+                continue
+            if result.tracks is None:
+                return False
+            remote = list(result.remote)
+            ids = tuple(row['videoId'] for row in remote)
+            self._browser(s)
+            player = self._player(s)
+            if player and player.get("video_id") in ids:
+                self._observe(s, ids.index(player["video_id"]))
+            # An acknowledged write can have raced a song change. Replan the
+            # unsent future only after pending readback has settled that write.
+            view, history = s.candidate_view(), s.history_view()
+            if any(self.policy.genre_mismatch(view, history, t) for t in tail.proposed):
+                valid = [t for t in tail.proposed if not self.policy.invalid(view, history, t)]
+                tail.proposed = self.policy.replenish(view, history, valid, tail.slot)
+                tail.choice_id = None
+                self._persist(s)
+            decision = tail.plan(remote, self._tail_view(s), player)
+            if decision.complete:
+                return True
+            edit = decision.edit
+            if edit is None or s.stop.is_set():
+                return False
+            result = self.mutations.edit_tail(self._target(s), s.edits, self._tail_view(s), edit, tuple(remote))
+            self._apply_mutation_result(s, result)
+            self._persist(s)
+            if result.status == 'rejected':
+                if result.rejected:
+                    self._reject_tail(s, tail, result.rejected)
+                    continue
+                return False
+            if result.tracks is None:
+                return False
+            s.refresh_needed = True
+            self._persist(s)
+        return False
 
     def _finish_replacement(self, s):
         replacement = s.replacement
-        if not replacement.apply(self, s):
+        if not self._apply_tail(s, replacement):
             return False
         with self.lock:
             # Finish an in-flight saved edit before applying the latest choice,
             # without waiting for playback to adopt a superseded direction.
             if s.requested_direction:
-                s.replacement = None
+                s.edits.finish(replacement)
                 return True
         replacement.saved = True
         s.refresh_needed = True
@@ -732,7 +645,7 @@ class PlaylistRadio:
             s.directions.active = replacement.slot
             s.directions.revision += 1
             s.directions.menu_id = uuid4().hex
-            s.replacement = None
+            s.edits.finish(replacement)
             s.exhausted = False
             s.error = None
             saved = {t["video_id"] for t in s.tracks}
@@ -750,16 +663,17 @@ class PlaylistRadio:
             slot, branch = s.directions.find(proposal_id)
             if menu_id != s.directions.menu_id or branch is None:
                 return {"ok": False, "stale": True, "reason": "The next songs changed. Choose a direction again."}
-            if slot == self._selected_slot(s):
+            if slot == selected_slot(s):
                 return {"ok": True, **self.status()}
             if not branch["tracks"]:
                 return {"ok": False, "reason": "No more library songs are available in that direction."}
-            s.requested_direction = {"slot": slot, "tracks": list(branch["tracks"]),
-                                     "choice": {"id": branch["id"], "menu_id": menu_id}}
+            s.edits.queue({"slot": slot, "tracks": list(branch["tracks"]),
+                           "choice": {"id": branch["id"], "menu_id": menu_id}})
             s.error = None
             self._persist(s)
             return {"ok": True, **self.status()}
 
+    @work_span("radio: apply stream tuning", announce=True)
     def tune(self, values):
         values = radio_tuning.controls(values)
         with self.operation:
@@ -770,23 +684,24 @@ class PlaylistRadio:
                 return {"ok": True, **self.status()}
             # Reuse the prepared pools with the new source mix. This route runs
             # off the playback poll and never changes durable taste or play evidence.
-            candidates = RadioCandidates(self.ctx.store, self.ctx.now_fn(), values)
-            metadata = list(s.tracks) + [t for b in s.directions.slots if b for t in b["tracks"]]
+            candidates = RadioCandidates(self.ctx.store, self.ctx.now_fn(), values,
+                                         now_source=s.candidates)
+            metadata = list(s.tracks) + s.heard + [t for b in s.directions.slots if b for t in b["tracks"]]
             if s.replacement:
                 metadata += s.replacement.proposed
             candidates.retain(metadata)
             with self.lock:
-                selected = self._selected_slot(s)
+                selected = selected_slot(s)
                 choice = (s.requested_direction["choice"] if s.requested_direction else
                           s.replacement.choice_id if s.replacement else None)
                 s.candidates = s.directions.candidates = candidates
                 s.directions.blocked.difference_update(s.metadata_rejected - s.rejected)
                 s.metadata_rejected.clear()
+                s.directions.active = selected
                 s.directions.update(s.heard or s.tracks[:1], [], s.transition, force=True)
                 branch = s.directions.slots[selected]
-                if branch["tracks"]:
-                    s.requested_direction = {"slot": selected, "tracks": list(branch["tracks"]),
-                                             "choice": choice}
+                s.edits.queue({"slot": selected, "tracks": list(branch["tracks"]),
+                               "choice": choice if branch["tracks"] else None})
                 self._persist(s)
             return {"ok": True, **self.status()}
 
@@ -843,10 +758,11 @@ class PlaylistRadio:
             if seed is None:
                 self.offer = None
                 return {"ok": False, "refresh_seeds": True, **self.status()}
+            title = versioned_title(self.ctx.store, f"Radio Session · {day.isoformat()}")
             with self.lock:
                 if self.session:
                     self.session.stop.set()
-                s = self.session = Session(client, candidates, identity, f"Radio Session · {day.isoformat()}")
+                s = self.session = Session(client, candidates, identity, title)
                 s.started_at = self.ctx.now_fn()
                 s.selected = list(seeds or [seed])
                 s.choices[seed["video_id"]] = {"id": uuid4().hex,
@@ -856,12 +772,13 @@ class PlaylistRadio:
                 for _ in range(max(0, INITIAL_TRACKS - len(seeds))):
                     if s.stop.is_set():
                         return {"ok": False, "reason": "Stopped during start."}
-                    pick = self._pick(s)
+                    pick = self.policy.pick(s.candidate_view())
                     if pick is None and playlist_id is not None:
                         break
                     if pick is None:
                         raise ValueError("Fewer than three playable songs are available. Sync your YouTube Music library first.")
                     seeds.append(pick)
+                    s.selected.append(pick)
                 if s.stop.is_set():
                     return {"ok": False, "reason": "Stopped during start."}
                 result = executor.create_generated_playlist(
@@ -902,41 +819,189 @@ class PlaylistRadio:
                 logger.warning("Radio Session start failed", exc_info=True)
                 with self.lock:
                     s.error = str(exc)
-                    s.halted = True
+                    if not s.stopped_by_user:
+                        s.move(Phase.CONFLICT)
                     s.stop.set()
                     self._persist(s)
                 return {"ok": False, "reason": str(exc), **self.status()}
             finally:
                 with self.lock:
-                    s.starting = bool(s.initial_tracks) and not s.halted
+                    s.settle()
             return {"ok": True, **self.status()}
 
     def _complete_start(self, s):
         """Wait for the existing playlist to settle, without recreating it."""
         seeds = s.initial_tracks
-        if s.preparation_deadline and time.monotonic() >= s.preparation_deadline:
+        now = time.monotonic()
+        if s.preparation_deadline and now >= s.preparation_deadline:
             raise PlaylistChanged("Radio playlist preparation timed out.")
         expected = [t["video_id"] for t in seeds]
-        received = [t["videoId"] for t in self._remote_tracks(s, expected=expected)]
+        try:
+            received = [t["videoId"] for t in self._remote_tracks(s, expected=expected)]
+        except Exception:
+            s.preparation_snapshot = None
+            raise
         if received != expected:
             report = ("preparing", tuple(received))
             if report != s.observer_report:
                 logger.info("Radio playlist preparation pending: playlist=%s expected=%s received=%s",
                             s.playlist, expected, received)
                 s.observer_report = report
-            raise PlaylistPending()
+            # YouTube can acknowledge a batch while silently omitting a song.
+            # Accept only a complete, stable, ordered subset of our own writes;
+            # transient pages, reorders and unrelated edits never qualify.
+            accepted = set(received)
+            if [video for video in expected if video in accepted] != received:
+                s.preparation_snapshot = None
+                raise PlaylistPending()
+            if s.preparation_snapshot != tuple(received):
+                s.preparation_snapshot = tuple(received)
+                s.preparation_seen_at = now
+            if now - s.preparation_seen_at < PREPARATION_SETTLE:
+                raise PlaylistPending()
+            if not received:
+                raise PlaylistChanged("YouTube Music did not save any playable songs. Choose another song.")
+            omitted = [track for track in seeds if track["video_id"] not in accepted]
+            seeds = [track for track in seeds if track["video_id"] in accepted]
+            choice = s.choices.pop(s.initial_tracks[0]["video_id"], None)
+            if choice:
+                s.choices[seeds[0]["video_id"]] = choice
+            s.directions = RadioDirections(s.candidates, seeds[0])
+            for track in omitted:
+                self._reject(s, track)
         self._publish(s, seeds)
         with self.lock:
             s.initial_tracks = []
             s.preparation_deadline = 0
-            s.starting = False
+            s.preparation_snapshot = None
+            if not s.stopped_by_user:
+                s.move(Phase.AWAITING_PLAYBACK)
             s.launch_deadline = time.monotonic() + 15
             s.error = None
             self._update_directions(s)
             self._persist(s)
             if not s.stop.is_set():
-                self.ctx.bridge.send_control({"type": "navigate", "url":
-                    "https://music.youtube.com/watch?" + urlencode({"v": seeds[0]["video_id"], "list": s.playlist})})
+                self.playback.navigate(s.playlist, seeds[0]["video_id"])
+
+    def _recover(self, s):
+        """Reconcile our in-flight write without discarding unrelated saved edits."""
+        remote = self._remote_tracks(s)
+        actual = tuple(t["videoId"] for t in remote)
+        allowed = {tuple(t["video_id"] for t in s.tracks)}
+        if s.pending:
+            allowed.add((*next(iter(allowed)), s.pending["video_id"]))
+            receipt = (s.edits.append.write.receipt if s.edits.append.write else None) or {}
+            if receipt.get("videoId"):
+                allowed.add(tuple(t["video_id"] for t in s.tracks) + (receipt["videoId"],))
+        if s.replacement:
+            try:
+                if not self._accept_tail(s, s.replacement, remote):
+                    return False
+            except PlaylistChanged:
+                return False
+            allowed.update(s.replacement.allowed)
+        if actual not in allowed and not (s.edits.append and self.mutations.append_substitution(
+                s.edits.append, s.tracks, remote)):
+            return False
+        s.move(s.running_phase())
+        s.error = None
+        s.edits.conflict = None
+        logger.info("Radio saved-playlist readback recovered: playlist=%s", s.playlist)
+        return True
+
+    def _wait_for_skip(self, s, video_id, deadline):
+        while time.monotonic() < deadline and not s.stop.wait(.25):
+            try:
+                self._browser(s)
+                current = (s.browser.get("player") or {}).get("video_id")
+                if current and current != video_id:
+                    return True
+            except PlaylistPending:
+                pass
+        return False
+
+    def skip(self, video_id):
+        """Repair radio's saved future, then advance exactly the displayed song.
+
+        A disabled/stale native Next control falls back to the confirmed saved
+        successor. Selecting that exact successor cannot skip a second song
+        when a native click's acknowledgement is lost.
+        """
+        playing = self.ctx.bridge.now_playing or {}
+        if not self.session or self.session.stop.is_set():
+            self.join()
+        s = self.session
+        if not s or s.stopped_by_user or playing.get("playlist_ytm_id") != s.playlist:
+            return None
+        deadline = time.monotonic() + 45
+        with self.operation:
+            s.skip_requested = True
+            try:
+                while time.monotonic() < deadline and not s.stop.is_set():
+                    try:
+                        self._browser(s)
+                        player = self._player(s)
+                        if player is None:
+                            current = s.browser.get("player") or {}
+                            if current.get("playlist_ytm_id") and current["playlist_ytm_id"] != s.playlist:
+                                return {"ok": True}  # User navigated away while this request waited.
+                            s.stop.wait(.25)
+                            continue
+                        if not player.get("video_id"):
+                            s.stop.wait(.25)
+                            continue
+                        if player["video_id"] != video_id:
+                            return {"ok": True}
+                        if s.halted and not self._recover(s):
+                            # An unrelated edit can still contain a usable next
+                            # song. Read it without removing or overwriting it.
+                            ids = [t["videoId"] for t in self._remote_tracks(s)]
+                        else:
+                            self._advance(s)
+                            self._browser(s)
+                            current = (s.browser.get("player") or {}).get("video_id")
+                            if current and current != video_id:
+                                return {"ok": True}
+                            ids = [t["video_id"] for t in s.tracks]
+                            if s.replacement or s.requested_direction or s.pending:
+                                s.stop.wait(.25)
+                                continue
+                        index = ids.index(video_id) if video_id in ids else -1
+                        if index >= 0 and index + 1 < len(ids):
+                            successor = ids[index + 1]
+                            status, result = 0, {"error": "Native queue is still refreshing"}
+                            if s.browser.get("playback_synced"):
+                                status, result = self.playback.next(video_id)
+                            if (status == 200 and result.get("ok")
+                                    and self._wait_for_skip(s, video_id, min(deadline, time.monotonic() + 3))):
+                                return {"ok": True}
+                            # Refresh/navigation can race the native button. Get
+                            # a fresh identity before using the saved successor.
+                            self._browser(s)
+                            current = (s.browser.get("player") or {}).get("video_id")
+                            if current and current != video_id:
+                                return {"ok": True}
+                            logger.info("Radio skip selecting saved successor: playlist=%s from=%s to=%s reason=%s",
+                                        s.playlist, video_id, successor, result.get("error"))
+                            self.playback.navigate(s.playlist, successor)
+                            # Navigation is sent once; subsequent observations
+                            # confirm it rather than repeating a skip command.
+                            if self._wait_for_skip(s, video_id, deadline):
+                                return {"ok": True}
+                            break
+                        if s.exhausted:
+                            return {"ok": False, "error": "No more playable songs are available in this radio session."}
+                    except PlaylistPending:
+                        pass
+                    except PlaylistChanged as exc:
+                        if not s.stopped_by_user:
+                            s.move(Phase.CONFLICT)
+                        s.error = str(exc)
+                    s.stop.wait(.25)
+                return {"ok": False, "error": "Radio is still preparing its next playable song. Try skip again shortly."}
+            finally:
+                s.skip_requested = False
+                self._persist(s)
 
     def _monitor(self, s):
         try:
@@ -944,6 +1009,7 @@ class PlaylistRadio:
                 if not self.work.accepting or not self.ctx.bridge.connected:
                     break
                 try:
+                    self._refresh_now(s)
                     with self.operation:
                         if s is not self.session or s.stop.is_set():
                             break
@@ -955,30 +1021,24 @@ class PlaylistRadio:
                                 # A conflict pauses mutations, not the radio UI.
                                 # Resume only after readback returns to a state
                                 # owned by this transaction; never overwrite an edit.
-                                actual = tuple(self._remote_ids(s))
-                                allowed = {tuple(t["video_id"] for t in s.tracks)}
-                                if s.pending:
-                                    allowed.add((*next(iter(allowed)), s.pending["video_id"]))
-                                if s.replacement:
-                                    allowed.update(s.replacement.allowed)
-                                if actual not in allowed:
+                                if not self._recover(s):
                                     continue
-                                s.halted = False
-                                s.readback_conflict = None
-                                logger.info("Radio saved-playlist readback recovered: playlist=%s", s.playlist)
                             self._refresh_metadata(s)
+                            self._refresh_candidates(s)
                             self._advance(s)
                         self._persist(s)
                 except PlaylistPending:
                     with self.lock:
-                        s.error = None
+                        if not s.halted:
+                            s.error = None
                         self._persist(s)
                 except PlaylistChanged as exc:
                     logger.warning("Radio saved-playlist conflict: playlist=%s current=%s reason=%s",
                                    s.playlist, s.observed_video, exc)
                     with self.lock:
                         s.error = str(exc)
-                        s.halted = True
+                        if not s.stopped_by_user:
+                            s.move(Phase.CONFLICT)
                         if not s.playback_confirmed:
                             s.stop.set()
                         self._persist(s)
@@ -990,6 +1050,8 @@ class PlaylistRadio:
             with self.lock:
                 s.stop.set()
                 s.monitoring = False
+                if s.phase == Phase.STOPPING:
+                    s.move(Phase.STOPPED)
                 self._persist(s)
 
     def advance(self, s):
@@ -999,7 +1061,10 @@ class PlaylistRadio:
         observation checks whether it landed before considering another write.
         """
         with self.operation:
-            self._advance(s)
+            try:
+                self._advance(s)
+            finally:
+                self._persist(s)
 
     def _advance(self, s):
         if s.stop.is_set() or self._player(s) is None:
@@ -1012,22 +1077,26 @@ class PlaylistRadio:
         # while its last local mirror failed. Reconcile it before looking up position.
         if s.replacement:
             changed = self._feedback(s)
-            if changed:
+            if changed and s.replacement.waiting is None:
                 replacement = s.replacement
-                anchor = s.directions.slots[replacement.slot]["anchor"]
-                valid = [t for t in replacement.proposed[:LOOKAHEAD] if not self._invalid(s, t)]
-                replacement.proposed = s.directions._extend(s.heard, valid, anchor, ())
+                view, history = s.candidate_view(), s.history_view()
+                valid = [t for t in replacement.proposed[:LOOKAHEAD] if not self.policy.invalid(view, history, t)]
+                replacement.proposed = self.policy.replenish(view, history, valid, replacement.slot)
             if not self._finish_replacement(s):
                 return
         if s.requested_direction:
             with self.lock:
                 request = s.requested_direction
-                s.replacement = RadioPlaylistTail(s.tracks, request["tracks"], request["slot"],
-                                                  choice_id=request["choice"])
+                view, history = s.candidate_view(), s.history_view()
+                if any(self.policy.genre_mismatch(view, history, t) for t in request["tracks"]):
+                    request["tracks"] = self.policy.replenish(view, history, request['tracks'], request['slot'])
+                    request["choice"] = None
+                s.edits.begin(RadioPlaylistTail(s.tracks, request["tracks"], request["slot"],
+                                                choice_id=request["choice"]))
                 s.choices.clear()
                 if request["choice"]:
                     s.choices[request["tracks"][0]["video_id"]] = request["choice"]
-                s.requested_direction = None
+                s.edits.requested = None
                 self._persist(s)
             if not self._finish_replacement(s):
                 return
@@ -1042,14 +1111,16 @@ class PlaylistRadio:
             self._update_directions(s, force=changed)
             return
         scheduled = s.tracks[position + 1:]
-        invalid = [t for t in scheduled if self._invalid(s, t)]
+        view, history = s.candidate_view(), s.history_view()
+        invalid = [t for t in scheduled if self.policy.invalid(view, history, t)]
         if invalid:
-            s.rejected.update(t["video_id"] for t in invalid)
+            # A genre pin is temporary. Those songs become eligible again when
+            # the DJ moves the dial or the currently playing genre changes.
+            s.rejected.update(t["video_id"] for t in invalid if not self.policy.genre_mismatch(view, history, t))
             s.directions.blocked.update(s.rejected)
-            active = s.directions.slots[s.directions.active]
             valid = [t for t in scheduled if t not in invalid]
-            proposal = s.directions._extend(s.heard, valid, active["anchor"], ())
-            s.replacement = RadioPlaylistTail(s.tracks, proposal, s.directions.active)
+            proposal = self.policy.replenish(s.candidate_view(), history, valid, s.directions.active)
+            s.edits.begin(RadioPlaylistTail(s.tracks, proposal, s.directions.active))
             if not self._finish_replacement(s):
                 return
         self._update_directions(s, force=changed)
@@ -1072,55 +1143,32 @@ class PlaylistRadio:
 
     def _append(self, s):
         if s.pending is None:
-            s.pending = self._pick(s)
-            if s.pending is None:
+            track = self.policy.pick(s.candidate_view())
+            if track is None:
                 s.exhausted = True
                 return False
-        expected = [t["video_id"] for t in s.tracks]
-        desired = expected + [s.pending["video_id"]]
-        actual = self._remote_ids(s)
-        if actual == expected and not s.pending_sent:
-            if s.stop.is_set():
-                return False
-            if s.directions and s.pending["video_id"] in s.directions.blocked:
-                s.selected = list(s.tracks)
-                s.pending = None
-                return True
-            # Read back even after a lost response; never retry a write blindly.
-            s.pending_sent = True
-            self._persist(s)
-            try:
-                result = s.client.add_playlist_items(s.playlist, [s.pending["video_id"]])
-                status = result.get("status") if isinstance(result, dict) else result
-                if status and status != "STATUS_SUCCEEDED":
-                    s.pending_sent = False
-            except Exception:
-                logger.warning("Radio Session append response failed; checking playlist", exc_info=True)
-            actual = self._remote_ids(s)
-        if actual == desired:
-            s.readback_conflict = None
-            self._publish(s, [*s.tracks, s.pending])
+            s.selected.append(track)
+            s.edits.begin(AppendOperation(track))
+        s.settle()
+        self._persist(s)
+        operation = s.edits.append
+        result = self.mutations.append(self._target(s), s.edits, self._tail_view(s))
+        self._apply_mutation_result(s, result)
+        if result.status == 'confirmed':
             with self.lock:
-                s.pending = None
-                s.pending_sent = False
+                s.edits.finish(operation)
                 s.exhausted = False
                 s.error = None
                 s.refresh_needed = True
             self._persist(s)
             self._browser(s)
             return True
-        if actual == expected or self._stale_read(s, actual):
-            s.readback_conflict = None
-            return False
-        # A single complete but older read after reconnect is not an external
-        # edit. Confirm the same conflict over several observations before
-        # suspending writes; keep the established session visible throughout.
-        conflict = tuple(actual)
-        if s.readback_conflict != conflict:
-            s.readback_conflict = conflict
-            s.readback_conflict_at = time.monotonic()
-            logger.info("Radio readback settling: playlist=%s expected=%s received=%s",
-                        s.playlist, desired, actual)
-        if time.monotonic() - s.readback_conflict_at < 30:
-            raise PlaylistPending()
-        raise PlaylistChanged("The playlist was changed elsewhere. Radio stopped to preserve those changes.")
+        if result.status in {'rejected', 'discarded'}:
+            if result.rejected:
+                self._reject(s, result.rejected)
+            s.edits.finish(operation)
+            s.selected = list(s.tracks)
+            s.error = None
+            self._persist(s)
+            return True
+        return False

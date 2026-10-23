@@ -1,4 +1,4 @@
-"""Saved discovery metadata updates cluster placement without refitting or reranking the corpus."""
+"""Saved discovery metadata queues background preparation with the established models."""
 import logging
 from types import SimpleNamespace
 
@@ -8,7 +8,7 @@ import pytest
 from tests.conftest import FakeClient
 from yt_playlist.enrich.enrich_worker import EnrichWorker
 from yt_playlist.library import executor
-from yt_playlist.rec import embed, fresh_pool, mode_surfaces, recipes, surfaces
+from yt_playlist.rec import embed, fresh_pool, mode_surfaces, model_refresh, recipes, surfaces
 from yt_playlist.rec.scoring import PlaylistTaste
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
@@ -81,8 +81,8 @@ def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatc
         store.playlists.set_playlist_tracks(pid, tids)
         store.enrichment.mark_enriched(tids, 200)
         groups.append(sorted(store.playlists.get_playlist_track_keys(pid)))
-    embed.build_and_store(store, dim=8)
-    embed.build_content_and_store(store)
+    store.settings.set_setting("rec_dim", "8")
+    assert model_refresh.rebuild(store, 200) is not None
     _, vectors, idx = embed.load_vectors(store)
     preferred = vectors[[idx[k] for k in groups[0]]].mean(0)
     preferred /= np.linalg.norm(preferred)
@@ -123,8 +123,8 @@ def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatc
     def forbidden(*args, **kwargs):
         raise AssertionError("An enrichment batch must reuse saved models and rankings")
 
-    monkeypatch.setattr(embed, "build_and_store", forbidden)
-    monkeypatch.setattr(embed, "build_content_and_store", forbidden)
+    monkeypatch.setattr(embed, "build_vectors_from_baskets", forbidden)
+    monkeypatch.setattr(embed, "_build_library_content", forbidden)
     monkeypatch.setattr(fresh_pool, "prepare", forbidden)
 
     def waterfall(s, batch, cfg, on_progress, should_stop=None, sink_for=None, **kwargs):
@@ -141,6 +141,12 @@ def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatc
     assert [t["key"] for t in store.rec_surface.get_proposals("fresh_pool")] == old_order
     assert store.settings.get_setting("rec_content_model") == model
     assert [t["key"] for t in fresh_pool.pick(store, 500, size=4)] == reference
+    assert store.rec_refresh.has_pending_changes()
+    # Enrichment only notifies the worker. The background pass reuses the library
+    # encoder and original ranker before publishing the updated discovery pools.
+    assert model_refresh.rebuild(store, 500) is not None
+    assert mode_surfaces.prepare_bundles(store, 500) is not None
+    assert store.settings.get_setting("rec_content_model") == model
     bundles = store.rec_surface.get_proposals("mode_bundles")
     assert {t["key"] for t in bundles["1"]["fresh"]} == set(changed)
     assert {t["key"] for t in bundles["2"]["fresh"]} == set(reference)

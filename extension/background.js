@@ -1,13 +1,14 @@
 // MV3 bootstrap: construct modules, wire explicit interfaces, and own Chrome lifecycle listeners.
 // Factories register no listeners and perform no work until called here.
-importScripts("worker/config.js", "worker/music_tabs.js", "worker/sensors.js",
+importScripts("worker/config.js", "worker/music_tabs.js", "worker/sensors.js", "worker/ratings.js",
   "worker/playback.js", "worker/requests.js", "worker/radio.js", "worker/site.js", "worker/transport.js");
 
 const tuneConsole = (() => {
   const warn = createBridgeWarnings();
   const tabs = createMusicTabs({origin: TC_CONFIG.musicOrigin,
     inject: id => sensors.inject(id), pingContent: id => sensors.pingContent(id)});
-  const sensors = createSensors({version: TC_CONFIG.sensorVersion, warn,
+  const sensors = createSensors({version: TC_CONFIG.sensorVersion,
+    revision: TC_CONFIG.sensorRevision, receiverRevision: TC_CONFIG.receiverRevision, warn,
     send: frame => transport.send(frame), suppressBeforeUnload: tabs.suppressBeforeUnload});
   const playback = createPlayback({origin: TC_CONFIG.musicOrigin, appOrigin: TC_CONFIG.appOrigin,
     musicTabs: tabs, sensors, send: frame => transport.send(frame), warn});
@@ -19,11 +20,11 @@ const tuneConsole = (() => {
     if (frame && frame.type === "navigate") { playback.navigate(frame.url); return; }
     if (frame && frame.type === "playpause") { playback.playPause(); return; }
     if (frame && frame.type === "refresh-view") { playback.refreshView(frame.playlist); return; }
-    if (frame && ["rate", "radio-session", "playlist-session-poc"].includes(frame.type)) {
+    if (frame && ["rate", "next", "radio-session", "playlist-session-poc"].includes(frame.type)) {
       let result;
       try {
-        result = frame.type === "rate" ? await playback.rate(frame.action, frame.videoId, frame.likeStatus)
-          : await radio.update(frame);
+        result = frame.type === "rate" ? await playback.rate(frame.action, frame.videoId, frame.likeStatus, frame.skip, frame.brandId)
+          : frame.type === "next" ? await playback.next(frame.videoId) : await radio.update(frame);
       } catch (e) { result = {ok: false, error: String(e)}; }
       return {id: frame.id, status: 200, body: JSON.stringify(result)};
     }

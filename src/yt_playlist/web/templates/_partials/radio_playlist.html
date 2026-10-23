@@ -24,8 +24,8 @@
             target="_blank" rel="noopener" data-yt-info>{{ t.title }}</a></div></td>
         <td class="t-wrap" title="{{ t.artist }}"><div class="track-cell track-cell--text"><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></div></td>
         <td class="t-wrap" title="{{ t.album }}"><div class="track-cell track-cell--text">{% if t.album_browse %}<a class="alink" href="/album?browse={{ t.album_browse }}">{{ t.album }}</a>{% else %}<span class="muted">{{ t.album }}</span>{% endif %}</div></td>
-        <td class="num mono"><div class="track-cell">{{ t.year or '—' }}</div></td>
-        <td class="t-wrap" title="{{ t.genre or '' }}"><div class="track-cell track-cell--text">{% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted">—</span>{% endif %}</div></td>
+        <td class="num mono"><div class="track-cell"><span class="ydisplay">{{ t.year or '—' }}</span></div></td>
+        <td class="t-wrap" title="{{ t.genre or '' }}"><div class="track-cell track-cell--text"><span class="genre-display-wrap">{% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted">—</span>{% endif %}</span></div></td>
         <td class="num mono"><div class="track-cell">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</div></td>
         <td class="rowmenu"><div class="track-cell">{{ song_menu(t, {"play_url": play_url}) }}</div></td>
       </tr>

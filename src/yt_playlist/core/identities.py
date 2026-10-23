@@ -31,6 +31,16 @@ STUB_AUTH = {
 
 
 class BridgeClient(YTMusic):
+    def get_history(self):
+        from yt_playlist.core.history_snapshot import history_snapshot
+        return history_snapshot(self)
+
+    def get_playlist(self, playlistId, limit=100, related=False, suggestions_limit=0):
+        if limit is not None or related or suggestions_limit:
+            return super().get_playlist(playlistId, limit, related, suggestions_limit)
+        from yt_playlist.core.playlist_snapshot import complete_playlist
+        return complete_playlist(self, playlistId)
+
     def get_library_playlists(self, limit=25):
         if limit is not None:
             return super().get_library_playlists(limit=limit)

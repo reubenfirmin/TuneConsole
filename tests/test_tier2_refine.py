@@ -1,4 +1,5 @@
 from yt_playlist.rec import embed, surfaces
+from tests import model_support
 
 
 def test_for_you_tier2_prefers_high_play_context(store):
@@ -14,7 +15,7 @@ def test_for_you_tier2_prefers_high_play_context(store):
     for day in range(8):
         store.history.record_history_plays(iid, -day * 86400.0, ["a0|ax"], source_timezone="UTC")
     store.history.record_history_plays(iid, 1.0, ["b0|bx"], source_timezone="UTC")
-    embed.build_and_store(store, dim=8)
+    model_support.build_track_model(store, dim=8)
 
     keys = [i.key for i in surfaces.for_you(store, now=2.0, limit=12)]
     a_cut = next((k for k in keys if k.endswith("|ax")), None)

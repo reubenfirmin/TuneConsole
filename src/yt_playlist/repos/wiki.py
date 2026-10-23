@@ -3,7 +3,7 @@
 One row per subject (a transient facet key, e.g. 'artist:khruangbin' or 'genre:shoegaze').
 found=1 rows hold a resolved summary; found=0 rows are a negative cache so a subject with no good
 Wikipedia page is not re-fetched on every Home load. Rows go stale after a TTL (longer for hits than
-misses) and are then refreshed by the route.
+misses) and are then refreshed by the recommendation worker.
 """
 from collections import OrderedDict
 

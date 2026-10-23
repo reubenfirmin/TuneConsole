@@ -200,6 +200,17 @@ def test_production_client_accepts_explicit_empty_grid():
     assert client.get_library_albums(limit=None) == []
 
 
+@pytest.mark.parametrize('metadata', [{}, {'itemSize': 'COLLECTION_STYLE_ITEM_SIZE_MEDIUM'}])
+def test_production_client_retains_all_album_pages_before_metadata_only_terminal(metadata):
+    client, bridge = _production_client([
+        _first_page(_page('ONE', continuation='next')),
+        {'continuationContents': {'gridContinuation': _page('TWO', continuation='last')}},
+        {'continuationContents': {'gridContinuation': {'trackingParams': 'tracking', **metadata}}},
+    ])
+    assert [a['browseId'] for a in client.get_library_albums(limit=None)] == ['ONE', 'TWO']
+    assert len(bridge.calls) == 3
+
+
 @pytest.mark.parametrize('last_page', [
     {},
     {'continuationContents': {}},

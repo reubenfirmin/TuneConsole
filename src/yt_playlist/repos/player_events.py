@@ -1,6 +1,7 @@
 """#91 PlayerEventsRepo: the raw player/curation event stream. Append-only; every judgment about
 these rows (skip vs completion, sessions) is a read-time derivation, never persisted here."""
 from yt_playlist.library.listen_derive import classify_exit
+from yt_playlist.core.db_revisions import keyed_reads
 from yt_playlist.repos.base import Repo, synchronized
 
 
@@ -34,11 +35,12 @@ class PlayerEventsRepo(Repo):
         video_id that resolves to a library identity_key (unresolved video_ids are dropped, same
         as identity_key_for_video); classify_exit (library.listen_derive, pure) decides "skip" at
         read time from the raw position/duration, so nothing about skip-ness is persisted here."""
-        rows = self.conn.execute(
-            "SELECT (SELECT identity_key FROM tracks WHERE video_id = pe.video_id LIMIT 1) AS key, "
-            "pe.position AS position, pe.duration AS duration, pe.at AS at "
-            "FROM player_events pe WHERE pe.kind IN ('track_exit', 'bye') AND pe.at >= ? "
-            "ORDER BY pe.at DESC", (since_ts,)).fetchall()
+        with keyed_reads(self._store, 'player_events', ('track_exit', 'bye')):
+            rows = self.conn.execute(
+                "SELECT (SELECT identity_key FROM tracks WHERE video_id = pe.video_id LIMIT 1) AS key, "
+                "pe.position AS position, pe.duration AS duration, pe.at AS at "
+                "FROM player_events pe WHERE pe.kind IN ('track_exit', 'bye') AND pe.at >= ? "
+                "ORDER BY pe.at DESC", (since_ts,)).fetchall()
         latest: dict[str, float] = {}
         for r in rows:
             key = r["key"]

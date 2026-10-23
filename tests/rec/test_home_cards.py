@@ -66,7 +66,7 @@ def test_chosen_genres_reach_ranker_and_stay_on_final_recipe(store, monkeypatch)
         return [{**proto(), "mode_id": 7, "ranker": "lane"}]
 
     monkeypatch.setattr(mode_surfaces, "assemble_cards", assemble)
-    monkeypatch.setattr(home_cards, "_order_by_journey", lambda store, tracks, journey, seed: tracks)
+    monkeypatch.setattr(home_cards, "_order_by_journey", lambda store, tracks, journey, seed, data=None: tracks)
     result = home.cards(home_cards.CardsRequest(1000))
     assert calls == [(1000, 0, {"include_genres": {"jazz"}})]
     assert result.requested_genres == ["jazz"]

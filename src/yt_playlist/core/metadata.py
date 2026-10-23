@@ -7,6 +7,7 @@ import json
 import time
 
 from .catalog_identity import RECORDING_FIELDS, ITEM_FIELDS
+from yt_playlist.util import genre_catalog
 
 
 def source_location(conn, entry_id, field):
@@ -44,7 +45,7 @@ def select(conn, entry_id, field, value, source, *, now=None):
 
 
 def apply_provider(conn, entry_id, provider, fields, providers):
-    """The configured first provider wins; its later findings can refresh its own fields.
+    """The first provider wins disagreements; documented genre refinements can be more precise.
 
     Unknown legacy values and weak import hints are replaceable, while overrides live above
     this selection. Missing answers never erase a previous useful finding.
@@ -60,11 +61,40 @@ def apply_provider(conn, entry_id, provider, fields, providers):
                      'observed_at) VALUES (?,?,?,?,?,?)',
                      (entry_id,recording,field,provider,json.dumps(value),time.time()))
         previous = selected_source(conn,entry_id,field)
-        if previous in rank and rank[previous] < rank.get(provider,len(rank)):
+        refinement = False
+        if field == 'genre' and previous in rank:
+            current = conn.execute('SELECT genre FROM recordings WHERE id=?', (recording,)).fetchone()[0]
+            refinement = genre_catalog.is_subgenre(value, current)
+            if previous != provider and genre_catalog.is_subgenre(current, value):
+                continue
+        if not refinement and previous in rank and rank[previous] < rank.get(provider,len(rank)):
             continue
         select(conn,entry_id,field,value,provider)
         conn.execute('UPDATE catalog_field_hints SET active=0 WHERE entry_id=? AND field=?',
                      (entry_id,field))
+
+
+def refresh_genre(conn, recording_id, answers, providers):
+    """Replace a superseded automatic genre when a refresh supplies an alternative.
+
+    The caller supplies completed, current answers. Historical findings remain retained;
+    item-scoped explicit choices continue to sit above this recording-level selection.
+    """
+    previous = conn.execute("SELECT source FROM recording_field_sources "
+                            "WHERE recording_id=? AND field='genre'", (recording_id,)).fetchone()
+    if not previous or previous[0] not in answers or answers[previous[0]]:
+        return
+    genre, source = None, None
+    for name in providers:
+        candidate = answers.get(name)
+        if candidate and (genre is None or genre_catalog.is_subgenre(candidate, genre)):
+            genre, source = candidate, name
+    entry_id = conn.execute('SELECT id FROM catalog_entries WHERE recording_id=? LIMIT 1',
+                            (recording_id,)).fetchone()[0]
+    if genre:
+        select(conn, entry_id, 'genre', genre, source)
+    # A no-match is absence of new evidence, not evidence that the previous genre
+    # is wrong. Retain both the value and its attribution until a replacement exists.
 
 
 def record_choice(conn, entry_id, field, value, source, *, now=None):

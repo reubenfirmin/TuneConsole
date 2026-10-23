@@ -1,5 +1,6 @@
 """Tests for Task 8: transient facet leans wired into _axis_weights_for / explore_for_you."""
 from yt_playlist.rec import scoring, surfaces
+from tests import model_support
 from yt_playlist.util.matching import identity_key
 
 
@@ -28,7 +29,7 @@ def test_explore_lane_respects_transient_facet_lean(store):
         h = store.tracks.upsert_track(f"h{i}", f"H{i}", f"DJ{i}", None, None); store.tracks.set_track_genre(h, "deep house"); house.append(h)
         j = store.tracks.upsert_track(f"j{i}", f"J{i}", f"Sx{i}", None, None); store.tracks.set_track_genre(j, "jazz"); jazz.append(j)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "P", "P", 12, "h", 0.0), house + jazz)
-    embed.build_and_store(store, dim=4)                     # neither artist is "familiar" (no plays)
+    model_support.build_track_model(store, dim=4)           # neither artist is "familiar" (no plays)
     for i in range(6):
         store.rec_surface.record_mood([identity_key(f"H{i}", f"DJ{i}")], -2, now=10.0)   # "less house", a lot
     ex = surfaces.explore_for_you(store, now=10.0, limit=12)

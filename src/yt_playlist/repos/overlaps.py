@@ -5,9 +5,18 @@ import json
 from yt_playlist.core.playlist_scopes import ensure
 
 from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.repos.models import CleanupPreferences
 
 
 class OverlapRepo(Repo):
+    @synchronized
+    def cleanup_preferences(self) -> CleanupPreferences:
+        """Read each preference table once; callers can pin a shared snapshot."""
+        return CleanupPreferences(
+            self.get_cleanup_ignored(), self.get_suppressed_overlaps(),
+            self.get_overlap_ignored(), self.get_overlap_kept_pairs(),
+            self.get_ignored_merges())
+
     @synchronized
     def suppress_overlap(self, ytm_a, ytm_b, now) -> None:
         ytm_a,ytm_b = ensure(self.conn,ytm_a),ensure(self.conn,ytm_b)

@@ -3,6 +3,8 @@ from yt_playlist.library.playlist_writes import add_items_resilient
 
 class Client:
     def __init__(self): self.calls = []
+    def get_playlist(self, pid, limit=None):
+        return {"tracks": []}
     def add_playlist_items(self, pid, ids):
         self.calls.append(list(ids))
         return "STATUS_SUCCEEDED"

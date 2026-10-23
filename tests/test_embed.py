@@ -1,4 +1,5 @@
 from yt_playlist.rec import embed, surfaces
+from tests import model_support
 from yt_playlist.util.matching import identity_key
 
 
@@ -14,7 +15,7 @@ def _two_clusters(store):
 
 def test_embedding_neighbors_stay_in_cluster(store):
     _two_clusters(store)
-    n = embed.build_and_store(store, dim=4)
+    n = model_support.build_track_model(store, dim=4)
     assert n == 12
     nbrs = embed.neighbors(store, "a0|ab", topn=4)
     assert nbrs, "expected neighbours once vectors are built"
@@ -35,7 +36,7 @@ def test_neighbors_for_unmodeled_uses_artist_proxy(store):
     store.playlists.set_playlist_tracks(gpl, [g])
     store.playlists.set_playlist_group("PG", "Generated")
     store.playlists.mark_generated_playlist('PG')
-    embed.build_and_store(store, dim=4)
+    model_support.build_track_model(store, dim=4)
 
     seed = identity_key("GNEW", "AB")
     assert embed.neighbors(store, seed) == []                   # quarantined: no vector of its own
@@ -46,7 +47,7 @@ def test_neighbors_for_unmodeled_uses_artist_proxy(store):
 def test_for_you_uses_taste_neighbourhood_when_built(store):
     iid, A, _ = _two_clusters(store)
     store.history.record_history_plays(iid, 1.0, ["a0|ab", "a1|ab"], source_timezone="UTC")
-    embed.build_and_store(store, dim=4)
+    model_support.build_track_model(store, dim=4)
     items = surfaces.for_you(store, now=1000.0)
     assert any(i.reason == "In your taste neighbourhood" for i in items)
 
@@ -59,7 +60,7 @@ def test_complete_playlist_uses_same_artist_and_genre_not_track_embedding(store)
         store.tracks.set_track_genre(tid, "Rock")
     target = store.playlists.upsert_playlist(iid, "PT", "Target", 2, "h3", 0.0)
     store.playlists.set_playlist_tracks(target, [A[0], A[1]])             # seed with two A tracks
-    embed.build_and_store(store, dim=4)
+    model_support.build_track_model(store, dim=4)
     items = surfaces.complete_playlist(store, target, limit=4)
     assert items
     assert all(i.artist == "AB" for i in items)                # same artist + genre; B is ineligible

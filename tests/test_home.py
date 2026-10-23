@@ -6,6 +6,8 @@ from tests.conftest import FakeClient, _track
 
 def _client(store, now=1000.0):
     iid = store.identities.upsert_identity("main", "cred", None, True)
+    from tests.test_mode_cards_route import prepare_home
+    prepare_home(store, now)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now)
     return TestClient(app, base_url="http://127.0.0.1")
 
@@ -78,7 +80,7 @@ def test_playlists_moved_to_slash_playlists(store):
 
 
 def test_home_renders_for_you_and_no_sync_elsewhere(store):
-    # Cards are lazy-loaded via /home/cards; card assertions move there. Sync-bar assertions stay on /.
+    # Complete cards are available both inline and through the fragment endpoint.
     import numpy as np
     from yt_playlist.rec import mode_surfaces as ms
     iid = store.identities.upsert_identity("main", "cred", None, True)
@@ -97,11 +99,15 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
     for surf in ms.CARD_SURFACES:
         title = "Gem" if surf == "wheelhouse" else f"Song {surf}"
         key = "gem|x" if surf == "wheelhouse" else f"{surf}k"
-        payload["1"][surf] = [{"key": key, "video_id": "v1", "title": title,
-                               "artist": "X" if surf == "wheelhouse" else "Art",
+        payload["1"][surf] = [{"key": key if i == 0 else f"{key}-{i}",
+                               "video_id": "v1" if surf == "wheelhouse" and i == 0 else f"fixture-{key}-{i}",
+                               "title": title if i == 0 else f"{title} {i}",
+                               "artist": "X" if surf == "wheelhouse" and i == 0 else f"Art {surf} {i}",
                                "album": "", "thumbnail": None,
-                               "plays": 0, "reason": "", "lane": "", "genre": ""}]
+                               "plays": 0, "reason": "", "lane": "", "genre": ""} for i in range(8)]
     store.rec_surface.put_proposals("mode_bundles", payload, now)
+    from tests.test_mode_cards_route import prepare_home
+    prepare_home(store, now)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now)
     c = TestClient(app, base_url="http://127.0.0.1")
 
@@ -138,6 +144,8 @@ def test_steering_panel_hidden_until_genres_exist(store):
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
+    from yt_playlist.rec import home_prepared
+    home_prepared.prepare(store, 1000)
     assert 'id="fingerprint"' in c.get("/home/feed").text          # genres present -> panel appears  # persisted
 
 
@@ -149,6 +157,8 @@ def test_home_page_has_steering_and_fingerprint(store):
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
     store.settings.set_setting("last_sync_at", "1000")            # synced user -> feed (with fingerprint/steer) renders
     store.settings.set_setting("onboard_dismissed", "1")          # graduated user: testing the normal feed, not onboarding
+    from tests.test_mode_cards_route import prepare_home
+    prepare_home(store)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     html = c.get("/").text

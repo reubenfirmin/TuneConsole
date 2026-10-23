@@ -3,7 +3,7 @@ import json
 import pytest
 
 from tests.conftest import FakeClient, _track
-from tests.test_undo_order import OccurrenceClient
+from tests.test_undo_order import OccurrenceClient, isolated_data_dir
 from yt_playlist.library import executor, playlist_undo
 from yt_playlist.library.undo_conflicts import playlist_state
 from yt_playlist.util.action_kinds import APPLY_MERGE, COPY_PLAYLIST
@@ -75,7 +75,7 @@ def test_edited_copy_destination_is_never_deleted(store, monkeypatch, tmp_path, 
         iid = store.identities.upsert_identity("Target", "bridge", None, False)
         client = FakeClient(catalog=source_client._catalog)
     get = client.get_playlist
-    metadata = {"title": "Copy", "description": "Copied by TuneConsole"}
+    metadata = {"title": "Source" if move else "Copy", "description": "Copied by TuneConsole"}
     monkeypatch.setattr(client, "get_playlist", lambda *a, **kw: {**get(*a, **kw), **metadata})
     if move:
         executor.copy_or_move_playlist(store, pid, iid, source_client, client, 1, delete_source=True)
@@ -106,7 +106,7 @@ def test_legacy_actions_without_post_action_evidence_require_manual_review(store
     if kind == COPY_PLAYLIST:
         aid = store.actions.record_action(kind, "{}", "{}", "executed", json.dumps({
             "new_ytm": "KEEP", "target_identity": iid}), 1)
-    with pytest.raises(ValueError, match="older.*snapshot"):
+    with pytest.raises(ValueError, match="snapshot could not be verified or was not saved"):
         playlist_undo.undo_action(store, aid, {iid: client}, 2)
     assert not client.deleted and not client.removed and not client.added
     assert store.actions.get_action(aid).status != "undone"

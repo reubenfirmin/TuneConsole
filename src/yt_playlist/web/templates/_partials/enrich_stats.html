@@ -45,13 +45,10 @@
 </section>
 <section class="card workflow-console enrich-coverage-card" aria-label="Enrichment coverage">
 <div class="enrich-tiles">
-  <a class="metric" href="/enrich/queue"><span class="v">{{ '{:,}'.format(remaining) }}</span><span class="l">In queue {{ arrow_icon('right') }}</span><span class="section-note">Tracks awaiting a provider pass</span></a>
+  <a class="metric" href="/enrich/queue"><span class="v">{{ '{:,}'.format(remaining) }}</span><span class="l">In queue {{ arrow_icon('right') }}</span><span class="section-note">{{ '{:,}'.format(queue.first_pass) }} awaiting first enrichment<br>{{ '{:,}'.format(queue.refresh) }} queued for re-enrichment</span></a>
   <a class="metric" href="/enrich/processed"><span class="v">{{ '%g'|format(pct.processed) }}%</span><span class="l">Processed {{ arrow_icon('right') }}</span><span class="section-note">{{ '{:,}'.format(cov.processed) }} of {{ '{:,}'.format(cov.total) }} tracks checked</span></a>
   <a class="metric" href="/enrich/conflicts"><span class="v">{{ '{:,}'.format(conflicts) }}</span><span class="l">Open conflicts {{ arrow_icon('right') }}</span><span class="section-note">Field disagreements to review</span></a>
 </div>
-<p class="section-note">Library and discovery tracks share this queue. Discovery metadata helps choose songs for Fresh playlists.</p>
-<p class="section-note">Processed means checked, even when providers have no match. Conflicts do not block the queue.</p>
-
 <p class="section-note">Metadata coverage</p>
 <div class="cov-grid">
   {% for key, label in [('processed','Processed'), ('genre','Genre'), ('year','Year'),
@@ -66,14 +63,15 @@
 </div>
 
 <div class="cov-trend">
-  <span class="section-note">Tracks processed over time</span>
+  <div class="enrich-chart-legend section-note"><span>First enrichment</span><span>Latest re-enrichment</span></div>
   {% if spark.path %}
   <svg viewBox="0 0 520 90" preserveAspectRatio="none" class="spark">
     <path d="{{ spark.path }}" class="spark-area"/>
+    <path d="{{ refresh_spark.path }}" class="spark-area spark-refresh"/>
     {# Invisible full-height bands, one per point, carry the shared [data-tip] tooltip (date + count). #}
     {% for b in spark.bands %}
     <rect x="{{ b.x }}" y="0" width="{{ b.w }}" height="90" fill="transparent" pointer-events="all"
-          {{ tip(b.label, [{"l": "Processed", "v": b.n, "n": "cumulative by this point"}]) }}/>
+          {{ tip(b.label, [{"l": "First enrichment", "v": b.n}, {"l": "Latest re-enrichment", "v": b.refresh}]) }}/>
     {% endfor %}
   </svg>
   {% else %}

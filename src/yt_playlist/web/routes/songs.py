@@ -1,10 +1,13 @@
 """Actions used by the single, shared song menu on every regular song surface."""
+from urllib.parse import urlencode
+
 from yt_playlist.core.activity import activity_for
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
+from yt_playlist.library.playlist_writes import PlaylistAddUncertain
 from yt_playlist.util.duration import parse_duration
 from yt_playlist.rec import measurement
 
@@ -48,6 +51,21 @@ def build(ctx):
     router = APIRouter()
     store = ctx.store
 
+    def unconfirmed_result(exc, *, created):
+        playlist = next((p for p in store.playlists.get_playlists()
+                         if p.ytm_playlist_id == exc.playlist_id), None)
+        return {"status": "partial", "added": bool(exc.confirmed),
+                "url": f"/playlist/{playlist.id}" if playlist else
+                       "https://music.youtube.com/playlist?" + urlencode({"list": exc.playlist_id}),
+                "title": playlist.title if playlist else "Created playlist" if created else "Playlist",
+                "confirmed": len(exc.confirmed), "rejected": len(exc.skipped),
+                "uncertain": len(exc.uncertain), "unattempted": len(exc.unattempted),
+                "recovery_url": "/actions",
+                "message": ("Playlist created, but YouTube has not confirmed this song." if created else
+                            "YouTube has not confirmed this song's addition."),
+                "guidance": ("Review the playlist and Action Log before retrying. Creating again makes another playlist."
+                             if created else "Review the playlist and Action Log before retrying.")}
+
     @router.get("/songs/metadata")
     def metadata(video_id: str):
         track = store.tracks.metadata_for_video(video_id)
@@ -89,6 +107,8 @@ def build(ctx):
         try:
             result = await activity_for(ctx).to_thread(ctx.ops().create_playlist_from_song,
                                              body.name, body.song.track())
+        except PlaylistAddUncertain as exc:
+            return unconfirmed_result(exc, created=True)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         except Exception as exc:
@@ -108,6 +128,8 @@ def build(ctx):
                                              body.playlist_id, body.song.track())
             if not result.get("already_present") and not result["added"]:
                 raise ValueError("YouTube couldn't add this song. Please try another song or playlist.")
+        except PlaylistAddUncertain as exc:
+            return unconfirmed_result(exc, created=False)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         except Exception as exc:

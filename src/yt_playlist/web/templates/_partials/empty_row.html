@@ -1,6 +1,7 @@
 {% from "_macros.html" import pllink with context %}
 {# One empty playlist. htmx: Delete posts and (on success) returns empty -> the row fades out. #}
-<tbody class="empty-row">
+<tbody class="empty-row" x-data="{ deleteFailed: false }"
+       @htmx:after-request.camel="if ($event.detail.elt.getAttribute('hx-post') === '/playlist/delete-empty') deleteFailed = $event.detail.failed">
   <tr>
     <td><span class="tag amber">{{ identities[p.identity_id] }}</span>
         {{ pllink(p.ytm_playlist_id, p.title) }}</td>
@@ -11,6 +12,10 @@
       <button type="button" class="btn-danger btn-sm"
               hx-post="/playlist/delete-empty" hx-vals='{"playlist": {{ p.id }}}'
               hx-target="closest tbody" hx-swap="outerHTML swap:300ms" hx-indicator="closest tr">Delete</button>
+      <button type="button" class="btn-ghost btn-sm" x-show="deleteFailed" x-cloak
+              hx-post="/playlist/forget-empty" hx-vals='{"playlist": {{ p.id }}}'
+              hx-confirm="Remove this empty entry from TuneConsole? YouTube will stay unchanged. If the playlist still exists there, a later sync can bring it back."
+              hx-target="closest tbody" hx-swap="outerHTML swap:300ms">Remove from TuneConsole</button>
     </td>
   </tr>
 </tbody>

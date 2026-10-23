@@ -92,6 +92,7 @@ const context = vm.createContext({
         if (playing) play();
         assert.equal(msg.videoId, 'requested');
         assert.equal(msg.playlist, 'PLREQUESTED');
+        assert.equal(msg.url, 'https://music.youtube.com/watch?v=requested&list=PLREQUESTED');
         return {playing, videoId: 'requested', playlist: 'PLREQUESTED'};
       },
       onUpdated: event(), onRemoved: { addListener: fn => { onRemoved = fn; } },

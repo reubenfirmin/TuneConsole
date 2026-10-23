@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 
 from yt_playlist.core import catalog
+from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.migrations import v028_discovery_representatives as upgrade
@@ -20,6 +21,8 @@ def store():
     s = Store(':memory:')
     migrate(s.conn,registry=REGISTRY)
     s._bind_repositories()
+    # This fixture intentionally stops at v028 instead of using init_schema().
+    s._snapshot_revisions = Revisions(s.conn)
     yield s
     upgrade.validate(s.conn)
     s.conn.close()

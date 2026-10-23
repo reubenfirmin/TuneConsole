@@ -1,4 +1,5 @@
 from yt_playlist.rec import discover, embed
+from tests import model_support
 from yt_playlist.providers import lastfm
 from yt_playlist.web.context import Ctx
 
@@ -26,7 +27,7 @@ def test_new_artists_taste_pinned_and_cached(store, monkeypatch):
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PC", "Core Mix", 10, "h", 0.0), band)
     for _ in range(5):
         store.history.record_history_plays(iid, 1.0, ["c0|coreband"], source_timezone="UTC")
-    embed.build_and_store(store, dim=4)
+    model_support.build_track_model(store, dim=4)
     store.settings.set_setting("lastfm_api_key", "KEY")
 
     calls = []

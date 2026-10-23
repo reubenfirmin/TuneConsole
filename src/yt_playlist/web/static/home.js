@@ -1,5 +1,6 @@
-// Discovery exposure belongs to the visible tile, never the GET that prepared its HTML. A page's
-// view id survives fragment polls, so server retries and replacements cannot count the same tile twice.
+// Exposure belongs to visible discovery tiles and story headings, never a GET or hidden tab.
+// A page's seen set survives fragment polls. Observe the heading rather than a whole article,
+// which can be taller than the viewport on a phone.
 let discoveryExposure = null;
 function syncDiscoveryExposure() {
   const home = document.getElementById('home');
@@ -23,7 +24,9 @@ function syncDiscoveryExposure() {
         }
         state.visible.add(tile);
         if (document.hidden || state.timers.has(tile)) return;
-        const kind = tile.dataset.discoveryKind, id = tile.dataset.discoveryId;
+        const story = tile.dataset.storySubject;
+        const kind = story ? 'story' : tile.dataset.discoveryKind;
+        const id = story || tile.dataset.discoveryId;
         const key = JSON.stringify([kind, id]);
         if (state.seen.has(key)) return;
         state.timers.set(tile, setTimeout(() => {
@@ -31,9 +34,9 @@ function syncDiscoveryExposure() {
           if (document.hidden || !tile.isConnected || !tile.getClientRects().length ||
               !state.visible.has(tile) || state.seen.has(key)) return;
           state.seen.add(key);
-          fetch('/discovery/impressions', {
+          fetch(story ? '/home/into-recently/impressions' : '/discovery/impressions', {
             method: 'POST', headers: {'Content-Type': 'application/json'}, keepalive: true,
-            body: JSON.stringify({kind, ids: [id], view_id: state.viewId})
+            body: JSON.stringify(story ? {subjects: [id]} : {kind, ids: [id], view_id: state.viewId})
           }).then(response => {
             if (!response.ok) state.seen.delete(key);
           }).catch(() => state.seen.delete(key));
@@ -51,7 +54,7 @@ function syncDiscoveryExposure() {
     clearTimeout(state.timers.get(tile));
     state.timers.delete(tile);
   });
-  home.querySelectorAll('[data-discovery-id]').forEach(tile => {
+  home.querySelectorAll('[data-discovery-id], [data-story-subject]').forEach(tile => {
     if (state.observed.has(tile)) return;
     state.observed.add(tile);
     state.observer.observe(tile);
@@ -194,33 +197,46 @@ document.addEventListener('htmx:beforeSwap', (event) => {
 });
 
 function homeStatus() {
-  // Home status card: polls GET /bridge/status every ~3s for the live extension connection and the
-  // now-playing track. Library syncing is automatic in the background, so the only action here is an
+  // Home consumes the document's shared playback status. Library syncing is automatic in the
+  // background, so the only action here is an
   // unobtrusive "Refresh library" link that kicks a manual POST /sync for power users.
   return {
     connected: false,
     nowPlaying: null,
+    radioActive: false,
+    radioReady: false,
+    get radioPlaybackState() {
+      const song = this.nowPlaying;
+      if (!this.connected || !this.radioActive || !this.radioReady || !song?.video_id
+          || !(song.title || song.artist)
+          || song.source?.kind !== 'radio' || typeof song.paused !== 'boolean') return '';
+      return song.paused ? 'paused' : 'playing';
+    },
     sensorHealth: null,
     refreshing: false,
     running: false,        // a library sync is streaming into the console
     failed: false,
     lines: [],
     _job: null,            // job id the console is attached to (guards against double-attach)
-    _poll: null, _scan: null, _stream: null, _reload: null, _disposed: false,
+    _scan: null, _stream: null, _reload: null, _disposed: false, _initialized: false,
     destroy() {
       this._disposed = true;
-      clearInterval(this._poll); clearInterval(this._scan); clearTimeout(this._reload);
+      clearInterval(this._scan); clearTimeout(this._reload);
       this._stream?.close();
     },
+    applyBridgeStatus(data) {
+      if (this._disposed) return;
+      this.connected = !!data.connected;
+      this.nowPlaying = data.now_playing ? {...data.now_playing} : null;
+      this.radioActive = !!data.radio;
+      this.radioReady = !!data.radio_ready;
+      this.sensorHealth = data.sensor_health || null;
+    },
     init() {
-      const poll = () => fetch('/bridge/status').then(r => r.json())
-        .then(d => { if (this._disposed) return;
-          this.connected = !!d.connected; this.nowPlaying = d.now_playing || null;
-          this.sensorHealth = d.sensor_health || null;
-                     window.dispatchEvent(new CustomEvent('bridge-status', { detail: d })); })
-        .catch(() => {});
-      poll();
-      this._poll = setInterval(poll, 3000);
+      if (this._initialized) return;
+      this._initialized = true;
+      window.playbackStatus.start();
+      if (window.playbackStatus.snapshot) this.applyBridgeStatus(window.playbackStatus.snapshot);
       // Attach the live console to whatever library sync is running — the automatic background sync
       // included — so the initial sync's results stream in with no manual action.
       const scan = () => { if (this._disposed || this.running) return; fetch('/sync/active').then(r => r.json())

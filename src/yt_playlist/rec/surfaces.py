@@ -2,7 +2,7 @@
 playlist completion and the Taste-page sample. Each returns a ranked pool; per-card rotation is here."""
 import random
 import statistics
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -73,7 +73,12 @@ def _score_candidates(store, pt, keys, V, idx, now, include_traces=False):
 def _weighted_fair_queue(queues, limit, hard, muted, traces=None):
     """Interleave lane queues by learned weight: each turn serve the lane with the highest
     weight/(taken+1) ratio (default weight 1.0 => round-robin), dedup across lanes, and skip rows that
-    are suppressed (`hard`) or by a muted artist. `queues` items are [rows, reason_fn, lane, weight, taken]."""
+    are suppressed (`hard`) or by a muted artist. `queues` items are [rows, reason_fn, lane, weight, taken].
+    Lanes retain their unconsumed rows as deques, so each candidate costs O(1) to consume.
+    """
+    for q in queues:
+        if not isinstance(q[0], deque):
+            q[0] = deque(q[0])
     seen: set = set()
     out: list[ForYouItem] = []
     while len(out) < limit:
@@ -82,7 +87,7 @@ def _weighted_fair_queue(queues, limit, hard, muted, traces=None):
             break
         q = max(live, key=lambda q: q[3] / (q[4] + 1))   # weight / (taken + 1)
         rows, reason, lane, _, _ = q
-        r = rows.pop(0)
+        r = rows.popleft()
         if r["key"] in seen or r["key"] in hard or r["artist"] in muted:
             seen.add(r["key"])
             continue
@@ -150,7 +155,7 @@ def for_you(store, now, limit=24, include_traces=False) -> list[ForYouItem]:
     hard = store.rec_model.suppressed_keys("for_you", now) | dao.generated_track_keys()
     muted = store.rec_model.muted_artists()
     # weighted fair queuing: each lane gets turns ∝ its learned weight (default 1.0 => round-robin)
-    queues = [[list(rows), reason, lane, weights.get(f"lane:{lane}", 1.0), 0]
+    queues = [[deque(rows), reason, lane, weights.get(f"lane:{lane}", 1.0), 0]
               for rows, reason, lane in sources]
     out = _weighted_fair_queue(queues, limit, hard, muted, traces=traces)
     for item in out:
@@ -554,22 +559,6 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
     return out
 
 
-def _take_from_ranked(candidates, limit, per_artist_cap, keep):
-    """Walk ranked (key, artist, meta, reason) candidates, applying the keep() suppression/mute filter
-    and a per-artist cap (the '529 repeats' guard), building ForYouItems until `limit`. meta is a dict
-    with title/artist/album/video_id/thumbnail. Shared by complete_playlist's two candidate sources."""
-    out, taken = [], Counter()
-    for key, artist, m, reason in candidates:
-        if not keep(key, artist) or taken[artist] >= per_artist_cap:
-            continue
-        taken[artist] += 1
-        out.append(ForYouItem(m["title"], m["artist"], m["album"], m["video_id"], m["thumbnail"],
-                              0, reason, key))
-        if len(out) >= limit:
-            break
-    return out
-
-
 def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem]:
     """Genre-compatible tracks by the playlist's own or artist-model-related artists.
 
@@ -644,37 +633,4 @@ def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem
         out.append(ForYouItem(c.get("title") or "", artist, c.get("album") or "",
                               c.get("video_id"), c.get("thumbnail"), 0, reason, key,
                               lane="related_artist", genre=c.get("genre") or "", score=_score))
-    return out
-
-
-def related_artist_suggestions(store, playlist_id, now, limit=8):
-    """#24/#28: tracks by artists RELATED to this playlist's artists (owned + out-of-corpus), for the
-    'Complete this playlist' pool. Out-of-corpus pulls are the headline: tracks not yet in the library
-    that fit the playlist's artist neighbourhood, which the embedding/co-occurrence completer cannot
-    reach. Excludes the playlist's own tracks, suppressed, and muted. Empty until the artist model is
-    built. Returned as ForYouItems on the 'related_artist' lane (their reason labels the source)."""
-    from yt_playlist.rec import artist_model
-    members = store.playlists.get_playlist_track_keys(playlist_id)
-    seeds = {k.rsplit("|", 1)[-1] for k in members}        # this playlist's (normalized) artists
-    if not seeds:
-        return []
-    member_set = set(members)
-    suppressed = store.rec_model.suppressed_keys("suggest", now or 0, scope=str(playlist_id))
-    muted = store.rec_model.muted_artists()
-    out, seen = [], set()
-    # Out-of-corpus first: those are the unique value here (the in-library completer already covers
-    # owned tracks), so they're not crowded out of the limited pool by owned related-artist tracks.
-    cands = sorted(artist_model.artist_track_candidates(store, seeds, topn=limit * 4),
-                   key=lambda c: not c.get("out_of_corpus"))
-    for c in cands:
-        key, artist = c.get("key"), c.get("artist") or ""
-        if not key or key in member_set or key in seen or key in suppressed or artist in muted:
-            continue
-        seen.add(key)
-        reason = (f"New: {artist}, related to this playlist's artists" if c.get("out_of_corpus")
-                  else f"By {artist}, related to this playlist")
-        out.append(ForYouItem(c.get("title") or "", artist, c.get("album") or "", c.get("video_id"),
-                              c.get("thumbnail"), 0, reason, key, lane="related_artist"))
-        if len(out) >= limit:
-            break
     return out

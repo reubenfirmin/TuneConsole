@@ -11,6 +11,7 @@ APPLY_MERGE = "apply_merge"      # N-way merge editor applied: keepers set to a 
 MOVE_IDENTITY = "move_identity"  # playlist copied/moved to another identity
 DELETE_EMPTY = "delete_empty"    # an empty playlist deleted
 DELETE_PLAYLIST = "delete_playlist"  # a playlist deleted outright (e.g. from the Playlists tab)
+REMOVE_LOCAL_PLAYLIST = "remove_local_playlist"  # stale empty membership removed; no YouTube write
 GC_GENERATED = "gc_generated"    # an unplayed generated playlist auto-collected by the daily GC worker
 COPY_PLAYLIST = "copy_playlist"  # a playlist duplicated into a new one (same identity)
 COPY_INTO = "copy_into"          # selected playlists' songs copied into an existing playlist

@@ -63,11 +63,12 @@ def test_disconnect_preserves_success_and_reconnect_is_due_immediately(store):
     assert sync.sync_all(store, {iid: client}, 100)["status"] == "complete"
     client.problem = BridgeError("extension disconnected")
     result = sync.sync_all(store, {iid: client}, 200)
-    assert result["status"] == "skipped"
+    assert result["status"] == "partial"  # history is independently available
     assert store.settings.get_setting("last_sync_at") == "100"
     assert store.settings.get_setting("last_sync_attempt_at") == "200"
     assert result["accounts"][str(iid)]["resources"]["playlists"]["last_success_at"] == 100
-    assert sync_due(store, 201, 86400)
+    assert not sync_due(store, 201, 86400)
+    assert sync_due(store, 201, 86400, retry_now=True)
     client.problem = None
     assert sync.sync_all(store, {iid: client}, 201)["status"] == "complete"
     assert store.settings.get_setting("last_sync_at") == "201"
@@ -94,7 +95,8 @@ def test_healthy_account_cannot_hide_an_unavailable_account(store, failure):
     assert result["resources"]["saved_album_mirror"]["last_success_at"] == 100
     assert store.settings.get_setting("last_sync_at") == "100"
     assert bool(expired) == (failure == "auth")
-    assert sync_due(store, 201, 86400)
+    assert not sync_due(store, 201, 86400)
+    assert sync_due(store, 500, 86400)
     store.settings.set_setting("last_plays_sync_at", "200")
     assert sync_status(store, 201).stale
     assert "partial" in sync_status(store, 201).message
@@ -121,7 +123,7 @@ def test_resource_freshness_advances_independently(store, failed_resource):
     {"continuation": "unread-page"},
     {"continuations": [{"nextContinuationData": {"continuation": "unread-page"}}]},
 ])
-def test_unread_playlist_pages_preserve_freshness_and_retry_immediately(store, monkeypatch, pages):
+def test_unread_playlist_pages_preserve_freshness_and_back_off(store, monkeypatch, pages):
     iid = store.identities.upsert_identity("Main", "bridge", None, True)
     client = Client()
     assert sync.sync_all(store, {iid: client}, 100)["status"] == "complete"
@@ -140,7 +142,8 @@ def test_unread_playlist_pages_preserve_freshness_and_retry_immediately(store, m
     assert account["resources"]["history"]["last_success_at"] == 200
     assert store.settings.get_setting("last_sync_at") == "100"
     assert store.settings.get_setting("last_sync_attempt_at") == "200"
-    assert sync_due(store, 201, 86400)
+    assert not sync_due(store, 201, 86400)
+    assert sync_due(store, 500, 86400)
     assert events[-1]["final"] and events[-1]["outcome"] == "partial"
     assert sync_status(store, 201).stale
 
@@ -156,7 +159,8 @@ def test_no_clients_is_skipped_and_an_interrupted_attempt_is_due(store):
     assert store.settings.get_setting("last_sync_at") is None
     sync.sync_all(store, {iid: Client()}, 200)
     store.settings.set_setting("last_sync_attempt_at", "201")
-    assert sync_due(store, 202, 86400)
+    assert not sync_due(store, 202, 86400)
+    assert sync_due(store, 501, 86400)
 
 
 @pytest.mark.parametrize("album", [{}, {"tracks": []}, {"tracks": [{"title": "Song"}],
@@ -236,7 +240,8 @@ def test_manual_and_automatic_failures_publish_error_before_terminal_and_retry(
 
     monkeypatch.setattr(sync, "sync_all", execute)
     monkeypatch.setattr("yt_playlist.web.app._maybe_check_update", lambda ctx: None)
-    app = create_app(store, provider, now_fn=lambda: 200, background_work=False)
+    clock = [200]
+    app = create_app(store, provider, now_fn=lambda: clock[0], background_work=False)
     ctx = app.state.ctx
     ctx.rec_worker = ctx.enrich_worker = None
     browser = TestClient(app, base_url="http://127.0.0.1")
@@ -256,13 +261,14 @@ def test_manual_and_automatic_failures_publish_error_before_terminal_and_retry(
     assert ctx.sync_lock.acquire(blocking=False)
     ctx.sync_lock.release()
     assert ctx.work.wait(1)
-    # A second automatic tick must survive the exception and complete the recovered run.
+    # Once backoff expires the automatic loop survives the exception and recovers.
+    clock[0] = 500
     automatic_sync(ctx, None, SimpleNamespace(connected=True), stop=Ticks(1))
     assert ctx.jobs.get(jid + 1).outcome == "complete"
-    assert store.settings.get_setting("last_sync_at") == "200"
+    assert store.settings.get_setting("last_sync_at") == "500"
 
 
-def test_automatic_loop_retries_partial_on_next_tick(store, monkeypatch):
+def test_automatic_loop_waits_until_partial_resource_retry_is_due(store, monkeypatch):
     iid = store.identities.upsert_identity("Main", "bridge", None, True)
     client = Client()
     client.failed_resource = "history"
@@ -275,10 +281,19 @@ def test_automatic_loop_retries_partial_on_next_tick(store, monkeypatch):
         return {iid: client}
 
     monkeypatch.setattr("yt_playlist.web.app._maybe_check_update", lambda ctx: None)
+    clock = [0]
+
+    class ScheduledTicks:
+        ticks = iter([200, 260, 500])
+
+        def wait(self, timeout):
+            clock[0] = next(self.ticks, None)
+            return clock[0] is None
+
     ctx = SimpleNamespace(store=store, work=Activity(), jobs=SyncJobs(), sync_lock=threading.Lock(),
-        client_provider=provider, now_fn=lambda: 200, rec_worker=None, enrich_worker=None,
+        client_provider=provider, now_fn=lambda: clock[0], rec_worker=None, enrich_worker=None,
         flag_auth_expired=None, clear_auth_expired=None, logger=logging.getLogger(__name__))
-    automatic_sync(ctx, None, SimpleNamespace(connected=True), stop=Ticks(3))
+    automatic_sync(ctx, None, SimpleNamespace(connected=True), stop=ScheduledTicks())
     assert len(calls) == 2
     assert ctx.jobs.get(1).outcome == "partial"
     assert ctx.jobs.get(2).outcome == "complete"

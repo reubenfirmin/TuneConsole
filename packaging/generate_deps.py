@@ -4,12 +4,8 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import tomllib
 from urllib.parse import unquote, urlsplit
-
-try:
-    import tomllib
-except ImportError:
-    import tomli as tomllib
 
 from packaging.markers import default_environment
 from packaging.requirements import Requirement

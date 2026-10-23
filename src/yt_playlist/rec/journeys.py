@@ -6,6 +6,7 @@ trivially testable. Dependencies are genre_map and ordering.dj_order (the within
 both are leaf modules, so there is no longer a circular import to dodge.
 """
 import random
+from functools import lru_cache
 
 from yt_playlist.util import genre_map
 from yt_playlist.rec.ordering import dj_order
@@ -64,12 +65,12 @@ _AXIS = {
 _BAND_SIZE = 4   # target tracks per band; a 12-track mix -> ~3 bands
 
 
-def _space(items, seed):
+def _space(items, seed, feat):
     """Seeded artist-spacing (+ light genre segue) for a small group, via the existing dj_order
     engine. <=2 items: nothing to space."""
     if len(items) <= 2:
         return list(items)
-    return dj_order(items, stickiness=0.4, seed=seed)
+    return dj_order(items, stickiness=0.4, seed=seed, feat=feat)
 
 
 def _split_bands(items, value_of, min_bands=1):
@@ -109,7 +110,7 @@ def _axis_order(items, journey, seed, feat):
         bands.append(none_band)                       # undated/untagged always trail at the end
     out = []
     for i, band in enumerate(bands):
-        spaced = _space(band, seed + i)
+        spaced = _space(band, seed + i, feat)
         if (out and len(spaced) > 1 and feat(out[-1])["artist"]
                 and feat(out[-1])["artist"] == feat(spaced[0])["artist"]):
             spaced[0], spaced[1] = spaced[1], spaced[0]   # seam repair across the band boundary
@@ -120,27 +121,31 @@ def _axis_order(items, journey, seed, feat):
 def _segue_order(items, journey, seed, feat):
     """Greedy genre-segue: start from a seeded shuffle, then repeatedly pick the next track whose
     genre is NEAREST (smooth_segue) or FARTHEST (odyssey) from the previous, avoiding same-artist
-    back-to-back unless forced."""
+    back-to-back unless forced. Detached artist/family rows and a bounded distance cache avoid
+    repeating feature resolution. Linear minimum selection keeps this O(n²), with O(n) space."""
     rng = random.Random(seed)
-    items = list(items)
-    rng.shuffle(items)
-    out = [items.pop(0)]
+    rows = []
+    for item in items:
+        features = feat(item)
+        rows.append((item, features["artist"], genre_map.family(features["genre"])))
+    rng.shuffle(rows)
+    out = [rows.pop(0)]
     smooth = journey == "smooth_segue"
-    while items:
-        last_g = feat(out[-1])["genre"] or ""
-        last_a = feat(out[-1])["artist"]
+    distance = lru_cache(maxsize=256)(genre_map.family_distance)
+    while rows:
+        _, last_a, last_g = out[-1]
 
         def score(c):
             # Sort key, ascending: same-artist last (0 before 1), then nearest genre for smooth_segue
             # (smallest distance first) or farthest for odyssey (negate), with a seeded random tiebreak.
-            fc = feat(c)
-            same = 1 if (fc["artist"] and fc["artist"] == last_a) else 0
-            d = genre_map.distance(last_g, fc["genre"] or "")
+            _, artist, genre = c
+            same = 1 if (artist and artist == last_a) else 0
+            d = distance(last_g, genre)
             return (same, d if smooth else -d, rng.random())
 
-        items.sort(key=score)
-        out.append(items.pop(0))
-    return out
+        best = min(range(len(rows)), key=lambda i: score(rows[i]))
+        out.append(rows.pop(best))
+    return [row[0] for row in out]
 
 
 def _road_trip_order(items, seed, feat):
@@ -170,7 +175,7 @@ def _road_trip_order(items, seed, feat):
     bands = [seq[i:i + _BAND_SIZE] for i in range(0, len(seq), _BAND_SIZE)]
     out = []
     for i, band in enumerate(bands):
-        spaced = _space(band, seed + i)
+        spaced = _space(band, seed + i, feat)
         if (out and len(spaced) > 1 and feat(out[-1])["artist"]
                 and feat(out[-1])["artist"] == feat(spaced[0])["artist"]):
             spaced[0], spaced[1] = spaced[1], spaced[0]   # seam repair across the band boundary
@@ -187,10 +192,12 @@ def journey_order(tracks, journey_key, seed, feat):
     items = list(tracks)
     if len(items) <= 2:
         return items
+    features = {id(item): dict(feat(item)) for item in items}
+    feat = lambda item: features[id(item)]
     if journey_key == "road_trip":
         return _road_trip_order(items, seed, feat)
     if journey_key in _AXIS:
         return _axis_order(items, journey_key, seed, feat)
     if journey_key in ("smooth_segue", "odyssey"):
         return _segue_order(items, journey_key, seed, feat)
-    return _space(items, seed)
+    return _space(items, seed, feat)

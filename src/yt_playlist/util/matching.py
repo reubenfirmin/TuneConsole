@@ -39,12 +39,22 @@ def recording_title(title: str) -> str:
     folded = "".join(c for c in folded if not unicodedata.combining(c))
     return _WS_RE.sub(" ", _PUNCT_RE.sub(" ", folded)).strip()
 
+
+def is_remix(title: str) -> bool:
+    """A credited mix or rework can change genre independently of its original artist."""
+    title = title or ""
+    return bool(re.search(r"\b(?:remix(?:ed)?|rework(?:ed)?)\b", title, re.I)
+                or re.search(r"[\(\[][^\)\]]*\b(?:mix|mixed)\b", title, re.I)
+                or re.search(r"\s[-–—]\s.*\b(?:mix|mixed)\b", title, re.I)
+                or re.search(r"\bmix\s*$", title, re.I))
+
+
 def search_squash(s: str) -> str:
     """Punctuation/space/accent-insensitive key for substring search: 'L.S.D.' -> 'lsd',
     'Café del Mar' -> 'cafedelmar'. Builds on normalize() (accent fold, feat/remaster noise removed,
     punctuation -> space) and then drops the spaces, so a query typed WITHOUT the punctuation still
     matches (#48: typing 'LSD' should find the track titled 'L.S.D.'). Registered as the SQLite
-    `searchnorm()` function so it can be applied column-side in cluster_search."""
+    `searchnorm()` function so it can be applied column-side in seed lookup."""
     return normalize(s).replace(" ", "")
 
 def fuzzy_ratio(a: str, b: str) -> float:

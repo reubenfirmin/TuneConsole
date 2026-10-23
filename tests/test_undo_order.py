@@ -3,9 +3,15 @@ import json
 import pytest
 
 from tests.conftest import FakeClient, _track
+from yt_playlist.core import paths
 from yt_playlist.library.playlist_undo import undo_action
 from yt_playlist.library.playlist_mutation import restore_playlist_sequence
 from yt_playlist.util.action_kinds import APPLY_MERGE
+
+
+@pytest.fixture(autouse=True)
+def isolated_data_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
 
 
 class OccurrenceClient(FakeClient):

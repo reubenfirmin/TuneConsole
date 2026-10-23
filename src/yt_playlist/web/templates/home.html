@@ -4,6 +4,7 @@
 {% block page_styles %}
 <link rel="stylesheet" href="/static/generating.css?v={{ asset_v }}">
 <link rel="stylesheet" href="/static/radio.css?v={{ asset_v }}">
+<script src="/static/radio-artwork.js?v={{ asset_v }}"></script>
 <script src="/static/radio.js?v={{ asset_v }}"></script>
 {% endblock %}
 {# Transient success toast (e.g. re-authed with auto-sync on, nothing for them to do). Mirrors the
@@ -23,8 +24,8 @@
   <button type="button" class="banner-x" @click="show = false" title="Dismiss" aria-label="Dismiss">×</button>
 </div>
 {% endif %}
-<div id="home" x-data="homeStatus()">
-  {# Extension state, one homeStatus() poller (~3s): a first-run hero until the extension connects,
+<div id="home" x-data="homeStatus()" @bridge-status.window="applyBridgeStatus($event.detail)">
+  {# Extension state from the shared document poller (~3s): a first-run hero until the extension connects,
      then a compact live strip with what's playing and library freshness. #}
   <div>
     {# Not connected: left-aligned card with the live equalizer, sits above the user's feed (if any). #}
@@ -99,7 +100,10 @@
               @click="go('directions')">Mix tapes</button>
       {% endif %}
       <button type="button" role="tab" :class="{ on: panel === 'radio' }" :aria-selected="panel === 'radio'"
-              @click="go('radio')">On air</button>
+              :aria-description="radioPlaybackState ? 'Radio ' + radioPlaybackState : null"
+              @click="go('radio')">On air <span class="dash-on-air-dot" x-show="radioPlaybackState" x-cloak
+                :class="{'is-paused': radioPlaybackState === 'paused'}"
+                aria-hidden="true"></span></button>
       {% if not onboarding and (rediscover_albums or rediscover) %}
       <button type="button" role="tab" :class="{ on: panel === 'rediscover' }" :aria-selected="panel === 'rediscover'"
               @click="go('rediscover')">Revisit</button>
@@ -177,9 +181,6 @@
   </div>
   {% endif %}
 
-  <footer class="home-footer">
-    <a href="/privacy">Privacy</a>
-  </footer>
 </div>
 {# hx-vals js: runs in global scope, so the "Save & play" button reaches its card's surviving rows
    by id - pruned (feedback-dismissed) rows are gone from the DOM, so they're naturally excluded. #}

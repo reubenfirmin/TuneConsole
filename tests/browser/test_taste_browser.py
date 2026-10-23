@@ -406,6 +406,57 @@ def test_overview_updates_itself_when_background_genre_repair_finishes(store, pa
     expect(page.locator("#taste-profile-panel .taste-panel-content")).to_contain_text("Loading taste profile")
 
 
+@pytest.mark.parametrize('width', [1440, 390, 320])
+def test_populated_overview_leads_with_changes_and_keeps_feedback_compact(store, page, monkeypatch, request, width, tmp_path):
+    from yt_playlist.rec.rec_worker import RecWorker
+
+    monkeypatch.setattr(RecWorker, 'trigger_mode_refresh', lambda self, **kw: None)
+    live_app = request.getfixturevalue('live_app')
+    iid = store.identities.get_identities()[0].id
+    store.modes.replace_modes([{
+        'mode_id': 1, 'label': 'Latin', 'families': [['latin', 1]],
+        'centroid': np.ones(1, dtype=np.float32), 'size': 3, 'rep_keys': [],
+    }], retired_ids=[], now=1.0)
+    store.history.record_history_plays(iid, 1.0, ['song|artist'], source_timezone='UTC')
+    for i in range(47):
+        store.rec_model.record_like(f'action-{i}|artist', 1.0, provenance='action')
+    for i in range(85):
+        store.rec_model.record_like(f'sync-{i}|artist', 1.0, provenance='sync')
+    for i in range(3):
+        store.rec_model.record_dislike(f'disliked-{i}|artist', until=None, now=1.0)
+    for axis in ('genre:latin', 'era:2010', 'artist:Hermanos Gutiérrez'):
+        store.rec_surface.log_graduation(axis, 'like', 2, 1.1, 1.1, 1.0)
+
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.goto(live_app + '/taste')
+    recent = page.locator('.taste-recent-summary')
+    expect(recent.locator('.taste-preference-name strong')).to_have_text(['Hermanos Gutiérrez', '2010s', 'latin'])
+    expect(recent.locator('.taste-preference-axis')).to_have_text(['Artist', 'Era', 'Genre'])
+    expect(recent.locator('.taste-preference-direction')).to_have_text(['Increased'] * 3)
+    expect(recent.locator('.taste-feedback-stats dd')).to_have_text(['47', '85', '3'])
+    expect(recent.get_by_text('Found by sync', exact=True)).to_be_visible()
+    expect(recent.locator('.taste-recent-listening')).to_contain_text('precise times aren’t available')
+    expect(recent.locator('.taste-recent-listening time')).to_have_attribute('datetime', '1970-01-01')
+    expect(recent.locator('.taste-feedback-note')).not_to_have_attribute('open', '')
+    expect(recent.locator('.taste-feedback-note p')).to_be_hidden()
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    preferences = recent.locator('.taste-recent-preferences').bounding_box()
+    feedback = recent.locator('.taste-recent-feedback').bounding_box()
+    if width > 900:
+        assert feedback['x'] >= preferences['x'] + preferences['width']
+        assert recent.bounding_box()['height'] < 550
+    else:
+        assert feedback['y'] >= preferences['y'] + preferences['height']
+    page.screenshot(path=str(tmp_path / f'taste-overview-populated-{width}.png'), full_page=True)
+    summary = recent.locator('.taste-feedback-note summary')
+    summary.focus()
+    summary.press('Enter')
+    expect(recent.locator('.taste-feedback-note p')).to_be_visible()
+    expect(recent.locator('.taste-feedback-note p')).to_contain_text('original rating dates aren’t known')
+    recent.get_by_role('link', name='See learning activity').click()
+    expect(page.get_by_role('tab', name='Recent & learning', exact=True)).to_have_attribute('aria-selected', 'true')
+
+
 @pytest.mark.parametrize("width", [1440, 1024, 390, 320])
 def test_playlist_influence_shows_the_whole_blend_and_links_selected_rows(live_app, store, page, width, tmp_path):
     iid = store.identities.get_identities()[0].id

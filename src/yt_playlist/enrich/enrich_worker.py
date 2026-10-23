@@ -13,6 +13,8 @@ from yt_playlist.providers import enrichment
 from yt_playlist.providers.waterfall import run_waterfall, TrackSink, REGISTRY
 from yt_playlist.core.activity import activity_for, WorkClosing
 
+RADIO_RETRY_SECONDS = 3600
+
 
 class EnrichWorker:
     def __init__(self, ctx, idle_sleep_s=3.0, waterfall_fn=run_waterfall):
@@ -28,6 +30,7 @@ class EnrichWorker:
         self._activity = {}
         self._thread = None
         self._priority = {}
+        self._priority_revision = 0
         self.work = activity_for(ctx)
 
     # --- settings (re-read each cycle so changes take effect on the next batch) ------------------
@@ -84,13 +87,19 @@ class EnrichWorker:
         self._wake.set()
 
     def prioritize(self, keys):
-        """Bound and coalesce rendered radio requests; the one worker owns all lookups."""
+        """Put the current radio view first; yield bulk work at the next track boundary."""
         with self._lock:
-            for key in keys:
-                self._priority[key] = None
-            while len(self._priority) > 96:
-                self._priority.pop(next(iter(self._priority)))
+            priority = list(dict.fromkeys([*keys, *self._priority]))[:96]
+            if priority != list(self._priority):
+                self._priority = dict.fromkeys(priority)
+                self._priority_revision += 1
         self.trigger()
+
+    def _batch_stopped(self, revision):
+        if self._stop():
+            return True
+        with self._lock:
+            return revision != self._priority_revision
 
     def shutdown(self):
         self._shutdown = True
@@ -129,13 +138,7 @@ class EnrichWorker:
         if self._stop():
             return 0
         limit = limit or self._batch_size()
-        from yt_playlist.enrich import artwork
-        self._busy = True
-        try:
-            art_completed = artwork.retry_due(store, self.ctx.now_fn, should_stop=self._stop,
-                on_progress=lambda event: self._record_activity(warning=event["text"]))
-        finally:
-            self._busy = False
+        art_completed = 0
         scope = "queue"
         config = enrichment.load_config(store)
         registry = getattr(self.waterfall_fn, "keywords", {}).get("registry", REGISTRY)
@@ -144,12 +147,22 @@ class EnrichWorker:
         providers = [name for name, p in configuration.items() if p["status"] == "available"]
         with self._lock:
             priority = list(self._priority)
+            priority_revision = self._priority_revision
         stale_before = self.ctx.now_fn() - self._resweep_days() * 86400
-        batch = store.enrichment.priority_enrich_batch(priority, min(limit, 24), stale_before,
+        radio_stale_before = max(stale_before, self.ctx.now_fn() - RADIO_RETRY_SECONDS)
+        batch = store.enrichment.priority_enrich_batch(priority, min(limit, 24), radio_stale_before,
             providers=providers, now=self.ctx.now_fn()) if priority else []
         if batch:
             scope = "radio"
         else:
+            from yt_playlist.enrich import artwork
+            self._busy = True
+            try:
+                art_completed = artwork.retry_due(store, self.ctx.now_fn,
+                    should_stop=lambda: self._batch_stopped(priority_revision),
+                    on_progress=lambda event: self._record_activity(warning=event["text"]))
+            finally:
+                self._busy = False
             batch = store.enrichment.next_enrich_batch(limit, providers=providers, now=self.ctx.now_fn())
         if batch:
             self._had_work = True
@@ -170,7 +183,7 @@ class EnrichWorker:
             for track in batch:
                 if track.get("last_enriched_at") is not None:
                     track["provider_jobs"] = store.enrichment.enrichment_provider_jobs(track["recording_id"])
-        completed = self._run_batch(batch, scope)
+        completed = self._run_batch(batch, scope, priority_revision)
         if completed:
             with self._lock:
                 for track in batch:
@@ -183,13 +196,12 @@ class EnrichWorker:
                 if rec_worker is not None:
                     rec_worker.trigger_content_update(keys)
                 else:
-                    from yt_playlist.rec import content_updates
-                    content_updates.update_tracks(store, keys, self.ctx.now_fn())
+                    store.rec_refresh.enqueue()
             except Exception:  # noqa: BLE001
                 self.ctx.logger.warning("recommendation refresh after enrich batch failed", exc_info=True)
         return len(completed) + art_completed
 
-    def _run_batch(self, batch, scope):
+    def _run_batch(self, batch, scope, priority_revision):
         """Commit each completed track, so a slow/failed/paused batch cannot hide or lose progress.
 
         A provider breaker may skip some tracks: only fully attempted events may leave the queue.
@@ -223,12 +235,16 @@ class EnrichWorker:
             self._record_activity(state=state, text=event.get("text", ""))
 
         try:
+            should_stop = lambda: self._batch_stopped(priority_revision)
             attempted = self.waterfall_fn(
                 self.ctx.store, batch, enrichment.load_config(self.ctx.store),
-                on_progress=progress, should_stop=self._stop, sink_for=sink_for,
+                on_progress=progress, should_stop=should_stop, sink_for=sink_for,
                 now_fn=self.ctx.now_fn, reuse_completed=True)
             if not self._stop():
-                attempted = batch_keys if attempted is None else set(attempted) & batch_keys
+                if attempted is None:
+                    attempted = set() if should_stop() else batch_keys
+                else:
+                    attempted = set(attempted) & batch_keys
                 pending = attempted - completed
                 mark(pending)
                 completed.update(pending)

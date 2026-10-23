@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from yt_playlist.rec import discover, embed, eval_recs
+from tests import model_support
 
 
 def test_content_projection_lands_in_right_cluster(store):
@@ -14,7 +15,7 @@ def test_content_projection_lands_in_right_cluster(store):
         store.tracks.set_track_genre(t, "Folk")
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 10, "h", 0.0), A)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", 10, "h2", 0.0), B)
-    embed.build_and_store(store, dim=8)
+    model_support.build_track_model(store, dim=8)
 
     proj = discover.ContentProjection.fit(store)
     assert proj is not None
@@ -111,7 +112,7 @@ def _two_playlists(store, A, B):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", len(A), "h", 0.0), A)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", len(B), "h2", 0.0), B)
-    embed.build_and_store(store, dim=8)
+    model_support.build_track_model(store, dim=8)
 
 
 def _cluster_dirs(store):

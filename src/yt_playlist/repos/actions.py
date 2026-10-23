@@ -69,13 +69,15 @@ class ActionRepo(Repo):
                       row["undo_json"], row["status"], row["created_at"], row["executed_at"])
 
     @synchronized
-    def update_action(self, action_id, status, executed_at, undo_json=None) -> None:
-        if undo_json is None:
-            self.conn.execute("UPDATE actions SET status=?, executed_at=? WHERE id=?",
-                              (status, executed_at, action_id))
-        else:
-            self.conn.execute("UPDATE actions SET status=?, executed_at=?, undo_json=? WHERE id=?",
-                              (status, executed_at, undo_json, action_id))
+    def update_action(self, action_id, status, executed_at, undo_json=None, *, params_json=None) -> None:
+        fields, values = ["status=?", "executed_at=?"], [status, executed_at]
+        if undo_json is not None:
+            fields.append("undo_json=?")
+            values.append(undo_json)
+        if params_json is not None:
+            fields.append("params_json=?")
+            values.append(params_json)
+        self.conn.execute(f"UPDATE actions SET {', '.join(fields)} WHERE id=?", (*values, action_id))
         self.conn.commit()
 
     @synchronized

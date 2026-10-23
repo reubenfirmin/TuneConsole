@@ -125,6 +125,77 @@ def test_overview_reports_recent_shifts_against_library_not_a_second_library_por
     assert recent["n"] == 3
 
 
+def test_overview_includes_week_old_feedback_without_turning_radio_plays_into_learning(store, monkeypatch):
+    now = 20 * 86400.0
+    _install_now_modes(store)
+    keys = ["radio1|artist", "radio2|artist", "radio3|artist"]
+    _install_now_content_vectors(store, monkeypatch, keys, np.ones((3, 2), dtype=np.float32))
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.settings.set_setting("radio_session_playlist_ids", '["radio"]')
+    for i, key in enumerate(keys):
+        store.history.record_play_event(iid, key, f"v{i}", now - 60,
+                                        playlist_ytm_id="radio", source_timezone="UTC")
+    store.rec_model.record_like(keys[0], now - 6 * 86400, provenance="action")
+    store.rec_model.record_like(keys[1], now - 2 * 86400, provenance="sync")
+    store.rec_model.record_dislike(keys[2], now + 86400, now - 3 * 86400)
+    graduation.graduate_facet(store, "genre:other:alternative metal", 2,
+                             now - 2 * 86400, source_label="like")
+
+    recent = taste_viz.overview(store, now)["recent"]
+
+    assert recent["ratings"] == {"likes": 1, "synced_likes": 1, "dislikes": 1}
+    assert recent["coverage"]["tracks"] == 3
+    assert recent["coverage"]["eligible_tracks"] == 0
+    assert recent["shifts"] == []
+    assert [(r["name"], r["direction"]) for r in recent["changes"]] == [
+        ("alternative metal", "boost")]
+    assert layers.session_mode_mix(store, now)[0] is None
+    assert transient.evidence_plays(store, 20) == []
+
+
+def test_recent_rating_inputs_preserve_provenance_bounds_and_sync_idempotence(store):
+    since, now = 10.0, 20.0
+    store.rec_model.record_like("old|artist", since - 1, provenance="action")
+    store.rec_model.record_like("future|artist", now + 1, provenance="action")
+    store.rec_model.record_like("action|artist", since, provenance="action")
+    store.rec_model.record_like("synced|artist", now, provenance="sync")
+    store.rec_model.record_like("synced|artist", now + 1, provenance="sync")
+    store.rec_model.record_dislike("negative|artist", 100, now)
+    store.rec_model.record_feedback("other", "negative|artist", "dislike", now=now)
+    store.rec_model.mark_graduated_once("action|artist", "like_grad", now)
+
+    assert store.rec_model.recent_rating_inputs(since, now) == {
+        "likes": 1, "synced_likes": 1, "dislikes": 1}
+    # Re-reading an old rating during sync does not make it new feedback this week.
+    store.rec_model.record_like("old|artist", now, provenance="sync")
+    assert store.rec_model.recent_rating_inputs(since, now)["likes"] == 1
+
+
+def test_listening_comparison_counts_observed_tracks_independently_of_mapping(store):
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    for key, video, at, playlist in (("shared|artist", "v1", 10, "radio"),
+                                    ("other|artist", "v2", 11, "radio"),
+                                    ("shared|artist", "v1", 14, "chosen"),
+                                    ("unmapped|artist", "v3", 20, None),
+                                    ("future|artist", "v4", 21, None)):
+        store.history.record_play_event(iid, key, video, at, playlist_ytm_id=playlist,
+                                        source_timezone="UTC")
+
+    coverage = store.history.listening_comparison_coverage(10, 20, exclude_list_ids=["radio"])
+
+    assert coverage["tracks"] == 3
+    assert coverage["eligible_tracks"] == 2
+    assert store.rec_model.rec_content_vectors_count() == 0
+
+
+def test_recent_saved_changes_filters_time_before_limiting(store):
+    for at, axis in ((9, "artist:Old"), (10, "artist:Start"), (15, "era:1990"),
+                     (19, "genre:other:metal"), (20, "artist:Latest"), (21, "artist:Future")):
+        store.rec_surface.log_graduation(axis, "like", 2, 1.1, 1.1, at)
+    rows = store.rec_surface.recent_graduations(limit=3, since=10, until=20)
+    assert [r["axis"] for r in rows] == ["artist:Latest", "genre:other:metal", "era:1990"]
+
+
 def test_viz_reflects_param_overrides(store):
     # #85: stale_decay_halflife_d and the "freshness" payload key are gone (no sync-staleness relax
     # any more); the equivalent per-source override now shows up in sources.halflife_days.

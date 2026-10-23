@@ -80,8 +80,13 @@ def test_routes_audit_mode_offers_previews_and_refreshes(store, audit_path):
 
 def test_single_card_refresh_is_audited_and_audit_failure_does_not_break_home(store, audit_path, monkeypatch):
     from tests.test_mode_cards_route import _client
+    from tests.conftest import seed_catalog_track
+    tracks = [{"key": f"a{i}|b", "title": f"A{i}", "artist": "B", "genre": "Jazz",
+               "video_id": f"a{i}|b"} for i in range(4)]
+    for t in tracks:
+        seed_catalog_track(store, t["key"], t["title"], t["artist"], video_id=t["key"], genre=t["genre"])
     proto = home._proto(store, "wheelhouse", "More in your wheelhouse",
-                        [{"key": "a|b", "title": "A", "artist": "B", "genre": "Jazz"}], 1000)
+                        tracks, 1000)
     monkeypatch.setattr(home, "_one_card", lambda *_, **kw: proto)
     client = _client(store)
     assert client.post("/home/refresh-card/wheelhouse").status_code == 200

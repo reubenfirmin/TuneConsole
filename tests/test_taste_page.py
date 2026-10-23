@@ -9,9 +9,9 @@ from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 
 
-def _client(store):
+def _client(store, *, now=1.0):
     iid = store.identities.upsert_identity("main", "cred", None, True)
-    return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
+    return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                       base_url="http://127.0.0.1")
 
 
@@ -64,6 +64,60 @@ def test_taste_shell_and_overview_do_not_compute_hidden_tabs(store, monkeypatch)
         assert f'id="taste-experiment-{topic}-tab"' in experiment.text
         assert f'id="taste-experiment-{topic}-panel"' in experiment.text
     assert c.get("/taste/panels/unknown").status_code == 404
+
+
+@pytest.mark.parametrize("source,explanation", [
+    ("radio", "Recent radio listening is recorded."),
+    ("dated", "precise times aren’t available for this comparison."),
+    ("unmapped", "Recent listening is recorded, but there isn’t enough comparable music yet"),
+    ("quiet", "A recent listening comparison isn’t available yet."),
+])
+def test_overview_shows_weekly_model_inputs_when_the_play_comparison_is_unavailable(store, source, explanation):
+    now = 20 * 86400.0
+    client = _client(store, now=now)
+    iid = store.identities.get_identities()[0].id
+    store.modes.replace_modes([
+        {"mode_id": 1, "label": "Jazz", "families": [["jazz", 1]],
+         "centroid": np.ones(1, dtype=np.float32), "size": 3, "rep_keys": []},
+    ], retired_ids=[], now=now)
+    store.settings.set_setting("radio_session_playlist_ids", '["radio"]')
+    if source in ("radio", "unmapped"):
+        store.history.record_play_event(iid, "song|artist", "v1", now,
+                                        playlist_ytm_id="radio" if source == "radio" else None,
+                                        source_timezone="UTC")
+    elif source == "dated":
+        store.history.record_history_plays(iid, now, ["song|artist"], source_timezone="UTC")
+    store.rec_model.record_like("liked|artist", now - 6 * 86400, provenance="action")
+    store.rec_model.record_like("synced|artist", now, provenance="sync")
+    store.rec_model.record_dislike("disliked|artist", now + 86400, now - 2 * 86400)
+    store.rec_surface.log_graduation("era:1990", "like", 2, 1.1, 1.1, now - 5 * 86400)
+
+    html = client.get("/taste/panels/overview").text
+
+    assert explanation in html
+    assert "last 7 days" in html
+    assert "Like recorded<small>From your ratings</small>" in html
+    assert "Existing like<small>Found by sync</small>" in html
+    assert "their original rating dates aren’t known." in html
+    assert "Dislike added</dt><dd>1</dd>" in html
+    assert "<strong>1990s</strong>" in html and '>Increased</span>' in html
+    assert 'class="taste-preference-axis">Era</span>' in html
+    assert html.index('Saved preference changes') < html.index('Feedback added to your model') < html.index('Listening balance')
+    assert '<details class="taste-feedback-note">' in html
+    assert "Ratings on radio songs count too." in html
+    assert "matched tracks" not in html
+    assert "At least 3" not in html
+    assert 'href="#learning"' in html
+
+
+def test_overview_shows_feedback_even_without_a_content_model_or_music_groups(store):
+    store.rec_model.record_like("liked|artist", 1, provenance="action")
+
+    html = _client(store).get("/taste/panels/overview").text
+
+    assert "Like recorded<small>From your ratings</small>" in html
+    assert "This comparison appears once your library has been grouped" in html
+    assert "matched tracks" not in html
 
 
 def test_genre_coverage_counts_tracks_instead_of_weighted_plays(store):

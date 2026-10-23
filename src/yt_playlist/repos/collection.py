@@ -142,8 +142,15 @@ class CollectionRepo(Repo):
         return accepted
 
     @synchronized
-    def saved_album_ids(self) -> set:
-        return {r["browse_id"] for r in self.conn.execute("SELECT browse_id FROM saved_albums")}
+    def saved_album_ids(self, *, browse_ids=None) -> set:
+        if browse_ids is None:
+            return {r["browse_id"] for r in self.conn.execute("SELECT browse_id FROM saved_albums")}
+        result = set()
+        for bid in set(browse_ids):
+            if self.conn.execute('SELECT 1 FROM album_provider_ids p JOIN album_library_memberships m '
+                "ON m.album_id=p.album_id WHERE p.provider='youtube' AND p.provider_id=? LIMIT 1", (bid,)).fetchone():
+                result.add(bid)
+        return result
 
     @synchronized
     def album_id(self, browse_id):

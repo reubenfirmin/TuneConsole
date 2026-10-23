@@ -138,6 +138,28 @@ def test_musicbrainz_cached_artist_rechecks_edited_vocabulary(monkeypatch):
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize('tags,expected', [
+    (['Rock', 'Psychedelic Rock'], 'Psychedelic Rock'),
+    (['Techno', 'Dub Techno'], 'Dub Techno'),
+    (['Rock', 'Jazz', 'Indie Rock'], 'Indie Rock'),
+    (['Jazz', 'Rock', 'Psychedelic Rock'], 'Jazz'),
+    (['Rock', 'Rocksteady'], 'Rock'),
+    (['Acid Techno', 'Dub Techno'], 'Acid Techno'),
+])
+def test_provider_tags_refine_the_chosen_genre_without_switching_to_an_unrelated_style(tags, expected):
+    assert genres.pick_genre(tags) == expected
+
+
+def test_disabled_specific_tag_cannot_refine_an_enabled_parent():
+    genres.set_active(['Rock'])
+    assert genres.pick_genre(['Rock', 'Psychedelic Rock']) == 'Rock'
+
+
+def test_recording_tags_can_refine_musicbrainz_broad_genre():
+    assert musicbrainz._top_label({'genres': [{'name': 'rock', 'count': 100}],
+                                   'tags': [{'name': 'psychedelic rock', 'count': 5}]}) == 'Psychedelic Rock'
+
+
 def test_imported_children_use_the_same_family_in_matching_and_recommendations():
     assert genres.match_tag("technical death metal") == "Technical Death Metal"
     assert genre_map.family("technical death metal") == "metal"
@@ -166,6 +188,8 @@ def test_parent_projection_handles_depth_ties_cycles_and_order(tmp_path, monkeyp
             (tmp_path / "musicbrainz_genres.json").write_text(json.dumps({"genres": genres_rows}))
             (tmp_path / "musicbrainz_genre_parents.json").write_text(json.dumps({"parents": parent_edges}))
             catalog.catalog.cache_clear()
+            catalog._parents.cache_clear()
+            catalog._ancestors.cache_clear()
             records, labels = catalog.catalog()
             assert "shared" not in labels                 # ambiguous equivalent name
             assert labels["metal"][0] == "metal"          # primary beats another genre's alias
@@ -175,7 +199,12 @@ def test_parent_projection_handles_depth_ties_cycles_and_order(tmp_path, monkeyp
             assert assignments["nearest child"] == "metal"
             assert assignments["cycle a"] is None
             assert assignments["cycle b"] is None
+            assert catalog.is_subgenre('deep child', 'metal')
+            assert not catalog.is_subgenre('cycle a', 'cycle b')
+            assert not catalog.is_subgenre('cycle b', 'cycle a')
             results.append(assignments)
         assert results[0] == results[1]
     finally:
         catalog.catalog.cache_clear()
+        catalog._parents.cache_clear()
+        catalog._ancestors.cache_clear()

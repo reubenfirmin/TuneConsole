@@ -7,7 +7,8 @@
   <title>{% block title %}TuneConsole{% endblock %}</title>
   <!-- Vendored from npm (see package.json); refresh with `npm run sync-assets`. Served locally
        so nothing is fetched from a third-party CDN at runtime. -->
-  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}"
+        data-playing-href="/static/favicon-playing.svg?v={{ asset_v }}">
   <!-- Token layer first, then shared components and feature modules in cascade order. -->
   <link rel="stylesheet" href="/static/tokens.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
@@ -57,6 +58,7 @@
   {% endif %}
   <!-- CSS token -> canvas bridge; must load before any script that paints. -->
   <script src="/static/theme.js?v={{ asset_v }}"></script>
+  <script src="/static/playback-status.js?v={{ asset_v }}"></script>
   <script src="/static/app.js?v={{ asset_v }}"></script>
   <script src="/static/song-actions.js?v={{ asset_v }}"></script>
   {% if path == '/' %}
@@ -132,6 +134,7 @@
       </div>
     </nav>
     <div class="sidebar-dock-slot" aria-label="Now playing"></div>
+    <a class="sidebar-privacy" href="/privacy">Privacy</a>
   </header>
   <div class="global-now-playing-slot">
     {% include "_partials/now_playing.html" %}

@@ -1,9 +1,12 @@
 {# Swapped in for a proto-playlist card after "Save & play": success or a friendly failure. #}
 <section class="gen-card card gen-done">
   {% if error %}
-  <header class="gen-head"><span class="status-label status-label--error">Couldn't save</span>
+  <header class="gen-head"><span class="status-label status-label--error">{% if partial_ytm %}Partially saved{% else %}Couldn't save{% endif %}</span>
     <h2 class="gen-name">{{ name }}</h2></header>
   <p class="section-note">{{ error }}</p>
+  {% if partial_ytm %}<p class="section-note">The partial playlist and confirmed progress are saved. Review it before saving again, which creates another playlist.</p>
+    <div class="gen-foot"><a href="https://music.youtube.com/playlist?list={{ partial_ytm|urlencode }}" target="_blank" rel="noopener">Review partial playlist</a> · <a href="/actions">Action Log and recovery</a></div>
+  {% endif %}
   {# Close the loading window we opened on click, otherwise it spins forever on a failure (e.g. no
      YouTube Music tab open to run the request). #}
   <script>(function () { var t = window.__ytTab; window.__ytTab = null;

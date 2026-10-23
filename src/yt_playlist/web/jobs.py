@@ -9,7 +9,7 @@ from yt_playlist.providers import enrichment, waterfall
 from yt_playlist.core.activity import activity_for
 
 
-def run_library_sync(ctx, job):
+def run_library_sync(ctx, job, *, automatic=False, retry_now=False, max_age_s=86400):
     """Run with the caller's sync lock held; publish terminal state only after error handling."""
     from yt_playlist.library import sync
     from yt_playlist.library.sync_outcomes import begin_attempt, finish_attempt, resource
@@ -21,7 +21,8 @@ def run_library_sync(ctx, job):
         clients = ctx.client_provider() or {}
         job.result = sync.sync_all(ctx.store, clients, now, on_progress=job.events.append,
                                    on_auth_expired=ctx.flag_auth_expired,
-                                   on_auth_ok=ctx.clear_auth_expired)
+                                   on_auth_ok=ctx.clear_auth_expired, automatic=automatic,
+                                   retry_now=retry_now, max_age_s=max_age_s)
         job.outcome = job.result["status"]
         if job.outcome != "complete":
             job.error = f"Sync {job.outcome}; some library resources could not be refreshed."
@@ -32,7 +33,7 @@ def run_library_sync(ctx, job):
         job.events.append({"type": "err", "text": f"sync failed: {detail}"})
         accounts = {str(i.id): {"label": i.label, "status": "failed", "resources": {
             name: resource("failed", detail)
-            for name in ("playlists", "ratings", "history", "saved_albums")}}
+            for name in ("playlist_listing", "playlists", "ratings", "history", "saved_albums")}}
             for i in ctx.store.identities.get_identities()}
         job.result = finish_attempt(ctx.store, {"status": "failed", "accounts": accounts,
             "resources": {name: resource("failed", detail)
@@ -84,6 +85,7 @@ def start_fresh_pool(ctx, parameters):
                                 on_progress=lambda text: job.events.append({"text": text}))
             job.events.append({"text": "Preparing your fresh mix…"})
             fresh_pool.prepare(ctx.store, ctx.now_fn())
+            ctx.rec_worker.trigger_home_refresh(force=True)
         except Exception as e:  # noqa: BLE001
             ctx.logger.warning("Fresh pool build failed", exc_info=True)
             job.error = (str(e) if isinstance(e, ValueError)
@@ -107,6 +109,7 @@ def start_library_pool(ctx, parameters, exclude_keys):
         try:
             job.events.append({"text": "Finding matching songs in your library…"})
             library_pool.prepare(ctx.store, ctx.now_fn(), parameters)
+            ctx.rec_worker.trigger_home_refresh(force=True)
         except Exception:  # noqa: BLE001
             ctx.logger.warning("Library pool build failed", exc_info=True)
             job.error = "Couldn't prepare this mix just now. Try again."

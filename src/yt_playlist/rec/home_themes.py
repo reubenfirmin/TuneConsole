@@ -32,7 +32,8 @@ def resolved_genres(store, items):
         genre = (_field(item, "genre") or "").strip()
         if not genre:
             if by_artist is None:
-                by_artist = store.rec_query.artist_genre_years()
+                by_artist = store.rec_query.artist_genre_years_for(
+                    [_field(candidate, 'artist') or '' for candidate in items if not _field(candidate, 'genre')])
             genre = (by_artist.get(_field(item, "artist") or "") or {}).get("genre") or ""
             if isinstance(item, dict):
                 item["genre"] = genre
@@ -41,7 +42,7 @@ def resolved_genres(store, items):
     return items
 
 
-def genre_options(store):
+def genre_options(store, *, genre_plays=None):
     """Offer genre families present in prepared candidates, using current track metadata.
     Deduplicate tracks across modes/lanes so a frequently bundled track doesn't dominate labels.
     Before the first rebuild, use the library's artist genres."""
@@ -55,7 +56,8 @@ def genre_options(store):
                 if item.get("key"):
                     tracks.setdefault(item["key"], item)
     items = attach_genres(store, [copy(item) for item in tracks.values()])
-    by_artist = store.rec_query.artist_genre_years()
+    by_artist = (store.rec_query.artist_genre_years_for([item.get('artist', '') for item in items if not item.get('genre')])
+                 if items else store.rec_query.artist_genre_years())
     if not items:
         items = list(by_artist.values())
     families = defaultdict(Counter)
@@ -63,7 +65,8 @@ def genre_options(store):
         genre = (item.get("genre") or (by_artist.get(item.get("artist")) or {}).get("genre") or "").strip().lower()
         if genre:
             families[genre_map.family(genre)][genre] += 1
-    plays = {g.lower(): count for g, count in store.rec_query.genre_play_distribution().items()}
+    dist = store.rec_query.genre_play_distribution() if genre_plays is None else genre_plays
+    plays = {g.lower(): count for g, count in dist.items()}
     family_plays = Counter()
     for genre, count in plays.items():
         family_plays[genre_map.family(genre)] += count

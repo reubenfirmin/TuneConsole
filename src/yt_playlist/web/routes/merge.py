@@ -244,6 +244,15 @@ def build(ctx) -> APIRouter:
         refresh_cleanup(store, now_fn())
         return HTMLResponse("")   # htmx fades + removes the row
 
+    @router.post("/playlist/forget-empty")
+    def forget_empty(request: Request, playlist: int = Form(...)):
+        try:
+            ctx.ops().forget_empty(playlist)
+        except ValueError as exc:
+            return _toast(request, str(exc))
+        refresh_cleanup(store, now_fn())
+        return HTMLResponse("")
+
     @router.get("/dupe/{a}/{b}")
     def dupe_detail(a: int, b: int):
         # back-compat: the pairwise compare is just the 2-playlist case of the N-way editor

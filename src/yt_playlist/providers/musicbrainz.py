@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 
 from yt_playlist.util import net
-from yt_playlist.util.matching import normalize, recording_title
+from yt_playlist.util.matching import is_remix, normalize, recording_title
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter
 from yt_playlist.providers import genres
 
@@ -131,12 +131,12 @@ def _earliest_year(recordings):
 
 
 def _top_label(obj):
-    """Highest-voted enabled genre, then recognized tags, using the shared canonical labels."""
+    """Vote order chooses the style; a documented child tag can refine its broad parent."""
+    tags = []
     for field in ("genres", "tags"):
         items = sorted(obj.get(field) or [], key=lambda x: int(x.get("count") or 0), reverse=True)
-        if genre := genres.pick_genre(item.get("name") for item in items):
-            return genre
-    return None
+        tags.extend(item.get('name') for item in items)
+    return genres.pick_genre(tags)
 
 
 _artist_genre_cache = {}
@@ -226,10 +226,10 @@ def _matches_recording(recording, title, artist):
 def enrich(title, artist):
     """Return (genre, year) for a track, or (None, None) on no match / error.
 
-    Genre falls back from recording -> artist level, because recording-level genres are sparse in
-    MusicBrainz while artist-level ones are well populated. Year comes from the earliest release.
+    Unremixed recordings may fall back to artist tags. A remix needs its own genre evidence.
+    Year comes from the earliest release.
     """
-    return _genre_year(_recording_search(title, artist))
+    return _genre_year(_recording_search(title, artist), title=title)
 
 
 def _release_ids(recordings):
@@ -254,12 +254,12 @@ def enrich_full(title, artist, *, include_identifiers=False):
     here rather than in its own function so the cover fallback costs no extra search, and so this
     stays the single seam where MusicBrainz touches the network."""
     recs = _recording_search(title, artist)
-    genre, year = _genre_year(recs)
+    genre, year = _genre_year(recs, title=title)
     result = (genre, year, (recs[0].get("id") if recs else None), _release_ids(recs))
     return (*result, (recs[0].get("isrcs") or []) if recs else []) if include_identifiers else result
 
 
-def _genre_year(recordings):
+def _genre_year(recordings, *, title=""):
     """Derive (genre, year) from a recordings list (best match first), or (None, None) if empty."""
     if not recordings:
         return (None, None)
@@ -278,7 +278,7 @@ def _genre_year(recordings):
             year = year or _earliest_year([full])
         except Exception as e:  # noqa: BLE001
             logger.debug("MB lookup failed for %s: %s", mbid, e)
-    if not genre:                              # recording had no genre/tag, so use the artist's
+    if not genre and not is_remix(title or rec.get("title")):
         genre = _artist_genre(artist_mbid)
     return (genre, year)
 

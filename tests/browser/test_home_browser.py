@@ -1,4 +1,5 @@
 import pytest
+from tests.test_mode_cards_route import prepare_home
 
 
 @pytest.fixture
@@ -12,8 +13,12 @@ def expiring_pool_jobs(monkeypatch):
 
 
 @pytest.mark.parametrize("kind,lane", [("fresh_pool", "fresh"), ("library_pool", "wheelhouse")])
-def test_expired_pool_stops_polling_and_refreshes_mixes(expiring_pool_jobs, live_app, page, kind, lane):
+def test_expired_pool_stops_polling_and_refreshes_mixes(expiring_pool_jobs, live_app, store, page, kind, lane):
     from playwright.sync_api import expect
+    from tests.test_home_other_genres import seed_genres
+
+    seed_genres(store)
+    prepare_home(store, 1)
 
     job = expiring_pool_jobs.create(kind)
     job.parameters = {"include_genres": [], "avoid_genres": [], "lane": lane, "epoch": 0}
@@ -55,6 +60,7 @@ def test_mix_hover_crossfades_even_with_reduced_motion(live_app, store, page, re
     seed_genres(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
+    prepare_home(store, 1)
     page.emulate_media(reduced_motion=reduced_motion)
     page.set_viewport_size({"width": 1440, "height": 1000})
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
@@ -102,6 +108,7 @@ def test_fresh_skeleton_click_builds_selected_pool_then_shows_mix(live_app, stor
     _without_fresh(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
+    prepare_home(store, 1)
     release = threading.Event()
     calls, tracks = [], []
     def populate(ctx, **params):
@@ -163,6 +170,7 @@ def test_two_ready_mixes_show_clickable_skeletons_for_the_missing_slots(live_app
     from yt_playlist.util.matching import identity_key
 
     two_ready_cards(store, monkeypatch)
+    prepare_home(store, 1)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
     rows = []
@@ -233,6 +241,16 @@ def test_home_is_landing_with_status_and_sections(live_app, page):
     assert page.get_by_text("Library synced").count() == 0     # no awkward "not yet" line anymore
 
 
+def test_cold_preparation_status_is_visible(live_app, store, page):
+    from playwright.sync_api import expect
+
+    store.settings.set_setting('last_sync_at', '1')
+    store.settings.set_setting('onboard_dismissed', '1')
+    page.goto(live_app)
+    expect(page.get_by_role('status').filter(
+        has_text='Your next mixes will appear as your library is prepared.')).to_be_visible()
+
+
 def test_sync_button_absent_from_playlists_tab(live_app, page):
     page.goto(f"{live_app}/playlists")
     assert page.get_by_role("button", name="Sync plays").count() == 0
@@ -263,6 +281,7 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(live_app, store, p
     seed_genres(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
+    prepare_home(store, 1)
     # Keep the browser check local: album art is incidental to this control.
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(f"{live_app}/")
@@ -361,6 +380,7 @@ def test_clear_mix_controls_resets_applied_and_draft_choices_from_either_tab(liv
     seed_genres(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
+    prepare_home(store, 1)
     store.rec_model.set_weight("genre:jazz", 1.4, now=1)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.request.post(f"{live_app}/home/mix-genres", form={"genres": "jazz"})
@@ -415,6 +435,7 @@ def test_mix_controls_automatically_reset_an_open_page_after_four_hours(live_app
     seed_genres(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
+    prepare_home(store, 1)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.clock.install()
     page.goto(f"{live_app}/")
@@ -454,6 +475,7 @@ def test_regenerating_one_mix_updates_shuffle_request(live_app, store, page):
     seed_genres(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
+    prepare_home(store, 1)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(f"{live_app}/")
     card = page.locator("#gen-wheelhouse")
@@ -492,6 +514,7 @@ def test_genre_draft_survives_unrelated_updates_and_failed_submission(live_app, 
     seed_genres(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
+    prepare_home(store, 1)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(f"{live_app}/")
     page.locator("#fingerprint .fp-collapse").click()
@@ -522,6 +545,7 @@ def test_configurator_modal_blocks_background_and_keeps_focus(live_app, store, p
     seed_genres(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
+    prepare_home(store, 1)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(f"{live_app}/")
     launcher = page.get_by_role("button", name="Tune these mixes", exact=True)
@@ -594,6 +618,7 @@ def test_quick_genres_show_favorites_and_search_reaches_the_rest(live_app, store
     bundles["all"]["wheelhouse"] += [
         {"key": f"archive-{i}", "genre": f"Archive {i}"} for i in range(20)]
     store.rec_surface.put_proposals("mode_bundles", bundles, 1.0)
+    prepare_home(store, 1)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(f"{live_app}/")
     page.get_by_role("button", name="Tune these mixes", exact=True).click()

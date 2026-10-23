@@ -38,7 +38,29 @@ def test_stats_fragment_reflects_state(store):
     assert 'href="/enrich/queue"' in html
     assert 'href="/enrich/processed"' in html
     assert 'href="/enrich/conflicts"' in html
-    assert "Conflicts do not block the queue" in html
+    assert "1 awaiting first enrichment" in html
+
+
+def test_queue_distinguishes_first_passes_from_refreshes_without_double_counting(store):
+    _seed(store)
+    store.discovery.upsert_discovered_track("a|x", "v1", "A", "X", None, None,
+                                           None, None, "radio:seed", 10.0)
+    configuration = {name: {"fingerprint": "old", "status": "available"}
+                     for name in ("musicbrainz", "lastfm")}
+    store.enrichment.reconcile_provider_configuration(configuration)
+    store.enrichment.reconcile_provider_configuration({
+        name: {**value, "fingerprint": "new"} for name, value in configuration.items()})
+    assert store.enrichment.queue_stats() == {"total": 2, "first_pass": 1, "refresh": 1}
+    c = _client(store)
+    for path in ("/enrich", "/enrich/stats"):
+        html = c.get(path).text
+        assert "1 awaiting first enrichment" in html
+        assert "1 queued for re-enrichment" in html
+    detail = c.get("/enrich/queue").text
+    assert ">First enrichment</td>" in detail and ">Re-enrichment</td>" in detail
+    store.enrichment.reconcile_provider_configuration({
+        name: {**value, "status": "disabled"} for name, value in configuration.items()})
+    assert store.enrichment.queue_stats() == {"total": 1, "first_pass": 1, "refresh": 0}
 
 
 def test_saved_retry_status_is_visible_without_a_running_worker(store):

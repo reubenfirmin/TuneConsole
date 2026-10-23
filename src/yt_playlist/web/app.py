@@ -28,6 +28,7 @@ from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.context import Ctx
 from yt_playlist.web.jobs import SyncJobs
 from yt_playlist.web.provider_links import provider_search_url
+from yt_playlist.web.request_priority import RequestPriorityMiddleware
 from yt_playlist.web.routes import build_all
 from yt_playlist.web.routes.bridge import build as build_bridge_route
 
@@ -156,11 +157,13 @@ def _maybe_check_update(ctx):
 
 def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=_SYNC_MAX_AGE_S,
                           stop=None):
-    """Keep the library fresh with no manual card: once configured and the extension is connected,
-    run a full sync when we've never synced or the last full sync is older than max_age_s. Covers
-    both the initial post-setup sync (fires as soon as the extension pairs) and periodic refresh.
-    Guarded by ctx.sync_lock so it never overlaps a manual POST /sync (or itself)."""
+    """Refresh due resources and retry failures with persisted backoff.
+
+    A new extension connection retries failures promptly. The shared sync lock
+    keeps automatic work from overlapping a manual POST /sync.
+    """
     stop = stop or threading.Event()
+    last_connection = None
     while not stop.wait(poll_s):
         try:
             release = ctx.work.admit("automatic sync")
@@ -172,8 +175,11 @@ def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=
                 continue
             if not (bridge is not None and bridge.connected):
                 continue                       # no live extension -> nothing to reach YouTube with
+            connection = getattr(bridge, "connection_id", None)
+            retry_now = connection is not None and connection != last_connection
             from yt_playlist.library.sync_outcomes import sync_due
-            if not sync_due(ctx.store, ctx.now_fn(), max_age_s):
+            if not sync_due(ctx.store, ctx.now_fn(), max_age_s, retry_now=retry_now):
+                last_connection = connection
                 continue                       # synced recently enough
             if not ctx.sync_lock.acquire(blocking=False):
                 continue                       # a manual sync is already running; try next tick
@@ -183,7 +189,8 @@ def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=
             try:
                 from yt_playlist.web.jobs import run_library_sync
                 with ctx.work.entered(release):
-                    run_library_sync(ctx, job)
+                    last_connection = connection
+                    run_library_sync(ctx, job, automatic=True, retry_now=retry_now, max_age_s=max_age_s)
             finally:
                 ctx.sync_lock.release()
         except Exception:  # noqa: BLE001 - a sync failure must never crash the daemon
@@ -247,6 +254,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
                 await ctx.updater.close()
 
     app = FastAPI(lifespan=lifespan)
+    app.add_middleware(RequestPriorityMiddleware, priority=store.priority)
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
     allowed = set(allowed_hosts)
     # Cache-bust the front-end by a CONTENT hash across ALL top-level static JS/CSS so browsers always

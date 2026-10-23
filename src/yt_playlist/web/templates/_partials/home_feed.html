@@ -1,25 +1,12 @@
 <div id="home-feed" class="home-feed">
-  {# The mode-focused cards lead the dash so it does not open on a wall of taste sliders. They load
-     lazily from the worker's prepared bundles (spinner while assembling). #}
+  {# Complete mixes are prepared by the worker and rendered with the initial page. #}
   <section class="home-mixes" aria-labelledby="home-mixes-title">
     <h2 class="section" id="home-mixes-title">Made for your library</h2>
     <p class="section-note">Ready-to-shape playlists drawn from what you save, play, and revisit.</p>
-    <div hx-get="/home/cards" hx-trigger="load" hx-swap="innerHTML" class="card-row-loading">
-      <div class="mix-loader" role="status" aria-label="Building four mixes from your library">
-        <div class="mix-loader-copy">
-          <span class="mix-loader-mark" aria-hidden="true">✦</span>
-          <div><strong>Finding four ways into your library</strong><span>Shaping mixes from what you save, play, and revisit</span></div>
-        </div>
-        <div class="mix-loader-grid" aria-hidden="true">
-          {% for card in range(4) %}
-          <div class="mix-loader-card">
-            <div class="mix-loader-art">{% for tile in range(4) %}<i style="--tile:{{ tile }};--card:{{ card }}"></i>{% endfor %}</div>
-            <div class="mix-loader-label"><i></i><i></i></div>
-          </div>
-          {% endfor %}
-        </div>
-      </div>
-    </div>
+    {% include "_partials/mode_cards.html" %}
+    {% if not protos %}
+    <p class="section-note" role="status">Your next mixes will appear as your library is prepared.</p>
+    {% endif %}
   </section>
   {# Steering stays attached to this fragment: changing it replaces #home-feed so the four choices
      and their controls update atomically. #}

@@ -25,6 +25,7 @@
               </span>
             </div>
             <input type="range" min="0" max="100" step="1" :id="'radio-tune-' + axis.key"
+                   :aria-description="axis.key === 'theme' ? 'Eclectic changes genres. Themed stays in the currently playing genre. The middle follows musical similarities.' : null"
                    :aria-label="axis.low + ' to ' + axis.high" x-model.number="tuningDraft[axis.key]">
           </div>
         </div>

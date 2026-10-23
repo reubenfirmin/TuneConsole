@@ -8,7 +8,7 @@ import pytest
 
 @pytest.mark.parametrize("scenario", [
     "fresh", "missing_main", "old_version", "stale", "missing_receiver", "partial_injection",
-    "negative_age", "invalid_age", "infinite_age", "missing_observer",
+    "negative_age", "invalid_age", "infinite_age", "missing_observer", "old_main_revision", "old_receiver",
 ])
 def test_health_repairs_main_sensor_even_when_content_receiver_answers(scenario):
     node = shutil.which("node")
@@ -22,6 +22,8 @@ const scenario = process.argv[1];
 const event = () => ({addListener() {}, removeListener() {}});
 const injections = [], probes = [], frames = [], sockets = [], reloads = [];
 let contentReady = scenario !== 'missing_receiver';
+let receiverRevision = scenario === 'old_receiver' ? undefined : 3;
+let mainRevision = scenario === 'old_main_revision' ? 3 : 4;
 let mainVersion = scenario === 'old_version' ? 3
   : ['missing_main', 'partial_injection', 'missing_receiver'].includes(scenario) ? null : 4;
 let mainAgeMs = scenario === 'stale' ? 20000 : mainVersion === null ? null : 0;
@@ -45,7 +47,8 @@ const chrome = {
       assert.equal(msg.type, 'sensor-ping');
       probes.push(msg);
       if (!contentReady) throw Error('Could not establish connection. Receiving end does not exist.');
-      return {ok: true, mainVersion, mainAgeMs};
+      return {ok: true, mainVersion, mainRevision, mainAgeMs, receiverRevision,
+        capture: {metadataVerified: false, accountKnown: true, barHasVideo: false}};
     },
   },
   scripting: {executeScript: async call => {
@@ -54,6 +57,7 @@ const chrome = {
     if (call.files.includes('nowplaying_main.js')) {
       if (scenario === 'partial_injection') throw Error('MAIN injection failed');
       mainVersion = 4;
+      mainRevision = 4;
       mainAgeMs = 0;
     }
     if (scenario === 'missing_observer' && call.files.includes('observer_main.js'))
@@ -73,12 +77,16 @@ sockets[0].readyState = Socket.OPEN;
     assert.equal(probes.at(-1).main, false);
   }
   const report = await sensors.probe();
-  const failed = ['partial_injection', 'missing_observer'].includes(scenario);
+  const failed = ['partial_injection', 'missing_observer', 'old_receiver'].includes(scenario);
   assert.equal(report.healthy, !failed);
   assert.equal(report.respondingTabs, failed ? 0 : 1);
-  assert.equal(report.reinjectedTabs, scenario === 'fresh' || failed ? 0 : 1);
+  assert.equal(report.reinjectedTabs, scenario === 'fresh' || ['partial_injection', 'missing_observer'].includes(scenario) ? 0 : 1);
   assert.equal(frames.at(-1).type, 'sensor-health');
   assert.equal(frames.at(-1).healthy, report.healthy);
+  assert.equal(report.versions[0].mainRevision, 4);
+  assert.equal(report.versions[0].receiverRevision, scenario === 'old_receiver' ? null : 3);
+  assert.equal(report.versions[0].capture.metadataVerified, false,
+    'healthy transport must not hide an ineligible exact-play producer');
   assert.equal(probes.at(-1).main, true);
   if (scenario === 'fresh') assert.equal(injections.length, 0);
   else assert(injections.some(call => call.world === 'MAIN' && call.files.includes('nowplaying_main.js')));
@@ -86,6 +94,7 @@ sockets[0].readyState = Socket.OPEN;
     assert.match(report.error, /MAIN injection failed/);
     assert.match(report.error, /MAIN sensor/);
   }
+  if (scenario === 'old_receiver') assert.match(report.error, /Outdated rating receiver.*reload/);
   assert.equal(reloads.length, 0, 'repair must never reload audible playback');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """

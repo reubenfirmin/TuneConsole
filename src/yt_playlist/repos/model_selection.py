@@ -31,20 +31,26 @@ class ModelSelectionRepo(Repo):
     def save_selection(self, run_id, result, *, rows=None):
         """Publish vectors, their configuration, result, and exact rollback snapshot together."""
         with self.conn:
-            if rows is not None:
-                paused = self.conn.execute("SELECT value FROM settings WHERE key='rec_selection_paused'").fetchone()
-                if paused and paused["value"] == "1":
-                    raise ValueError("Automatic selection was paused before publication")
-                self.conn.execute(
-                    "INSERT INTO rec_model_previous_vectors SELECT ?,identity_key,vec FROM rec_vectors", (run_id,))
-                self.conn.execute("DELETE FROM rec_vectors")
-                self.conn.executemany("INSERT INTO rec_vectors(identity_key,vec) VALUES (?,?)", rows)
-                self.conn.executemany("INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)", [
-                    ("rec_embed_method", result["selected"]["method"]),
-                    ("rec_dim", str(result["selected"]["dim"])),
-                    ("rec_selection_active_run", str(run_id))])
-            self.conn.execute("UPDATE rec_model_selection_runs SET result_json=? WHERE id=?",
-                              (json.dumps(result), run_id))
+            self.conn.execute('UPDATE rec_model_selection_runs SET result_json=result_json WHERE id=?', (run_id,))
+            self.publish_selection(run_id, json.dumps(result), rows, result["selected"])
+
+    @synchronized
+    def publish_selection(self, run_id, encoded, rows, selected):
+        """Only prepared writes; the caller owns the transaction and stale-input guard."""
+        if not self.conn.in_transaction:
+            raise RuntimeError('Selection publication requires an outer transaction')
+        if rows is not None:
+            paused = self.conn.execute("SELECT value FROM settings WHERE key='rec_selection_paused'").fetchone()
+            if paused and paused["value"] == "1":
+                raise ValueError("Automatic selection was paused before publication")
+            self.conn.execute(
+                "INSERT INTO rec_model_previous_vectors SELECT ?,identity_key,vec FROM rec_vectors", (run_id,))
+            self.conn.execute("DELETE FROM rec_vectors")
+            self.conn.executemany("INSERT INTO rec_vectors(identity_key,vec) VALUES (?,?)", rows)
+            self._store.settings.publish_values({"rec_embed_method": selected["method"],
+                "rec_dim": str(selected["dim"]), "rec_selection_active_run": str(run_id)})
+            self.conn.execute("DELETE FROM settings WHERE key='rec_fit_inputs'")
+        self.conn.execute("UPDATE rec_model_selection_runs SET result_json=? WHERE id=?", (encoded, run_id))
 
     @synchronized
     def save_model_forecast(self, run_id, now, forecast):

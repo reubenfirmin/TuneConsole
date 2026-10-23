@@ -28,6 +28,10 @@ def test_fresh_card_waits_for_metadata_then_renders_discoveries(store):
         for key in keys:
             store.discovery.set_discovered_enrichment(key, "House", None)
         fresh_pool.prepare(store, 250)
+        from yt_playlist.rec import home_prepared
+        payload = home_prepared.prepare(store, 250)
+        assert payload is not None
+        assert all(any(p['lane'] == 'fresh' for p in menu['protos']) for menu in payload['menus'])
         response = client.get("/home/cards")
     assert response.status_code == 200
     assert 'data-title="Unenriched ' in response.text
@@ -130,13 +134,14 @@ def test_genre_selection_leaves_other_requests_responsive(store, monkeypatch):
     from yt_playlist.rec import mode_surfaces
 
     _without_fresh(store)
+    client = _client(store)
     started, release = threading.Event(), threading.Event()
     def assemble(*args, **kwargs):
         started.set()
         release.wait(5)
         return []
     monkeypatch.setattr(mode_surfaces, "assemble_cards", assemble)
-    with _client(store) as client, ThreadPoolExecutor(max_workers=2) as requests:
+    with client, ThreadPoolExecutor(max_workers=2) as requests:
         making = requests.submit(client.post, "/home/mix-genres", data={"genres": ["jazz", "techno"]})
         try:
             assert started.wait(2)
@@ -194,6 +199,9 @@ def test_fresh_slot_starts_once_rejoins_on_refresh_and_becomes_a_scoped_mix(stor
                                         key=identity_key(f"New {i}", f"Artist {i}"),
                                         genre="Jazz" if i % 2 else "Techno")
                       for i in range(12))
+        for track in tracks:
+            store.discovery.upsert_discovered_track(track.key, track.video_id, track.title, track.artist,
+                "", None, track.genre, None, None, 1000)
     finally:
         release.set()
     deadline = time.monotonic() + 3

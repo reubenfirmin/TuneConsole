@@ -87,6 +87,32 @@ def test_empty_playlist_failed_read_keeps_row_and_allows_retry(live_cleanup_app,
     expect(row).to_have_count(0)
 
 
+def test_failed_remote_read_offers_local_removal(live_cleanup_app, page, monkeypatch):
+    from yt_playlist.library import executor
+    monkeypatch.setattr(executor, 'with_retry', lambda fn: fn())
+
+    def unreadable(*args, **kwargs):
+        raise KeyError('musicPlaylistShelfRenderer')
+
+    def never_delete(*args, **kwargs):
+        raise AssertionError('Local removal must not call YouTube delete')
+
+    monkeypatch.setattr(FakeClient, 'get_playlist', unreadable)
+    monkeypatch.setattr(FakeClient, 'delete_playlist', never_delete)
+    page.goto(f'{live_cleanup_app}/cleanup')
+    row = page.get_by_role('row').filter(has_text='Empty One')
+    removal = row.get_by_role('button', name='Remove from TuneConsole', exact=True)
+    expect(removal).to_be_hidden()
+    row.get_by_role('button', name='Delete', exact=True).click()
+    expect(removal).to_be_visible()
+    removal.click()
+    expect(page.get_by_text('YouTube will stay unchanged.', exact=False)).to_be_visible()
+    page.get_by_role('button', name='Confirm', exact=True).click()
+    expect(row).to_have_count(0)
+    page.goto(f'{live_cleanup_app}/actions')
+    expect(page.get_by_text('YouTube unchanged', exact=False)).to_be_visible()
+
+
 def test_keep_one_resolves_duplicate_group(live_cleanup_app, page):
     page.goto(f"{live_cleanup_app}/cleanup")
     expect(page.get_by_text("identical copies")).to_be_visible()

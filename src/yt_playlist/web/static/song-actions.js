@@ -9,9 +9,60 @@ document.addEventListener('click', event => {
   }}));
 });
 
+// Refresh every visible copy without replacing rows, player state, or the page.
+function applySongMetadata(videoId, metadata) {
+  const { title, artist = '', genre = '', year = '' } = metadata;
+  for (const button of document.querySelectorAll('[data-song]')) {
+    const song = JSON.parse(button.dataset.song);
+    if (song.video_id !== videoId) continue;
+    button.dataset.song = JSON.stringify({ ...song, title, artist });
+    button.setAttribute('aria-label', 'More actions for ' + title);
+    const row = button.closest('tr, .gen-row, .rt-row, .tile');
+    if (!row) continue;
+    const setText = (selector, value) => {
+      for (const node of row.querySelectorAll(selector)) {
+        // Chart titles also contain an external-link icon.
+        node.replaceChildren(document.createTextNode(value), ...node.children);
+        if (node.hasAttribute('title')) node.title = value;
+        if (node.closest('td[title]')) node.closest('td').title = value;
+      }
+    };
+    setText('.ptitle, .gen-title, .rt-c-title, .tile-cap-title', title);
+    setText('.alink[href^="/artist?"], .gen-artist, .rt-c-artist', artist);
+    setText('.rt-c-genre', genre);
+    setText('.rt-c-year', year || '');
+    for (const link of row.querySelectorAll('a[href^="/artist?"]')) {
+      link.href = '/artist?name=' + encodeURIComponent(artist);
+    }
+    for (const node of row.querySelectorAll('.ydisplay')) node.textContent = year || '—';
+    for (const node of row.querySelectorAll('.genre-display-wrap')) {
+      const label = document.createElement('span');
+      label.className = genre ? 'gtag' : 'muted ghint';
+      label.textContent = genre || '—';
+      node.replaceChildren(label);
+      if (node.closest('td[title]')) node.closest('td').title = genre;
+    }
+    const caption = row.querySelector('.tile-cap-sub');
+    if (caption) caption.textContent = [artist, song.album].filter(Boolean).join(' · ');
+    const input = row.querySelector('input[name="track"]');
+    if (input) input.value = JSON.stringify({ ...JSON.parse(input.value), title, artist });
+    const play = row.querySelector('.gen-track-play');
+    if (play) {
+      play.title = 'Play ' + title;
+      play.setAttribute('aria-label', 'Play ' + title + ' on YouTube Music');
+    }
+    row.dataset.title = row.matches('tr') ? title.toLowerCase() : title;
+    row.dataset.artist = row.matches('tr') ? artist.toLowerCase() : artist;
+    row.dataset.genre = genre.toLowerCase();
+    row.dataset.year = String(year || 0);
+  }
+  window.dispatchEvent(new CustomEvent('song-metadata-updated', { detail: { videoId, title, artist } }));
+}
+
 function songActions() {
   // Keep DOM nodes and the originating Alpine scope outside reactive data.
   let trigger = null, owner = null, request = 0, lookupStream = null;
+  const metadataSaves = new Map();
   return {
     song: {}, context: {}, mode: 'create', name: '', query: '', selected: '',
     playlists: [], multipleIdentities: false, loading: false, busy: false, error: '', result: null,
@@ -28,6 +79,7 @@ function songActions() {
       if (wasOpen) this.$refs.menu.hidePopover();
       if (trigger) trigger.setAttribute('aria-expanded', 'false');
       if (wasOpen && same) return;
+      request++;
       trigger = detail.trigger;
       owner = Alpine.$data(trigger);
       this.song = detail.song;
@@ -113,6 +165,9 @@ function songActions() {
       this.focusDialog(focus);
       if (mode === 'create') return;
       try {
+        // Reopening the same song waits for its pending write before reading defaults.
+        if (mode === 'metadata') await metadataSaves.get(this.song.video_id);
+        if (current !== request) return;
         const data = await this.json('/songs/' + (mode === 'metadata' ? 'metadata' : 'playlists') +
           '?video_id=' + encodeURIComponent(this.song.video_id));
         if (current !== request) return;
@@ -225,20 +280,60 @@ function songActions() {
       if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Couldn’t save this song. Please try again.');
       return data;
     },
+    restoreMetadata(edit, message) {
+      if (this.$refs.dialog.open) return false;
+      this.closeMenu();
+      request++;
+      trigger = edit.trigger; owner = edit.owner;
+      Object.assign(this, edit.fields, { mode: 'metadata', busy: false, loading: false,
+        metadataLoaded: true, result: null, error: message, lookupRunning: false, lookupStatus: '' });
+      this.$refs.dialog.showModal();
+      this.focusDialog('metadataTitle');
+      return true;
+    },
+    saveMetadata() {
+      if (!this.metadataLoaded) return;
+      const edit = { trigger, owner, fields: {
+        song: { ...this.song }, context: { ...this.context }, metadata: { ...this.metadata },
+        initialMetadata: { ...this.initialMetadata }, originals: { ...this.originals },
+        trackId: this.trackId, genreOptions: [...this.genreOptions], genres: [...this.genres]
+      }};
+      const changes = Object.fromEntries(Object.entries(edit.fields.metadata)
+        .filter(([field, value]) => value !== edit.fields.initialMetadata[field]));
+      const videoId = edit.fields.song.video_id;
+      this.closeDialog();
+      const current = request;
+      const save = async () => {
+        try {
+          await this.json('/songs/metadata', { song: edit.fields.song, ...changes });
+          const data = await this.json('/songs/metadata?video_id=' + encodeURIComponent(videoId));
+          if (data.metadata) applySongMetadata(videoId, data.metadata);
+        } catch (error) {
+          const message = error.message || 'Couldn’t save this song. Please try again.';
+          if (current === request && this.restoreMetadata(edit, message)) return;
+          // A later dialog owns the shared form. Keep this failed edit separately for retry.
+          const toast = document.createElement('div');
+          toast.className = 'toast toast-err';
+          toast.setAttribute('role', 'alert');
+          const text = document.createElement('span');
+          text.className = 'toast-body';
+          text.textContent = edit.fields.song.title + ': ' + message;
+          const retry = document.createElement('button');
+          retry.type = 'button'; retry.className = 'btn-ghost'; retry.textContent = 'Retry edit';
+          retry.onclick = () => { if (this.restoreMetadata(edit, message)) toast.remove(); };
+          toast.append(text, retry);
+          document.getElementById('toasts').prepend(toast);
+        } finally {
+          metadataSaves.delete(videoId);
+        }
+      };
+      metadataSaves.set(videoId, save());
+    },
     async submit() {
-      if (this.busy || this.loading) return;
+      if (this.busy || this.loading || this.result) return;
+      if (this.mode === 'metadata') { this.saveMetadata(); return; }
       this.busy = true; this.error = '';
       try {
-        if (this.mode === 'metadata') {
-          if (!this.metadataLoaded) return;
-          const changes = Object.fromEntries(Object.entries(this.metadata)
-            .filter(([field, value]) => value !== this.initialMetadata[field]));
-          await this.json('/songs/metadata', { song: this.song, ...changes });
-          lookupStream?.close();
-          this.$refs.dialog.close();
-          location.reload();
-          return;
-        }
         this.result = await this.json('/songs/' + (this.mode === 'create' ? 'create-playlist' : 'add-to-playlist'), {
           song: this.song, ...(this.mode === 'create' ? { name: this.name.trim() } : { playlist_id: Number(this.selected) })
         });

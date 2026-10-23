@@ -1,6 +1,7 @@
 import logging
 
 from yt_playlist.rec import discover, embed
+from tests import model_support
 
 
 class _FakeClient:
@@ -22,7 +23,7 @@ def test_populate_discovered_tracks_builds_candidates_and_vectors(store):
     # a library track gives the content model a genre token (techno) to encode candidates into
     tid = store.tracks.upsert_track("vL", "LibT", "LibArtist", None, None)
     store.tracks.set_track_genre(tid, "Techno")
-    embed.build_content_and_store(store)             # persists rec_content_model
+    model_support.build_content_model(store)         # persists rec_content_model
     # a discovered techno album waiting to be populated into tracks
     store.discovery.upsert_discovered_album("alb1", "New Artist", "Some Album", "2024", None, 1.0, genre="Techno")
 
@@ -41,7 +42,7 @@ def test_populate_skips_owned_tracks(store):
     # an owned track that the album also contains, must not be re-added as out-of-corpus
     from yt_playlist.util.matching import identity_key
     store.tracks.upsert_track("vOwned", "Track One", "New Artist", None, None)
-    embed.build_content_and_store(store)
+    model_support.build_content_model(store)
     store.discovery.upsert_discovered_album("alb1", "New Artist", "Some Album", "2024", None, 1.0, genre="Techno")
     discover.populate_discovered_tracks(_Ctx(store, _FakeClient()), now=1.0)
     keys = {d["identity_key"] for d in store.discovery.get_discovered_tracks()}

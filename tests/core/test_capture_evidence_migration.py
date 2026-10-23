@@ -50,8 +50,12 @@ def test_populated_conversion_preserves_originals_precision_receipts_and_project
     days = list(map(tuple, store.conn.execute('SELECT * FROM listening_days ORDER BY identity_id,identity_key')))
     observations = list(map(tuple, store.conn.execute('SELECT * FROM listening_observations')))
     receipts = list(map(tuple, store.conn.execute('SELECT * FROM history_snapshots ORDER BY id')))
-    store.init_schema()
+    migrate(store.conn, registry=_registry())
     capture.validate(store.conn)
+    # Later migrations may replace these views while retaining the evidence.
+    # Validate each schema against its own contract, then compare the data below.
+    store.init_schema()
+    current.validate(store.conn)
     assert list(map(tuple, store.conn.execute(
         'SELECT identity_id,raw_identity_key,identity_key,recording_id,source,last_observed_at,'
         "capture_id,capture_item_id FROM listening_observations WHERE precision='legacy_unknown' "

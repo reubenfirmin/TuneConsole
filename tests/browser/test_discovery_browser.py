@@ -1,6 +1,7 @@
 """Discovery counts require exposure, including when tabs, polls, and grid clamps hide tiles."""
 import pytest
 from playwright.sync_api import expect
+from yt_playlist.rec import home_prepared
 
 
 @pytest.mark.parametrize("width", [1440, 390])
@@ -10,6 +11,7 @@ def test_only_visible_discovery_tiles_count_once_per_visit(live_app, store, page
     for i in range(15):
         store.discovery.upsert_discovered_album(f"album{i}", f"Artist {i}", f"Album {i}", "2026", None, 1.0)
     store.discovery.upsert_discovered_artist("New artist", 1.0, [], [], None, 1.0)
+    assert home_prepared.prepare(store, 1) is not None
     requests = []
     page.on("request", lambda request: requests.append(request.url))
     page.set_viewport_size({"width": width, "height": 1000})
@@ -79,6 +81,7 @@ def test_prepared_songs_are_ready_when_discover_opens(live_app, store, page, wid
         store.discovery.upsert_discovered_track(f"new {i}|artist {i}", f"v{i}", f"New song {i}",
             f"Artist {i}", None, None, "Jazz", "2020", "radio:seed", 1)
     fresh_pool.prepare(store, 2)
+    assert home_prepared.prepare(store, 2) is not None
     # Opening the tab must not need a lazy fragment or a recommendation request to succeed.
     page.route("**/home/discovery", lambda route: route.abort())
     page.set_viewport_size({"width": width, "height": 1000})
@@ -102,3 +105,41 @@ def test_prepared_songs_are_ready_when_discover_opens(live_app, store, page, wid
     assert max(deltas) == 1
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     page.screenshot(path=tmp_path / f"discovery-ready-songs-{width}.png", full_page=True)
+
+
+def test_missing_artist_art_appears_on_the_existing_discover_page(live_app, store, page, monkeypatch):
+    from types import SimpleNamespace
+    from yt_playlist.rec import discover
+    from yt_playlist.rec.rec_worker import RecWorker
+
+    store.settings.set_setting('last_sync_at', '1')
+    store.settings.set_setting('onboard_dismissed', '1')
+    store.discovery.upsert_discovered_artist('New artist', 1, [], [], None, 1)
+    assert home_prepared.prepare(store, 1) is not None
+    queued = []
+
+    def queue(worker, ids):
+        queued.append((worker, ids))
+        worker._model_active = True
+
+    monkeypatch.setattr(RecWorker, 'trigger_artist_images', queue)
+    page.goto(live_app + '/')
+    page.get_by_role('tab', name='Discover', exact=True).click()
+    tile = page.locator('#new-artist-grid .tile')
+    tile.scroll_into_view_if_needed()
+    expect(tile.locator('img')).to_have_count(0)
+    assert queued
+    worker, ids = queued[-1]
+    client = SimpleNamespace(search=lambda name, filter: [
+        {'thumbnails': [{'url': live_app + '/static/favicon.svg'}]}])
+    ctx = SimpleNamespace(store=store, client_provider=lambda: {1: client})
+    discover.repair_artist_images(ctx, ids, 1)
+    worker._model_active = False
+
+    expect(tile.locator('img')).to_have_count(1, timeout=10000)
+    expect(tile.locator('.tile-cover')).not_to_have_class('tile-cover no-art')
+    page.wait_for_function("""() => {
+        const image = document.querySelector('#new-artist-grid img');
+        return image && image.complete && image.naturalWidth > 0;
+    }""")
+    assert store.discovery.get_discovered_artists()[0]['thumbnail'].endswith('/static/favicon.svg')

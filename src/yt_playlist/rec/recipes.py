@@ -61,7 +61,8 @@ def theme_counts(store, items):
             # untagged tracks by artists you already own - and an artist's genre is a fair thing to
             # attribute to their song, where inventing one wouldn't be.
             if by_artist is None:
-                by_artist = store.rec_query.artist_genre_years()
+                by_artist = store.rec_query.artist_genre_years_for(
+                    [_field(item, 'artist') or '' for item in items if not _field(item, 'genre')])
             g = (by_artist.get(_field(it, "artist") or "") or {}).get("genre") or ""
         if g:
             genres[g.strip().lower()] += 1
@@ -130,7 +131,7 @@ def pool_facets(store, items, min_tracks=3):
     return _shares(fams), _shares(eras)
 
 
-def roll_recipe(store, model, seed=None, now=None, avoid=None, dists=None) -> dict:
+def roll_recipe(store, model, seed=None, now=None, avoid=None, dists=None, leans=None) -> dict:
     """Roll a per-playlist theme. Preference-weighted by your play distribution × permanent axis
     weights × the live transient facet leans, so common facets come up often, a muted facet never
     rolls, and a fresh 'less house' makes house roll less in the very next generation.
@@ -147,7 +148,8 @@ def roll_recipe(store, model, seed=None, now=None, avoid=None, dists=None) -> di
     rng = random.Random(seed)
     avoid = avoid or {}
     weights = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
-    leans = transient.facet_leans(store, now) if now is not None else {}
+    if leans is None:
+        leans = transient.facet_leans(store, now) if now is not None else {}
     fgain = rec_params.get_param(store, "facet_gain")
     fmin = rec_params.get_param(store, "facet_mult_min")
     fmax = rec_params.get_param(store, "facet_mult_max")
@@ -172,9 +174,10 @@ def roll_recipe(store, model, seed=None, now=None, avoid=None, dists=None) -> di
                 return k
         return items[-1][0]
 
-    genre_dist, era_dist = dists or (None, None)
-    genre = pick(genre_dist or taste_breadth(store)["families"], "genre")
-    era = pick(era_dist or dict(era_distribution(store)), "era")
+    genre_dist, era_dist = dists if dists is not None else (taste_breadth(store)["families"],
+                                                           dict(era_distribution(store)))
+    genre = pick(genre_dist, "genre")
+    era = pick(era_dist, "era")
     # Fresh playlists are unowned proposals with no plays/recency, so data-dependent journeys
     # (rediscovery, deep dive, eras…) have no signal to order by. Keep them a straight shuffle.
     journey = "shuffle" if model == "fresh" else (pick(dict.fromkeys(journeys.JOURNEYS, 1.0), "journey") or "shuffle")

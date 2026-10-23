@@ -2,7 +2,6 @@
 import json
 
 from yt_playlist.rec import rec_params
-from yt_playlist.repos.base import synchronized
 
 
 def decisions(store):
@@ -22,12 +21,27 @@ def lifecycle(store):
     return {"state": state, "share": share, "decision": decision}
 
 
-@synchronized
 def decide(store, decision, cohort, reason, now):
     if decision not in {"promote", "retire"} or not isinstance(reason, str) or not reason.strip():
         raise ValueError("Choose promote or retire and supply a reason.")
     if len(reason) > 2000 or not isinstance(cohort, str) or len(cohort) > 100:
         raise ValueError("Decision fields are too long.")
+    with store.read_snapshot() as snapshot:
+        rows, record = _prepare_decision(snapshot.store, decision, cohort, reason, now)
+        # Resolve cohorts and encode retained evidence off the serving lock.
+        # Publication rejects a concurrent evidence/settings change atomically.
+        def publish():
+            store.conn.executemany("INSERT INTO settings(key,value) VALUES (?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", rows)
+        if not snapshot.publish(publish):
+            raise ValueError("Listening evidence or experiment settings changed. Review the report and try again.")
+    return {"state": "retained" if decision == "promote" else "retired",
+            "share": 1.0 if decision == "promote" else 0.0, "decision": record}
+
+
+def _prepare_decision(store, decision, cohort, reason, now):
+    # Guard a concurrent allocation edit as well as the evidence/history reads.
+    store.settings.get_setting(rec_params.SETTING_PREFIX + "ppr_ab_share")
     report = store.rec_surface.experiment_report(max(0, now - 90 * 86400), now, now)
     arms = report["live"]
     ppr, cosine = arms.get(cohort + ":ppr"), arms.get(cohort + ":cosine")
@@ -49,10 +63,5 @@ def decide(store, decision, cohort, reason, now):
     record = {"decision": decision, "cohort": cohort, "reason": reason.strip(), "at": now,
               "powered": bool(powered), "live_evidence": {"ppr": ppr, "cosine": cosine},
               "basis": "live outcomes" if powered else "operator retirement; insufficient live evidence"}
-    # Decision + effective share publish together, independently of disposable rec_proposals caches.
-    with store.conn:
-        store.conn.executemany("INSERT INTO settings(key,value) VALUES (?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", [
-                ("ppr_experiment_decisions", json.dumps((decisions(store) + [record])[-200:])),
-                (rec_params.SETTING_PREFIX + "ppr_ab_share", "1.0" if decision == "promote" else "0.0")])
-    return lifecycle(store)
+    return [("ppr_experiment_decisions", json.dumps((decisions(store) + [record])[-200:])),
+            (rec_params.SETTING_PREFIX + "ppr_ab_share", "1.0" if decision == "promote" else "0.0")], record

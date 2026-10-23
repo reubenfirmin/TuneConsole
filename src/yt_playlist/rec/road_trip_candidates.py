@@ -4,9 +4,12 @@ This owner may call providers. It never allocates a mix, changes draft state, or
 writes playlists; the draft application service passes its snapshots to the mixer.
 """
 import math
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
+from hashlib import sha256
 from itertools import zip_longest
+from threading import Lock
+from time import monotonic
 from typing import Protocol
 
 from yt_playlist.providers import deezer, lastfm, musicbrainz
@@ -101,29 +104,67 @@ def own_candidates(store, now, state=None):
     return out
 
 
-_FACTS_CACHE: dict = {}
-_ARTIST_GENRE_CACHE: dict = {}
-_GENRE_ARTIST_CACHE: dict = {}
+_FACTS_CACHE = OrderedDict()
+_ARTIST_GENRE_CACHE = OrderedDict()
+_GENRE_ARTIST_CACHE = OrderedDict()
+_METADATA_CACHE_LOCK = Lock()
+_METADATA_CACHE_LIMIT = 512
+_METADATA_TTL = 86400
+_METADATA_RETRY_TTL = 60
 _NOT_AN_ARTIST = {"various artists", "various", "[unknown]", "unknown artist", "soundtrack",
                   "traditional", "[no artist]", "va"}
 
 
 def _facts(title, artist):
     key = (title or "", artist or "")
-    if key not in _FACTS_CACHE:
-        if len(_FACTS_CACHE) > 4000:
-            _FACTS_CACHE.clear()
-        _FACTS_CACHE[key] = deezer.lookup(title, artist)
-    return _FACTS_CACHE[key]
+
+    def load():
+        facts = deezer.lookup(title, artist)
+        # Deezer returns a truthy, all-None dictionary for both errors and missing recordings.
+        # Keep useful partial facts, but retry missing fields after the short failure window.
+        complete = all(facts.get(field) not in (None, "")
+                       for field in ("duration", "year", "genre", "popularity"))
+        return facts, complete
+
+    return dict(_metadata_cached(_FACTS_CACHE, key, load))
 
 
 def artist_genre(store, artist):
     if not artist:
         return None
-    if artist not in _ARTIST_GENRE_CACHE:
-        key = lastfm.api_key(store)
-        _ARTIST_GENRE_CACHE[artist] = lastfm.artist_genre(artist, key) if key else None
-    return _ARTIST_GENRE_CACHE[artist]
+    key = lastfm.api_key(store)
+    if not key:
+        return None  # Missing credentials must never poison a later configured lookup.
+    cache_key = (artist.casefold(), _credential_version(key))
+    return _metadata_cached(_ARTIST_GENRE_CACHE, cache_key,
+                            lambda: (lastfm.artist_genre(artist, key), True))
+
+
+def _credential_version(key):
+    return sha256(key.encode()).digest() if key else None
+
+
+def _metadata_cached(cache, key, load):
+    """Bounded LRU retention; ambiguous provider misses retry after one minute.
+
+    Providers currently collapse transport errors and confirmed absence to the same
+    value. Partial fallback results also use the retry window. Never hold the cache
+    lock across provider I/O, and never retain credentials themselves in cache keys.
+    """
+    with _METADATA_CACHE_LOCK:
+        cached = cache.get(key)
+        if cached and monotonic() < cached[0]:
+            cache.move_to_end(key)
+            return cached[1]
+        cache.pop(key, None)
+    value, complete = load()
+    ttl = _METADATA_TTL if value and complete else _METADATA_RETRY_TTL
+    with _METADATA_CACHE_LOCK:
+        cache[key] = (monotonic() + ttl, value)
+        cache.move_to_end(key)
+        while len(cache) > _METADATA_CACHE_LIMIT:
+            cache.popitem(last=False)
+    return value
 
 
 def _artist_page(client, name):
@@ -191,13 +232,21 @@ def _cap_per_artist(rows, cap):
 
 
 def genre_artists(store, genre, decade=None, limit=GENRE_ARTISTS):
-    cache_key = (genre.lower(), decade)
-    if cache_key in _GENRE_ARTIST_CACHE:
-        return _GENRE_ARTIST_CACHE[cache_key]
+    if limit <= 0:
+        return []
     key = lastfm.api_key(store)
+    cache_key = (genre.casefold(), decade, limit, _credential_version(key))
+    names = _metadata_cached(_GENRE_ARTIST_CACHE, cache_key,
+                             lambda: _load_genre_artists(genre, decade, limit, key))
+    return list(names)  # Callers must not mutate a cached result.
+
+
+def _load_genre_artists(genre, decade, limit, key):
     ranked = lastfm.tag_top_artists(genre, key, limit=limit * 2) if key else []
+    complete = bool(ranked) or not key
     if decade:
         dated = musicbrainz.tag_artists(genre, decade=decade, limit=limit * 2)
+        complete = complete and bool(dated)
         agreed = {name.lower() for name in dated}
         both = [name for name in ranked if name.lower() in agreed]
         rest_ranked = [name for name in ranked if name.lower() not in agreed]
@@ -211,8 +260,7 @@ def genre_artists(store, genre, decade=None, limit=GENRE_ARTISTS):
         if low and low not in seen and low not in _NOT_AN_ARTIST:
             seen.add(low)
             out.append(name.strip())
-    _GENRE_ARTIST_CACHE[cache_key] = out[:limit]
-    return out[:limit]
+    return out[:limit], complete
 
 
 def other_input_songs(client, kind, name, cap, store=None, decade=None):
@@ -258,30 +306,6 @@ def rank_other(cands):
 def other_cap(artists, genres, limit):
     inputs = [name for name in (artists or []) if name] + [name for name in (genres or []) if name]
     return max(MIN_ARTIST_CAP, math.ceil(limit / max(1, len(inputs))))
-
-
-def build_other_pool(client, artists, genres, limit, store=None):
-    cap = other_cap(artists, genres, limit)
-    rows, seen, related = [], set(), []
-
-    def take(candidates):
-        for candidate in candidates:
-            if candidate["video_id"] not in seen:
-                seen.add(candidate["video_id"])
-                rows.append(candidate)
-
-    for kind, names in (("artist", artists or []), ("genre", genres or [])):
-        for name in names:
-            chunk, more = other_input_songs(client, kind, name, cap, store)
-            for row in chunk:
-                row["input"] = name
-            take(chunk)
-            related += more
-    for name in related:
-        if len(rows) >= limit:
-            break
-        take(_cap_per_artist(_artist_songs(client, name), max(2, cap // 2)))
-    return rank_other(to_candidates(rows[:limit], store))
 
 
 def _resolve_durations(store, client, pool, cap=DURATION_LOOKUPS):

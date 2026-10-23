@@ -36,7 +36,8 @@ def build(ctx) -> APIRouter:
                 # Never claim 100% while a few tracks still await their first pass.
                 return math.floor(1000 * cov[k] / total) / 10
             return round(100 * cov[k] / total) if total else 0
-        remaining = store.enrichment.queue_remaining()
+        queue = store.enrichment.queue_stats()
+        remaining = queue["total"]
         now = ctx.now_fn()
         progress = store.enrichment.enrichment_activity_stats(now)
         enabled = store.settings.get_setting("enrich_worker_enabled", "1") == "1"
@@ -58,18 +59,26 @@ def build(ctx) -> APIRouter:
             state = "queued"
         else:
             state = "idle"
+        timeline = store.enrichment.processed_timeline()
+        spark = viz.area_spark(timeline)
+        refresh_spark = viz.area_spark([
+            {"t": point["t"], "n": point["refresh"]} for point in timeline],
+            maximum=max((point["n"] for point in timeline), default=0), filled=False)
+        for band, point in zip(spark["bands"], timeline):
+            band["refresh"] = point["refresh"]
         return {
             "cov": cov,
             "pct": {k: pct(k) for k in
                     ("processed", "genre", "year", "bpm", "energy", "danceability")},
-            "remaining": remaining, "conflicts": store.enrichment.outstanding_conflicts(),
+            "remaining": remaining, "queue": queue,
+            "conflicts": store.enrichment.outstanding_conflicts(),
             "enabled": enabled, "state": state,
             "activity": activity, "activity_age": age(activity.get("updated_at")),
             "retry": retry, "retry_seconds": max(0, math.ceil((retry["retry_at"] or now) - now)),
             "art_retry": art_retry,
             "art_retry_seconds": max(0, math.ceil((art_retry["retry_at"] or now) - now)),
             "progress": progress, "age": age,
-            "spark": viz.area_spark(store.enrichment.processed_timeline()),
+            "spark": spark, "refresh_spark": refresh_spark,
         }
 
     @router.get("/enrich")

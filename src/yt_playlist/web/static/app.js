@@ -195,9 +195,12 @@ function playlistsTab(rows) {
   // Remember the particular row, since New playlists repeats rows from the library below.
   let lastPickedRow = null;
   return {
-    rows, sel: {}, sortKey: 'title', sortDir: 1, split: false, busy: false,
+    rows, activityScale: 0, sel: {}, sortKey: 'title', sortDir: 1, split: false, busy: false,
     groupModal: false, groupName: '', delModal: false, collapsed: { New: false, Generated: true },
     init() {
+      this.refreshActivityScale();
+      // Alpine watches nested row changes too, including live listen-count updates.
+      this.$watch('rows', () => this.refreshActivityScale());
       // remember view preferences across reloads (the tab reloads after group/delete)
       try {
         this.split = localStorage.getItem('pl.split') === '1';
@@ -241,9 +244,12 @@ function playlistsTab(rows) {
       else { this.sortKey = key; this.sortDir = ['count', 'listens', 'last'].includes(key) ? -1 : 1; }
     },
     ind(key) { return this.sortKey === key ? (this.sortDir === 1 ? 'is-ascending' : 'is-descending') : ''; },
+    refreshActivityScale() {
+      const max = this.rows.reduce((value, row) => Math.max(value, row.listens || 0), 0);
+      this.activityScale = Math.log1p(max);
+    },
     activity(r) {
-      const max = Math.max(0, ...this.rows.map(row => row.listens || 0));
-      return r.listens && max ? Math.log1p(r.listens) / Math.log1p(max) : 0;
+      return r.listens && this.activityScale ? Math.log1p(r.listens) / this.activityScale : 0;
     },
     activityLabel(r) {
       const n = r.listens || 0;
@@ -480,6 +486,7 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource, enrichBas
           }
         } else if (ev.type === 'end') {
           es.close(); this.running = false; this.finished = true;
+          document.body.dispatchEvent(new CustomEvent('playlist-metadata-changed'));
           if (!ev.error) this._finishTimer = setTimeout(() => { this.finished = false; }, 4000);
         }
       };
@@ -500,6 +507,7 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource, enrichBas
       if (!ev.row_html) return;
       const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(ev.video_id)}"]`);
       if (tr) htmx.swap(tr, ev.row_html, { swapStyle: 'outerHTML', settleDelay: 0 });
+      document.body.dispatchEvent(new CustomEvent('playlist-metadata-changed'));
     },
   };
 }
@@ -569,8 +577,11 @@ function playerStatus() {
   return {
     connected: false,
     nowPlaying: null,
+    metadataOverrides: {},
     pendingRating: null,
     ratingSequence: 0,
+    skipping: false,
+    artworkFailed: '',
     currentLocation: location.href,
     sourceLinkVisible() {
       const source = this.nowPlaying && this.nowPlaying.source;
@@ -588,12 +599,8 @@ function playerStatus() {
       return kind === 'radio' ? 'Radio' : kind;
     },
     init() {
-      // Home already owns the shared status poll for radio/onboarding. Everywhere else this global
-      // instrument polls for itself, so there is one poller per page rather than one per component.
-      if (document.getElementById('home')) return;
-      const poll = () => fetch('/bridge/status').then(r => r.json()).then(d => this.apply(d)).catch(() => {});
-      poll();
-      setInterval(poll, 2500);
+      window.playbackStatus.start();
+      if (window.playbackStatus.snapshot) this.apply(window.playbackStatus.snapshot);
     },
     publishLike() {
       if (!this.nowPlaying || !this.nowPlaying.video_id) return;
@@ -602,9 +609,14 @@ function playerStatus() {
         liked: this.nowPlaying.likeStatus === 'LIKE',
       }}));
     },
+    updateMetadata(detail) {
+      this.metadataOverrides[detail.videoId] = { title: detail.title, artist: detail.artist };
+      if (this.nowPlaying?.video_id === detail.videoId) Object.assign(this.nowPlaying, this.metadataOverrides[detail.videoId]);
+    },
     apply(d) {
       this.connected = !!d.connected;
       const next = d.now_playing ? { ...d.now_playing } : null;
+      if (next) Object.assign(next, this.metadataOverrides[next.video_id]);
       const pending = this.pendingRating;
       if (pending) {
         if (!this.connected || !next || next.video_id !== pending.videoId ||
@@ -617,6 +629,13 @@ function playerStatus() {
         }
       }
       this.nowPlaying = next;
+      const icon = document.querySelector('link[rel="icon"][data-playing-href]');
+      if (icon) {
+        icon.dataset.idleHref ||= icon.getAttribute('href');
+        const playing = this.connected && next?.paused === false && !!next.video_id;
+        const href = playing ? icon.dataset.playingHref : icon.dataset.idleHref;
+        if (icon.getAttribute('href') !== href) icon.setAttribute('href', href);
+      }
       this.publishLike();
     },
     requestLike(event) {
@@ -627,13 +646,15 @@ function playerStatus() {
       this.rate('like', liked ? 'LIKE' : 'INDIFFERENT');
     },
     rate(action, desiredStatus = null) {
-      if (!this.nowPlaying) return;
+      if (!this.nowPlaying || this.skipping) return;
       const want = action === 'like' ? 'LIKE' : 'DISLIKE';
       const previous = this.nowPlaying.likeStatus;
       const videoId = this.nowPlaying.video_id;
       const sequence = ++this.ratingSequence;
       this.nowPlaying.likeStatus = desiredStatus || (previous === want ? 'INDIFFERENT' : want);
       const likeStatus = this.nowPlaying.likeStatus;
+      const advancing = likeStatus === 'DISLIKE';
+      if (advancing) this.skipping = true;
       this.pendingRating = { sequence, videoId, likeStatus: this.nowPlaying.likeStatus,
                              expires: Date.now() + 10000 };
       this.publishLike();
@@ -648,8 +669,31 @@ function playerStatus() {
       fetch('/now-playing/rate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, videoId, likeStatus }) })
         .then(r => r.json()).then(d => {
-          if (!d.ok) { console.debug('[Rating] update rejected', videoId, d.error); revert(); }
-        }).catch(revert);
+          if (!d.ok) {
+            console.debug('[Rating] update rejected', videoId, d.error);
+            revert();
+          } else if (d.player_error) {
+            console.debug('[Rating] native player update not confirmed', videoId, d.player_error);
+          }
+        }).catch(error => {
+          console.debug('[Rating] request interrupted', videoId, error);
+          revert();
+        }).finally(() => { if (advancing) this.skipping = false; });
+    },
+    async next() {
+      if (!this.nowPlaying?.video_id || this.skipping) return;
+      const videoId = this.nowPlaying.video_id;
+      this.skipping = true;
+      try {
+        const response = await fetch('/now-playing/next', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ videoId }) });
+        const result = await response.json();
+        if (!result.ok) throw new Error(result.error);
+      } catch (error) {
+        console.debug('[Playback] skip not yet confirmed', videoId, error);
+      } finally {
+        this.skipping = false;
+      }
     },
     toggle() {
       if (!this.nowPlaying) return;
@@ -676,7 +720,10 @@ window.mountNowPlayingDock = mountNowPlayingDock;
 // Music tab (in the background, you stay on TuneConsole). A bridge failure must not create another
 // player that cannot stop the existing music. Ctrl/meta/middle-click still open a new tab.
 function tcPlay(url) {
+  const requestId = window.tcPlaybackRequestSequence = (window.tcPlaybackRequestSequence || 0) + 1;
+  window.dispatchEvent(new CustomEvent('playback-requested', {detail: {url, requestId}}));
   const failed = () => {
+    window.dispatchEvent(new CustomEvent('playback-settled', {detail: {requestId, ok: false}}));
     document.getElementById('playback-error')?.remove();
     const toast = document.createElement('div');
     toast.id = 'playback-error';
@@ -698,6 +745,7 @@ function tcPlay(url) {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
   }).then(r => r.json()).then(d => {
     if (!d || !d.ok) return failed();
+    window.dispatchEvent(new CustomEvent('playback-settled', {detail: {requestId, ok: true}}));
     document.getElementById('playback-error')?.remove();
     return true;
   }).catch(failed);
@@ -724,9 +772,11 @@ document.addEventListener('click', function (e) {
 }, true);
 
 // On a track-list page (playlist, album): highlight the currently-playing row (matched by video id,
-// falling back to a normalized title), and while THIS list is the one playing, fill in genre/year
-// cells as the background enrichment worker resolves them, on the same 2.5s loop.
+// falling back to a normalized title). Metadata enrichment has its own loop, independent of
+// playback status, so it continues while the player is disconnected or another list is playing.
 (function () {
+  if (window.__trackPlaybackBound) return;
+  window.__trackPlaybackBound = true;
   function norm(s) {
     return (s || '').toLowerCase().replace(/\(.*?\)|\[.*?\]/g, '').replace(/\bfeat\.?.*$/, '')
       .replace(/[^a-z0-9]+/g, ' ').trim();
@@ -736,11 +786,14 @@ document.addEventListener('click', function (e) {
     var sel = window.CSS && CSS.escape ? CSS.escape(vid) : vid;
     return document.querySelector('tr[data-vid="' + sel + '"]');
   }
-  var plId = (location.pathname.match(/^\/playlist\/(\d+)/) || [])[1];
-  var metaDone = false;
+  var metaDone = false, metadataTable = null;
   document.addEventListener('playlist-track-added', function () {
     metaDone = false;
     refreshCells();
+    highlightCurrent();
+  });
+  window.addEventListener('song-metadata-updated', function () {
+    document.body.dispatchEvent(new CustomEvent('playlist-metadata-changed'));
   });
 
   // Returns true if the now-playing track is one of the rows on this page.
@@ -758,8 +811,12 @@ document.addEventListener('click', function (e) {
   }
 
   function refreshCells() {
-    if (!plId || metaDone) return;
+    var plId = (location.pathname.match(/^\/playlist\/(\d+)/) || [])[1];
+    var table = document.querySelector('tr[data-vid]')?.closest('table');
+    if (table !== metadataTable) { metadataTable = table; metaDone = false; }
+    if (!plId || !table || metaDone) return;
     fetch('/playlist/' + plId + '/cells').then(function (r) { return r.json(); }).then(function (d) {
+      if (!table.isConnected || (location.pathname.match(/^\/playlist\/(\d+)/) || [])[1] !== plId) return;
       (d.cells || []).forEach(function (c) {
         var row = rowByVid(c.video_id); if (!row) return;
         if (c.genre) {
@@ -775,20 +832,26 @@ document.addEventListener('click', function (e) {
           if (y && y.querySelector('.ghint')) { y.textContent = c.year; row.setAttribute('data-year', String(c.year)); }
         }
       });
+      var facets = document.getElementById('fb-facets-' + plId);
+      if (facets && d.feedback_version && facets.dataset.metadataVersion !== d.feedback_version) {
+        document.body.dispatchEvent(new CustomEvent('playlist-metadata-changed'));
+      }
       if (d.pending === 0) metaDone = true;   // everything resolved: stop refreshing cells
     }).catch(function () {});
   }
 
-  function poll() {
-    if (!document.querySelector('tr[data-vid]')) return;   // only on pages that list tracks
-    if (plId) refreshCells();                              // enrichment updates even when not playing
-    fetch('/bridge/status').then(function (r) { return r.json(); }).then(function (d) {
-      var np = d && d.connected ? d.now_playing : null;
-      highlight(np);
-    }).catch(function () {});
+  function highlightCurrent() {
+    var data = window.playbackStatus.snapshot;
+    highlight(data?.connected ? data.now_playing : null);
   }
-  poll();
-  setInterval(poll, 2500);
+  window.addEventListener('bridge-status', function (event) {
+    highlight(event.detail?.connected ? event.detail.now_playing : null);
+  });
+  document.addEventListener('htmx:afterSwap', highlightCurrent);
+  document.addEventListener('DOMContentLoaded', function () { highlightCurrent(); refreshCells(); }, {once: true});
+  highlightCurrent();
+  refreshCells();
+  setInterval(refreshCells, 2500);
 })();
 
 // Navbar omnisearch dropdown: open/close + keyboard nav over the HTMX-rendered result rows.

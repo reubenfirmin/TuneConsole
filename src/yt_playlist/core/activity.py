@@ -10,13 +10,19 @@ from dataclasses import dataclass
 from typing import Callable
 
 from yt_playlist.core.work_diagnostics import work_span
+from yt_playlist.core.priority import yield_to_requests
 
 _CURRENT_WORK = ContextVar("tuneconsole_activity", default=None)
 _CANCELLATION = ContextVar("tuneconsole_cancellation", default=None)
+_DEADLINE = ContextVar("tuneconsole_work_deadline", default=None)
 
 
 class WorkClosing(RuntimeError):
     pass
+
+
+class WorkBudgetExceeded(RuntimeError):
+    """A disposable calculation used its allotted wall time."""
 
 
 @dataclass
@@ -165,9 +171,16 @@ def check_stopping():
     """Cooperative boundary for read-only work; admitted mutations still drain normally."""
     current = _CURRENT_WORK.get()
     cancellation = _CANCELLATION.get()
-    if ((current is not None and current[0].closing_reason == "shutdown")
-            or (cancellation is not None and cancellation.should_stop())):
+    def stopped():
+        return ((current is not None and current[0].closing_reason == "shutdown")
+                or (cancellation is not None and cancellation.should_stop()))
+
+    deadline = _DEADLINE.get()
+    yield_to_requests(lambda: stopped() or (deadline is not None and time.monotonic() >= deadline))
+    if stopped():
         raise WorkClosing("TuneConsole is shutting down; background work stopped.")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise WorkBudgetExceeded("Background preparation exhausted its time budget")
 
 
 @contextmanager
@@ -195,6 +208,18 @@ def check_cancellable_work():
         check_stopping()
 
 
+@contextmanager
+def work_budget(seconds):
+    """Bound an entire disposable calculation, including its SQLite setup queries."""
+    previous = _CANCELLATION.get()
+    token = _DEADLINE.set(time.monotonic() + seconds)
+    try:
+        with cancellable_work(previous.should_stop if previous else lambda: False):
+            yield
+    finally:
+        _DEADLINE.reset(token)
+
+
 def interrupt_query():
     """SQLite progress callback: interrupt only the current cancellable calculation.
 
@@ -205,7 +230,7 @@ def interrupt_query():
     if cancellation is not None and not cancellation.interrupted:
         try:
             check_stopping()
-        except WorkClosing:
+        except (WorkClosing, WorkBudgetExceeded):
             cancellation.interrupted = True
             return 1
     return 0

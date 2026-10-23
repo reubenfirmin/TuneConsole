@@ -3,6 +3,7 @@ vector they already have. content_taste = the content-space sibling of playlist_
 includes content-vectored-but-collab-vectorless owned tracks."""
 from yt_playlist.core.store import Store
 from yt_playlist.rec import surfaces, embed, eval_recs
+from tests import model_support
 from yt_playlist.rec.scoring import content_taste
 
 
@@ -20,7 +21,7 @@ def test_content_taste_builds_centroids():
     s = _store(); iid = s.identities.upsert_identity("m", "c", None, True)
     a = _trk(s, "v1", "A", "X", "Techno"); b = _trk(s, "v2", "B", "Y", "Techno")
     pl = s.playlists.upsert_playlist(iid, "P", "Techno", 2, "h", 0.0); s.playlists.set_playlist_tracks(pl, [a, b])
-    embed.build_content_and_store(s)
+    model_support.build_content_model(s)
     ct = content_taste(s)
     assert ct and "Techno" in ct.titles            # a content-space taste context was built
 
@@ -30,7 +31,7 @@ def test_catalog_ranks_content_only_owned_track():
     a = _trk(s, "v1", "A", "X", "Techno"); b = _trk(s, "v2", "B", "Y", "Techno"); c = _trk(s, "v3", "C", "Z", "Techno")
     pl = s.playlists.upsert_playlist(iid, "P", "Techno", 3, "h", 0.0); s.playlists.set_playlist_tracks(pl, [a, b, c])
     _trk(s, "v4", "D", "W", "Techno")              # owned, genre, NOT in any playlist, NO co-occurrence vector
-    embed.build_content_and_store(s)               # content vectors for all; no collaborative vectors built
+    model_support.build_content_model(s)  # content vectors for all; no collaborative vectors built
     keys = {i.key for i in surfaces.explore_for_you(s, 0.0, limit=10)}
     assert "d|w" in keys                           # the content-only owned track is now rankable in Catalog
 
@@ -40,6 +41,6 @@ def test_content_rankable_counts_vectorless_owned():
     a = _trk(s, "v1", "A", "X", "Techno"); b = _trk(s, "v2", "B", "Y", "Techno")
     pl = s.playlists.upsert_playlist(iid, "P", "Techno", 2, "h", 0.0); s.playlists.set_playlist_tracks(pl, [a, b])
     _trk(s, "v4", "D", "W", "Techno")
-    embed.build_content_and_store(s)
+    model_support.build_content_model(s)
     out = eval_recs.content_rankable(s)
     assert out["rankable"] >= 1 and out["rankable"] <= out["vectorless_owned"]

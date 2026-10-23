@@ -132,7 +132,7 @@ def test_assemble_empty_without_bundles(store):
 
 @pytest.mark.parametrize("ppr_share", [0, 1])
 def test_cached_cards_respond_to_durable_dislikes_and_clear_without_rebuild(store, monkeypatch, ppr_share):
-    from yt_playlist.rec import embed, graduation, rec_params
+    from yt_playlist.rec import graduation, rec_params
 
     _seed(store)
     rec_params.set_param(store, "ppr_ab_share", ppr_share)
@@ -140,10 +140,10 @@ def test_cached_cards_respond_to_durable_dislikes_and_clear_without_rebuild(stor
     payload = store.rec_surface.get_proposals("mode_bundles")
     keys = [item["key"] for bucket in payload.values() if isinstance(bucket, dict)
             for items in bucket.values() if isinstance(items, list) for item in items]
-    vectors = np.array([[1., 0.] if key.endswith("-0") else [0., 1.] for key in keys] + [[1., 0.]])
-    index = {key: i for i, key in enumerate(keys)}
-    index["disliked-seed"] = len(keys)
-    monkeypatch.setattr(embed, "load_vectors", lambda store: (keys + ["disliked-seed"], vectors, index))
+    vectors = np.array([[1., 0.] if key.endswith("-0") else [0., 1.] for key in keys] + [[1., 0.]],
+                       dtype=np.float32)
+    store.rec_model.replace_rec_vectors([(key, vector.tobytes())
+                                        for key, vector in zip(keys + ["disliked-seed"], vectors)])
     payload["_ppr"] = {str(mid): [item["key"] for surf in ms.CARD_SURFACES
                                 for item in payload[str(mid)][surf]] for mid in range(1, 5)}
     store.rec_surface.put_proposals("mode_bundles", payload, 1)
@@ -252,6 +252,7 @@ def _genre_items(prefix, genre, count):
 @pytest.mark.parametrize("prepared", [False, True])
 def test_thin_mix_exhausts_deeper_family_before_adjacent_tracks(store, monkeypatch, prepared):
     from types import SimpleNamespace
+    from tests.conftest import seed_catalog_track
     from yt_playlist.rec import embed, surfaces
 
     store.modes.replace_modes([
@@ -266,7 +267,11 @@ def test_thin_mix_exhausts_deeper_family_before_adjacent_tracks(store, monkeypat
                "_meta": {"full_pools": prepared}}
     store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
     store.rec_model.record_dislike("deep0", until=None, now=1.0)
-    monkeypatch.setattr(store.rec_query, "generated_track_keys", lambda: {"deep1"})
+    entry = seed_catalog_track(store, "deep1", "deep1", "deep artist 1", video_id="vdeep1")
+    identity = store.identities.upsert_identity("test", "cred", None, True)
+    playlist = store.playlists.upsert_playlist(identity, "GENERATED", "Generated", 1, "hash", 1)
+    store.playlists.set_playlist_tracks(playlist, [entry])
+    store.playlists.mark_generated_playlist("GENERATED")
 
     def ranked_library(s, now, limit):
         assert not prepared  # full bundles serve without reranking

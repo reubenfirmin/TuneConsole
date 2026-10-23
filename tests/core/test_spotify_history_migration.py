@@ -7,6 +7,7 @@ from yt_playlist.core.migrations import v031_spotify_history as upgrade
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
 from yt_playlist.core import listening
+from yt_playlist.core.db_revisions import Revisions
 
 
 def _predecessor(path):
@@ -78,6 +79,8 @@ def test_daily_only_spotify_history_marks_unknown_legacy_influence():
         listening.observe_day(store.conn, iid, 'old-song', '2024-01-01', 'spotify', 'UTC', 100)
     migrate(store.conn, registry=_registry())
     assert store.settings.get_setting('spotify_legacy_discovery_unattributed') == '1'
+    # Install the runtime snapshot guard without upgrading this v031 fixture.
+    store._snapshot_revisions = Revisions(store.conn)
     assert store.history.spotify_history_stats()['days'] == 0
     assert store.history.spotify_history_stats()['unresolved_days'] == 1
     store.conn.close()

@@ -60,6 +60,50 @@ function roadTripBalance(rows) {
   };
 }
 
+function roadTripScreen() {
+  return {
+    requests: [],
+    lookups: 0,
+    error: '',
+    get loading() { return this.lookups > 0 || this.requests.length > 0; },
+    get loadingMessage() {
+      return this.requests.at(-1)?.message || 'Finding music for your passenger…';
+    },
+    requestStarted(event) {
+      const detail = event.detail;
+      if (detail.target?.id !== 'road-trip-body' || detail.requestConfig?.verb === 'get') return;
+      const path = detail.requestConfig?.path || '';
+      const message = path.endsWith('/save') ? 'Saving your playlist to YouTube…'
+        : path.endsWith('/build') ? 'Preparing your playlist…' : 'Updating your route…';
+      this.error = '';
+      this.requests.push({ xhr: detail.xhr, message, saving: path.endsWith('/save') });
+    },
+    requestFinished(event) {
+      const request = this.requests.find(request => request.xhr === event.detail.xhr);
+      if (!request) return;
+      this.requests = this.requests.filter(request => request.xhr !== event.detail.xhr);
+      // HTMX emits afterRequest first for transport failures/timeouts, without
+      // detail.failed. Status zero already identifies that terminal failure;
+      // the later sendError/timeout event arrives after this request is removed.
+      if (event.detail.failed || event.detail.xhr.status === 0 || event.type !== 'htmx:afterRequest') {
+        this.error = request.saving
+          ? 'The save could not be confirmed. Check YouTube Music before trying again.'
+          : 'The request could not be completed. Check your route before trying again.';
+      }
+    },
+    beforeSwap(event) {
+      // Background progress must not replace an editor with unsaved artist/genre selections,
+      // or remove a request's indicator while its replacement is still being prepared.
+      if (this.loading && event.detail.target?.id === 'road-trip-body'
+          && event.detail.requestConfig?.verb === 'get') event.detail.shouldSwap = false;
+    },
+    lookupChanged(event) {
+      this.lookups = Math.max(0, this.lookups + (event.detail.pending ? 1 : -1));
+      if (event.detail.pending) this.error = '';
+    },
+  };
+}
+
 function roadTripForm(initial, context) {
   initial = initial || {};
   context = context || {};
@@ -98,7 +142,8 @@ function roadTripForm(initial, context) {
       this.artists.filter(name => !this.artistGenres[name]).forEach(name => this.loadArtistGenre(name));
     },
     loadArtistGenre(name) {
-      return fetch('/road_trip/artist_genre?name=' + encodeURIComponent(name))
+      return fetch('/road_trip/artist_genre?name=' + encodeURIComponent(name),
+        { signal: AbortSignal.timeout(30000) })
         .then(r => r.json()).then(d => {
           if (d.genre && this.artists.includes(name)) this.artistGenres[name] = d.genre;
           return d.genre || '';
@@ -155,11 +200,20 @@ function roadTripForm(initial, context) {
     addArtist(name) {
       if (!this.artists.includes(name)) this.artists.push(name);
       this.artistQuery = ''; this.artistSuggestions = [];
+      // Keep completion attached to the persistent screen even if a draft poll replaces this
+      // editor while the lookup is pending. A detached component must still release its loader.
+      const screen = this.$el.closest('[data-road-trip-screen]');
+      const lookupChanged = pending => screen?.dispatchEvent(new CustomEvent('road-trip-lookup',
+        { detail: { pending } }));
+      lookupChanged(true);
       this.loadArtistGenre(name)
         .then(genre => {
           if (this.artists.includes(name) && genre && !this.genres.includes(genre)) this.genres.push(genre);
         })
-        .finally(() => this.steer());
+        .finally(() => {
+          if (!this.disposed && this.id) this.submit();
+          lookupChanged(false);
+        });
     },
     removeArtist(name) { this.artists = this.artists.filter(a => a !== name); this.steer(); },
     // Apply an edit to the recipe already on screen. Debounced, so tapping through a few chips or

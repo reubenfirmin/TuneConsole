@@ -16,6 +16,10 @@
         <td class="num">{{ a.id }}</td>
         <td class="mono nowrap text-dim">{{ row.when }}</td>
         <td>{{ row.desc }} <span class="tag">{{ a.kind }}</span>
+          {% if (row.uncertain or row.unattempted) and a.status != 'undone' %}<p class="text-dim" role="alert">{{ row.uncertain }} addition(s) remain unconfirmed; {{ row.unattempted }} were not attempted. Confirmed progress was retained. Review the destination before retrying; unconfirmed additions may still appear.</p>{% endif %}
+          {% if row.missing_snapshot and a.status != 'undone' %}<p class="text-dim">The change was recorded, but its post-action snapshot could not be verified or was not saved. Automatic Undo cannot safely remove these changes. Review the playlist in YouTube Music before recovering manually.</p>
+            {% if row.copy_ytm %}<a href="https://music.youtube.com/playlist?list={{ row.copy_ytm|urlencode }}" target="_blank" rel="noopener">Review created playlist</a>{% endif %}
+          {% endif %}
           {% if row.recovery_error %}<p class="text-dim" role="alert">{{ row.recovery_error }} Progress is saved; retry this Undo to continue.</p>{% endif %}
           {% if row.recovered %}<p>Recovered playlists:
             {% for ytm in row.recovered %}<a href="https://music.youtube.com/playlist?list={{ ytm|urlencode }}" target="_blank" rel="noopener">View playlist</a>{% if not loop.last %}, {% endif %}{% endfor %}
@@ -25,7 +29,7 @@
           {% if a.status == 'executed' %}<span class="tag teal">{{ a.status }}</span>
           {% elif a.status in ('cancelled', 'undone') %}<span class="tag">{{ a.status }}</span>
           {% elif a.status == 'planned' %}<span class="tag amber">{{ a.status }}</span>
-          {% elif a.status == 'pending' %}<span class="tag amber">placement pending</span>
+          {% elif a.status == 'pending' %}<span class="tag amber">{{ 'creating playlist' if a.kind == 'copy_playlist' else 'placement pending' }}</span>
           {% elif a.status == 'undo_failed' %}<span class="tag amber">recovery incomplete · {{ row.recovery_progress }}</span>
           {% elif a.status == 'undoing' %}<span class="tag amber">recovering · {{ row.recovery_progress }}</span>
           {% else %}<span class="tag">{{ a.status }}</span>{% endif %}

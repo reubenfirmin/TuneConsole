@@ -10,7 +10,7 @@ from yt_playlist.library import ratings
 from yt_playlist.library.playlist_positions import retry_insertions
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.library.sync_outcomes import (begin_attempt, combined_status, finish_attempt,
-                                               resource)
+                                               resource, retained, SyncSchedule)
 from yt_playlist.repos.base import GENERATED_GROUP
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,9 @@ def _emit(on_progress, type, text, **extra):
         on_progress({"type": type, "text": text, **extra})
 
 def _is_auth_error(e) -> bool:
+    from yt_playlist.core.album_snapshot import LibrarySnapshotError
+    if isinstance(e, LibrarySnapshotError):
+        return e.reason == "signed out"
     # A dead session shows up two ways: a clean HTTP 401/403, or (more often) YouTube quietly serving
     # the SIGNED-OUT layout - singleColumnBrowseResultsRenderer with a "Sign in" button / signInEndpoint -
     # which ytmusicapi can't parse (it expects the signed-in twoColumnBrowseResultsRenderer) and raises a
@@ -70,27 +73,75 @@ def _is_auth_error(e) -> bool:
             or "signinendpoint" in s or "singlecolumnbrowseresultsrenderer" in s)
 
 def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
-                  on_auth_expired=None, on_auth_ok=None):
+                  on_auth_expired=None, on_auth_ok=None, *, schedule=None):
+    schedule = schedule or SyncSchedule(store, now)
+    label = label or f"identity {identity_id}"
+    try:
+        resources, auth_bad = _sync_playlists(store, identity_id, client, now, on_progress,
+                                             label, on_auth_expired, schedule)
+    except WorkClosing:
+        raise
+    except Exception as exc:
+        detail = error_summary(exc)
+        resources = {name: resource("failed", detail)
+                     for name in ("playlist_listing", "playlists", "ratings")}
+        resources["playlists"]["items"] = {pid: retained(item) for pid, item in
+            schedule.previous(identity_id, "playlists").get("items", {}).items()}
+        auth_bad = _is_auth_error(exc)
+        logger.warning("playlist-library fetch failed for identity %s: %s", identity_id, detail)
+        _emit(on_progress, "err", f"{label}: playlist library unavailable: {detail}")
+    if schedule.resource_due(identity_id, "history"):
+        resources["history"], history_auth_bad = _sync_history(
+            store, identity_id, client, now, on_progress, label, on_auth_expired)
+        auth_bad = auth_bad or history_auth_bad
+    else:
+        resources["history"] = retained(schedule.previous(identity_id, "history"))
+    if not auth_bad:
+        ratings.reconcile_pending(store, identity_id, client)
+        if on_auth_ok and any(r.get("status") == "complete" and not r.get("_retained")
+                              for r in resources.values()):
+            on_auth_ok(identity_id)
+    status = combined_status(resources.values())
+    playlists = resources["playlists"]
+    _emit(on_progress, "info", f"{label}: {status} ({playlists.get('refreshed', 0)} playlists refreshed, "
+          f"{playlists.get('skipped', 0)} skipped)")
+    return {"label": label, "resources": resources, "status": status}
+
+
+def _sync_playlists(store, identity_id, client, now, on_progress, label, on_auth_expired, schedule):
     label = label or f"identity {identity_id}"
     resources = {}
+    auth_bad = False
 
     def result():
-        return {"label": label, "resources": resources,
-                "status": combined_status(resources.values())}
+        return resources, auth_bad
 
     def unavailable(status, message):
         resources.update({name: resource(status, message)
-                          for name in ("playlists", "ratings", "history")})
+                          for name in ("playlist_listing", "playlists", "ratings")})
+        resources["playlists"]["items"] = {pid: retained(item) for pid, item in
+            schedule.previous(identity_id, "playlists").get("items", {}).items()}
         return result()
+    if (not schedule.resource_due(identity_id, "playlist_listing") and
+            schedule.previous(identity_id, "playlist_listing").get("status") != "complete"):
+        return {name: retained(schedule.previous(identity_id, name))
+                for name in ("playlist_listing", "playlists", "ratings")}, False
     logger.info("syncing identity %s", identity_id)
     # Only these rows can be disproved by this library snapshot. A playlist created while
     # the remote fetch is in flight may not appear in it yet, even while it is playing.
     existing_playlists = [p for p in store.playlists.get_playlists() if p.identity_id == identity_id]
     _emit(on_progress, "info", f"{label}: fetching playlists…")
     try:
-        playlists = with_retry(lambda: client.get_library_playlists(limit=None),
-                               operation=f"fetch library for {label!r} (identity {identity_id})",
-                               check_cancelled=check_stopping)
+        if schedule.resource_due(identity_id, "playlist_listing"):
+            playlists = with_retry(lambda: client.get_library_playlists(limit=None),
+                                   operation=f"fetch library for {label!r} (identity {identity_id})",
+                                   check_cancelled=check_stopping)
+            resources["playlist_listing"] = resource("complete", entries=playlists)
+            resources["playlist_listing"]["verified_empty"] = (not playlists and
+                                                                  getattr(playlists, "complete", False))
+        else:
+            resources["playlist_listing"] = retained(schedule.previous(identity_id, "playlist_listing"))
+            playlists = resources["playlist_listing"].get("entries", [])
         if (not isinstance(playlists, list)
                 or any(not isinstance(p, dict) or not p.get("playlistId") for p in playlists)):
             raise ValueError("playlist snapshot is unavailable")
@@ -105,6 +156,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         return unavailable("skipped", "Extension not connected")
     except Exception as e:  # noqa: BLE001 - an expired session shouldn't abort the whole sync
         if _is_auth_error(e):
+            auth_bad = True
             logger.warning("auth expired for identity %s: %s", identity_id, e)
             if on_auth_expired:
                 on_auth_expired(identity_id, label)
@@ -118,13 +170,26 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     groups = store.playlists.get_playlist_groups()        # for the generated-quarantine reconciliation below
     rated: dict[str, str] = {}                  # videoId -> likeStatus; see _STATUS_PRIORITY
     ratings_complete = True
-    refreshed = skipped = incomplete = 0
-    auth_bad = False
+    refreshed = skipped = incomplete = reused = 0
+    previous_items = schedule.previous(identity_id, "playlists").get("items", {})
+    previous_listing = schedule.previous(identity_id, "playlist_listing")
+    # Periodic full reads also reconcile neutral ratings. Retries between those
+    # sweeps reuse healthy membership without claiming fresh neutral evidence.
+    full_refresh = (previous_listing.get("status") == "complete" and
+                    schedule.resource_due(identity_id, "playlist_listing"))
+    items = {}
     for i, pl in enumerate(playlists, 1):
         check_stopping()
         pid = pl["playlistId"]
         context = f"playlist {pl.get('title', '')!r} ({pid}), account {label!r} (identity {identity_id})"
         seen_ytm.add(pid)  # mark seen before fetch so a transient read failure doesn't prune it
+        previous = previous_items.get(pid, {})
+        if not full_refresh and not schedule.due(previous):
+            items[pid] = retained(previous)
+            reused += 1
+            # An older snapshot cannot prove that a rating became neutral today.
+            ratings_complete = False
+            continue
         try:
             detail = with_retry(lambda: client.get_playlist(pid, limit=None), operation=f"fetch {context}",
                                 check_cancelled=check_stopping)
@@ -146,11 +211,21 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
                            "Check https://music.youtube.com/playlist?list=%s with this account; "
                            "full exception at DEBUG", context, error_summary(e), pid)
             _emit(on_progress, "info", f"{label} › skipped {pl.get('title', '')} (couldn't read)")
+            items[pid] = resource("failed", error_summary(e))
             continue
         ratings_complete = ratings_complete and _complete_rating_context(detail)
         complete = is_complete_playlist(detail)
         if not complete:
             incomplete += 1
+            count = detail.get("trackCount")
+            advertised = count if type(count) is int else "missing" if count is None else "invalid"
+            reason = (f"advertised={advertised}, received={len(detail['tracks'])}, "
+                      f"continuation={bool(detail.get('continuation') or detail.get('continuations'))}")
+            audit = detail.get('_readAudit')
+            if isinstance(audit, dict):
+                reason += ', ' + ', '.join(f'{field}={audit.get(field)}' for field in
+                    ('pages', 'raw_items', 'omitted', 'unidentified', 'exhausted'))
+            items[pid] = resource("partial", reason)
         track_ids, keys = [], []
         for t in detail.get("tracks", []):
             if complete:
@@ -173,7 +248,8 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
                     rated[rk] = status
         if not complete:
             _sync_generated_group(store, pid, detail.get("description"), groups, identity_id)
-            logger.warning("incomplete %s; keeping any cached playlist/tracks until a complete read", context)
+            logger.warning("incomplete %s (%s); keeping any cached playlist/tracks until a complete read",
+                           context, reason)
             _emit(on_progress, "info", f"{label} › {pl.get('title', '')} (incomplete; waiting for a complete read)",
                   i=i, total=total)
             continue
@@ -188,6 +264,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         store.playlists.ensure_playlist_thumbnail(db_pid)
         _sync_generated_group(store, pid, detail.get("description"), groups,identity_id)
         refreshed += 1
+        items[pid] = resource("complete")
         _emit(on_progress, "step", f"{label} › {pl.get('title', '')} ({len(track_ids)} tracks)",
               i=i, total=total)
 
@@ -196,13 +273,14 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     # transient or session glitch (it doesn't always surface as a 401/403), and pruning on it would
     # destructively wipe every playlist for the identity. Sync must only *update* on success, never
     # clear on a non-result. A later, real sync re-adds anything genuinely missing.
-    if playlists:
+    verified_empty = not playlists and resources["playlist_listing"].get("verified_empty", False)
+    if (playlists or verified_empty) and not resources["playlist_listing"].get("_retained"):
         stale = [p for p in existing_playlists if p.ytm_playlist_id not in seen_ytm]
         for p in stale:
             store.playlists.remove_playlist(p.id)
         if stale:
             _emit(on_progress, "info", f"{label}: removed {len(stale)} playlist(s) no longer present")
-    else:
+    elif not playlists and not verified_empty:
         # An empty library on a configured identity is, in practice, a broken/expired session. Some
         # endpoints return [] instead of raising a 401 (exactly what happened to the master account
         # while the brand account got a clean 401). Treat it the SAME: flag for re-auth, never prune.
@@ -213,25 +291,36 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
             on_auth_expired(identity_id, label)
         _emit(on_progress, "auth_expired",
               f"{label}: returned no playlists. Session may have expired, re-authenticate", label=label)
+        resources["playlist_listing"] = resource("failed", "Unverified empty playlist snapshot")
 
     incomplete_summary = f", {incomplete} incomplete" if incomplete else ""
-    playlist_summary = f"{refreshed} refreshed, {skipped} skipped{incomplete_summary}"
+    playlist_summary = f"{refreshed} refreshed, {skipped} skipped{incomplete_summary}, {reused} reused"
+    item_status = combined_status(items.values()) if items else "complete"
     resources["playlists"] = resource(
-        "failed" if auth_bad or (skipped and not refreshed and not incomplete) else
-        "partial" if skipped or incomplete else "complete",
+        "failed" if auth_bad else item_status,
         "No playlist snapshot" if auth_bad else playlist_summary,
-        refreshed=refreshed, skipped=skipped, incomplete=incomplete)
+        refreshed=refreshed, skipped=skipped, incomplete=incomplete, reused=reused, items=items)
+    if reused == len(playlists) and resources["playlist_listing"].get("_retained"):
+        resources["playlists"]["_retained"] = True
     rating_status = ("complete" if ratings_complete and not auth_bad else
                      "partial" if any(s != "INDIFFERENT" for s in rated.values()) else "skipped")
     resources["ratings"] = resource(rating_status,
                                     "" if ratings_complete and not auth_bad else
                                     "Incomplete playlist evidence; neutral ratings preserved")
+    if reused and schedule.previous(identity_id, "ratings"):
+        resources["ratings"] = retained(schedule.previous(identity_id, "ratings"))
 
     # An unread context might contain the LIKE/DISLIKE hidden by an ordinary playlist's
     # INDIFFERENT. Apply the same trustworthy evidence to account ratings and model feedback.
     if not ratings_complete:
         rated = {video_id: status for video_id, status in rated.items() if status != "INDIFFERENT"}
     ratings.record_observations(store, identity_id, rated, source="sync", now=now)
+    logger.info("synced identity %s (%s): %d playlists listed, %d refreshed, %d skipped, %d incomplete, %d reused",
+                identity_id, label, len(playlists), refreshed, skipped, incomplete, reused)
+    return result()
+
+
+def _sync_history(store, identity_id, client, now, on_progress, label, on_auth_expired):
     _emit(on_progress, "info", f"{label}: fetching history…")
     try:  # history is best-effort (powers stale detection); never let it fail the whole sync
         history = with_retry(lambda: client.get_history(),
@@ -250,28 +339,17 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         # events (library/live_plays.py) and dedup against the same (track, date) model.
         store.history.record_history_plays(identity_id, now, hist,
                                    source_timezone=getattr(client, "history_timezone", None))
-        resources["history"] = resource("complete", refreshed=len(hist))
+        return resource("complete", refreshed=len(hist)), False
     except WorkClosing:
         raise
     except Exception as e:  # noqa: BLE001
-        logger.warning("history fetch failed for %s: %s", identity_id, e)
+        logger.warning("history fetch failed for identity %s: %s", identity_id, error_summary(e))
         _emit(on_progress, "info", f"{label}: history unavailable (skipped)")
-        resources["history"] = resource("failed", error_summary(e))
-        if _is_auth_error(e):
-            auth_bad = True
+        auth_bad = _is_auth_error(e)
+        if auth_bad:
             if on_auth_expired:
                 on_auth_expired(identity_id, label)
-    if not auth_bad:
-        ratings.reconcile_pending(store, identity_id, client)
-        if on_auth_ok:
-            on_auth_ok(identity_id)   # genuine success -> clear any "expired" flag
-        logger.info("synced identity %s (%s): %d playlists listed, %d refreshed, %d skipped, %d incomplete",
-                    identity_id, label, len(playlists), refreshed, skipped, incomplete)
-        status = result()["status"]
-        _emit(on_progress, "done" if status == "complete" else "info",
-              f"{label}: {status} ({refreshed} playlists refreshed, {skipped} skipped{incomplete_summary})",
-              outcome=status)
-    return result()
+        return resource("failed", error_summary(e)), auth_bad
 
 def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now, *, snapshot=None) -> None:
     """Re-fetch a single playlist's tracks into the store, fast post-merge refresh (no full sync)."""
@@ -298,14 +376,22 @@ def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now, *,
     _sync_generated_group(store, ytm_playlist_id, detail.get('description'),
                           store.playlists.get_playlist_groups(),identity_id)
 
-def _sync_saved_albums(store, clients, on_progress):
+def _sync_saved_albums(store, clients, on_progress, *, schedule=None):
     """Refresh each complete account snapshot without deleting another account's evidence."""
     saved, snapshots, revisions = {}, {}, {}
+    previous_saved_ids = store.collection.saved_album_ids() if schedule else set()
     configured = {identity.id for identity in store.identities.get_identities()}
     complete = bool(clients) and configured <= clients.keys()
-    outcomes = {str(i): resource("skipped", "Account unavailable") for i in configured - clients.keys()}
+    outcomes = {str(i): (retained(schedule.previous(i, "saved_albums"))
+                           if schedule and not schedule.resource_due(i, "saved_albums") else
+                           resource("skipped", "Account unavailable"))
+                for i in configured - clients.keys()}
     for identity_id, client in clients.items():
         check_stopping()
+        if schedule and not schedule.resource_due(identity_id, "saved_albums"):
+            outcomes[str(identity_id)] = retained(schedule.previous(identity_id, "saved_albums"))
+            complete = complete and outcomes[str(identity_id)]["status"] == "complete"
+            continue
         try:
             revisions[identity_id] = store.collection.saved_album_revision(identity_id)
             albums = with_retry(lambda: client.get_library_albums(limit=None), check_cancelled=check_stopping)
@@ -331,6 +417,14 @@ def _sync_saved_albums(store, clients, on_progress):
             outcomes[str(identity_id)] = resource("skipped" if isinstance(e, BridgeError) else "failed",
                                                   error_summary(e))
     if not snapshots:
+        if schedule:
+            tracks = (_materialize_album_tracks(store, clients,
+                       {a['browse']: a for a in store.collection.get_saved_albums()}, on_progress)
+                      if schedule.resource_due(None, "album_tracks") else
+                      retained(schedule.previous(None, "album_tracks")))
+            mirror = schedule.previous(None, "saved_album_mirror")
+            return outcomes, (retained(mirror) if mirror else
+                              resource("skipped", "Complete account snapshots unavailable")), tracks
         _emit(on_progress, "info", "saved albums unchanged: no complete account snapshots")
         return outcomes, resource("skipped", "Complete account snapshots unavailable"), resource(
             "skipped", "Saved-album mirror unchanged")
@@ -345,7 +439,10 @@ def _sync_saved_albums(store, clients, on_progress):
             'skipped', 'Saved-album mirror unchanged')
     saved = {a['browse']:a for a in store.collection.get_saved_albums()}
     _emit(on_progress, "info", f"saved albums: {len(saved)}")
-    tracks = _materialize_album_tracks(store, clients, saved, on_progress)
+    tracks = (_materialize_album_tracks(store, clients, saved, on_progress)
+              if schedule is None or schedule.resource_due(None, "album_tracks") or
+              bool(saved.keys() - previous_saved_ids)
+              else retained(schedule.previous(None, "album_tracks")))
     return outcomes, resource("complete" if complete else "partial", refreshed=len(saved)), tracks
 
 
@@ -396,18 +493,22 @@ def _materialize_album_tracks(store, clients, saved, on_progress):
                         f"{failed} albums unavailable", refreshed=added, skipped=failed)
     return resource("complete", refreshed=added)
 
-def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_auth_ok=None):
+def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_auth_ok=None, *,
+             automatic=False, retry_now=False, max_age_s=86400):
+    schedule = SyncSchedule(store, now, automatic=automatic, retry_now=retry_now, max_age_s=max_age_s)
     begin_attempt(store, now)
     labels = {idn.id: idn.label for idn in store.identities.get_identities()}
     accounts = {str(i): {"label": label, "status": "skipped", "resources": {
-        name: resource("skipped", "Account unavailable") for name in ("playlists", "ratings", "history")}}
+        name: (resource("skipped", "Account unavailable") if schedule.resource_due(i, name) else
+               retained(schedule.previous(i, name)))
+        for name in ("playlist_listing", "playlists", "ratings", "history")}}
         for i, label in labels.items() if i not in clients}
     for identity_id, client in clients.items():
         check_stopping()
         try:
             accounts[str(identity_id)] = sync_identity(
                 store, identity_id, client, now, on_progress=on_progress, label=labels.get(identity_id),
-                on_auth_expired=on_auth_expired, on_auth_ok=on_auth_ok)
+                on_auth_expired=on_auth_expired, on_auth_ok=on_auth_ok, schedule=schedule)
         except WorkClosing:
             raise
         except Exception as e:  # keep healthy accounts usable when another account fails
@@ -415,11 +516,13 @@ def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_aut
             _emit(on_progress, "err", f"{labels.get(identity_id, identity_id)}: sync failed: {detail}")
             accounts[str(identity_id)] = {"label": labels.get(identity_id), "status": "failed",
                 "resources": {name: resource("failed", detail)
-                              for name in ("playlists", "ratings", "history")}}
-    albums, mirror, tracks = _sync_saved_albums(store, clients, on_progress)
+                              for name in ("playlist_listing", "playlists", "ratings", "history")}}
+    albums, mirror, tracks = _sync_saved_albums(store, clients, on_progress, schedule=schedule)
     for identity_id, account in accounts.items():
         account["resources"]["saved_albums"] = albums[identity_id]
         account["status"] = combined_status(account["resources"].values())
+        if all(item.get("_retained") for item in account["resources"].values()):
+            account["_retained"] = True
     resources = {"saved_album_mirror": mirror, "album_tracks": tracks}
     status = combined_status([*accounts.values(), *resources.values()])
     result = finish_attempt(store, {"status": status, "accounts": accounts, "resources": resources}, now)

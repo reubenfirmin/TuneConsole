@@ -1,6 +1,7 @@
 from playwright.sync_api import expect
 
 from tests.test_home_vibe import seed_sounds
+from tests.test_mode_cards_route import prepare_home
 from yt_playlist.rec import home_vibe, mix_tuning
 from yt_playlist.util.matching import identity_key
 
@@ -17,6 +18,7 @@ def prepare(store):
         for day in range(10):
             store.history.record_history_plays(iid, 1 - day * 86400,
                 [identity_key(f"Favorite {i}", f"Favorite artist {i}")], source_timezone="UTC")
+    prepare_home(store, 1)
 
 
 def test_vibe_applies_persists_recovers_from_failure_and_resets(live_app, store, page):

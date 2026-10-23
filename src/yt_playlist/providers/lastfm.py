@@ -10,23 +10,19 @@ Needs a (free) Last.fm API key: set $LASTFM_API_KEY, or `lastfm_api_key = "..."`
 import json
 import logging
 import re
-import sys
+import tomllib
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from yt_playlist.providers import genres
+from yt_playlist.util.matching import is_remix
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter
 from yt_playlist.util import net
 from yt_playlist.core import paths
 
 name = "lastfm"
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover
-    import tomli as tomllib
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +207,7 @@ def enrich(title, artist, key):
     track = (info or {}).get("track") or {}
     track_tags = _tag_names(track)   # _tag_names guards the single-tag-as-dict case the API returns
     genre = genres.pick_genre(track_tags)
-    if not genre and artist:                      # no track-level genre. Fall back to artist tags
+    if not genre and artist and not is_remix(title):
         try:
             genre = genres.pick_genre(_tag_names(
                 _get({"method": "artist.gettoptags", "artist": artist, **common})))

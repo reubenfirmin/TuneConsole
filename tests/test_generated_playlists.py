@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.test_mode_cards_route import prepare_home
 
 
 def _client(store, provider):
@@ -208,10 +209,11 @@ def test_home_renders_generated_cards(store):
     ], retired_ids=[], now=1.0)
     payload = {"1": {}}
     for surf in ms.CARD_SURFACES:
-        payload["1"][surf] = [{"key": f"{surf}k", "video_id": "v", "title": f"Song {surf}",
-                               "artist": "Art", "album": "", "thumbnail": None,
-                               "plays": 0, "reason": "", "lane": "", "genre": ""}]
+        payload["1"][surf] = [{"key": f"{surf}{i}", "video_id": f"{surf}{i}", "title": f"Song {surf} {i}",
+                               "artist": f"Art {i}", "album": "", "thumbnail": None,
+                               "plays": 0, "reason": "", "lane": "", "genre": ""} for i in range(4)]
     store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
+    prepare_home(store, 1.0)
     c = _client(store, lambda: {iid: FakeClient()})
 
     r = c.get("/home/cards")

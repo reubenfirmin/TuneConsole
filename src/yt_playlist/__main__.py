@@ -10,7 +10,6 @@ from pathlib import Path
 from yt_playlist.core import logsetup, paths
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.core.store import Store
-from yt_playlist.core.config import credential_path
 from yt_playlist.core.runtime import Runtime
 from yt_playlist.web.app import create_app
 
@@ -24,24 +23,6 @@ class AppServer(uvicorn.Server):
             ctx.work.close_admission()
         super().handle_exit(sig, frame)
 
-
-def sync_identities_into_store(store, identity_configs):
-    """Ensure each configured identity exists in the store; return {label: id}."""
-    return {cfg.label: store.identities.upsert_identity(cfg.label, cfg.credential_ref, cfg.brand_account_id, cfg.is_master)
-            for cfg in identity_configs}
-
-def validate_credentials(identity_configs, base_dir=None):
-    """Check that each identity's credential file exists; raise SystemExit if any are missing."""
-    if base_dir is None:
-        base_dir = paths.config_path().parent
-    base_dir = Path(base_dir)
-    for cfg in identity_configs:
-        try:
-            path = credential_path(base_dir, cfg.credential_ref)
-        except ValueError as e:
-            raise SystemExit(f"Identity '{cfg.label}': {e}")
-        if not path.exists():
-            raise SystemExit(f"Identity '{cfg.label}': credential file not found at {path}")
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(

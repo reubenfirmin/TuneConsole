@@ -58,7 +58,10 @@ def test_paused_drain_does_not_mark(store):
     assert store.enrichment.queue_remaining() == 1                    # left for next time, not marked
 
 
-def test_visible_radio_metadata_uses_shared_worker_before_bulk_queue(store):
+def test_visible_radio_metadata_uses_shared_worker_before_bulk_queue(store, monkeypatch):
+    from yt_playlist.enrich import artwork
+    art = Mock()
+    monkeypatch.setattr(artwork, "retry_due", art)
     _unprocessed(store, "old", "Old")
     shown = _unprocessed(store, "shown", "Shown")
     key = store.tracks.catalog_subject(shown)["identity_key"]
@@ -68,6 +71,47 @@ def test_visible_radio_metadata_uses_shared_worker_before_bulk_queue(store):
     assert w.drain_once(limit=1) == 1
     assert w.calls == [[shown]]
     assert not w._priority
+    art.assert_not_called()
+
+
+def test_current_radio_view_moves_ahead_of_older_radio_requests(store):
+    old = _unprocessed(store, "old", "Old")
+    current = _unprocessed(store, "current", "Current")
+    keys = [store.tracks.catalog_subject(tid)["identity_key"] for tid in (current, old)]
+    worker = make_worker(store)
+    worker.prioritize(keys[1:])
+    worker.prioritize(keys)
+    assert worker.drain_once(limit=1) == 1
+    assert worker.calls == [[current]]
+
+
+def test_radio_request_interrupts_bulk_at_the_next_track_boundary(store):
+    first = _unprocessed(store, "v1", "One")
+    second = _unprocessed(store, "v2", "Two")
+    shown = _unprocessed(store, "shown", "Shown")
+    key = store.tracks.catalog_subject(shown)["identity_key"]
+    worker = make_worker(store)
+    probed = []
+
+    class Provider:
+        name = "musicbrainz"
+        def available(self, _store): return True
+        def reset(self): pass
+        def tripped(self): return False
+        def probe(self, track, _store):
+            probed.append(track["id"])
+            if track["id"] == first:
+                worker.prioritize([key])
+            return EnrichmentResult(self.name, {"genre": "Rock", "year": "1999"})
+
+    worker.waterfall_fn = partial(run_waterfall, registry={"musicbrainz": Provider()})
+    assert worker.drain_once(limit=40) == 1
+    assert probed == [first]
+    assert store.enrichment.queue_remaining() == 2
+    assert worker.drain_once(limit=40) == 1
+    assert probed == [first, shown]
+    assert worker.drain_once(limit=40) == 1
+    assert probed == [first, shown, second]
 
 
 def test_radio_priority_respects_pause_and_recent_attempts(store):
@@ -81,6 +125,20 @@ def test_radio_priority_respects_pause_and_recent_attempts(store):
     store.settings.set_setting("enrich_worker_enabled", "1")
     store.enrichment.mark_enriched([tid], now=999.)
     assert store.enrichment.priority_enrich_batch([key], 24, stale_before=900, now=1000) == []
+    assert w.drain_once() == 0
+    assert not w.calls
+
+
+def test_visible_radio_retries_incomplete_tracks_before_the_bulk_resweep_window(store):
+    _unprocessed(store, "bulk", "Bulk")
+    shown = _unprocessed(store, "shown", "Shown")
+    key = store.tracks.catalog_subject(shown)["identity_key"]
+    now = 400_000.
+    store.enrichment.mark_enriched([shown], now=now - 3 * 86400)
+    worker = make_worker(store, now=now)
+    worker.prioritize([key])
+    assert worker.drain_once(limit=1) == 1
+    assert worker.calls == [[shown]]
 
 
 def test_radio_priority_preserves_provider_retry_deadline(store):
@@ -113,12 +171,12 @@ def test_enrichment_fills_via_waterfall_are_persisted(store):
 
 
 def test_library_enrichment_schedules_changed_recordings(store, monkeypatch):
-    from yt_playlist.rec import embed
+    from yt_playlist.rec import model_refresh
     _unprocessed(store)
     worker = make_worker(store)
     worker.ctx.rec_worker = SimpleNamespace(trigger_content_update=Mock())
     rebuild = Mock()
-    monkeypatch.setattr(embed, "maybe_rebuild_content_vectors", rebuild)
+    monkeypatch.setattr(model_refresh, "rebuild", rebuild)
     assert worker.drain_once() == 1
     worker.ctx.rec_worker.trigger_content_update.assert_called_once_with({"s|a"})
     rebuild.assert_not_called()

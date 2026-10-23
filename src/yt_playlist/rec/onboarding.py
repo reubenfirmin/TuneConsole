@@ -66,9 +66,10 @@ def onboarding_active(store, now) -> bool:
 def library_sample(store, n=12) -> list[dict]:
     """A genre-diverse sample of owned tracks: round-robin across genre families, so ratings teach
     breadth. Falls back to any owned tracks when genres are sparse."""
-    rows = store.conn.execute(
-        "SELECT identity_key k, title, artist, album, video_id vid, thumbnail thumb, genre "
-        "FROM playable_library_tracks").fetchall()
+    with store.read_snapshot() as snapshot:
+        rows = snapshot.store.conn.execute(
+            "SELECT identity_key k, title, artist, album, video_id vid, thumbnail thumb, genre "
+            "FROM playable_library_tracks").fetchall()
     if not rows:
         return []
     by_fam = {}

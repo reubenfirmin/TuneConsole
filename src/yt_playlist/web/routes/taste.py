@@ -1,11 +1,11 @@
 """Tools > Taste Model: full visibility into the recommendation model + tinkering controls."""
 import json
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
 from yt_playlist.rec import autotune_run, eval_recs, experiments, model_selection, rec_params, rose, surfaces, taste_analysis, taste_viz
-from yt_playlist.web.context import form_float
+from yt_playlist.web.context import form_float, request_form
 
 
 def build(ctx) -> APIRouter:
@@ -367,8 +367,7 @@ def build(ctx) -> APIRouter:
                 "decisions": experiments.decisions(store)}
 
     @router.post("/taste/experiments/decision")
-    async def experiment_decision(request: Request):
-        form = await request.form()
+    def experiment_decision(request: Request, form=Depends(request_form)):
         try:
             return experiments.decide(store, form.get("decision"), form.get("cohort", ""),
                                       form.get("reason", ""), ctx.now())
@@ -458,8 +457,7 @@ def build(ctx) -> APIRouter:
                                           _comparison_context())
 
     @router.post("/taste/weight")
-    async def taste_weight(request: Request):
-        form = await request.form()
+    def taste_weight(request: Request, form=Depends(request_form)):
         axis, weight = form.get("axis"), form_float(form.get("weight"))
         if axis and weight is not None:
             if axis.startswith("lane:") and axis.removeprefix("lane:") not in rec_params.LANE_NAMES:
@@ -472,8 +470,7 @@ def build(ctx) -> APIRouter:
         return _stale()
 
     @router.post("/taste/param")
-    async def taste_param(request: Request):
-        form = await request.form()
+    def taste_param(request: Request, form=Depends(request_form)):
         name, val = form.get("name"), form.get("value")
         if name in rec_params.PARAMS_BY_NAME:
             _save_starting_point()
@@ -485,8 +482,8 @@ def build(ctx) -> APIRouter:
         return _stale()
 
     @router.post("/taste/reset-param")
-    async def taste_reset_param(request: Request):
-        name = (await request.form()).get("name")
+    def taste_reset_param(request: Request, form=Depends(request_form)):
+        name = form.get("name")
         if name in rec_params.PARAMS_BY_NAME:
             _save_starting_point()
             rec_params.reset_param(store, name)
@@ -559,8 +556,8 @@ def build(ctx) -> APIRouter:
         return _refresh()
 
     @router.post("/taste/unban")
-    async def taste_unban(request: Request):
-        key = (await request.form()).get("key")
+    def taste_unban(request: Request, form=Depends(request_form)):
+        key = form.get("key")
         if key:
             store.rec_model.clear_dislike(key)
         return _refresh()

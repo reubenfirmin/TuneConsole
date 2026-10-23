@@ -2,6 +2,7 @@ import numpy as np
 
 from yt_playlist.core.store import Store
 from yt_playlist.rec import embed
+from tests import model_support
 from yt_playlist.util.matching import identity_key
 
 
@@ -22,7 +23,7 @@ def test_include_new_surfaces_out_of_corpus_track(tmp_path):
     dkey = identity_key("NewTrack", "NewArtist")
     s.discovery.upsert_discovered_track(dkey, "vD", "NewTrack", "NewArtist", "Alb", "th",
                               "Techno", "2020", "bid", 1.0)
-    embed.build_content_and_store(s)        # builds library vectors + model + discovered vectors
+    model_support.build_content_model(s)  # builds library vectors + model + discovered vectors
 
     new = [k for k, _ in embed.cluster_expand(s, pos_keys=[skey], topn=10, include_new=True)]
     base = [k for k, _ in embed.cluster_expand(s, pos_keys=[skey], topn=10, include_new=False)]
@@ -36,7 +37,7 @@ def test_discovered_vectors_share_the_library_model_space(tmp_path):
     dkey = identity_key("NewTrack", "NewArtist")
     s.discovery.upsert_discovered_track(dkey, "vD", "NewTrack", "NewArtist", "Alb", "th",
                               "Techno", "2020", "bid", 1.0)
-    embed.build_content_and_store(s)
+    model_support.build_content_model(s)
     _, CV, _ = embed.load_content_vectors(s)
     _, DV, _ = embed.load_discovered_content_vectors(s)
     assert CV is not None and DV is not None

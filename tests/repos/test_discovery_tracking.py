@@ -19,11 +19,10 @@ def test_mark_offered_track_sets_first_shown_once_and_bumps_count():
     assert r["last_shown"] == 300.0 and r["offered_count"] == 2
 
 
-def test_pick_albums_does_not_count_an_impression(monkeypatch):
+def test_pick_albums_does_not_count_an_impression():
     from yt_playlist.rec import discover
     s = _s()
     s.discovery.upsert_discovered_album("b1", "Artist", "Album", "2020", None, 100.0, genre=None)
-    monkeypatch.setattr(discover, "_discovery_facet_w", lambda store, genre, now: 1.0)
     discover.pick_discovered_albums(s, 5, 200.0)
     alb = next(a for a in s.discovery.get_discovered_albums() if a["browse_id"] == "b1")
     assert alb["offered_count"] == 0 and alb["first_shown"] is None

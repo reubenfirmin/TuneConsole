@@ -163,9 +163,12 @@ def test_long_song_title_and_artwork_survive_creation(song_app, page, width, tmp
                                arg=f'#new-playlists tr[data-playlist-id="{saved.id}"] img.pl-thumb')
 
 
-def test_partial_creation_keeps_warning_and_playlist_link(song_app, page, monkeypatch, tmp_path):
+@pytest.mark.parametrize('unknown', [False, True])
+def test_partial_creation_keeps_warning_and_playlist_link(song_app, page, monkeypatch, tmp_path, unknown):
     def fail(*args):
-        raise RuntimeError("Song unavailable")
+        if unknown:
+            raise RuntimeError("Song response lost")
+        return {"status": "STATUS_FAILED"}
     monkeypatch.setattr(song_app["main"], "add_playlist_items", fail)
     page.set_viewport_size({"width": 390, "height": 740})
     page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
@@ -173,12 +176,18 @@ def test_partial_creation_keeps_warning_and_playlist_link(song_app, page, monkey
     page.get_by_role("menuitem", name="Create playlist from song").click()
     dialog = page.get_by_role("dialog", name="Create playlist", exact=True)
     dialog.get_by_role("button", name="Create playlist", exact=True).click()
-    expect(dialog.get_by_role("status")).to_have_text("Playlist created, but YouTube couldn't add this song.")
+    expect(dialog.get_by_role("status")).to_have_text(
+        "Playlist created, but YouTube has not confirmed this song." if unknown else
+        "Playlist created, but YouTube couldn't add this song.")
     expect(dialog.get_by_role("heading", name="Owned Song", exact=True)).to_be_visible()
     expect(dialog.get_by_role("button", name="Create playlist", exact=True)).to_be_hidden()
-    expect(dialog.get_by_role("link", name="Open playlist")).to_be_focused()
+    link = dialog.get_by_role("link", name="Review playlist" if unknown else "Open playlist")
+    expect(link).to_be_focused()
+    if unknown:
+        expect(dialog.get_by_role('link', name='Action Log and recovery')).to_be_visible()
+    dialog.locator('form').evaluate('form => form.requestSubmit()')
     page.screenshot(path=tmp_path / "song-partially-created-390.png", animations="disabled")
-    dialog.get_by_role("link", name="Open playlist").click()
+    link.press('Enter')
     expect(page.get_by_role("heading", name="Owned Song", exact=True)).to_be_visible()
     assert len(song_app["main"].created) == 1
 
@@ -295,8 +304,7 @@ def test_keyboard_reuses_one_menu_after_metadata_save(song_app, page):
     menu.get_by_role("menuitem", name="Edit Metadata").click()
     dialog = page.get_by_role("dialog", name="Edit Metadata")
     dialog.get_by_label("Year", exact=True).fill("2003")
-    with page.expect_navigation():
-        dialog.get_by_role("button", name="Save changes").click()
+    dialog.get_by_role("button", name="Save changes").click()
     expect(row.get_by_text("2003", exact=True)).to_be_visible()
     row.get_by_role("button", name="More actions for Second Song").click()
     expect(page.locator("#song-action-menu")).to_have_count(1)
@@ -324,15 +332,16 @@ def test_suggestion_feedback_uses_shared_menu(song_app, page):
     expect(tile).to_have_count(0)
 
 
-def test_now_playing_uses_shared_menu(song_app, page):
+def test_now_playing_has_playback_controls_without_track_menu(song_app, page):
     page.route("**/bridge/status", lambda route: route.fulfill(json={
         "connected": True, "now_playing": {**SONG, "paused": False, "likeStatus": "INDIFFERENT"},
         "sensor_health": {"healthy": True}, "radio": False,
     }))
     page.goto(song_app["base"] + "/playlists")
-    page.locator(".global-now-playing").get_by_role("button", name=f"More actions for {SONG['title']}").click()
-    page.get_by_role("menuitem", name="Create playlist from song").click()
-    expect(page.get_by_label("Playlist name")).to_have_value(SONG["title"])
+    player = page.locator(".global-now-playing")
+    expect(player).to_be_visible()
+    expect(player.get_by_role("button", name="More actions", exact=False)).to_have_count(0)
+    expect(player.get_by_role("button", name="Next / skip")).to_be_visible()
 
 
 def test_adding_suggestion_to_current_playlist_refreshes_when_done(song_app, page):
@@ -466,8 +475,7 @@ def test_metadata_dialog_edits_all_fields_and_restores_originals(song_app, page,
         page.keyboard.press('Tab')
         assert dialog.evaluate('el => el.contains(document.activeElement)')
     page.screenshot(path=tmp_path / f'metadata-{surface}-{width}.png', animations='disabled')
-    with page.expect_navigation():
-        dialog.get_by_role('button', name='Save changes').click()
+    dialog.get_by_role('button', name='Save changes').click()
     expect(row.locator('.ptitle')).to_have_text('Fixed title')
     expect(row.locator('.alink').first).to_have_text('Fixed artist')
     expect(row.locator('.gtag')).to_have_text('Art Pop')
@@ -480,8 +488,7 @@ def test_metadata_dialog_edits_all_fields_and_restores_originals(song_app, page,
     dialog.get_by_role('button', name='Restore original artist').click()
     dialog.get_by_label('Genre', exact=True).fill('')
     dialog.get_by_label('Year', exact=True).fill('')
-    with page.expect_navigation():
-        dialog.get_by_role('button', name='Save changes').click()
+    dialog.get_by_role('button', name='Save changes').click()
     expect(row.locator('.ptitle')).to_have_text('Owned Song', use_inner_text=True)
     expect(row.locator('.gtag')).to_have_count(0)
     expect(row.locator('.ydisplay')).to_have_text('—')
@@ -522,8 +529,7 @@ def test_metadata_save_failure_preserves_edits_for_retry(song_app, page):
     expect(title).to_have_value('Retry this title')
     assert song_app['store'].tracks.metadata_for_video('owned-song')['title'] == 'Owned Song'
     page.unroute('**/songs/metadata')
-    with page.expect_navigation():
-        dialog.get_by_role('button', name='Save changes').click()
+    dialog.get_by_role('button', name='Save changes').click()
     expect(page.locator('tr.srow .ptitle')).to_have_text('Retry this title')
 
 
@@ -547,8 +553,88 @@ def test_genre_lookup_keeps_unsaved_metadata(song_app, page, monkeypatch):
     suggestion.click()
     expect(dialog.get_by_label('Genre', exact=True)).to_have_value('Ambient')
     with page.expect_response('**/songs/metadata') as response:
-        with page.expect_navigation():
-            dialog.get_by_role('button', name='Save changes').click()
+        dialog.get_by_role('button', name='Save changes').click()
     assert set(response.value.request.post_data_json) == {'song', 'title', 'genre'}
+    expect(page.locator('tr.srow .ptitle')).to_have_text('Still editing')
+    expect(page.locator('tr.srow .ydisplay')).to_have_text('2022')
     track = song_app['store'].tracks.metadata_for_video('owned-song')
     assert track['title'] == 'Still editing' and track['genre'] == 'Ambient' and track['year'] == '2022'
+
+
+@pytest.mark.parametrize('succeeds', [True, False])
+def test_metadata_save_closes_immediately_and_keeps_later_dialog(song_app, page, succeeds):
+    store = song_app['store']
+    second = store.tracks.upsert_track('second', 'Second Song', 'Someone', '', 200)
+    store.playlists.set_playlist_tracks(song_app['source'],
+                                       store.playlists.get_playlist_track_ids(song_app['source']) + [second])
+    page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
+    # A reload would discard both this marker and the second dialog's unsaved fields.
+    page.evaluate('window.metadataPageMarker = true')
+    page.get_by_role('button', name='More actions for Owned Song').click()
+    page.get_by_role('menuitem', name='Edit Metadata').click()
+    dialog = page.get_by_role('dialog', name='Edit Metadata')
+    expect(dialog.get_by_label('Title', exact=True)).to_have_value('Owned Song')
+    dialog.get_by_label('Title', exact=True).fill('Saved in background')
+    pending = []
+    page.route('**/songs/metadata', lambda route: pending.append(route))
+    with page.expect_request(lambda request: request.url.endswith('/songs/metadata') and request.method == 'POST'):
+        dialog.get_by_role('button', name='Save changes').click()
+    expect(dialog).not_to_be_visible()
+    expect(page.locator('tr.srow .ptitle').first).to_have_text('Owned Song')
+    page.get_by_role('button', name='More actions for Second Song').click()
+    page.get_by_role('menuitem', name='Edit Metadata').click()
+    expect(dialog.get_by_label('Title', exact=True)).to_have_value('Second Song')
+    dialog.get_by_label('Artist', exact=True).fill('Still editing this artist')
+    if succeeds:
+        pending[0].continue_()
+        expect(page.locator('tr.srow .ptitle').first).to_have_text('Saved in background')
+    else:
+        pending[0].fulfill(status=503, json={'detail': 'Try again later.'})
+        expect(page.locator('#toasts').get_by_role('alert')).to_contain_text('Try again later.')
+        assert store.tracks.metadata_for_video('owned-song')['title'] == 'Owned Song'
+    expect(dialog).to_be_visible()
+    expect(dialog.get_by_label('Title', exact=True)).to_have_value('Second Song')
+    expect(dialog.get_by_label('Artist', exact=True)).to_have_value('Still editing this artist')
+    assert page.evaluate('window.metadataPageMarker')
+    dialog.get_by_role('button', name='Cancel', exact=True).click()
+    if not succeeds:
+        page.unroute('**/songs/metadata')
+        page.get_by_role('button', name='Retry edit').click()
+        expect(dialog.get_by_label('Title', exact=True)).to_have_value('Saved in background')
+        dialog.get_by_role('button', name='Save changes').click()
+        expect(page.locator('tr.srow .ptitle').first).to_have_text('Saved in background')
+        expect(page.get_by_role('button', name='Retry edit')).to_have_count(0)
+
+
+def test_metadata_save_updates_player_and_suggestion_without_reload(song_app, page):
+    store = song_app['store']
+    owned = store.playlists.get_playlist_track_ids(song_app['source'])[0]
+    bonus = store.tracks.upsert_track('bonus', 'Bonus Song', 'Artist & Friends', 'Bonus Album', 200)
+    for track in [owned, bonus]:
+        store.tracks.set_track_genre(track, 'Techno')
+    store.playlists.set_playlist_tracks(song_app['destination'], [owned, bonus])
+    status = {'connected': True, 'now_playing': {
+        'video_id': 'bonus', 'title': 'Bonus Song', 'artist': 'Artist & Friends', 'paused': False,
+    }, 'sensor_health': {'healthy': True}, 'radio': False}
+    page.route('**/bridge/status', lambda route: route.fulfill(json=status))
+    page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
+    tile = page.locator('.tile-suggest').filter(has=page.locator('.tile-play[href$="v=bonus"]'))
+    tile.get_by_role('button', name='More actions for Bonus Song').click()
+    page.get_by_role('menuitem', name='Edit Metadata').click()
+    dialog = page.get_by_role('dialog', name='Edit Metadata')
+    expect(dialog.get_by_label('Title', exact=True)).to_have_value('Bonus Song')
+    dialog.get_by_label('Title', exact=True).fill('Fixed <title>')
+    dialog.get_by_label('Artist', exact=True).fill('Fixed & artist')
+    dialog.get_by_role('button', name='Save changes').click()
+    expect(tile.locator('.tile-cap-title')).to_have_text('Fixed <title>')
+    expect(tile.locator('.tile-cap-sub')).to_have_text('Fixed & artist · Bonus Album')
+    assert tile.locator('input[name="track"]').evaluate('el => JSON.parse(el.value).title') == 'Fixed <title>'
+    dock = page.locator('.global-now-playing')
+    expect(dock.locator('.hs-now-title')).to_have_text('Fixed <title>')
+    expect(dock.locator('.hs-now-artist')).to_have_text('Fixed & artist')
+    # The extension still reports the provider's title; polling must keep the saved override.
+    page.evaluate('status => window.dispatchEvent(new CustomEvent("bridge-status", {detail: status}))', status)
+    expect(dock.locator('.hs-now-title')).to_have_text('Fixed <title>')
+    dock.get_by_role('button', name='More actions for Fixed <title>').click()
+    page.get_by_role('menuitem', name='Create playlist from song').click()
+    expect(page.get_by_label('Playlist name')).to_have_value('Fixed <title>')

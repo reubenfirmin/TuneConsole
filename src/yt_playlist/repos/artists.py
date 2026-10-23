@@ -1,6 +1,6 @@
 """Canonical artist references, ordered credits, and name lookup for display boundaries."""
 from yt_playlist.core import artists
-from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 
 
 class ArtistRepo(Repo):
@@ -33,6 +33,19 @@ class ArtistRepo(Repo):
         aid = artists.lookup(self.conn,value)
         return artists.public_key(self.conn,aid) if aid else value
 
+    @snapshot_read
+    def public_keys(self, values):
+        values = list(values)
+        resolved = {value: artists.lookup(self.conn, value) for value in values}
+        keys = artists.public_keys(self.conn, [aid for aid in resolved.values() if aid is not None])
+        return {value: keys[aid] if aid is not None else value for value, aid in resolved.items()}
+
+    @snapshot_read
+    def name_keys(self):
+        """Resolve display names on one private connection, including ambiguous-name behavior."""
+        names = {r[0] for r in self.conn.execute("SELECT name FROM artists")}
+        return self.public_keys(names)
+
     @synchronized
     def track_credits(self, entry_id):
         return [dict(r) for r in self.conn.execute(
@@ -42,11 +55,15 @@ class ArtistRepo(Repo):
             (entry_id,))]
 
     @synchronized
-    def track_keys(self, *, library=False):
+    def track_keys(self, *, library=False, keys=None):
+        keys = list(dict.fromkeys(keys)) if keys is not None else None
+        if keys == []:
+            return {}
         rows = self.conn.execute(
             'SELECT DISTINCT r.identity_key,ta.artist_id FROM recordings r '
             'JOIN catalog_entries e ON e.recording_id=r.id JOIN track_artists ta ON ta.entry_id=e.id '+
-            ('JOIN library_memberships m ON m.entry_id=e.id' if library else ''))
+            ('JOIN library_memberships m ON m.entry_id=e.id ' if library else '') +
+            ('WHERE r.identity_key IN (' + ','.join('?' for _ in keys) + ')' if keys is not None else ''), keys or [])
         out = {}
         for key,aid in rows:
             out.setdefault(key,set()).add(artists.token(aid))

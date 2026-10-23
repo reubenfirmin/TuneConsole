@@ -7,17 +7,19 @@ from tests.conftest import FakeClient
 def test_new_artists_fragment_serves_cached(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     store.discovery.upsert_discovered_artist("Donato Dozzy", 1.0, ["Recondite", "Rrose"], ["Deep Focus"], None, now=1.0)
+    from yt_playlist.rec import home_prepared
+    home_prepared.prepare(store, 1)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     html = c.get("/home/new-artists").text
     assert "Donato Dozzy" in html
-    assert "because you play Recondite, Rrose" in html
-    assert "fits your Deep Focus" in html
+    assert "because you play" not in html
+    assert "fits your" not in html
 
 
 def test_new_artists_building_polls(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
-    app.state.ctx.rec_worker._running = True
+    app.state.ctx.rec_worker.jobs.merge('full')
     c = TestClient(app, base_url="http://127.0.0.1")
     assert 'hx-trigger="intersect once delay:4s"' in c.get("/home/new-artists").text

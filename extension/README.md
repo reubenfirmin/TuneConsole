@@ -165,6 +165,8 @@ the public site's Local Player button reuses an existing app tab.
   the queue so a launch can navigate an already-starting tab. Waits end on load, removal, or timeout.
 - `worker/playback.js`: playback ownership, muted/playing tabs, pending plays, ordered report
   relay, control routing, and one bounded autoplay rescue episode. Removal clears tab-owned state.
+- `worker/ratings.js`: one native desired-rating recovery on its original tab, with a deadline,
+  revision checks, cancellation, and bounded pending/terminal diagnostics.
 - `worker/sensors.js`: isolated/MAIN probes, injection, resync, and idle-only reload cooldowns.
 - `worker/site.js`: public-site connection status and local-player tab activation, with its own
   coalesced open request. It receives no music/library state.
@@ -196,16 +198,49 @@ MAIN and isolated scripts on Music, and the public-site script on the two TuneCo
 
 | Boundary | Messages and response |
 | --- | --- |
-| MAIN sensor to isolated content | `window.postMessage` carries `__tcSensorVersion: 4` plus `__tcNow` (player/bar metadata, queue, account availability, pause/mute), or `__tcPlayer` (raw playback event). The isolated receiver accepts messages from the same window, ignores obsolete sensor versions, and persists neither unknown-account nor unverified metadata snapshots as plays. |
+| MAIN sensor to isolated content | `window.postMessage` carries `__tcSensorVersion: 4` plus `__tcNow` (player/bar metadata, queue, account availability, pause/mute) with `__tcSensorRevision: 4`, or `__tcPlayer` (raw playback event). The isolated receiver accepts messages from the same window, ignores obsolete sensor versions/revisions, and persists neither unknown-account nor unverified metadata snapshots as plays. |
 | MAIN fetch observer to isolated content | `__tcCuration` carries a bounded request body, endpoint, page URL, and account. Ratings include settled `success`/`httpStatus`; other actions report intent. The observer returns the page's original fetch promise unchanged. |
 | Isolated content to MAIN | `__tcSensorProbe: {version, id}` requests an immediate sample. MAIN echoes `__tcSensorProbeId` on `__tcNow`. Health and rating commands use this handshake instead of trusting interval timing. |
-| Worker to isolated content | `sensor-ping` replies with receiver readiness and MAIN version/age; `main: false` checks fetch readiness alone. `fetch` carries URL/method/body/auth and replies with status/body/time zone. Both worker and receiver enforce the youtubei allowlist. |
-| Worker playback commands to content | `rate` carries the displayed `videoId`, action, and optional desired `likeStatus`; a fresh MAIN sample must identify the same player and rating target before a click. `playpause` toggles; `pause` is idempotent; `ensure-playing` replies with actual playback readiness. `refresh-view` defers matching playlist reloads during playback; `resync-now` clears report deduplication and asks MAIN for a fresh snapshot. |
+| Worker to isolated content | `sensor-ping` replies with receiver revision and MAIN version/revision/age, plus bounded `capture` diagnostics from its fresh MAIN probe; `main: false` checks fetch readiness alone. `fetch` carries URL/method/body/auth and replies with status/body/time zone. Both worker and receiver enforce the youtubei allowlist. |
+| Worker playback commands to content | `rate` carries the displayed `videoId`, action, optional desired `likeStatus`, expected `brandId`, and `skip`; a fresh MAIN sample must identify the same player, rating target, and requested account before a click. MAIN reads Polymer element/controller data and can identify the rating target independently of the bar's recording credits. The reply waits for the selected native thumb. A missing binding/control returns `retryable` only before any click; for an exact desired state without `skip`, the worker replies `{ok: true, pending: true}` and retries in the background for up to 30 seconds, repairing a missing sensor once. A newer rating cancels recovery; every attempt rechecks the playing song/account. Uncertain delivery and unconfirmed clicks are never replayed. Dislike-and-skip waits for the native thumbs-down, then advances only if the same video is still playing. `next` carries the displayed `videoId` and confirms a changed playing video after a fresh identity check and one native next-button click. `playpause` toggles; `pause` is idempotent; `ensure-playing` replies with actual playback readiness. `refresh-view` defers matching playlist reloads during playback; `resync-now` clears report deduplication and asks MAIN for a fresh snapshot. |
 | Isolated content to worker | `play`, metadata-bearing `now-heartbeat`, and raw `pevent`. Playback resolves tab ownership in arrival order before forwarding. Muted/non-owner observations cannot take over controls or persist plays. |
 | Worker to local backend | WebSocket `/bridge/ws`: the backend authenticates the browser's extension origin. `play` can persist a verified play/rating; `now-heartbeat` restores presence without persisting a play; `pevent` carries playback/curation observations; `sensor-health` reports counts, recovery, and errors independently of socket connectivity. |
-| Local backend to worker | Request `{id, url, method, body}` gets `{id, status, body, timeZone?}`. Only a proven missing receiver allows one retry; an uncertain delivered write is never replayed. Controls are `navigate`, `playpause`, `refresh-view`, and acknowledged `rate`/`radio-session` (legacy alias `playlist-session-poc`). `{ping: 1}` is a keepalive. |
+| Local backend to worker | Request `{id, url, method, body}` gets `{id, status, body, timeZone?}`. Only a proven missing receiver allows one retry; an uncertain delivered write is never replayed. Controls are `navigate`, `playpause`, `refresh-view`, and acknowledged `next`/`rate`/`radio-session` (legacy alias `playlist-session-poc`). Now Playing first saves the exact song’s API rating, then sends a native `rate` control if that song is still playing. A dislike then uses the shared skip path: radio reconciles pending playlist writes and prepares a saved successor before skipping; a stale/disabled native button falls back to selecting that exact saved successor. Native acknowledgements are independently checked against observed playback, avoiding a second skip after uncertain delivery. `{ping: 1}` is a keepalive. |
 | Worker to MAIN radio companion | Inject on demand, then call `__tcRadioSession.update({playlist, videoIds, refresh})` using `chrome.scripting`. The response reports native playback/page adoption. This boundary has no separate playback ownership or tab creation. |
 | Public site to worker | Only `local-player-status` and `open-local-player`, checked against the sender's exact site origin. Replies expose connection/open status, never account, track, or library data. |
+
+Native rating recovery carries a `ratingId` and absolute `expiresAt`. Every attempt stays on
+the original tab and checks receiver revision 3 and MAIN revision 4 before delivery. The receiver
+checks expiry and cancellation after its fresh probe, immediately before a possible click.
+`cancel-rating` invalidates an awaiting probe when a newer request, song/account snapshot, tab
+closure, or recovery deadline ends the job. A lost reply or an unconfirmed click ends recovery.
+
+Deferred jobs send `rating-reconciliation` frames over the bridge: one `pending`, followed by
+one `recovered`, `cancelled`, or `failed`. The backend logs the first and last bounded binding
+snapshots, revisions, attempt count, and elapsed time; only `failed` is a warning. Correlated MAIN
+probes report renderer/button presence, candidate IDs, and bounded Polymer field names rather
+than copying page objects or account configuration. This distinguishes a binding that settles
+from persistent missing selectors/data and identifies obsolete receivers. API rating success
+remains independent of this native reconciliation.
+
+Exact play capture also supports Music layouts with no player-bar data, watch link, or
+video-specific artwork. In that layout, the fresh native rating target must match the active
+player's video, and both displayed title and artist must exactly match that same player's
+title/author. A rating target alone cannot verify recording credits; missing or conflicting
+identifiers/credits remain heartbeats. Normal account, audible playback, ownership, deduplication,
+and playlist provenance checks still apply.
+
+The bridge status exposes the sensor's boolean `metadata_verified` separately from presence.
+Each sensor-health version entry includes `capture`: verification/account/pause/mute flags,
+bar/player credit agreement, candidate counts, and bounded Polymer field names. These probes
+omit song/account values and candidate IDs; unanswered probes report no capture snapshot.
+
+The isolated receiver now has explicit teardown for future revision changes. A legacy boolean
+guard has anonymous listeners that cannot safely be replaced: its health report requests a Music
+page reload, and native rating delivery is refused. Automatic health repair still never reloads
+playing or partially played media. A matching protocol version alone does not prove current code.
+`/bridge/status` includes each tab's receiver and MAIN revisions in `sensor_health.versions`
+(at most eight entries), so the installed code can be identified without opening DevTools.
 
 ## Extension verification
 

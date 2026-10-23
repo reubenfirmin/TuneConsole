@@ -134,10 +134,11 @@ class TrendsRepo(Repo):
         the Trends rollup only; the charts/ticker consumers keep their own day-model semantics."""
         frag, args = self._generated_filter(exclude_generated)
         rows = self.conn.execute(
-            f"SELECT a artist, COUNT(*) c FROM ("
-            f"  SELECT (SELECT MIN(t.artist) FROM tracks t WHERE t.identity_key = pe.identity_key) a "
-            f"  FROM play_events pe WHERE pe.played_at >= ? AND pe.played_at < ?{frag}"
-            f") WHERE a IS NOT NULL AND a <> '' GROUP BY a",
+            "WITH names AS MATERIALIZED ("
+            "  SELECT identity_key,MIN(artist) artist FROM tracks GROUP BY identity_key) "
+            "SELECT n.artist,COUNT(*) c FROM play_events pe "
+            "JOIN names n ON n.identity_key=pe.identity_key "
+            f"WHERE pe.played_at>=? AND pe.played_at<?{frag} AND n.artist<>'' GROUP BY n.artist",
             [since, until, *args]).fetchall()
         return {r["artist"]: r["c"] for r in rows}
 
@@ -188,12 +189,64 @@ class TrendsRepo(Repo):
     def _rebuild_artist_first_play(self):
         self.conn.execute("DELETE FROM trend_first_play WHERE kind = 'artist'")
         self.conn.execute(
-            "INSERT INTO trend_first_play(kind, id_key, first_day, first_ts, source) "
-            "SELECT 'artist', t.artist, MIN(fp.first_day), MIN(fp.first_ts), "
-            "  (SELECT fp2.source FROM trend_first_play fp2 JOIN tracks t2 ON t2.identity_key = fp2.id_key "
-            "   WHERE fp2.kind = 'track' AND t2.artist = t.artist ORDER BY fp2.first_ts LIMIT 1) "
-            "FROM trend_first_play fp JOIN tracks t ON t.identity_key = fp.id_key "
-            "WHERE fp.kind = 'track' AND t.artist <> '' GROUP BY t.artist")
+            # tracks resolves catalog/provider identities through several joins. Materialize its
+            # credits once, rather than evaluating that view again for every artist's source.
+            "WITH credits AS MATERIALIZED ("
+            "  SELECT DISTINCT identity_key,artist FROM tracks WHERE artist<>''), "
+            "ranked AS (SELECT c.artist,fp.first_day,fp.first_ts,fp.source,"
+            "  ROW_NUMBER() OVER (PARTITION BY c.artist ORDER BY fp.first_ts,fp.id_key) position "
+            "  FROM credits c JOIN trend_first_play fp ON fp.kind='track' AND fp.id_key=c.identity_key) "
+            "INSERT INTO trend_first_play(kind,id_key,first_day,first_ts,source) "
+            "SELECT 'artist',artist,MIN(first_day),MIN(first_ts),"
+            "  MAX(CASE WHEN position=1 THEN source END) FROM ranked GROUP BY artist")
+
+    def _replace_first_play(self):
+        self.conn.execute('DELETE FROM trend_first_play')
+        rows = self.conn.execute(
+            "SELECT identity_key,CAST(julianday(MIN(day))-julianday('1970-01-01') AS INTEGER) day,"
+            'MIN(at) ts FROM listening_activity GROUP BY identity_key').fetchall()
+        self._upsert_first_play_min(
+            ('track', r['identity_key'], r['day'], r['ts'], 'listening_v33') for r in rows)
+        self._rebuild_artist_first_play()
+
+    @synchronized
+    def prepare_first_play(self):
+        """Build the index privately on a maintenance reader, without changing published data.
+
+        The temporary table shadows the serving index for this reader's subsequent rollup queries.
+        Its writes stay private even though the source connection is read-only.
+        """
+        self.conn.execute(
+            "CREATE TEMP TABLE trend_first_play(kind TEXT NOT NULL,id_key TEXT NOT NULL,"
+            "first_day INTEGER NOT NULL,first_ts REAL NOT NULL,source TEXT NOT NULL,"
+            "PRIMARY KEY(kind,id_key)) WITHOUT ROWID")
+        self._replace_first_play()
+        return list(map(tuple, self.conn.execute(
+            "SELECT kind,id_key,first_day,first_ts,source FROM trend_first_play")))
+
+    def _first_play_settings(self, imported):
+        self.conn.execute("INSERT INTO settings(key,value) VALUES ('trend_first_play_source','listening_v33') "
+                          "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        self.conn.execute("DELETE FROM settings WHERE key='trend_first_play_watermark'")
+        if imported is None:
+            self.conn.execute("DELETE FROM settings WHERE key='trend_first_play_takeout_seen'")
+        else:
+            self.conn.execute("INSERT INTO settings(key,value) VALUES ('trend_first_play_takeout_seen',?) "
+                              "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (imported,))
+
+    @synchronized
+    def publish_rollup(self, rows, encoded_payload, now, imported, review_month):
+        """Write prepared output inside ReadSnapshot.publish's checked transaction. No commit."""
+        self.conn.execute('DELETE FROM trend_first_play')
+        self.conn.executemany('INSERT INTO trend_first_play VALUES (?,?,?,?,?)', rows)
+        self._first_play_settings(imported)
+        self.conn.execute(
+            "INSERT INTO rec_proposals(surface,payload,built_at) VALUES ('trend_rollups',?,?) "
+            "ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at",
+            (encoded_payload, now))
+        if review_month is not None:
+            self.conn.execute("INSERT INTO settings(key,value) VALUES ('trend_spotlight_review_month',?) "
+                              "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (review_month,))
 
     @synchronized
     def clear_first_play(self) -> None:
@@ -209,29 +262,12 @@ class TrendsRepo(Repo):
         An exact ledger cannot erase older coarse evidence. Late evidence and
         account-calendar changes require a full rescan, not a snapshot-id checkpoint.
         """
-        def setting(key):
-            row = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-            return row[0] if row else None
-
         self.conn.execute("SAVEPOINT first_play_refresh")
         try:
-            imported = setting("takeout_imported_at")
-            source = 'listening_v33'
-            self.conn.execute('DELETE FROM trend_first_play')
-            rows = self.conn.execute(
-                "SELECT identity_key,CAST(julianday(MIN(day))-julianday('1970-01-01') AS INTEGER) day,"
-                'MIN(at) ts FROM listening_activity GROUP BY identity_key').fetchall()
-            self._upsert_first_play_min(('track',r['identity_key'],r['day'],r['ts'],source) for r in rows)
-            self._rebuild_artist_first_play()
-            self.conn.executemany("INSERT INTO settings(key,value) VALUES (?,?) "
-                                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", [
-                ("trend_first_play_source", source)])
-            self.conn.execute("DELETE FROM settings WHERE key='trend_first_play_watermark'")
-            if imported is None:
-                self.conn.execute("DELETE FROM settings WHERE key='trend_first_play_takeout_seen'")
-            else:
-                self.conn.execute("INSERT INTO settings(key,value) VALUES ('trend_first_play_takeout_seen',?) "
-                                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (imported,))
+            imported = self.conn.execute(
+                "SELECT value FROM settings WHERE key='takeout_imported_at'").fetchone()
+            self._replace_first_play()
+            self._first_play_settings(imported[0] if imported else None)
             self.conn.execute("RELEASE first_play_refresh")
         except BaseException:
             # SQLite may already have rolled back the transaction on interruption.
@@ -276,10 +312,10 @@ class TrendsRepo(Repo):
     def never_played(self) -> tuple:
         """(total_tracks, never_played), per distinct identity_key."""
         row = self.conn.execute(
-            "SELECT COUNT(*) total, SUM(CASE WHEN plays = 0 THEN 1 ELSE 0 END) never FROM ("
-            "  SELECT t.identity_key, "
-            "    (SELECT COUNT(*) FROM listening_days hi WHERE hi.identity_key=t.identity_key) plays "
-            "  FROM tracks t GROUP BY t.identity_key)").fetchone()
+            "WITH owned AS MATERIALIZED (SELECT DISTINCT identity_key FROM tracks), "
+            "played AS MATERIALIZED (SELECT DISTINCT identity_key FROM listening_days) "
+            "SELECT COUNT(*) total, SUM(CASE WHEN p.identity_key IS NULL THEN 1 ELSE 0 END) never "
+            "FROM owned t LEFT JOIN played p USING(identity_key)").fetchone()
         return (row["total"] or 0, row["never"] or 0)
 
     @synchronized

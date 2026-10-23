@@ -44,6 +44,21 @@ def test_never_played_and_last(store):
     assert last["k1"] == 5*86400.0+43200 and last["k2"] is None
 
 
+def test_never_played_reads_history_once_for_all_owned_tracks(store):
+    for i in range(30):
+        _track(store, f"k{i}", "Artist")
+    calls = []
+    store.conn.create_function("count_history_read", 1,
+                               lambda key: (calls.append(key), key)[1])
+    store.conn.execute("CREATE TEMP TABLE history_probe(identity_key TEXT)")
+    store.conn.executemany("INSERT INTO history_probe VALUES (?)", [(f"k{i}",) for i in range(20)])
+    store.conn.execute("CREATE TEMP VIEW listening_days AS "
+                       "SELECT count_history_read(identity_key) identity_key FROM history_probe")
+    store.conn.commit()
+    assert store.trends.never_played() == (30, 10)
+    assert len(calls) == 20
+
+
 def test_dead_playlists_threshold_and_order(store):
     _track(store, "ka", "A1")
     _track(store, "kb", "A2")

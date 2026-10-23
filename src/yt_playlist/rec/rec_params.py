@@ -14,6 +14,7 @@ Embedding internals (dim, method, item2vec hyperparams, seeds) are deliberately 
 hand-setting them only degrades quality, so they stay managed by Auto-tune.
 """
 from dataclasses import dataclass
+from yt_playlist.core.recommendation_settings import LANES, LANE_NAMES, MAX_TRACK_MINUTES
 
 SETTING_PREFIX = "rec_param:"
 
@@ -41,7 +42,7 @@ PARAMS = [
     ParamSpec("max_track_minutes", "Maximum track length (minutes)", "discovery",
               "Longest track allowed in generated song playlists. Lower limits keep DJ mixes and "
               "concerts out. Tracks with unknown length remain eligible.",
-              1, 180, 1, 20, integer=True),
+              MAX_TRACK_MINUTES.minimum, MAX_TRACK_MINUTES.maximum, 1, MAX_TRACK_MINUTES.default, integer=True),
     ParamSpec("comfort_min_plays", "Comfort Listening: minimum plays", "discovery",
               "Minimum past plays for a forgotten favorite to appear in Comfort Listening. "
               "Raise this to include only tracks you played often.",
@@ -306,12 +307,6 @@ SEMANTIC_PARAMS = ("breadth_bias", "play_transient_w", "like_transient_w", "audi
 
 
 # Lane weights (rec_weights table, axis `lane:<name>`): labels + help for the page. Clamp [0.2, 3.0].
-LANES = [
-    ("neighbourhood", "Taste matches", "Tracks matched to your playlists, listening history, and preferences."),
-    ("deep_cut", "Deep cuts", "Overlooked tracks by artists you play often."),
-    ("rotation", "Playlist neighbors", "Tracks found in the same playlists as your favorites."),
-]
-LANE_NAMES = frozenset(name for name, _label, _help in LANES)
 LANE_MIN, LANE_MAX, LANE_DEFAULT = 0.2, 3.0, 1.0
 
 # Genre-family weights (rec_weights table, axis `genre:<family>`): 0 mutes, 1 neutral, 2 favors.

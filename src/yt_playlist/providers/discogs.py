@@ -11,22 +11,17 @@ token via $DISCOGS_TOKEN or `discogs_token` in config.toml / the settings table.
 import json
 import logging
 import re
-import sys
+import tomllib
 import urllib.parse
 import urllib.request
 
 from yt_playlist.providers import genres
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter
 from yt_playlist.util import net
-from yt_playlist.util.matching import normalize
+from yt_playlist.util.matching import normalize, recording_title
 from yt_playlist.core import paths
 
 name = "discogs"
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover
-    import tomli as tomllib
 
 logger = logging.getLogger(__name__)
 
@@ -115,11 +110,11 @@ def _matches_release(result, title, artist, tok):
     """Discogs searches all release text, so even highly ranked hits can be unrelated records."""
     result_artist, separator, result_title = (result.get("title") or "").partition(" - ")
     wanted_artist = _artist_key(artist)
-    wanted_title = normalize(title)
+    wanted_title = recording_title(title)
     if not separator or not wanted_artist or not wanted_title:
         return False
     same_artist = _artist_key(result_artist) == wanted_artist
-    if same_artist and normalize(result_title) == wanted_title:
+    if same_artist and recording_title(result_title) == wanted_title:
         return True
     # Album search hits can be legitimate, but must actually contain this artist's track.
     # Only inspect plausible albums/compilations; an unrelated artist's record needs no lookup.
@@ -138,7 +133,7 @@ def _matches_release(result, title, artist, tok):
 def _has_track(tracklist, artists, wanted_title, wanted_artist):
     for track in tracklist:
         credits = track.get("artists") or artists
-        if (track.get("type_") != "heading" and normalize(track.get("title")) == wanted_title
+        if (track.get("type_") != "heading" and recording_title(track.get("title")) == wanted_title
                 and any(_artist_key(a.get("name")) == wanted_artist for a in credits)):
             return True
         if _has_track(track.get("sub_tracks") or [], credits, wanted_title, wanted_artist):

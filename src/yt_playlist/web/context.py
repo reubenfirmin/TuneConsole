@@ -13,7 +13,7 @@ import logging
 import threading
 from dataclasses import dataclass, field
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from fastapi.templating import Jinja2Templates
 
 from yt_playlist.library.ops import PlaylistOps
@@ -25,6 +25,11 @@ logger = logging.getLogger("yt_playlist.web")
 # Settings key under which the expired-session banner state is persisted, so the banner survives a
 # server restart (e.g. `uvicorn --reload` re-spawning the worker on every code change).
 AUTH_EXPIRED_KEY = "auth_expired_identities"
+
+
+async def request_form(request: Request):
+    """Parse the body before dispatching a synchronous form handler to the request pool."""
+    return await request.form()
 
 
 def form_float(value):

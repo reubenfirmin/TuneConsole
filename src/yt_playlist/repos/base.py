@@ -7,6 +7,7 @@ serves sync routes from a threadpool, so every DB call serializes on that one lo
 from functools import wraps
 
 from yt_playlist.core.activity import check_cancellable_work
+from yt_playlist.core.db_diagnostics import database_operation
 
 # Default display group for generated playlists. Policy lives in playlist_provenance;
 # changing a group never changes taste eligibility. Only explicit adoption lifts quarantine.
@@ -42,14 +43,33 @@ def synchronized(method):
     """
     @wraps(method)
     def wrapper(self, *args, **kwargs):
-        with self._lock:
+        with database_operation(method.__qualname__), self._lock:
             check_cancellable_work()
             return method(self, *args, **kwargs)
+    return wrapper
+
+
+def snapshot_read(method):
+    """Run a substantial read on a private snapshot, without the serving lock.
+
+    Use only for read-only operations. Nested calls reuse the same pinned reader.
+    """
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with database_operation(method.__qualname__):
+            if getattr(self._store, "_read_only", False):
+                with self._lock:
+                    check_cancellable_work()
+                    return method(self, *args, **kwargs)
+            with self._store.read_snapshot() as snapshot:
+                reader = type(self)(snapshot.store)
+                return wrapper(reader, *args, **kwargs)
     return wrapper
 
 
 class Repo:
     """Base for domain DAOs: bind the Store's connection + lock (constructor injection)."""
     def __init__(self, db):
+        self._store = db
         self.conn = db.conn
         self._lock = db._lock

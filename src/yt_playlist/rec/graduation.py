@@ -119,7 +119,7 @@ def graduate_slider_exposure(store, now) -> None:
             store.rec_surface.log_graduation(axis, "slider", score, factor, new_perm, now)
 
 
-def graduate_play_exposure(store, now) -> None:
+def graduate_play_exposure(store, now, *, prepared_leans=None) -> None:
     """Plays graduate by daily EXPOSURE, the same way held sliders do (graduate_slider_exposure).
 
     Plays feed only the transient model (sync stores history; transient.play_facet_leans reads it).
@@ -137,7 +137,8 @@ def graduate_play_exposure(store, now) -> None:
     threshold = rec_params.get_param(store, "theme_threshold")
     w_play = rec_params.get_param(store, "source_w_play")
     today = _utc_day(now)
-    for axis, lean in transient.play_facet_leans(store, now).items():
+    leans = transient.play_facet_leans(store, now) if prepared_leans is None else prepared_leans
+    for axis, lean in leans.items():
         if store.rec_surface.get_play_graduated_day(axis) == today:
             continue                                          # already exposed this axis today
         store.rec_surface.set_play_graduated_day(axis, today)             # stamp the day either way

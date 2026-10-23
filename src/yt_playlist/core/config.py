@@ -1,11 +1,6 @@
-import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover
-    import tomli as tomllib
 
 @dataclass
 class IdentityConfig:

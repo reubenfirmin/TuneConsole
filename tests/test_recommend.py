@@ -1,5 +1,6 @@
 from yt_playlist.util import genre_map
 from yt_playlist.rec import actions, embed, graduation, rec_params, scoring, surfaces, taste_analysis
+from tests import model_support
 from yt_playlist.util import duration
 from yt_playlist.core.store import Store
 
@@ -72,7 +73,7 @@ def test_for_you_genre_suppression_reduces_that_family(store):
         store.tracks.set_track_genre(t, "Techno")
     for f in folk:
         store.tracks.set_track_genre(f, "Folk")
-    embed.build_and_store(store, dim=4)        # 12 tracks; build needs len(keys) >= dim + 5
+    model_support.build_track_model(store, dim=4)  # 12 tracks; build needs len(keys) >= dim + 5
     fam = genre_map.family("Folk")
 
     def folk_count():
@@ -203,20 +204,33 @@ def test_complete_playlist_suggests_fitting_owned_tracks(store):
     assert all(i.reason for i in items)
 
 
-def test_complete_playlist_rejects_genreless_embedding_neighbor(store, monkeypatch):
+def test_complete_playlist_rejects_genreless_related_artist_candidate(store, monkeypatch):
+    from yt_playlist.rec import artist_model
+
     iid = store.identities.upsert_identity("main", "cred", None, True)
     seed = store.tracks.upsert_track("v1", "Anchor", "Seed Artist", None, None)
+    store.tracks.set_track_genre(seed, 'Techno')
     store.tracks.upsert_track("v2", "Candidate", "Other Artist", None, None)
+    compatible = store.tracks.upsert_track("v3", "Compatible", "Other Artist", None, None)
+    store.tracks.set_track_genre(compatible, 'Techno')
     target = store.playlists.upsert_playlist(iid, "PT", "Target", 1, "h", 0.0)
     store.playlists.set_playlist_tracks(target, [seed])
-    seed_key, candidate_key = next(iter(store.playlists.get_playlist_track_keys(target))), "candidate|other artist"
-    store.rec_model.replace_rec_vectors([(seed_key, b"vector")])  # select the embedding branch
-    monkeypatch.setattr(embed, "centroid_neighbors",
-                        lambda *args, **kwargs: [(candidate_key, 0.9)])
+    calls = []
+
+    def candidates(store, seeds, **kwargs):
+        calls.append(set(seeds))
+        return [{'key': 'candidate|other artist', 'title': 'Candidate', 'artist': 'Other Artist',
+                 'video_id': 'v2', 'genre': '', 'artist_score': 1.0},
+                {'key': 'compatible|other artist', 'title': 'Compatible', 'artist': 'Other Artist',
+                 'video_id': 'v3', 'genre': 'Techno', 'artist_score': 0.5}]
+
+    monkeypatch.setattr(artist_model, 'artist_track_candidates', candidates)
+    monkeypatch.setattr(artist_model, 'related_artists', lambda *args, **kwargs: [('Other Artist', 0.9)])
 
     items = surfaces.complete_playlist(store, target, limit=4)
 
-    assert items == []                 # neither a genre match nor artist-model relation
+    assert calls == [{store.artists.key('Seed Artist')}]
+    assert [item.key for item in items] == ['compatible|other artist']
 
 
 def test_take_action_auth_and_cleanup_no_sync(store):
@@ -300,7 +314,7 @@ def _seed_two_eras(store):
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PO", "Noughts", 6, "h2", 0.0), noughts)
     store.history.record_history_plays(iid, 1.0, ["n0|nb0"], source_timezone="UTC")
     store.history.record_history_plays(iid, 1.0, ["o0|ob0"], source_timezone="UTC")
-    embed.build_and_store(store, dim=4)
+    model_support.build_track_model(store, dim=4)
     return iid
 
 

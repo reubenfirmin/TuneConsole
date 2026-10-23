@@ -1,18 +1,16 @@
 """Claimed, journaled playlist recovery with verified remote outcomes."""
 import json
 import os
-import re
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
-
-from ytmusicapi.exceptions import YTMusicServerError
 
 from yt_playlist.core import paths
 from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.library.sync import refresh_playlist
 from yt_playlist.library.playlist_mutation import restore_playlist_sequence
-from yt_playlist.library.playlist_snapshot import validate_playlist
+from yt_playlist.library.playlist_snapshot import (
+    http_status as _http_status, playlist_if_present)
 from yt_playlist.library.undo_conflicts import keeper_target, playlist_state, require_unchanged_copy
 
 
@@ -41,27 +39,13 @@ def _claim_lock(store, action_id):
         yield
 
 
-def _http_status(exc):
-    status = getattr(getattr(exc, "response", None), "status_code", None)
-    if status is None and isinstance(exc, YTMusicServerError):
-        match = re.search(r"Server returned HTTP (\d{3}):", str(exc))
-        status = int(match[1]) if match else None
-    return status
-
-
 def _existing(client, playlist_id):
     """Only an explicit remote 404 establishes absence; connection/parser failures do not."""
     try:
-        detail = client.get_playlist(playlist_id, limit=None)
+        return playlist_if_present(client, playlist_id)
     except Exception as exc:
-        if _http_status(exc) == 404:
-            return None
         raise ValueError(f"Could not establish whether playlist {playlist_id} exists. "
                          "Reconnect YouTube Music and retry Undo.") from exc
-    error = detail.get("error") if isinstance(detail, dict) else None
-    if isinstance(error, dict) and error.get("code") == 404:
-        return None
-    return validate_playlist(detail)
 
 
 def _client(clients, identity):

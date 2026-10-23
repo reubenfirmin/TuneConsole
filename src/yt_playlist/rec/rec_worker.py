@@ -5,13 +5,17 @@ taste vectors and materializes the heavy/slow surfaces (fresh songs, outward dis
 rec_proposals for last-good serving. Triggers coalesce: many syncs in a row collapse into one
 rebuild, so frequent syncs never pile up.
 """
+import logging
 import threading
 import time
 import traceback
 
-from yt_playlist.rec import actions, artist_model, embed, model_selection, surfaces
+from yt_playlist.rec import model_selection
 from yt_playlist.core.activity import activity_for, cancellable_work, check_stopping, WorkClosing
 from yt_playlist.core.work_diagnostics import work_span
+from yt_playlist.core.numerics import limit_native_threads
+from yt_playlist.rec.worker_queue import Job, PendingJobs
+from yt_playlist.rec.worker_tasks import ServingTasks
 
 
 class RecWorker:
@@ -24,18 +28,23 @@ class RecWorker:
         self.gc_initial_s = gc_initial_s           # first GC pass shortly after start (catches restarts)
         self._lock = threading.Lock()
         self.model_lock = threading.RLock()
-        self._pending = False
-        self._modes_pending = False
-        self._ratings_pending = False
-        self._content_pending = set()
+        self.jobs = PendingJobs()
         self._running = False
+        self._model_active = False
         self._discovering = False
         self._ticker_started = False
         self.enabled = enabled
         self._stop = threading.Event()
         self._threads = []
         self.work = activity_for(ctx)
+        limit_native_threads()
         model_selection.recover_interrupted(ctx.store)
+        from yt_playlist.rec.maintenance import Projections
+        self.projections = Projections(ctx.store, ctx.now_fn, ctx.logger, accepting=self._accepting,
+                                       schedule=self._schedule_projections, execute=self._stage)
+        self.tasks = ServingTasks(ctx, self._stage)
+        if self.enabled:
+            ctx.store.background_measurement = self.enqueue_measurement
 
     def start_ticker(self):
         """Start the periodic background daemons (idempotent): the budgeted discovery scan (so the
@@ -45,16 +54,44 @@ class RecWorker:
                 return
             self._stop.clear()
             self._ticker_started = True
-        for target in (self._tick_loop, self._gc_loop):
+        for target in (self._tick_loop, self._gc_loop, self._maintenance_loop):
             thread = threading.Thread(target=target, daemon=True)
             self._threads.append(thread)
             thread.start()
 
+    def _maintenance_loop(self):
+        """Notice committed changes from live playback and external import writers."""
+        while not self._stop.wait(0.5):
+            try:
+                self.ctx.store.maintenance_diagnostics.flush()
+                self._retry_home()
+                self._retry_bundles()
+                self.projections.poll()
+                self._poll_refresh()
+            except Exception:
+                self.ctx.logger.warning('recommendation change polling failed', exc_info=True)
+
+    def _poll_refresh(self):
+        from yt_playlist.rec import candidate_refresh
+        if self.busy:
+            return
+        now = time.monotonic()
+        state = self.jobs.retry[Job.FULL]
+        if state.dirty or self.ctx.store.rec_refresh.has_pending_changes():
+            if now >= state.retry_at:
+                self.trigger()
+        if (now >= self.jobs.retry[Job.BUNDLES].retry_at
+              and (not self.ctx.store.rec_surface.get_proposals('mode_bundles')
+                   or candidate_refresh.due(self.ctx.store, self.ctx.now_fn()))):
+            # Decay/expiry changes rankings, not model fitting inputs.
+            self._schedule(full=False, bundles=True)
+
     def shutdown(self):
         self._stop.set()
         with self._lock:
-            self._pending = self._modes_pending = self._ratings_pending = False
-            self._content_pending.clear()
+            offers = self.jobs.cancel()
+        for offer in offers:
+            offer.close()
 
     def join(self, timeout):
         deadline = time.monotonic() + timeout
@@ -64,6 +101,7 @@ class RecWorker:
             raise RuntimeError("Recommendation worker did not stop")
         self._threads.clear()
         self._ticker_started = False
+        self.ctx.store.maintenance_diagnostics.flush(force=True)
 
     def _tick_loop(self):
         while not self._stop.wait(self.discovery_tick_s):
@@ -79,12 +117,14 @@ class RecWorker:
         from yt_playlist.rec import discover, fresh_pool
         self._discovering = True
         try:
-            with cancellable_work(self._stop.is_set):
+            limit_native_threads()
+            with self.ctx.store.priority.background(check_stopping), cancellable_work(self._stop.is_set):
                 result = discover.run_discovery(self.ctx, now)
                 # The scan runs after the rebuild's earlier Home bundles. Publish the new songs now,
                 # rather than waiting for another rebuild or making a page request rank them.
                 check_stopping()
                 fresh_pool.prepare(self.ctx.store, now)
+                self.trigger_home_refresh()
                 return result
         finally:
             self._discovering = False
@@ -124,7 +164,39 @@ class RecWorker:
     @property
     def busy(self):
         """True while a rebuild is scheduled or running, driving the 'refreshing…' UI state."""
-        return self._running
+        with self._lock:
+            return self._model_active or self.jobs.visible
+
+    def enqueue_measurement(self, offer):
+        """Use this worker for analytics too; requests only pin and enqueue their offered state."""
+        with self._lock:
+            if self._stop.is_set() or not self.work.accepting:
+                return False
+            if not self.jobs.merge(Job.MEASUREMENT, offer):
+                self.ctx.logger.warning("recommendation measurement backlog full; offer omitted: surface=%s",
+                                        offer.surface)
+                return False
+            start = not self._running
+            self._running = True
+        if start:
+            self._start_loop()
+        return True
+
+    def _flush_measurements(self):
+        with self._lock:
+            offers = self.jobs.take_measurements()
+        try:
+            for offer in offers:
+                try:
+                    with (self.ctx.store.priority.background(check_stopping),
+                          cancellable_work(self._stop.is_set), work_span("rec: serving measurement")):
+                        check_stopping()
+                        offer.run()
+                finally:
+                    offer.close()
+        finally:
+            for offer in offers:
+                offer.close()
 
     @property
     def discovery_busy(self):
@@ -132,7 +204,7 @@ class RecWorker:
         return self.busy or self._discovering
 
     def trigger(self):
-        """Request a rebuild. Coalesces: if one is already scheduled/running, just mark pending."""
+        """Coalesce source changes into a background refresh of the existing models."""
         self._schedule(full=True)
 
     def trigger_mode_refresh(self):
@@ -143,38 +215,89 @@ class RecWorker:
         """Resolve exact-video rating subjects without blocking the bridge's response reader."""
         self._schedule(full=False, ratings=True)
 
+    def trigger_home_refresh(self, *, force=False):
+        """Coalesce disposable Home preparation without asking for any model fit.
+
+        Automatic preparation shares a thirty-second backoff, including bundle
+        publications during catch-up. The maintenance ticker retries dirty work
+        even when no Home request arrives. Explicit completed pool jobs may force
+        a refresh so their user-requested result becomes available immediately.
+        """
+        with self._lock:
+            state = self.jobs.retry[Job.HOME]
+            state.dirty = True
+        if force or time.monotonic() - state.attempted_at >= 30:
+            self._schedule(full=False, home=True)
+
+    def _retry_home(self):
+        with self._lock:
+            state = self.jobs.retry[Job.HOME]
+            due = state.dirty and time.monotonic() - state.attempted_at >= 30
+        if due:
+            self._schedule(full=False, home=True)
+
+    def _retry_bundles(self):
+        """Retry a failed projection even after the learning backlog has drained."""
+        with self._lock:
+            state = self.jobs.retry[Job.BUNDLES]
+            due = state.dirty and time.monotonic() >= state.retry_at
+        if due:
+            self._schedule(full=False, bundles=True)
+
     def trigger_content_update(self, keys=(), *, video_ids=()):
-        """Coalesce changed recordings for placement into the existing model and cluster pools."""
+        """Coalesce metadata changes for the next background model and pool preparation."""
         keys = set(keys)
         keys.update(key for vid in video_ids if (key := self.ctx.store.tracks.identity_key_for_video(vid)))
         if keys:
-            self._schedule(full=False, keys=keys)
+            self.ctx.store.rec_refresh.enqueue()
+            self._schedule(full=True)
 
-    def _schedule(self, *, full, modes=False, keys=(), ratings=False):
+    def trigger_story_refresh(self):
+        """A cold reading tab queues article preparation, never a synchronous provider lookup."""
+        if time.monotonic() - self.jobs.retry[Job.STORIES].attempted_at >= 30:
+            self._schedule(full=False, stories=True)
+
+    def trigger_artist_images(self, artist_ids):
+        """Coalesce on-screen artwork repairs separately from model and Home preparation."""
+        if artist_ids:
+            self._schedule(full=False, artist_images=artist_ids)
+
+    def _accepting(self):
+        return self.enabled and not self._stop.is_set() and self.work.accepting
+
+    def _schedule_projections(self, kinds):
+        return self._schedule(full=False, **dict.fromkeys(kinds, True))
+
+    def _schedule(self, *, full, modes=False, keys=(), ratings=False, trends=False, cleanup=False, bundles=False, home=False,
+                  stories=False, artist_images=()):
         with self._lock:
-            if not self.enabled or self._stop.is_set() or not self.work.accepting:
-                return
-            previous = (self._pending, self._modes_pending, self._ratings_pending, len(self._content_pending))
-            self._pending |= full
-            self._modes_pending |= modes
-            self._ratings_pending |= ratings
-            self._content_pending.update(keys)
-            if previous != (self._pending, self._modes_pending, self._ratings_pending, len(self._content_pending)):
+            if not self._accepting():
+                return False
+            requested = {Job.FULL: full, Job.MODES: modes, Job.RATINGS: ratings, Job.TRENDS: trends,
+                         Job.CLEANUP: cleanup, Job.BUNDLES: bundles, Job.HOME: home, Job.STORIES: stories,
+                         Job.ARTWORK: artist_images, Job.CONTENT: keys}
+            for job, payload in requested.items():
+                if payload:
+                    self.jobs.merge(job, payload)
+            if any(requested.values()) and self.ctx.logger.isEnabledFor(logging.DEBUG):
                 caller = traceback.extract_stack(limit=3)[0]
-                self.ctx.logger.info("rec scheduled: kind=%s changed_tracks=%d running=%s source=%s:%d in %s",
-                    "full" if full else ("ratings" if ratings else "initialization" if modes else "incremental"),
-                    len(self._content_pending), self._running,
+                self.ctx.logger.debug("rec scheduled: kind=%s changed_tracks=%d running=%s source=%s:%d in %s",
+                    "models" if full else ("ratings" if ratings else "trends" if trends else
+                                          "bundles" if bundles else "initialization" if modes else "content"),
+                    len(self.jobs.pending.get(Job.CONTENT, ())), self._running,
                     caller.filename, caller.lineno, caller.name)
             if self._running:
-                return
+                return True
             self._running = True
         self._start_loop()
+        return True
 
     def _start_loop(self):
         try:
             run = self.work.wrap("recommendation updates", self._loop)
         except WorkClosing:
             self._running = False
+            self.shutdown()
             return
         thread = threading.Thread(target=run, daemon=True)
         self._threads.append(thread)
@@ -187,31 +310,36 @@ class RecWorker:
 
     def _loop(self):
         try:
+            limit_native_threads()
             self._run_pending()
         except WorkClosing:
+            # Application admission may close before shutdown() is called.
+            # Release arrivals and their pinned readers on either stop path.
+            self.shutdown()
             with self._lock:
                 self._running = False
             self.ctx.logger.info("rec worker stopped for shutdown")
+        finally:
+            self._model_active = False
 
     def _run_pending(self):
         while not self._stop.wait(self.debounce_s):
+            self._flush_measurements()
             with self._lock:
-                if not (self._pending or self._modes_pending or self._content_pending or self._ratings_pending):
+                if not self.jobs:
                     self._running = False
                     return
-                full, modes, keys = self._pending, self._modes_pending, self._content_pending
-                ratings_pending = self._ratings_pending
-                self._pending = False
-                self._modes_pending = False
-                self._ratings_pending = False
-                self._content_pending = set()
-            if ratings_pending:
+                batch = self.jobs.drain()
+                self._model_active = bool(batch)
+            full, modes = Job.FULL in batch, Job.MODES in batch
+            if full and time.monotonic() < self.jobs.retry[Job.FULL].retry_at:
+                # Keep the intent for the ticker without delaying ratings/serving jobs.
+                self.jobs.retry[Job.FULL].dirty = True
+                full = False
+            keys = batch.get(Job.CONTENT, set())
+            if Job.RATINGS in batch:
                 try:
-                    from yt_playlist.library import ratings
-                    clients = self.ctx.client_provider() or {}
-                    for identity in self.ctx.store.identities.get_identities():
-                        keys.update(ratings.reconcile_pending(
-                            self.ctx.store, identity.id, clients.get(identity.id)))
+                    keys.update(self.tasks.ratings())
                 except WorkClosing:
                     raise
                 except Exception:
@@ -221,43 +349,96 @@ class RecWorker:
                     self._do_rebuild()           # includes genre groups and Home bundles
                 elif modes:
                     self._do_mode_refresh()
+                if Job.BUNDLES in batch:
+                    with self.model_lock:
+                        self._refresh_bundles()
             except WorkClosing:
                 raise
             except Exception:  # noqa: BLE001 - never let rec work crash the app
-                self.ctx.logger.warning("rec worker rebuild failed", exc_info=True)
+                # A queued continuation or the maintenance poll must not turn a
+                # persistent failure into a 10ms retry loop. Keep every traceback.
+                backoff = self.jobs.retry[Job.FULL].failed(time.monotonic(), base=2, exponent_cap=4)
+                self.ctx.logger.warning("rec worker rebuild failed: retry_backoff=%.1fs", backoff, exc_info=True)
                 if full and modes:              # a failed full rebuild must not swallow local repair
                     self.trigger_mode_refresh()
+            # Disposable projections keep their own retry clocks. A failed or
+            # coalesced learning pass must not swallow either summary job.
+            if Job.TRENDS in batch:
+                with self.model_lock:
+                    self._refresh_trends()
+            if Job.CLEANUP in batch:
+                with self.model_lock:
+                    self.projections.run('cleanup')
             if keys:
                 try:
-                    from yt_playlist.rec import content_updates
-                    with self.model_lock, cancellable_work(self._stop.is_set):
-                        content_updates.update_tracks(self.ctx.store, keys, self.ctx.now_fn())
+                    self.ctx.store.rec_refresh.enqueue()
+                    self._schedule(full=True)
                 except WorkClosing:
                     raise
                 except Exception:
-                    self.ctx.logger.warning("rec incremental update failed: tracks=%d", len(keys), exc_info=True)
+                    self.ctx.logger.warning("rec content refresh failed: tracks=%d", len(keys), exc_info=True)
+            if Job.HOME in batch:
+                try:
+                    state = self.jobs.retry[Job.HOME]
+                    state.attempted_at = time.monotonic()
+                    with self.model_lock:
+                        dirty = self.tasks.home()
+                    with self._lock:
+                        state.dirty |= dirty
+                except WorkClosing:
+                    raise
+                except Exception:
+                    with self._lock:
+                        self.jobs.retry[Job.HOME].dirty = True
+                    self.ctx.logger.warning("Home preparation failed; retaining previous collections", exc_info=True)
+            if Job.ARTWORK in batch:
+                try:
+                    self.tasks.artwork(batch[Job.ARTWORK])
+                except WorkClosing:
+                    raise
+                except Exception:
+                    self.ctx.logger.warning('Artist image repair failed', exc_info=True)
+            if Job.STORIES in batch:
+                try:
+                    self.jobs.retry[Job.STORIES].attempted_at = time.monotonic()
+                    if self.tasks.stories():
+                        self._schedule(full=False, stories=True)
+                except WorkClosing:
+                    raise
+                except Exception:
+                    self.ctx.logger.warning("Story preparation failed; retaining previous stories", exc_info=True)
+            self._model_active = False
         self._running = False
 
     def rebuild(self):
-        """Synchronous rebuild for the Taste-model 'rebuild' button. Guarded against the background
-        loop: if a rebuild is already running it defers (marks pending) instead of starting a second
-        concurrent SVD, and it flips `_running` so `busy` reflects a direct rebuild too."""
+        """Run maintenance directly for background callers and command-line tools.
+
+        Interactive handlers use trigger(). An active worker absorbs direct calls
+        into its next pass instead of fitting a second model concurrently.
+        """
         with self._lock:
+            if self._stop.is_set() or not self.work.accepting:
+                return
             if self._running:
-                self._pending = True   # one's already in flight; let it absorb this request
+                self.jobs.merge(Job.FULL)   # one's already in flight; absorb this request
                 return
             self._running = True
+            self._model_active = True
         try:
             self.work.wrap("recommendation rebuild", self._do_rebuild)()
         finally:
             with self._lock:
-                again = self._pending or self._modes_pending or self._ratings_pending or bool(self._content_pending)
+                again = bool(self.jobs)
                 self._running = again
+                self._model_active = False
             if again:
                 self._start_loop()
 
     def _stage(self, name, target, *args, **kwargs):
-        with cancellable_work(self._stop.is_set), work_span("rec: " + name, announce=True):
+        limit_native_threads()
+        self._flush_measurements()
+        with (self.ctx.store.priority.background(check_stopping), cancellable_work(self._stop.is_set),
+              work_span("rec: " + name, announce=True, level=logging.DEBUG)):
             return target(*args, **kwargs)
 
     def _do_mode_refresh(self):
@@ -265,22 +446,11 @@ class RecWorker:
             self._refresh_modes()
 
     def _refresh_modes(self):
-        """Initialize absent models/groups; ordinary startup reuses the prepared structures."""
-        from yt_playlist.rec import fresh_pool, mode_surfaces, taste_modes
-        store = self.ctx.store
-        if (store.settings.get_setting("rec_content_model") and not taste_modes.needs_refresh(store)
-                and store.rec_surface.get_proposals("mode_bundles")):
-            if not store.rec_surface.get_proposals("fresh_pool"):
-                self._stage("initial discovery songs", fresh_pool.prepare, store, self.ctx.now_fn())
-            self.ctx.logger.info("rec initialization: reused saved model, clusters and candidate pools")
-            return
-        if not store.settings.get_setting("rec_content_model"):
-            self._stage("initial content vectors", embed.maybe_rebuild_content_vectors, store)
-        now = self.ctx.now_fn()
-        if taste_modes.needs_refresh(store):
-            self._stage("initial taste clusters", taste_modes.recompute, store, now)
-        self._stage("cluster surfaces and PPR", mode_surfaces.prepare_bundles, store, now)
-        self.ctx.logger.info("rec initialization: missing genre groups and Home bundles prepared")
+        """Serve saved results immediately; prepare missing or changed state in the worker."""
+        if self.ctx.store.rec_refresh.has_pending_changes():
+            self._rebuild()
+        else:
+            self._refresh_bundles()
 
     def _do_rebuild(self):
         # Source removal waits for publication, then clears every derived cache
@@ -288,115 +458,78 @@ class RecWorker:
         with self.model_lock:
             self._rebuild()
 
-    def _rebuild(self):
-        """Rebuild vectors and materialize the heavy proposal surfaces.
+    def _refresh_trends(self):
+        return self.projections.run('trends')
 
-        Surfaces go through a small table so adding more later stays uniform. Each is built in its own
-        try/except: the build hits YouTube and can fail (network, rate-limit, parse), and a failure
-        must leave that surface's last-good proposals in place rather than wiping its card to empty.
-        Today the only such surface is Fresh songs; outward album discovery now accumulates separately
-        in the discovery pool (see discover.pick_discovered_albums), refreshed by the discovery tick."""
-        log = self.ctx.logger
+    def _refresh_bundles(self):
+        from yt_playlist.rec import mode_surfaces
         store = self.ctx.store
-        now = self.ctx.now_fn()
-        t0 = time.monotonic()
-        log.info("rec rebuild: starting")
+        # Model fitting can succeed while ranking fails. Keep the pool's retry
+        # clock separate so it cannot stall ratings or reset its own backoff.
+        with self._lock:
+            state = self.jobs.retry[Job.BUNDLES]
+            if time.monotonic() < state.retry_at:
+                state.dirty = True
+                return None
+            state.dirty = False
+            state.started(time.monotonic())
+        try:
+            result = self._stage("cluster surfaces and PPR", mode_surfaces.prepare_bundles,
+                                 store, self.ctx.now_fn())
+        except WorkClosing:
+            raise
+        except Exception:
+            with self._lock:
+                backoff = state.failed(time.monotonic(), base=5, cap=300, exponent_cap=6)
+            self.ctx.logger.warning('rec bundle preparation failed: attempt=%d retry_backoff=%.1fs; '
+                                    'retaining published pools', state.failures, backoff, exc_info=True)
+            return None
+        if result is None:
+            self.ctx.logger.debug("rec mode bundles deferred: database changed during calculation")
+            with self._lock:
+                state.deferred(time.monotonic())
+        else:
+            with self._lock:
+                state.succeeded()
+            self.ctx.logger.debug("rec rebuild: mode bundles prepared")
+            # Catch-up can publish a new pool every five seconds. Both partial
+            # and drained generations share Home's automatic preparation budget.
+            self.trigger_home_refresh()
+        return result
+
+    def _rebuild(self):
+        """Fit privately; keep the last completed model available throughout the work."""
+        from yt_playlist.rec import model_refresh
+        store = self.ctx.store
+        with self._lock:
+            state = self.jobs.retry[Job.FULL]
+            if time.monotonic() < state.retry_at:
+                state.dirty = True
+                return
+            state.started(time.monotonic())
+        restore = store.settings.get_setting('rec_selection_restore')
         restored = False
-        restore_id = store.settings.get_setting("rec_selection_restore")
-        if restore_id:
-            self._stage("model followup", model_selection.update_followup, store, now, now_fn=self.ctx.now_fn)
-            restored = store.model_selection.restore_model_selection(int(restore_id), now)
-            store.settings.set_setting("rec_selection_restore", "")
-        n = store.rec_model.rec_vectors_count() if restored else self._stage("taste embedding", embed.build_and_store, store)
-        log.info("rec rebuild: embedded %d vectors in %.1fs", n, time.monotonic() - t0)
+        if restore:
+            self._stage('model followup', model_selection.update_followup, store,
+                        self.ctx.now_fn(), now_fn=self.ctx.now_fn)
+            restored = store.model_selection.restore_model_selection(int(restore), self.ctx.now_fn())
+            store.settings.delete_setting('rec_selection_restore')
+        result = self._stage('recommendation models', model_refresh.rebuild, store, self.ctx.now_fn(),
+                             keep_collaborative=restored)
+        if result is None:
+            self.ctx.logger.debug('rec models deferred: inputs changed during fitting; retaining published model')
+            with self._lock:
+                state.deferred(time.monotonic())
+            # Candidate caches can use the last coherent model while metadata is
+            # still arriving. Their independent retry clock bounds ranking work.
+            self._refresh_bundles()
+            return
+        with self._lock:
+            state.succeeded()
         try:
-            self._stage("model comparison", model_selection.maintain, store, now, now_fn=self.ctx.now_fn)
+            self._stage('model selection', model_selection.maintain, store, self.ctx.now_fn(), now_fn=self.ctx.now_fn)
         except WorkClosing:
             raise
-        except Exception:  # comparison failures must leave the regular rebuild usable
-            log.warning("automatic model comparison failed", exc_info=True)
-        # Keep the content (genre/era) space + its model in step with the collaborative rebuild, so the
-        # cluster blend and the out-of-corpus "new music" pool refresh on the regular rebuild cadence
-        # rather than ONLY when an enrichment batch happens to cross a coverage bucket (#48). Bucket-gated
-        # inside (cheap when nothing changed; forced when the model is missing); guarded so a content
-        # failure never breaks the rebuild.
-        try:
-            self._stage("content vectors", embed.maybe_rebuild_content_vectors, store)
-        except WorkClosing:
-            raise
-        except Exception:  # noqa: BLE001 - content space is best-effort; don't fail the rebuild
-            log.warning("rec rebuild: content-vector refresh failed", exc_info=True)
-        # Taste modes (#60): cluster the freshly-rebuilt content space into the user's distinct taste
-        # regions, with stable ids across recomputes. Read-only for now (nothing ranks on them yet);
-        # guarded so a mode failure never breaks the rebuild.
-        try:
-            from yt_playlist.rec import taste_modes
-            nm = self._stage("taste clusters", taste_modes.recompute, store, now)
-            log.info("rec rebuild: taste modes -> %d active", nm)
-        except WorkClosing:
-            raise
-        except Exception:  # noqa: BLE001 - modes are best-effort; don't fail the rebuild
-            log.warning("rec rebuild: taste-modes recompute failed", exc_info=True)
-        # Part B (#60): bucket every Home surface's pool by mode so the request can assemble distinct,
-        # mode-focused cards without ranking anything live. Guarded; a failure leaves last-good bundles.
-        try:
-            from yt_playlist.rec import mode_surfaces
-            self._stage("cluster surfaces and PPR", mode_surfaces.prepare_bundles, store, now)
-            log.info("rec rebuild: mode bundles prepared")
-        except WorkClosing:
-            raise
-        except Exception:  # noqa: BLE001 - mode bundles are best-effort; don't fail the rebuild
-            log.warning("rec rebuild: mode-bundle prep failed", exc_info=True)
-        # #76-#80 Trends rollups: first-play index + weekly/monthly rollup + spotlight candidate,
-        # materialized for the /trends page and the intermittent Home spotlight. Guarded; a failure
-        # leaves the last-good rollup in place and never breaks the rebuild.
-        try:
-            from yt_playlist.rec import trend_rollups
-            self._stage("trend rollups", trend_rollups.build, store, now)
-            log.info("rec rebuild: trend rollups built")
-        except WorkClosing:
-            raise
-        except Exception:  # noqa: BLE001 - trend rollups are best-effort; don't fail the rebuild
-            log.warning("rec rebuild: trend-rollup build failed", exc_info=True)
-        # #28 artist-relationship model, built alongside the track embedding. Guarded: an artist-model
-        # failure must never break the track rebuild (the model is consumed by nothing critical yet).
-        try:
-            ta = time.monotonic()
-            na = self._stage("artist model", artist_model.build_artist_model_and_store, store)
-            log.info("rec rebuild: artist model %d artists in %.1fs", na, time.monotonic() - ta)
-        except WorkClosing:
-            raise
-        except Exception:  # noqa: BLE001 - artist model is best-effort; don't fail the rebuild
-            log.warning("rec rebuild: artist model failed", exc_info=True)
-        # Wikipedia 'into recently' cards: pre-fetch the whole fresh-subject pool so the Home card
-        # serves from a warm cache instead of blocking on a live fetch when the rotation lands on a
-        # new subject. Guarded + best-effort: a fetch failure leaves the prior cache in place. The
-        # subject pool tracks the transient model, which we just rebuilt, so this is the right moment.
-        try:
-            from yt_playlist.rec import into_recently
-            warmed = self._stage("wiki prewarm", into_recently.prewarm_pool, store, now)
-            log.info("rec rebuild: warmed %d wiki card(s)", warmed)
-        except WorkClosing:
-            raise
-        except Exception:  # noqa: BLE001 - wiki prewarm is best-effort; never fail the rebuild
-            log.warning("rec rebuild: wiki prewarm failed", exc_info=True)
-        # Playlist-cleanup summary: a local-only O(n²) scan we keep OFF the home request path by
-        # materializing it here (sync changes the playlists this depends on, so a rebuild is the right
-        # moment). Last-good: a failure leaves the previous summary in place.
-        try:
-            payload = self._stage("playlist cleanup", actions.refresh_cleanup, store, now)
-            log.info("rec rebuild: cleanup → %d playlist(s)", payload["count"])
-        except WorkClosing:
-            raise
-        except Exception:  # noqa: BLE001 - never let the cleanup scan crash a rebuild
-            log.warning("rec rebuild: cleanup summary failed", exc_info=True)
-        # Outward discovery (new albums + new artists) is now an accumulating, scan-ledger-backed pass
-        # over ALL interested artists, a budgeted batch at a time, not a top-10 overwrite each sync.
-        try:
-            res = self._stage("discovery", self._discover, now)
-            log.info("rec rebuild: discovery scanned %d artists", res.get("scanned", 0))
-        except WorkClosing:
-            raise
-        except Exception:  # noqa: BLE001
-            log.warning("rec rebuild: discovery pass failed", exc_info=True)
-        log.info("rec rebuild: done in %.1fs", time.monotonic() - t0)
+        except Exception:
+            self.ctx.logger.warning('automatic model comparison failed; retaining published models', exc_info=True)
+        self._refresh_bundles()

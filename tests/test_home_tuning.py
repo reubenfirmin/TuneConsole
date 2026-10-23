@@ -9,6 +9,8 @@ from yt_playlist.web.app import create_app
 
 def client_at(store, clock):
     iid = store.identities.upsert_identity("main", "cred", None, True)
+    from tests.test_mode_cards_route import prepare_home
+    prepare_home(store, clock[0])
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: clock[0]),
                       base_url="http://127.0.0.1")
 

@@ -24,7 +24,7 @@ def test_checked_in_flatpak_inputs_match_current_lock_and_markers(tmp_path):
               for p in lock["package"] for w in p.get("wheels", [])}
     for module in manifest["modules"]:
         command = module["build-commands"][0]
-        for required in ("requests==", "websockets==", "watchfiles==", "dbus-next=="):
+        for required in ("requests==", "websockets==", "watchfiles==", "dbus-next==", "scipy=="):
             assert required in command
         assert "tomli==" not in command and "colorama==" not in command
         assert "--no-index --no-deps --no-build-isolation" in command

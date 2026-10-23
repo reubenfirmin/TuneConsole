@@ -6,6 +6,7 @@ Split out of the former monolithic RecRepo so each rec concern is its own focuse
 import json
 import time
 import uuid
+from dataclasses import dataclass
 
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.core import artists, catalog
@@ -17,6 +18,17 @@ from yt_playlist.util import genre_map
 # (see _reverted below) rather than shrinking a flat amount on every nudge, so stale learning decays
 # but reinforced preferences hold.
 _WEIGHT_MIN, _WEIGHT_MAX = 0.2, 3.0
+
+_VECTOR_TABLES = {"rec_vectors": "identity_key", "rec_content_vectors": "identity_key",
+                  "rec_discovered_content_vectors": "identity_key", "rec_artist_vectors": "artist",
+                  "rec_artist_content_vectors": "artist"}
+
+
+@dataclass(frozen=True)
+class VectorChanges:
+    upserts: tuple[tuple[str, bytes], ...]
+    removed: tuple[str, ...]
+    replace: bool = False
 
 
 def _reverted(weight, updated_at, now, halflife_d):
@@ -105,7 +117,7 @@ class RecModelRepo(Repo):
         if raw is None:
             return False
         snapshot = json.loads(raw["value"])
-        from yt_playlist.rec.rec_params import LANE_NAMES
+        from yt_playlist.core.recommendation_settings import LANE_NAMES
         weights = [w for w in snapshot["weights"]
                    if not w["axis"].startswith("lane:") or w["axis"][5:] in LANE_NAMES]
         with self.conn:
@@ -138,31 +150,42 @@ class RecModelRepo(Repo):
         self.conn.commit()
 
     @synchronized
-    def suppressed_keys(self, surface, now, scope="") -> set:
+    def suppressed_keys(self, surface, now, scope="", *, keys=None) -> set:
         """Keys to hide on a surface: dismissed/muted/snoozed (surface-scoped) PLUS YouTube dislikes
         and explicit genre mutes (global, every surface). Feedback honors any 'until' expiry.
 
         A zero preference is an eligibility rule, including for unscored and cached candidates;
         lowering a score alone would still let muted tracks fill an otherwise sparse card.
         """
+        keys = list(dict.fromkeys(keys)) if keys is not None else None
+        if keys == []:
+            return set()
+        clause = (' AND item_key IN (' + ','.join('?' for _ in keys) + ')') if keys is not None else ''
         rows = self.conn.execute(
             "SELECT item_key FROM rec_feedback WHERE "
             "( (surface=? AND (scope='' OR scope=?) AND kind IN ('dismiss','mute','not_now')) "
             "  OR kind='dislike' ) "
-            "AND (until IS NULL OR until>?)",
-            (surface, scope or "", now)).fetchall()
+            "AND (until IS NULL OR until>?)" + clause,
+            (surface, scope or "", now, *(keys or []))).fetchall()
         blocked = {r["item_key"] for r in rows}
         blocked.update(r[0] for r in self.conn.execute(
             "SELECT DISTINCT r.identity_key FROM rec_feedback f "
             "JOIN track_artists ta ON ta.artist_id=f.artist_id "
             "JOIN catalog_entries e ON e.id=ta.entry_id JOIN recordings r ON r.id=e.recording_id "
-            "WHERE f.kind='mute' AND (f.until IS NULL OR f.until>?)", (now,)))
+            "WHERE f.kind='mute' AND (f.until IS NULL OR f.until>?)" +
+            ((' AND r.identity_key IN (' + ','.join('?' for _ in keys) + ')') if keys is not None else ''),
+            (now, *(keys or []))))
         muted_genres = {r["axis"][6:] for r in self.conn.execute(
             "SELECT axis FROM rec_weights WHERE axis LIKE 'genre:%' AND weight=0")}
         if muted_genres:
+            keys = list(keys) if keys is not None else None
+            if keys == []:
+                return blocked
+            clause = (" AND identity_key IN (" + ",".join("?" for _ in keys) + ")") if keys is not None else ""
             for row in self.conn.execute(
-                    "SELECT identity_key,genre FROM tracks WHERE genre<>'' "
-                    "UNION SELECT identity_key,genre FROM discovered_tracks WHERE genre<>''"):
+                    "SELECT identity_key,genre FROM tracks WHERE genre<>''" + clause +
+                    " UNION SELECT identity_key,genre FROM discovered_tracks WHERE genre<>''" + clause,
+                    (keys or []) * 2):
                 if (genre_map.family(row["genre"]) in muted_genres
                         or genre_map.subgenre(row["genre"]) in muted_genres):
                     blocked.add(row["identity_key"])
@@ -272,17 +295,6 @@ class RecModelRepo(Repo):
             "SELECT reason FROM rec_feedback WHERE kind='like' AND item_key=? AND scope=''",
             (identity_key,)).fetchone()
         return row["reason"] if row else None
-
-    @synchronized
-    def stamp_sync_like_provenance(self) -> int:
-        """One-shot migration helper (rec/repair.py): mark every provenance-less like row as
-        sync-discovered. Pre-provenance rows all came from the sync's bulk rated map (the live
-        pipeline recorded through the same code path, indistinguishably), so 'sync' - the class with
-        no transient participation - is the only honest classification. Returns rows stamped."""
-        cur = self.conn.execute(
-            "UPDATE rec_feedback SET reason='sync' WHERE kind='like' AND (reason IS NULL OR reason='')")
-        self.conn.commit()
-        return cur.rowcount
 
     @synchronized
     def mark_graduated_once(self, identity_key, kind, now) -> bool:
@@ -398,12 +410,96 @@ class RecModelRepo(Repo):
             "SELECT kind, COUNT(*) c FROM rec_feedback GROUP BY kind")}
 
     @synchronized
+    def recent_rating_inputs(self, since, until) -> dict:
+        """Retained rating inputs first added in [since, until], not an action ledger.
+
+        Sync discovers existing ratings without knowing their action time. Keep those likes
+        separate; dislikes likewise describe when evidence entered the model. Count each track
+        once per kind even if more than one feedback surface retains it.
+        """
+        rows = self.conn.execute(
+            "WITH inputs AS (SELECT kind,item_key,MAX(CASE WHEN reason='action' THEN 1 ELSE 0 END) action "
+            "FROM rec_feedback "
+            "WHERE kind IN ('like','dislike') AND created_at>=? AND created_at<=? "
+            "GROUP BY kind,item_key) "
+            "SELECT kind,CASE WHEN kind='like' AND action=1 THEN 'action' ELSE 'sync' END provenance,"
+            "COUNT(*) n FROM inputs GROUP BY kind,provenance", (since, until)).fetchall()
+        counts = {(r["kind"], r["provenance"]): r["n"] for r in rows}
+        return {"likes": counts.get(("like", "action"), 0),
+                "synced_likes": counts.get(("like", "sync"), 0),
+                "dislikes": sum(n for (kind, _), n in counts.items() if kind == "dislike")}
+
+    @synchronized
     def clear_feedback(self) -> None:
         self.conn.execute("DELETE FROM rec_feedback")
         self.conn.execute("DELETE FROM rec_impressions")
         self.conn.commit()
 
     # --- taste-embedding vectors ---
+    @synchronized
+    def next_feedback_expiry(self, now):
+        row = self.conn.execute('SELECT MIN(until) FROM rec_feedback WHERE until>?', (now,)).fetchone()
+        return row[0]
+
+    @synchronized
+    def prepare_training_changes(self, vectors):
+        """Compare serialized results on the pinned reader, before taking the serving lock.
+
+        These reads also register the output tables as snapshot dependencies, so a concurrent
+        model publisher invalidates the delta just like a source edit invalidates its fit.
+        """
+        if not getattr(self._store, '_read_only', False):
+            raise RuntimeError('Training changes require a read snapshot')
+        changes = {}
+        for table, rows in vectors.items():
+            column = _VECTOR_TABLES.get(table)
+            if column is None:
+                raise ValueError('Invalid training model table')
+            current = dict(self.conn.execute(f'SELECT {column},vec FROM {table}'))
+            # Discovery encoding follows source order, unlike the sorted fitted spaces.
+            # Preserve its tied rankings when a newly inserted key belongs between old rows.
+            old_order = tuple(current) if table == 'rec_discovered_content_vectors' else None
+            if old_order is not None:
+                rows = tuple(rows)
+            upserts, seen = [], set()
+            for key, blob in rows:
+                if key in seen:
+                    raise ValueError('Duplicate training vector key')
+                seen.add(key)
+                if current.pop(key, None) != blob:
+                    upserts.append((key, blob))
+            if old_order is not None:
+                old_keys = set(old_order)
+                delta_order = [key for key in old_order if key in seen]
+                delta_order.extend(key for key, _ in rows if key not in old_keys)
+                if delta_order != [key for key, _ in rows]:
+                    changes[table] = VectorChanges(rows, (), replace=True)
+                    continue
+            if upserts or current:
+                changes[table] = VectorChanges(tuple(upserts), tuple(current))
+        return changes
+
+    @synchronized
+    def publish_training_generation(self, changes):
+        """Apply snapshot-checked deltas inside ReadSnapshot's atomic transaction.
+
+        Identical rows avoid vector-page, revision-trigger and WAL churn unless preserving
+        discovery order requires replacement. An omitted space stays intact; an empty target
+        removes it.
+        """
+        if not self.conn.in_transaction:
+            raise RuntimeError("Training publication requires an outer transaction")
+        for table, delta in changes.items():
+            column = _VECTOR_TABLES.get(table)
+            if column is None:
+                raise ValueError("Invalid training model table")
+            if delta.replace:
+                self.conn.execute(f'DELETE FROM {table}')
+            self.conn.executemany(f'DELETE FROM {table} WHERE {column}=?',
+                                  [(key,) for key in delta.removed])
+            self.conn.executemany(f'INSERT INTO {table}({column},vec) VALUES (?,?) '
+                f'ON CONFLICT({column}) DO UPDATE SET vec=excluded.vec', delta.upserts)
+
     @synchronized
     def replace_rec_vectors(self, rows) -> None:
         """Atomically replace all taste-embedding vectors. rows = iterable of (identity_key, bytes)."""
@@ -413,8 +509,9 @@ class RecModelRepo(Repo):
 
     @synchronized
     def get_rec_vectors(self) -> list[tuple]:
+        # Match the fit's sorted keys even when a delta inserts between existing rows.
         return [(r["identity_key"], r["vec"])
-                for r in self.conn.execute("SELECT identity_key, vec FROM rec_vectors")]
+                for r in self.conn.execute("SELECT identity_key, vec FROM rec_vectors ORDER BY identity_key")]
 
     @synchronized
     def rec_vectors_count(self) -> int:
@@ -422,20 +519,21 @@ class RecModelRepo(Repo):
 
     # --- content (genre/era) vectors: parallel space for the cluster blend ---
     @synchronized
-    def content_generation(self):
+    def content_generation(self, *, keys=None):
         """Read the encoding model and both vector pools from one SQLite snapshot."""
         self.conn.execute("SAVEPOINT content_snapshot")
         try:
-            settings = dict(self.conn.execute(
-                "SELECT key,value FROM settings WHERE key IN "
-                "('rec_content_model','rec_content_genre_revision','rec_content_inputs','rec_content_generation')"))
+            settings = {key: self._store.settings.get_setting(key) for key in (
+                "rec_content_model", "rec_content_genre_revision", "rec_content_inputs",
+                "rec_content_generation")}
             result = {
-                "generation": settings.get("rec_content_generation", ""),
+                "generation": settings.get("rec_content_generation") or "",
                 "model": settings.get("rec_content_model"),
                 "revision": settings.get("rec_content_genre_revision"),
                 "inputs": settings.get("rec_content_inputs"),
-                "library": self.get_rec_content_vectors(),
-                "discovered": self.get_rec_discovered_content_vectors(),
+                "library": (self.get_rec_content_vectors() if keys is None else
+                            list(self.vectors_by_keys(keys, content=True).items())),
+                "discovered": self.get_rec_discovered_content_vectors() if keys is None else [],
             }
         except BaseException:
             if self.conn.in_transaction:
@@ -472,6 +570,18 @@ class RecModelRepo(Repo):
         return True
 
     @synchronized
+    def vectors_by_keys(self, keys, *, content=False) -> dict:
+        """Read only the requested rows from one established model space."""
+        keys = list(dict.fromkeys(keys))
+        table = 'rec_content_vectors' if content else 'rec_vectors'
+        result = {}
+        for offset in range(0, len(keys), 500):
+            batch = keys[offset:offset + 500]
+            result.update(self.conn.execute(f'SELECT identity_key,vec FROM {table} WHERE identity_key IN ('
+                + ','.join('?' for _ in batch) + ')', batch).fetchall())
+        return result
+
+    @synchronized
     def content_vectors_by_keys(self, keys) -> dict:
         """Read a bounded neighbourhood; prefer library vectors for overlapping recordings."""
         keys = list(dict.fromkeys(keys))
@@ -485,37 +595,6 @@ class RecModelRepo(Repo):
         return result
 
     @synchronized
-    def update_content_vectors(self, library, discovered, *, expected_generation):
-        """Patch only changed keys in the existing encoding; never replace either vector pool.
-
-        A concurrent full model publication invalidates the calculation. Bumping the generation
-        also prevents a previously started full publisher from overwriting these newer inputs.
-        None removes a key that no longer has any feature in the saved model.
-        """
-        with self.conn:
-            self.conn.execute("UPDATE settings SET value=value WHERE key='rec_content_generation'")
-            current = self.conn.execute(
-                "SELECT value FROM settings WHERE key='rec_content_generation'").fetchone()
-            if (current[0] if current else "") != expected_generation:
-                return False
-            changed = False
-            for table, vectors in (("rec_content_vectors", library),
-                                   ("rec_discovered_content_vectors", discovered)):
-                for key, blob in vectors.items():
-                    if blob is None:
-                        result = self.conn.execute(f"DELETE FROM {table} WHERE identity_key=?", (key,))
-                    else:
-                        result = self.conn.execute(
-                            f"INSERT INTO {table}(identity_key,vec) VALUES (?,?) "
-                            "ON CONFLICT(identity_key) DO UPDATE SET vec=excluded.vec WHERE vec<>excluded.vec",
-                            (key, blob))
-                    changed |= result.rowcount > 0
-            if changed:
-                self.conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)",
-                                  ("rec_content_generation", uuid.uuid4().hex))
-        return True
-
-    @synchronized
     def replace_rec_content_vectors(self, rows) -> None:
         """Atomically replace all content vectors. rows = iterable of (identity_key, bytes)."""
         self.conn.execute("DELETE FROM rec_content_vectors")
@@ -525,7 +604,7 @@ class RecModelRepo(Repo):
     @synchronized
     def get_rec_content_vectors(self) -> list[tuple]:
         return [(r["identity_key"], r["vec"])
-                for r in self.conn.execute("SELECT identity_key, vec FROM rec_content_vectors")]
+                for r in self.conn.execute("SELECT identity_key, vec FROM rec_content_vectors ORDER BY identity_key")]
 
     @synchronized
     def rec_content_vectors_count(self) -> int:
@@ -555,7 +634,7 @@ class RecModelRepo(Repo):
     @synchronized
     def get_rec_artist_vectors(self) -> list[tuple]:
         return [(r["artist"], r["vec"])
-                for r in self.conn.execute("SELECT artist, vec FROM rec_artist_vectors")]
+                for r in self.conn.execute("SELECT artist, vec FROM rec_artist_vectors ORDER BY artist")]
 
     @synchronized
     def rec_artist_vectors_count(self) -> int:
@@ -571,4 +650,4 @@ class RecModelRepo(Repo):
     @synchronized
     def get_rec_artist_content_vectors(self) -> list[tuple]:
         return [(r["artist"], r["vec"])
-                for r in self.conn.execute("SELECT artist, vec FROM rec_artist_content_vectors")]
+                for r in self.conn.execute("SELECT artist, vec FROM rec_artist_content_vectors ORDER BY artist")]

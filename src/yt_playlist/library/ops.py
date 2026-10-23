@@ -17,7 +17,7 @@ from yt_playlist.library import sync as sync_mod
 from yt_playlist.library.executor import (
     MergePlan, add_tracks_to_playlist, apply_result, copy_into_playlist, copy_or_move_playlist,
     copy_playlist, create_playlist_from_album, create_playlist_from_song, delete_empty_playlist, delete_playlist,
-    deserialize_plan, execute_planned, remove_track, rename_playlist,
+    deserialize_plan, execute_planned, forget_empty_playlist, remove_track, rename_playlist,
     reorder_track, search_versions, store_plan)
 from yt_playlist.library.playlist_undo import undo_action
 from yt_playlist.library.liked_music import LikedMusic
@@ -84,6 +84,9 @@ class PlaylistOps:
     # --- deletes ------------------------------------------------------------
     def delete_empty(self, playlist_id) -> None:
         delete_empty_playlist(self.store, playlist_id, self._require_client(playlist_id), self.now_fn())
+
+    def forget_empty(self, playlist_id) -> None:
+        forget_empty_playlist(self.store, playlist_id, self.now_fn())
 
     def delete(self, playlist_id) -> None:
         delete_playlist(self.store, playlist_id, self._require_client(playlist_id), self.now_fn())

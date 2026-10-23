@@ -73,6 +73,25 @@ def test_every_provider_field_is_logged(store):
     assert ("discogs", "genre", "Art Pop") in [tuple(r) for r in logged]
 
 
+@pytest.mark.parametrize('first,later', [('Rock', 'Psychedelic Rock'), ('Psychedelic Rock', 'Rock')])
+def test_supported_subgenre_wins_over_parent_across_provider_order(store, first, later):
+    track = _track(store)
+    mb = FakeProv('musicbrainz', {'Hyperballad': {'genre': first}})
+    lf = FakeProv('lastfm', {'Hyperballad': {'genre': later}})
+    _run(store, [track], [mb, lf], _cfg(('musicbrainz', True), ('lastfm', True)))
+    assert store.tracks.get_track_enrichment(track['id'])[0] == 'Psychedelic Rock'
+    assert store.conn.execute('SELECT COUNT(*) FROM enrichment_conflict').fetchone()[0] == 0
+
+
+def test_sibling_genres_still_follow_provider_order_and_record_disagreement(store):
+    track = _track(store)
+    mb = FakeProv('musicbrainz', {'Hyperballad': {'genre': 'Acid Techno'}})
+    lf = FakeProv('lastfm', {'Hyperballad': {'genre': 'Dub Techno'}})
+    _run(store, [track], [mb, lf], _cfg(('musicbrainz', True), ('lastfm', True)))
+    assert store.tracks.get_track_enrichment(track['id'])[0] == 'Acid Techno'
+    assert store.conn.execute('SELECT COUNT(*) FROM enrichment_conflict').fetchone()[0] == 1
+
+
 def test_mbid_from_first_provider_is_visible_to_later_one(store):
     t = _track(store)
     mb = FakeProv("musicbrainz", {"Hyperballad": {"mb_recording_id": "mbid-1"}})

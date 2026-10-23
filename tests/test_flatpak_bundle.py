@@ -20,8 +20,11 @@ def test_signed_bundle_configures_origin_and_updates_from_it(tmp_path, initial_r
             pytest.skip(f"{tool} is required for the bundle integration check")
 
     def run(*args, env=None):
-        return subprocess.run([str(a) for a in args], check=True, text=True,
-                              capture_output=True, env=env).stdout.strip()
+        result = subprocess.run([str(a) for a in args], text=True,
+                                capture_output=True, env=env)
+        assert result.returncode == 0, (
+            f"Command failed: {result.args}\n{result.stdout}\n{result.stderr}")
+        return result.stdout.strip()
 
     sdk = "org.freedesktop.Sdk//25.08"
     if subprocess.run(["flatpak", "info", sdk], capture_output=True).returncode:
@@ -58,8 +61,10 @@ def test_signed_bundle_configures_origin_and_updates_from_it(tmp_path, initial_r
     server = ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHandler, directory=str(repo)))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    # Flatpak's bundle unpacking also needs a private, writable temporary directory.
     isolated = {**os.environ, "XDG_DATA_HOME": str(tmp_path / "data"),
-                "XDG_CONFIG_HOME": str(tmp_path / "config"), "XDG_CACHE_HOME": str(tmp_path / "cache")}
+                "XDG_CONFIG_HOME": str(tmp_path / "config"), "XDG_CACHE_HOME": str(tmp_path / "cache"),
+                "TMPDIR": str(tmp_path)}
     try:
         export("one", initial_runtime)
         archive = tmp_path / "TuneConsole.flatpak"

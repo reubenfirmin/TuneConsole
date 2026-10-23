@@ -1,6 +1,6 @@
 // Sensor installation, independent isolated/MAIN health, and idle-only repair.
 // Playback and request readiness consume this interface; probes never reset play deduplication.
-function createSensors({version, warn, send, suppressBeforeUnload}) {
+function createSensors({version, revision, receiverRevision, warn, send, suppressBeforeUnload}) {
   const reloadedAt = new Map();
 
   async function inject(tabId) {
@@ -30,7 +30,14 @@ function createSensors({version, warn, send, suppressBeforeUnload}) {
     try {
       const reply = await chrome.tabs.sendMessage(tabId, {type: "sensor-ping", main: requireMain});
       if (!reply || !reply.ok) return {ok: false, error: "invalid sensor reply"};
+      // Fetch readiness remains independent of MAIN. Playback needs a receiver which supports
+      // exact desired-state reconciliation, including cancellation before a delayed click.
+      if (requireMain && reply.receiverRevision !== receiverRevision) {
+        return {ok: false, reply, outdatedReceiver: true,
+          error: "Outdated rating receiver; reload YouTube Music when playback can be interrupted"};
+      }
       if (requireMain && (reply.mainVersion !== version ||
+          reply.mainRevision !== revision ||
           typeof reply.mainAgeMs !== "number" || !Number.isFinite(reply.mainAgeMs) ||
           reply.mainAgeMs < 0 || reply.mainAgeMs >= 10000)) {
         return {ok: false, reply, error: "MAIN sensor missing, outdated, or stale"};
@@ -65,7 +72,7 @@ function createSensors({version, warn, send, suppressBeforeUnload}) {
   }
 
   async function probe() {
-    let tabs = [], responding = 0, reinjected = 0, reloading = 0, errors = [];
+    let tabs = [], responding = 0, reinjected = 0, reloading = 0, errors = [], versions = [];
     try { tabs = await chrome.tabs.query({url: "https://music.youtube.com/*"}); }
     catch (e) { errors.push(String(e && e.message ? e.message : e)); }
     for (const tab of tabs) {
@@ -79,10 +86,16 @@ function createSensors({version, warn, send, suppressBeforeUnload}) {
       if (result.ok) responding += 1;
       else if (await reloadUnresponsive(tab.id)) reloading += 1;
       else errors.push(`tab ${tab.id}: ${result.error || "sensor did not answer"}`);
+      if (versions.length < 8) versions.push({tabId: tab.id, ok: result.ok,
+        receiverRevision: result.reply?.receiverRevision ?? null,
+        mainVersion: result.reply?.mainVersion ?? null, mainRevision: result.reply?.mainRevision ?? null,
+        mainAgeMs: result.reply?.mainAgeMs ?? null,
+        capture: result.reply?.capture ?? null});
     }
     const report = {type: "sensor-health", ytmTabs: tabs.length, respondingTabs: responding,
       reinjectedTabs: reinjected, healthy: tabs.length > 0 && responding === tabs.length,
       recovering: reloading > 0, reloadedTabs: reloading,
+      versions,
       error: errors.filter(Boolean).join("; ").slice(0, 500)};
     try { send(report); } catch (e) {}
     return report;

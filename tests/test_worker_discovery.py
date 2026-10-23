@@ -5,6 +5,7 @@ from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
 from yt_playlist.web.context import Ctx
 from tests.conftest import FakeClient
+from yt_playlist.rec import home_prepared
 
 
 class _ArtistClient(FakeClient):
@@ -26,13 +27,16 @@ def _ctx(store, client):
                     templates=None, jobs=None)
 
 
-def test_worker_materializes_proposals(store):
+def test_worker_materializes_proposals(store, monkeypatch):
     iid, ctx = _ctx(store, _ArtistClient())
     t = store.tracks.upsert_track("v1", "Song", "Fav", None, None)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "P", "P", 1, "h", 0.0), [t])
     store.history.record_history_plays(iid, 1.0, ["song|fav"], source_timezone="UTC")
 
-    RecWorker(ctx).rebuild()               # synchronous rebuild + discovery pass
+    worker = RecWorker(ctx)
+    monkeypatch.setattr(worker, '_start_loop', lambda: None)
+    worker._discover(1.0)
+    worker.shutdown()
     # discovery now accumulates into the pool (scan-ledger backed), not the overwrite proposals
     titles = {a["title"] for a in store.discovery.get_discovered_albums()}
     assert "Brand New LP" in titles        # the new album was scanned into the pool
@@ -41,6 +45,7 @@ def test_worker_materializes_proposals(store):
 def test_home_discover_serves_cached(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     store.discovery.upsert_discovered_album("B", "X", "Cached LP", "2024", None, now=1.0)
+    assert home_prepared.prepare(store, 1.0) is not None
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     assert "Cached LP" in c.get("/home/discover").text     # served from materialized proposals, no fetch
@@ -64,10 +69,11 @@ def test_discovery_pass_publishes_new_songs_before_the_next_rebuild(store, monke
 
 
 @pytest.mark.parametrize("fails", [False, True])
-def test_periodic_discovery_refresh_state_clears_after_success_or_failure(store, monkeypatch, fails):
+def test_discovery_finishes_and_queues_home_refresh_only_on_success(store, monkeypatch, fails):
     from yt_playlist.rec import discover
     _, ctx = _ctx(store, FakeClient())
     worker = RecWorker(ctx)
+    monkeypatch.setattr(worker, '_start_loop', lambda: None)
 
     def scan(*args):
         assert worker.discovery_busy and not worker.busy
@@ -81,6 +87,9 @@ def test_periodic_discovery_refresh_state_clears_after_success_or_failure(store,
             worker._discover(10)
     else:
         worker._discover(10)
-    assert not worker.discovery_busy
+    assert not worker._discovering
+    assert worker.jobs.has('home') is (not fails)
+    assert worker.discovery_busy is (not fails)
+    worker.shutdown()
 
 

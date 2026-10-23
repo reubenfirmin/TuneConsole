@@ -328,6 +328,7 @@
   --danger-3:    var(--p-pink-200);
   --danger-deep: var(--p-red-600);
   --danger-soft: color-mix(in srgb, var(--danger) 15%, transparent);
+  --on-air:      var(--p-red-500);
   --up:          var(--p-sage-400);     /* ticker "heating up" */
   --down:        var(--p-pink-400);     /* ticker "cooling" (shares --danger hue) */
 

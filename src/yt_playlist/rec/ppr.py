@@ -5,6 +5,7 @@ PPR/cosine experiment. Final displayed cards and the other policy's counterfactu
 in the local recommendation ledger. Only displayed cards receive observed outcomes.
 """
 import numpy as np
+from scipy.sparse.linalg import LinearOperator
 
 from yt_playlist.core.activity import check_stopping
 from yt_playlist.rec import embed, rec_params, taste_modes
@@ -22,16 +23,22 @@ def build_transition(store):
     if not keys:
         return [], None, {}
     C = embed._cooc_matrix(baskets, keys)          # symmetric Newman-weighted co-occurrence
-    col = C.sum(axis=0)
+    col = np.asarray(C.sum(axis=0)).ravel()
     dangling = col == 0                            # isolated track: no co-listen edges
     col[dangling] = 1.0
-    W = C / col
+    W = C.multiply(1.0 / col).tocsr()
     if dangling.any():
         # Teleport from dangling nodes to the uniform distribution so the walk stays column-stochastic
         # and PPR mass is conserved (otherwise mass arriving at isolated tracks vanishes, biasing the
         # ranking against modes whose members have little co-listen data).
-        W[:, dangling] = 1.0 / len(keys)
-    return keys, W, {k: i for i, k in enumerate(keys)}
+        # Apply the uniform term at multiplication time, rather than storing dense columns.
+        def step(vector):
+            return W @ vector + vector[dangling].sum(axis=0) / len(keys)
+
+        transition = LinearOperator(W.shape, matvec=step, matmat=step, dtype=np.float64)
+    else:
+        transition = W
+    return keys, transition, {k: i for i, k in enumerate(keys)}
 
 
 def ppr_rank(W, seed_idx, alpha=_ALPHA, iters=_ITERS, tol=0.0):

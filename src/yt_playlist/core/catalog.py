@@ -119,6 +119,13 @@ def invalidate_derived(conn):
     from yt_playlist.core.first_play import invalidate
 
     invalidate(conn)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='rec_change_queue'").fetchone():
+        # Preserve the last completed generation while the background worker
+        # rebuilds. Current identity/eligibility checks filter superseded keys.
+        conn.execute("INSERT INTO rec_change_queue(kind,item) VALUES ('refresh','') "
+                     'ON CONFLICT(kind,item) DO UPDATE SET revision=revision+1')
+        conn.execute('UPDATE rec_model_selection_runs SET identity_version=0 WHERE identity_version=2')
+        return
     for table in ('rec_vectors','rec_content_vectors','rec_discovered_content_vectors',
                   'rec_artist_vectors','rec_artist_content_vectors','rec_proposals'):
         conn.execute(f'DELETE FROM {table}')
@@ -135,7 +142,7 @@ def rekey_state(conn, old_key, new_key, recording_id, *, previous_recording_id=N
         conn.execute(f'UPDATE {table} SET identity_key=?,recording_id=? WHERE recording_id=?', (new_key,recording_id,subject))
     conn.execute('UPDATE listening_observations SET identity_key=?,recording_id=? WHERE recording_id=?',
                  (new_key,recording_id,subject))
-    from .listening import reconcile_foreign_days
+    from .listening_calendar import reconcile_foreign_days
     for row in conn.execute('SELECT identity_id FROM listening_calendars'):
         reconcile_foreign_days(conn,row[0])
     for row in conn.execute('SELECT rowid,* FROM rec_feedback WHERE recording_id=?', (subject,)).fetchall():
@@ -197,7 +204,7 @@ def associate_item(conn, video_id, recording_id, *, source, evidence, now):
     # Exact-video observations can follow the corrected association without changing raw evidence.
     conn.execute('UPDATE play_events SET recording_id=?,identity_key=? WHERE video_id=?', (recording_id,target[0],video_id))
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='listening_observations'").fetchone():
-        from .listening import reconcile_foreign_days
+        from .listening_calendar import reconcile_foreign_days
         for row in conn.execute('SELECT DISTINCT identity_id FROM play_events WHERE video_id=?',(video_id,)).fetchall():
             reconcile_foreign_days(conn,row[0])
     conn.execute('UPDATE recordings SET provisional=0 WHERE id=?', (recording_id,))

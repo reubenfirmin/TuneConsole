@@ -33,6 +33,33 @@ def _app(bridge):
     return app
 
 
+@pytest.mark.parametrize("starting", [False, True])
+@pytest.mark.parametrize("version", [1, 2])
+def test_status_attributes_saved_radio_before_controller_reattaches(store, starting, version):
+    from types import SimpleNamespace
+    from yt_playlist.web.radio_session import PlaylistRadio
+
+    bridge = Bridge()
+    bridge.now_playing = {"title": "Playing song", "artist": "Artist", "video_id": "v1",
+                          "playlist_ytm_id": "PLRADIO", "paused": False}
+    bridge.now_playing_seen_at = time.monotonic()
+    store.settings.set_setting("radio_current_session", json.dumps({
+        "version": version, "phase": "preparing" if starting else "playing",
+        "playlist": "PLRADIO", "title": "Radio Session", "tracks": [{"video_id": "v1"}],
+        "initial_tracks": [{"video_id": "v1"}] if starting else [],
+    }))
+    ctx = SimpleNamespace(bridge=bridge, store=store)
+    ctx.radio = PlaylistRadio(ctx)
+    assert ctx.radio.session is None and not ctx.radio.active
+    app = FastAPI()
+    app.include_router(build_bridge_route(ctx))
+    with TestClient(app).websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}):
+        report = TestClient(app).get("/bridge/status").json()
+    assert report["radio"] is True
+    assert report["radio_ready"] is (not starting)
+    assert report["now_playing"]["source"]["kind"] == "radio"
+
+
 def test_our_extension_origin_connects_and_round_trips():
     bridge = Bridge()
     client = TestClient(_app(bridge))
@@ -215,6 +242,7 @@ def test_rich_now_playing_heartbeat_restores_expired_ui_without_recording_play()
         assert bridge.now_playing == {
             "title": "Recovered", "artist": "Artist", "thumbnail": "art",
             "likeStatus": "LIKE", "video_id": "v-recovered", "paused": False,
+            "metadata_verified": None,
             "playlist_ytm_id": "OLAK5uy_album", "album_browse_id": "MPRE_album",
         }
         assert store.history.play_events_since(0) == []
@@ -254,6 +282,40 @@ def test_legacy_heartbeat_for_another_video_does_not_inherit_source():
     snapshot = _now_playing_snapshot({"videoId": "new", "title": "New"}, previous)
     assert "playlist_ytm_id" not in snapshot
     assert "album_browse_id" not in snapshot
+
+
+@pytest.mark.parametrize("value, expected", [(True, True), (False, False), (None, None),
+                                           (1, None), ("true", None)])
+def test_playback_verification_is_observed_without_inheriting_previous_state(value, expected):
+    from yt_playlist.web.routes.bridge import _now_playing_snapshot
+
+    previous = {"video_id": "same", "metadata_verified": True}
+    snapshot = _now_playing_snapshot({"videoId": "same", "metadataVerified": value}, previous)
+    assert snapshot["metadata_verified"] is expected
+    assert _now_playing_snapshot({"videoId": "same"}, previous)["metadata_verified"] is None
+
+
+def test_capture_diagnostics_retain_only_bounded_structural_fields():
+    from yt_playlist.web.routes.bridge import _capture_diagnostics
+
+    result = _capture_diagnostics({
+        "metadataVerified": False, "accountKnown": True, "hasVideo": "true",
+        "barCandidates": 0, "ratingCandidates": 10**6,
+        "title": "private song", "brandId": "private account",
+        "sources": [{"source": "bar.polymerController.data", "present": True,
+                     "keys": ["x" * 100] * 12, "targetKeys": ["videoId"],
+                     "data": {"title": "private song"}},
+                    {"source": "private source", "present": True}, {"source": []}],
+    })
+    assert result["metadataVerified"] is False
+    assert result["accountKnown"] is True
+    assert result["hasVideo"] is None
+    assert result["barCandidates"] == 0
+    assert result["ratingCandidates"] is None
+    assert result["sources"] == [{"source": "bar.polymerController.data", "present": True,
+                                  "keys": ["x" * 32] * 8, "targetKeys": ["videoId"]}]
+    assert "private" not in repr(result)
+    assert _capture_diagnostics(None) is None
 
 
 @pytest.mark.parametrize("thumbnail", [None, "", "https://example.com/live-art.jpg"])
@@ -328,6 +390,8 @@ def test_sensor_health_is_observable_and_clears_on_disconnect():
         ws.send_json({"type": "sensor-health", "healthy": False, "ytmTabs": 1,
                       "respondingTabs": 0, "reinjectedTabs": 1,
                       "recovering": True, "reloadedTabs": 1,
+                      "versions": [{"tabId": 1, "ok": False, "receiverRevision": 1,
+                                    "mainVersion": 4, "mainRevision": 2, "mainAgeMs": 0}],
                       "error": "content sensor did not answer"})
         deadline = time.time() + 1
         while time.time() < deadline and bridge.sensor_health is None:
@@ -336,8 +400,39 @@ def test_sensor_health_is_observable_and_clears_on_disconnect():
             "healthy": False, "ytm_tabs": 1, "responding_tabs": 0,
             "reinjected_tabs": 1, "recovering": True, "reloaded_tabs": 1,
             "error": "content sensor did not answer",
+            "versions": [{"tabId": 1, "ok": False, "receiverRevision": 1,
+                          "mainVersion": 4, "mainRevision": 2, "mainAgeMs": 0, "capture": None}],
         }
     assert bridge.sensor_health is None
+
+
+def test_native_rating_recovery_logs_terminal_binding_evidence_without_changing_api_state(caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="yt_playlist.web.routes.bridge")
+    bridge = Bridge()
+    bridge.now_playing = {"video_id": "rated-song", "likeStatus": "LIKE"}
+    evidence = {"receiverRevision": 1, "mainRevision": 3,
+                "binding": {"renderer": True, "targetIds": [], "barIds": []}}
+    with TestClient(_app(bridge)).websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
+        for state in ("pending", "failed"):
+            ws.send_json({"type": "rating-reconciliation", "state": state, "ratingId": "one",
+                          "videoId": "rated-song", "attempts": 12, "elapsedMs": 30000,
+                          "error": "No rating binding", "first": evidence, "last": evidence})
+        # A subsequent request's response proves both preceding frames were consumed in order.
+        out = {}
+        worker = threading.Thread(target=lambda: out.update(result=bridge.execute(
+            "GET", "https://music.youtube.com/youtubei/v1/browse", None, timeout=2)))
+        worker.start()
+        request = ws.receive_json()
+        ws.send_json({"id": request["id"], "status": 200, "body": "{}"})
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+        assert bridge.now_playing["likeStatus"] == "LIKE"
+    records = [record for record in caplog.records if "native rating reconciliation" in record.message]
+    assert [record.levelno for record in records] == [logging.INFO, logging.WARNING]
+    assert '"mainRevision": 3' in records[-1].message
+    assert '"targetIds": []' in records[-1].message
 
 
 def test_ws_disconnect_stops_playlist_radio():
@@ -426,6 +521,72 @@ def test_now_playing_toggle_returns_ok_false_when_not_connected():
     client = TestClient(_app(bridge))
     r = client.post("/now-playing/toggle")
     assert r.json()["ok"] is False
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_next_waits_for_player_acknowledgement(accepted):
+    bridge = Bridge()
+    client = TestClient(_app(bridge))
+    with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
+        result = []
+        worker = threading.Thread(target=lambda: result.append(client.post(
+            "/now-playing/next", json={"videoId": "displayed"}).json()))
+        worker.start()
+        frame = ws.receive_json()
+        assert frame == {"id": frame["id"], "type": "next", "videoId": "displayed"}
+        assert worker.is_alive()
+        ws.send_json({"id": frame["id"], "status": 200,
+                      "body": json.dumps({"ok": accepted, "error": "Song changed"})})
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert result == ([{"ok": True}] if accepted else [{"ok": False, "error": "Song changed"}])
+
+
+@pytest.mark.parametrize("payload", [{}, {"videoId": ""}, {"videoId": "song"}])
+def test_next_rejects_missing_song_or_disconnected_player(payload):
+    client = TestClient(_app(Bridge()))
+    assert client.post("/now-playing/next", json=payload).json()["ok"] is False
+
+
+@pytest.mark.parametrize("like_status", ["LIKE", "DISLIKE", "INDIFFERENT"])
+@pytest.mark.parametrize("player_ok", [True, False])
+def test_confirmed_rating_updates_native_player_and_skips_only_dislikes(store, like_status, player_ok):
+    from types import SimpleNamespace
+    from tests.conftest import FakeClient
+    from yt_playlist.library.ops import PlaylistOps
+
+    main = store.identities.upsert_identity("Main", "bridge", "main-brand", True)
+    remote = FakeClient()
+    ops = PlaylistOps(store, lambda: {main: remote}, lambda: 1234)
+    bridge = Bridge()
+    app = FastAPI()
+    app.include_router(build_bridge_route(SimpleNamespace(
+        bridge=bridge, store=store, ops=lambda: ops, now_fn=lambda: 1234)))
+    client = TestClient(app)
+    with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
+        bridge.now_playing = {"video_id": "radio-song", "playlist_ytm_id": "PLRADIO"}
+        result = []
+        action = "dislike" if like_status == "DISLIKE" else "like"
+        worker = threading.Thread(target=lambda: result.append(client.post("/now-playing/rate", json={
+            "action": action, "videoId": "radio-song", "likeStatus": like_status}).json()))
+        worker.start()
+        frame = ws.receive_json()
+        assert remote.rated == [("radio-song", like_status)]
+        assert store.tracks.item_rating(main, "radio-song")["status"] == like_status
+        assert frame == {"id": frame["id"], "type": "rate", "action": action,
+                         "videoId": "radio-song", "likeStatus": like_status,
+                         "brandId": "main-brand", "skip": False}
+        ws.send_json({"id": frame["id"], "status": 200,
+                      "body": json.dumps({"ok": player_ok, "error": "No next song"})})
+        if like_status == "DISLIKE":
+            skip = ws.receive_json()
+            assert skip == {"id": skip["id"], "type": "next", "videoId": "radio-song"}
+            ws.send_json({"id": skip["id"], "status": 200, "body": json.dumps({"ok": True})})
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert result[0]["ok"] is True  # A failed player command cannot undo a confirmed rating.
+        assert result[0].get("player_error") == (None if player_ok else "No next song")
+        assert store.tracks.item_rating(main, "radio-song")["status"] == like_status
 
 
 @pytest.mark.parametrize("outcome", ["ok", "rejected", "http_error"])

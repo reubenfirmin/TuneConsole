@@ -89,6 +89,8 @@ a:has(> .ui-arrow--external) {
 }
 .topbar nav a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
 .topbar nav a.active { color: var(--light-source); background: var(--control-primary); border-color: var(--control-selected-border); }
+.sidebar-privacy { flex: none; color: var(--faint); font-size: var(--type-xs); }
+.sidebar-privacy:hover, .sidebar-privacy:focus-visible { color: var(--text); }
 
 /* Tools dropdown (cleanup / move / actions / setup) at the right of the nav */
 .tools-menu { position: relative; display: flex; }
@@ -680,7 +682,7 @@ tr:hover .pl-play, .pl-play:focus-visible { opacity: 1; text-decoration: none; }
   padding: 0; background: none; border: 0; box-shadow: none; cursor: pointer; color: var(--faint);
   transition: color .12s ease, filter .12s ease, transform .08s ease; }
 .like-btn svg { width: 1.2rem; height: 1.2rem; display: block; }
-.like-btn:hover { color: var(--danger-2); transform: scale(1.12); }
+.like-btn:hover { background: none; color: var(--danger-2); transform: scale(1.12); }
 .like-btn.on { color: var(--danger-2); filter: drop-shadow(0 0 5px color-mix(in srgb, var(--danger-2) 70%, transparent)); }
 /* the Liked Music playlist is all-liked, so per-row hearts are redundant: hide the column;
    a single heart sits in the header instead (.lm-heart). */
@@ -1254,6 +1256,10 @@ body:not(:has(.page-clusters)) .modal {
     right: auto;
     top: auto;
     bottom: 0;
+  }
+  body:not(:has(.page-clusters)) .sidebar-privacy {
+    align-self: flex-start;
+    margin-inline-start: .65rem;
   }
   body:not(:has(.page-clusters)) main {
     width: min(var(--maxw), calc(100vw - 27rem));

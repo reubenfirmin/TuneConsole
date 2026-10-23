@@ -14,7 +14,7 @@ from .runner import MigrationError
 
 
 CONTRACT_FLOOR = 32
-VERSION = 33
+VERSION = 42
 DEFINITION = Path(__file__).with_name('schema_v033.sql')
 SEED_SETTINGS = {
     'catalog_identity_version': '2',
@@ -30,6 +30,51 @@ TOKEN = re.compile(r"--[^\n]*|/\*.*?\*/|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|"
 
 
 def statements(version=VERSION):
+    if version == 42:
+        from .v042_foreign_calendar_scopes import statements as foreign_calendar_statements
+        yield from statements(41)
+        yield from foreign_calendar_statements()
+        return
+    if version == 41:
+        from .v041_scorecard_lookups import statements as scorecard_statements
+        yield from statements(40)
+        yield from scorecard_statements()
+        return
+    if version == 40:
+        from .v040_player_refresh_inputs import statements as player_statements
+        yield from statements(39)
+        yield from player_statements()
+        return
+    if version == 39:
+        from .v039_background_refresh import statements as refresh_statements
+        yield from statements(38)
+        yield from refresh_statements()
+        return
+    if version == 38:
+        from .v038_listening_day_counts import statements as count_statements
+        yield from statements(37)
+        yield from count_statements()
+        return
+    if version == 37:
+        from .v037_home_query_plans import statements as home_statements
+        yield from statements(36)
+        yield from home_statements()
+        return
+    if version == 36:
+        from .v036_progressive_signals import statements as signal_statements
+        yield from statements(35)
+        yield from signal_statements()
+        return
+    if version == 35:
+        from .v035_progressive_source_members import statements as source_statements
+        yield from statements(34)
+        yield from source_statements()
+        return
+    if version == 34:
+        from .v034_progressive_learning import statements as progressive_statements
+        yield from statements(33)
+        yield from progressive_statements()
+        return
     pending = ''
     definition = DEFINITION if version == VERSION else DEFINITION.with_name(f'schema_v{version:03}.sql')
     for line in definition.read_text().splitlines(keepends=True):

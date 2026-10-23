@@ -258,7 +258,8 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                 store.enrichment.record_enrichment_attempt(
                     key, m.name, fields, retry=retry, video_id=t.get("video_id"), now=now,
                     error=error, cooldown=outage,
-                    retry_after=max((net.retry_after(e, now) for e in errors), default=0))
+                    retry_after=max((net.retry_after(e, now) for e in errors), default=0),
+                    providers=[mod.name for mod in chosen])
                 if not retry:
                     attempted += 1
                     successful.add(m.name)

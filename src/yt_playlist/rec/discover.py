@@ -7,9 +7,10 @@ per-playlist taste, so it only surfaces if it fits contexts the user actually pl
 playlist can't drag in off-taste artists. Each result explains itself: which of your artists bridged
 it, and which of your playlists it fits. Runs in the background worker; Last.fm results cached 14d.
 """
+import json
 import random
 from yt_playlist.core.accounts import catalog_client,main_client
-from yt_playlist.core.activity import check_stopping
+from yt_playlist.core.activity import check_stopping, WorkClosing
 
 import numpy as np
 
@@ -125,8 +126,7 @@ class ContentProjection:
         artists, AV, aidx = (artist_model.load_artist_vectors(store) if include_artist
                              else ([], None, {}))
         refs = store.artists.track_keys(library=True)
-        artist_keys = {r['name']:store.artists.key(r['name']) for r in
-                       store.conn.execute('SELECT name FROM artists')}
+        artist_keys = store.artists.name_keys()
         proj = cls(model, None, aidx, AV,artist_keys)
         rows = []
         for k in idx:                                   # only library tracks that ARE in the embedding
@@ -179,10 +179,37 @@ def _artist_thumb(ctx, name):
         client = catalog_client(ctx.client_provider())
         if client is None:
             return None
-        results = client.search(name, filter="artists") or []
-        return best_thumb(results[0].get("thumbnails")) if results else None
+        return _search_artist_thumb(client, name)
+    except WorkClosing:
+        raise
     except Exception:  # noqa: BLE001 - no client / network / parse all degrade to no image
         return None
+
+
+def _search_artist_thumb(client, name):
+    results = client.search(name, filter="artists") or []
+    return best_thumb(results[0].get("thumbnails")) if results else None
+
+
+def repair_artist_images(ctx, artist_ids, now):
+    """Repair a small visible cohort in the worker, without a database lock during I/O."""
+    bridge = getattr(ctx, 'bridge', None)
+    if bridge is not None and not bridge.connected:
+        return
+    client = catalog_client(ctx.client_provider())
+    if client is None:
+        return
+    for artist in ctx.store.discovery.artist_images_due(artist_ids, now):
+        check_stopping()
+        try:
+            thumbnail = _search_artist_thumb(client, artist['artist'])
+        except WorkClosing:
+            raise
+        except Exception:
+            ctx.logger.debug('Artist image lookup deferred for %r', artist['artist'], exc_info=True)
+            ctx.store.discovery.record_artist_image(artist['artist_id'], None, now, retry_after=60)
+        else:
+            ctx.store.discovery.record_artist_image(artist['artist_id'], thumbnail, now)
 
 
 def _rank_candidates(bridges, pt, dim) -> list[dict]:
@@ -390,7 +417,8 @@ def populate_radio_tracks(ctx, now, seeds=6, per_seed_limit=12) -> int:
     owned = store.rec_query.library_keys()
     have = {r["identity_key"] for r in store.discovery.get_discovered_tracks()}
     added = 0
-    for t in store.charts.top_tracks(seeds):
+    seed_tracks = store.charts.top_tracks(seeds)
+    for t in seed_tracks:
         vid = t.get("video_id")
         if not vid:
             continue
@@ -459,14 +487,14 @@ def populate_discovered_tracks(ctx, now, budget=4) -> int:
     return n
 
 
-def _discovery_facet_w(store, genre, now):
+def _discovery_facet_w(store, genre, now, *, leans=None):
     """#18 facet overlay for a discovered candidate: its genre-family multiplier, or None to exclude
     (muted family). Untagged → neutral 1.0."""
     fam = genre_map.family(genre) if genre else None
-    return discovery_facet_weight(store, fam, now)
+    return discovery_facet_weight(store, fam, now, **({'leans': leans} if leans is not None else {}))
 
 
-def pick_discovered_albums(store, n, now, recent_frac=0.7):
+def pick_discovered_albums(store, n, now, recent_frac=0.7, *, facet_leans=None):
     """Surface n albums from the discovered pool: recency-biased (so new releases reliably pop), with
     some older ones mixed in, de-prioritizing what was shown most recently. Selection is read-only;
     the browser records impressions only for visible tiles.
@@ -481,7 +509,7 @@ def pick_discovered_albums(store, n, now, recent_frac=0.7):
     for a in albums:
         family = genre_map.family(a["genre"]) if a.get("genre") else None
         if family not in family_weights:
-            family_weights[family] = _discovery_facet_w(store, a.get("genre"), now)
+            family_weights[family] = _discovery_facet_w(store, a.get("genre"), now, leans=facet_leans)
         w = family_weights[family]
         if w is None:                                    # muted family: excluded from discovery
             continue
@@ -534,7 +562,7 @@ def pick_discovered_albums(store, n, now, recent_frac=0.7):
     return chosen
 
 
-def pick_discovered_artists(store, n, now):
+def pick_discovered_artists(store, n, now, *, facet_leans=None):
     """Surface n new artists from the pool: best taste-score first, de-prioritizing recently-shown.
 
     #18: the FACET overlay applies: artists in a muted genre-family are excluded, and the family
@@ -547,7 +575,7 @@ def pick_discovered_artists(store, n, now):
     for a in arts:
         family = genre_map.family(a["genre"]) if a.get("genre") else None
         if family not in family_weights:
-            family_weights[family] = _discovery_facet_w(store, a.get("genre"), now)
+            family_weights[family] = _discovery_facet_w(store, a.get("genre"), now, leans=facet_leans)
         w = family_weights[family]
         if w is None:                                    # muted family: excluded from discovery
             continue

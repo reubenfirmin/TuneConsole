@@ -1,4 +1,6 @@
 """Setup wizard: identities, provider configuration, and local import connections."""
+from contextlib import contextmanager
+
 from yt_playlist.core.activity import activity_for
 from yt_playlist.core.accounts import client_for
 from urllib.parse import quote
@@ -29,6 +31,15 @@ def build(ctx) -> APIRouter:
     store, templates, setup = ctx.store, ctx.templates, ctx.setup
     previews = TransferPreviews()
     history_imports = HistoryImports(ctx)
+
+    @contextmanager
+    def _spotify_report_operation():
+        if not ctx.spotify_import_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Wait for the current Spotify import or album operation to finish")
+        try:
+            yield
+        finally:
+            ctx.spotify_import_lock.release()
 
     def _saved_identities():
         return [{"id": i.id, "label": i.label, "brand": i.brand_account_id or "",
@@ -360,10 +371,11 @@ def build(ctx) -> APIRouter:
     async def spotify_library_cancel(request: Request):
         form = await request.form()
         token = form.get("preview_token")
-        _snapshot(token, "ready", consume=True)
-        job = current_job(ctx)
-        if job and job.get("preview_token") == token:
-            store.settings.delete_setting(JOB_KEY)
+        with _spotify_report_operation():
+            _snapshot(token, "ready", consume=True)
+            job = current_job(ctx)
+            if job and job.get("preview_token") == token:
+                store.settings.delete_setting(JOB_KEY)
         return RedirectResponse("/setup?tab=import", status_code=303)
 
     @router.get("/import/spotify-library/status")
@@ -420,8 +432,7 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=409, detail="album outcome is already resolved")
         return item
 
-    def _spotify_destination():
-        job = current_job(ctx)
+    def _spotify_destination(job):
         if job and job.get("identity_id") is not None:
             identity,remote = _destination(job["identity_id"])
             return identity.id,remote
@@ -432,51 +443,52 @@ def build(ctx) -> APIRouter:
 
     @router.post("/import/spotify-library/find-album-candidates")
     async def spotify_library_find_candidates(request: Request):
-        job = current_job(ctx)
-        if not job or job.get("status") != "done":
-            raise HTTPException(status_code=404, detail="report not found")
         form = await request.form()
-        item = _report_album(job, form.get("album_index"))
-        try:
-            # Bridge-backed YTMusic calls wait for replies delivered by this app's
-            # WebSocket handler. Running them on the event loop deadlocks that reply.
-            item["candidates"] = await activity_for(ctx).to_thread(
-                find_album_candidates, _spotify_destination()[1], item)
-            save_job(store, job)
-        except Exception:  # noqa: BLE001 - a failed lookup leaves the report intact
-            ctx.logger.exception("Spotify import candidate lookup failed")
-            message = quote("YouTube Music could not search for candidates. Try again when connected.")
-            return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
+        with _spotify_report_operation():
+            job = current_job(ctx)
+            if not job or job.get("status") != "done":
+                raise HTTPException(status_code=404, detail="report not found")
+            item = _report_album(job, form.get("album_index"))
+            try:
+                # Keep the report owner while provider work runs off the WebSocket loop.
+                item["candidates"] = await activity_for(ctx).to_thread(
+                    find_album_candidates, _spotify_destination(job)[1], item)
+                save_job(store, job)
+            except Exception:  # noqa: BLE001 - a failed lookup leaves the report intact
+                ctx.logger.exception("Spotify import candidate lookup failed")
+                message = quote("YouTube Music could not search for candidates. Try again when connected.")
+                return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
         return RedirectResponse(
             f"/import/spotify-library/report#album-{form.get('album_index')}", status_code=303)
 
     @router.post("/import/spotify-library/resolve-album")
     async def spotify_library_resolve_album(request: Request):
-        job = current_job(ctx)
-        if not job or job.get("status") != "done":
-            raise HTTPException(status_code=404, detail="report not found")
         form = await request.form()
-        item = _report_album(job, form.get("album_index"))
-        try:
-            identity_id,remote = _spotify_destination()
-            outcome = await activity_for(ctx).to_thread(
-                save_selected_album, store, remote, item,
-                (form.get("browse_id") or "").strip(), identity_id=identity_id)
-        except (ValueError, HTTPException) as exc:
-            message = quote(str(exc.detail if isinstance(exc, HTTPException) else exc))
-            return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
-        except Exception:  # noqa: BLE001 - preserve the report and surface a usable failure
-            ctx.logger.exception("Spotify import selected-album save failed")
-            message = quote("YouTube Music could not save that album. Try again when connected.")
-            return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
-        report = job["report"]
-        item.update(outcome)
-        item.pop("candidates", None)
-        report["albums_unmatched"] = max(0, report["albums_unmatched"] - 1)
-        report["albums_imported" if outcome["status"] == "imported" else "albums_skipped"] += 1
-        save_job(store, {**job, "report": report})
-        if outcome["status"] == "imported":
-            store.settings.set_setting("spotify_library_imported_at", str(ctx.now_fn()))
+        with _spotify_report_operation():
+            job = current_job(ctx)
+            if not job or job.get("status") != "done":
+                raise HTTPException(status_code=404, detail="report not found")
+            item = _report_album(job, form.get("album_index"))
+            try:
+                identity_id,remote = _spotify_destination(job)
+                outcome = await activity_for(ctx).to_thread(
+                    save_selected_album, store, remote, item,
+                    (form.get("browse_id") or "").strip(), identity_id=identity_id)
+            except (ValueError, HTTPException) as exc:
+                message = quote(str(exc.detail if isinstance(exc, HTTPException) else exc))
+                return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
+            except Exception:  # noqa: BLE001 - preserve the report and surface a usable failure
+                ctx.logger.exception("Spotify import selected-album save failed")
+                message = quote("YouTube Music could not save that album. Try again when connected.")
+                return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
+            report = job["report"]
+            item.update(outcome)
+            item.pop("candidates", None)
+            report["albums_unmatched"] = max(0, report["albums_unmatched"] - 1)
+            report["albums_imported" if outcome["status"] == "imported" else "albums_skipped"] += 1
+            save_job(store, {**job, "report": report})
+            if outcome["status"] == "imported":
+                store.settings.set_setting("spotify_library_imported_at", str(ctx.now_fn()))
         return RedirectResponse("/import/spotify-library/report", status_code=303)
 
     @router.get("/import/spotify-library/spotify-thumbnail")
@@ -489,22 +501,19 @@ def build(ctx) -> APIRouter:
 
     @router.post("/import/spotify-library/dismiss")
     def dismiss_spotify_library_notice():
-        job = current_job(ctx)
-        if not job or job.get("status") not in ACTIVE_STATUSES:
-            if job:
-                save_job(store, {**job, "dismissed": True})
-            else:
-                store.settings.delete_setting(JOB_KEY)
+        with _spotify_report_operation():
+            job = current_job(ctx)
+            if not job or job.get("status") not in ACTIVE_STATUSES:
+                if job:
+                    save_job(store, {**job, "dismissed": True})
+                else:
+                    store.settings.delete_setting(JOB_KEY)
         return Response(status_code=200)
 
     @router.post("/import/spotify-library/delete-report")
     def delete_spotify_library_report():
-        if not ctx.spotify_import_lock.acquire(blocking=False):
-            raise HTTPException(status_code=409, detail="Wait for the Spotify import to finish")
-        try:
+        with _spotify_report_operation():
             store.settings.delete_setting(JOB_KEY)
-        finally:
-            ctx.spotify_import_lock.release()
         return RedirectResponse("/setup?tab=import", status_code=303)
 
     @router.post("/import/takeout")

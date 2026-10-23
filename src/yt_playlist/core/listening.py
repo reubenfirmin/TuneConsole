@@ -3,18 +3,11 @@ import datetime as dt
 import logging
 import os
 from pathlib import Path
-from zoneinfo import ZoneInfo,ZoneInfoNotFoundError
 
 from . import catalog,first_play
+from .listening_calendar import zone as _zone, day_at, reconcile_foreign_days
 
 logger = logging.getLogger(__name__)
-
-
-def _zone(name):
-    try:
-        return ZoneInfo(name) if name else None
-    except (ZoneInfoNotFoundError,ValueError,TypeError):
-        return None
 
 
 def machine_timezone():
@@ -60,10 +53,6 @@ def calendar(conn,identity_id,source_timezone=None):
     return name
 
 
-def day_at(timestamp,timezone):
-    return dt.datetime.fromtimestamp(timestamp,_zone(timezone)).date().isoformat()
-
-
 def project_event(conn,event_id,identity_id,timestamp,*,timezone=None,source=None):
     name = timezone or calendar(conn,identity_id)
     conn.execute('INSERT INTO play_event_calendar(event_id,day,timezone) VALUES (?,?,?) '
@@ -73,7 +62,7 @@ def project_event(conn,event_id,identity_id,timestamp,*,timezone=None,source=Non
         conn.execute('INSERT OR IGNORE INTO play_event_sources VALUES (?,?)',(event_id,source))
 
 
-def observe_day(conn,identity_id,key,source_day,source,timezone,observed_at):
+def observe_day(conn,identity_id,key,source_day,source,timezone,observed_at,*,reconcile=True):
     """Retain a coarse source contribution; daily projection deduplicates subjects."""
     dt.date.fromisoformat(source_day)
     name = calendar(conn,identity_id)
@@ -90,26 +79,10 @@ def observe_day(conn,identity_id,key,source_day,source,timezone,observed_at):
         (identity_id,key,subject,recording[0] if recording else None,source_day,day,source,
          timezone,observed_at,observed_at))
     if day is None:
-        reconcile_foreign_days(conn,identity_id)
-
-
-def reconcile_foreign_days(conn,identity_id):
-    """An exact event can anchor a foreign-calendar date; ambiguity remains unknown."""
-    rows = conn.execute('SELECT o.* FROM listening_observations o JOIN listening_calendars c '
-                        'ON c.identity_id=o.identity_id WHERE o.identity_id=? '
-                        "AND o.precision='calendar_day' AND o.timezone<>c.timezone",
-                        (identity_id,)).fetchall()
-    for row in rows:
-        matches = {
-            event['day'] for event in conn.execute(
-                'SELECT pe.played_at,c.day FROM play_events pe JOIN play_event_calendar c ON c.event_id=pe.id '
-                'WHERE pe.identity_id=? AND pe.identity_key=?',(identity_id,row['identity_key']))
-            if day_at(event['played_at'],row['timezone'])==row['source_day']
-        }
-        # A later event can reveal that an earlier match was ambiguous. Do not
-        # leave an old projection behind when the same source date spans two days.
-        day = matches.pop() if len(matches)==1 else None
-        conn.execute('UPDATE listening_observations SET day=? WHERE id=?',(day,row['id']))
+        scope = subject, source_day, timezone
+        if reconcile:
+            reconcile_foreign_days(conn,identity_id,observations={scope})
+        return scope
 
 
 def day_count(conn,identity_id):

@@ -3,6 +3,7 @@ import logging
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock
+import pytest
 
 from yt_playlist.enrich.enrich_worker import EnrichWorker
 from yt_playlist.providers import enrichment, lastfm
@@ -30,7 +31,7 @@ def config(store, enabled):
 
 def worker(store, providers):
     ctx = SimpleNamespace(store=store, now_fn=lambda: 1000,
-        logger=logging.getLogger(__name__), rec_worker=SimpleNamespace(trigger_mode_refresh=Mock()))
+        logger=logging.getLogger(__name__), rec_worker=SimpleNamespace(trigger_content_update=Mock()))
     return EnrichWorker(ctx, waterfall_fn=partial(run_waterfall,
                         registry={p.name: p for p in providers}))
 
@@ -58,6 +59,24 @@ def test_enabling_provider_revisits_fully_populated_tracks_and_preserves_user_ch
     assert w.drain_once() == 0
     statuses = {r["provider"]:r["status"] for r in store.conn.execute("SELECT * FROM enrichment_provider_config")}
     assert statuses == {"musicbrainz":"available", "deezer":"available"}
+
+
+def test_reenrichment_keeps_genre_until_later_provider_replacement(store):
+    tid = store.tracks.upsert_track('song', 'Song', 'Artist', None, 200)
+    order = ['musicbrainz', 'discogs']
+    store.enrichment.apply_provider_fields(tid, 'musicbrainz', {'genre': 'Rock'}, providers=order)
+    recording = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (tid,)).fetchone()[0]
+    with store.conn:
+        store.conn.executemany('INSERT INTO enrichment_provider_jobs VALUES (?,?)',
+                               [(recording, name) for name in order])
+    store.enrichment.record_enrichment_attempt('song|artist', 'musicbrainz', {}, providers=order)
+    assert store.tracks.get_track_enrichment(tid)[0] == 'Rock'
+    assert store.enrichment.metadata_provenance(tid)['fields']['genre']['source'] == 'musicbrainz'
+    # A subsequent process can replace it using completed answers, without an empty interval.
+    store.enrichment.apply_provider_fields(tid, 'discogs', {'genre': 'Soundtrack'}, providers=order)
+    store.enrichment.record_enrichment_attempt('song|artist', 'discogs', {'genre': 'Soundtrack'}, providers=order)
+    assert store.tracks.get_track_enrichment(tid)[0] == 'Soundtrack'
+    assert store.enrichment.metadata_provenance(tid)['fields']['genre']['source'] == 'discogs'
 
 
 def test_adding_or_changing_effective_key_schedules_only_that_provider(store, monkeypatch):
@@ -107,3 +126,64 @@ def test_disabled_provider_retains_retry_evidence_without_reporting_an_active_re
     assert store.enrichment.enrichment_retry_status()["count"] == 0
     assert store.enrichment.provider_coverage(track["recording_id"])["deezer"] == "disabled"
     assert store.enrichment.enrichment_attempts(track["identity_key"])["deezer"]["status"] == "retry"
+
+
+@pytest.mark.parametrize('change', ['catalog', 'policy', 'vocabulary'])
+def test_genre_revision_refreshes_completed_library_in_bounded_resumable_batches(store, monkeypatch, change):
+    ids = [store.tracks.upsert_track(f'v{i}', f'Song {i}', 'Artist', None, 200) for i in range(3)]
+    genre_provider, audio_provider = Provider('musicbrainz'), Provider('acousticbrainz')
+    config(store, {'musicbrainz', 'acousticbrainz'})
+    w = worker(store, [genre_provider, audio_provider])
+    assert w.drain_once() == 3
+    store.tracks.set_track_genre(ids[0], 'My explicit genre')
+    if change == 'catalog':
+        monkeypatch.setattr(enrichment.genre_catalog, 'REVISION', 'next-catalog')
+    elif change == 'policy':
+        monkeypatch.setattr(enrichment, 'GENRE_POLICY_VERSION', enrichment.GENRE_POLICY_VERSION + 1)
+    else:
+        store.genres.add_genre('Dub Techno')
+
+    assert w.drain_once(limit=1) == 1
+    assert store.enrichment.queue_remaining() == 2
+    assert len(genre_provider.calls) == 4 and len(audio_provider.calls) == 3
+    # A replacement worker resumes persisted jobs instead of enqueueing the
+    # completed first item again. The same revision eventually becomes idle.
+    w = worker(store, [genre_provider, audio_provider])
+    assert w.drain_once(limit=1) == 1
+    assert w.drain_once(limit=1) == 1
+    assert w.drain_once(limit=1) == 0
+    assert len(genre_provider.calls) == 6 and len(audio_provider.calls) == 3
+    assert store.tracks.get_track_enrichment(ids[0])[0] == 'My explicit genre'
+
+
+@pytest.mark.parametrize('replacement', [None, 'Soundtrack'])
+@pytest.mark.parametrize('retry_first', [False, True])
+@pytest.mark.parametrize('explicit', [False, True])
+def test_genre_refresh_preserves_existing_value_until_replacement_without_losing_choices_or_retries(
+        store, monkeypatch, replacement, retry_first, explicit):
+    tid = store.tracks.upsert_track('remix', 'Song (Club Mix)', 'Artist', None, 200)
+    original, fallback = Provider('musicbrainz'), Provider('discogs')
+    original.probe = Mock(return_value=EnrichmentResult('musicbrainz', {'genre': 'Rock', 'year': '1993'}))
+    fallback.probe = Mock(return_value=EnrichmentResult('discogs', {}))
+    config(store, {'musicbrainz', 'discogs'})
+    w = worker(store, [original, fallback])
+    assert w.drain_once() == 1
+    if explicit:
+        store.tracks.set_track_genre(tid, 'My explicit genre')
+
+    monkeypatch.setattr(enrichment, 'GENRE_POLICY_VERSION', enrichment.GENRE_POLICY_VERSION + 1)
+    fresh = EnrichmentResult('musicbrainz', {'year': '1993'})
+    original.probe.side_effect = [TimeoutError('temporarily offline'), fresh] if retry_first else [fresh]
+    fallback.probe.return_value = EnrichmentResult('discogs', {'genre': replacement} if replacement else {})
+    if retry_first:
+        assert w.drain_once() == 0
+        assert store.tracks.get_track_enrichment(tid) == ('My explicit genre' if explicit else 'Rock', '1993')
+        # The alternative provider has already answered. A restarted worker must
+        # reuse that answer when the selected provider finally rejects its old tag.
+        w = worker(store, [original, fallback])
+        w.ctx.now_fn = lambda: 2000
+    assert w.drain_once() == 1
+    assert store.tracks.get_track_enrichment(tid) == (
+        'My explicit genre' if explicit else (replacement or 'Rock'), '1993')
+    assert fallback.probe.call_count == 2
+    assert store.enrichment.queue_remaining() == 0

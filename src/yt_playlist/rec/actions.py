@@ -62,14 +62,20 @@ class ActionItem:
 CLEANUP_SURFACE = "cleanup"
 
 
-def refresh_cleanup(store, now=None) -> dict:
+def refresh_cleanup(store, now=None, *, summary=None) -> dict | None:
     """Recompute the playlist-cleanup summary and cache it as a rec proposal (last-good serving).
 
     This is the ONLY place the heavy O(n²) cleanup scan runs for the home card: the rec worker calls
-    it on every rebuild (so it tracks the playlist changes a sync brings in) and the /cleanup page
+    it after relevant source changes and the /cleanup page
     calls it after every edit (its mutations HX-Refresh back through the GET). take_action then just
     reads the cached number. The home page never pays for the scan."""
-    payload = analysis.cleanup_summary(store).as_payload()
+    if summary is None:
+        with store.read_snapshot() as snapshot:
+            payload = analysis.cleanup_summary(snapshot.store).as_payload()
+            if not snapshot.publish(lambda: store.rec_surface.put_proposals(CLEANUP_SURFACE, payload, now)):
+                return None
+        return payload
+    payload = summary.as_payload()
     store.rec_surface.put_proposals(CLEANUP_SURFACE, payload, now)
     return payload
 

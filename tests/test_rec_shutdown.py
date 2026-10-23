@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from yt_playlist.core.activity import Activity, WorkClosing
-from yt_playlist.rec import embed, ppr
+from yt_playlist.rec import embed, model_refresh, ppr
 from yt_playlist.rec.rec_worker import RecWorker
 
 
@@ -82,26 +82,23 @@ def test_quit_interrupts_rollup_sql_rolls_back_and_releases_waiting_request(
 
 
 def test_cancelled_rebuild_does_not_continue_after_best_effort_stage(store, monkeypatch):
-    from yt_playlist.rec import actions, artist_model, model_selection, trend_rollups
+    from yt_playlist.rec import mode_surfaces, model_refresh
 
     work = Activity()
     worker = RecWorker(SimpleNamespace(store=store, work=work,
         logger=logging.getLogger(__name__), now_fn=lambda: 1))
-    monkeypatch.setattr(embed, "build_and_store", lambda store: 10)
+    monkeypatch.setattr(model_refresh, "rebuild", lambda *args, **kwargs: {})
 
     def cancel(*args, **kwargs):
         work.close_admission()
         raise WorkClosing("stopped")
 
-    monkeypatch.setattr(model_selection, "maintain", cancel)
+    monkeypatch.setattr(mode_surfaces, "prepare_bundles", cancel)
 
     def unexpected(*args, **kwargs):
         pytest.fail("A cancelled rebuild started another stage")
 
-    monkeypatch.setattr(embed, "maybe_rebuild_content_vectors", unexpected)
-    monkeypatch.setattr(trend_rollups, "build", unexpected)
-    monkeypatch.setattr(artist_model, "build_artist_model_and_store", unexpected)
-    monkeypatch.setattr(actions, "refresh_cleanup", unexpected)
+    monkeypatch.setattr(worker, "trigger_home_refresh", unexpected)
     with pytest.raises(WorkClosing):
         worker.rebuild()
     assert work.wait(0) and not worker.busy
@@ -146,13 +143,13 @@ def test_cancelled_embedding_keeps_saved_vectors(store, monkeypatch):
     store.rec_model.replace_rec_vectors([("old", np.ones(8, dtype=np.float32).tobytes())])
     work = Activity()
 
-    def finish_after_quit(*args):
+    def finish_after_quit(*args, **kwargs):
         work.close_admission()
         return ["new"], np.ones((1, 8), dtype=np.float32)
 
-    monkeypatch.setattr(embed, "build_vectors", finish_after_quit)
+    monkeypatch.setattr(embed, "build_vectors_from_baskets", finish_after_quit)
     with pytest.raises(WorkClosing):
-        work.wrap("recommendation rebuild", embed.build_and_store, store, 8)()
+        work.wrap("recommendation rebuild", model_refresh.rebuild, store, 8)()
     assert [key for key, _ in store.rec_model.get_rec_vectors()] == ["old"]
 
 

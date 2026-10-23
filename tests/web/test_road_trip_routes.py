@@ -115,7 +115,18 @@ def test_reopening_and_saving_repairs_passenger_genre_membership(store):
     assert c.post(f"/road_trip/draft/{rid}/save").status_code == 200
     saved = store.road_trip.get_road_trip_draft(rid)
     assert set(saved["picks"]) == set(seeds)
+    assert {row["video_id"] for row in saved["pool"]} == set(seeds)
+    assert {row["video_id"] for row in saved["picked"]} == set(seeds)
     assert client.added == [(saved["saved_playlist_id"], saved["picks"])]
+    reopened = c.get("/road_trip")
+    assert reopened.status_code == 200 and "Old singer song" not in reopened.text
+    steered = c.post(f"/road_trip/draft/{rid}/mix", data={"their_pct": "100", "familiarity_pct": "75"})
+    assert steered.status_code == 200 and "Old singer song" not in steered.text
+    current = store.road_trip.get_road_trip_draft(rid)
+    assert set(current["picks"]) == set(seeds)
+    assert {row["video_id"] for row in current["pool"]} == set(seeds)
+    assert {row["video_id"] for row in current["picked"]} == set(seeds)
+    assert current["saved_playlist_id"] == saved["saved_playlist_id"]
 
 
 def test_new_route_is_a_library_action_and_hides_the_active_draft(store):

@@ -78,6 +78,8 @@ def test_removal_clears_models_forecasts_and_rollbacks_but_keeps_user_choices(st
     store.rec_model.record_like(key,100,provenance='action')
     store.settings.set_setting('user-setting','keep')
     store.settings.set_setting('spotify_imported_at','100')
+    for name in ('rec_fit_inputs', 'rec_artist_fit_inputs', 'rec_mode_fit_inputs', 'rec_refresh_version'):
+        store.settings.set_setting(name, 'previous generation')
     run = store.model_selection.start_selection(100,{'status':'applied'})
     with store.conn:
         store.conn.execute("INSERT INTO rec_vectors VALUES (?,x'00000000')",(key,))
@@ -85,6 +87,9 @@ def test_removal_clears_models_forecasts_and_rollbacks_but_keeps_user_choices(st
         store.conn.execute("INSERT INTO rec_model_forecasts VALUES (?,100,'{}')",(run,))
     store.history.remove_spotify_history()
     assert store.rec_model.rec_vectors_count() == 0
+    assert store.rec_refresh.has_pending_changes()
+    for name in ('rec_fit_inputs', 'rec_artist_fit_inputs', 'rec_mode_fit_inputs', 'rec_refresh_version'):
+        assert store.settings.get_setting(name) is None
     assert store.rec_surface.get_proposals('trend_rollups') is None
     assert not store.model_selection.selection_runs()
     assert not store.model_selection.restore_model_selection(run,200)

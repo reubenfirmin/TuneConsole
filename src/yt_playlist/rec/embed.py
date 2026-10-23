@@ -11,9 +11,11 @@ import json
 import math
 
 import numpy as np
+from scipy.sparse import csr_array
 
 from yt_playlist.core.activity import check_stopping
-from yt_playlist.util import genre_catalog, genre_map
+from yt_playlist.rec.pair_stream import PairStream
+from yt_playlist.util import genre_map
 from yt_playlist.rec import rec_params
 
 # Default embedding dimensionality. Automatic model selection may override it through `rec_dim`.
@@ -33,6 +35,8 @@ _NORM_EPS = 1e-9
 _NEG_SAMPLE_SMOOTH = 0.75
 _INIT_SCALE = 0.01
 _SGNS_BATCH = 2048
+# Bound temporary basket incidence storage and keep cancellation responsive during accumulation.
+_COOC_BASKET_BATCH = 256
 
 
 def _normalize(v):
@@ -92,50 +96,63 @@ def _cooc_matrix(baskets, keys, weights=None):
     n = len(keys)
     idx = {k: i for i, k in enumerate(keys)}
     g = None if weights is None else np.array([float(weights.get(k, 1.0)) for k in keys])
-    C = np.zeros((n, n), dtype=np.float64)
-    for b in baskets:
+    C = csr_array((n, n), dtype=np.float64)
+    for start in range(0, len(baskets), _COOC_BASKET_BATCH):
         check_stopping()
-        ii = [idx[k] for k in b]
-        w = 1.0 / (len(ii) - 1)
-        for a in range(len(ii)):
-            if a % 64 == 0:
-                check_stopping()
-            ia = ii[a]
-            for c in range(a + 1, len(ii)):
-                ic = ii[c]
-                pw = w if g is None else w * g[ia] * g[ic]
-                C[ia, ic] += pw
-                C[ic, ia] += pw
+        indices, indptr, gains = [], [0], []
+        for b in baskets[start:start + _COOC_BASKET_BATCH]:
+            check_stopping()
+            ii = [idx[k] for k in dict.fromkeys(b)]
+            if len(ii) < 2:
+                continue
+            indices.extend(ii)
+            indptr.append(len(indices))
+            gains.append(1.0 / (len(ii) - 1))
+        if not gains:
+            continue
+        incidence = csr_array((np.ones(len(indices)), np.asarray(indices, dtype=np.int64),
+                               np.asarray(indptr, dtype=np.int64)), shape=(len(gains), n))
+        block = (incidence.T @ incidence.multiply(np.asarray(gains)[:, None])).tocsr()
+        block.setdiag(0)
+        block.eliminate_zeros()
+        C = C + block
+    check_stopping()
+    if g is not None:
+        C = C.multiply(g[:, None]).multiply(g[None, :]).tocsr()
+        C.eliminate_zeros()
     return C
 
 
+def _positive_pmi(C):
+    """PPMI has no entries where co-occurrence is zero; never form the dense marginal product."""
+    total = float(C.sum())
+    if total <= 0:
+        return csr_array(C.shape, dtype=np.float64)
+    row = np.asarray(C.sum(axis=1)).ravel()
+    entries = C.tocoo(copy=False)
+    values = np.maximum(np.log((entries.data / row[entries.row])
+                               * (total / row[entries.col])), 0.0)
+    ppmi = csr_array((values, (entries.row, entries.col)), shape=C.shape)
+    ppmi.eliminate_zeros()
+    return ppmi
+
+
 def _svd(baskets, keys, dim, weights=None):
-    """PPMI co-occurrence + randomised truncated SVD (numpy only). #38 §4c: optional per-track
+    """Sparse PPMI + the existing randomised truncated SVD. #38 §4c: optional per-track
     co-occurrence weighting via `weights` (None = binary membership, the default)."""
     n = len(keys)
-    C = _cooc_matrix(baskets, keys, weights)
-    tot = C.sum()
-    if tot <= 0:
+    ppmi = _positive_pmi(_cooc_matrix(baskets, keys, weights))
+    if not ppmi.nnz:
         return [], np.zeros((0, dim), dtype=np.float32)
-    # Positive PMI: log( P(i,j) / [P(i)P(j)] ), floored at 0. P is the joint (C/tot); `exp` is the
-    # independence expectation (outer product of marginals). PPMI keeps only above-chance co-occurrence
-    # (negative PMI is unreliable on sparse counts), giving the SVD a denser, better-conditioned input.
-    row = C.sum(1)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        P = C / tot                                      # joint P(i,j)
-        exp = np.outer(row, row) / (tot * tot)           # independence expectation P(i)P(j)
-        # ratio = P(i,j) / [P(i)P(j)] where both are defined, else 1.0 so its log floors to 0.
-        ratio = np.where((P > 0) & (exp > 0), P / np.where(exp > 0, exp, 1.0), 1.0)
-        ppmi = np.maximum(np.log(ratio), 0.0)            # PPMI: keep only above-chance co-occurrence
     # Randomised truncated SVD (Halko 2011): project PPMI through a Gaussian sketch of dim+oversample
-    # columns, orthonormalise (QR), then do an exact small SVD in that subspace. O(n^2·dim) and numpy-
-    # only, vs a full dense SVD. Fixed seed → identical vectors across rebuilds when the data is unchanged.
+    # columns, orthonormalise (QR), then do an exact small SVD in that subspace. Only n-by-sketch
+    # working arrays are dense. Preserve the original sketch width for small libraries too.
     rng = np.random.default_rng(0)
     om = rng.standard_normal((n, dim + _SVD_OVERSAMPLE))
     check_stopping()
     Q, _ = np.linalg.qr(ppmi @ om)
     check_stopping()
-    Ub, S, _ = np.linalg.svd(Q.T @ ppmi, full_matrices=False)
+    Ub, S, _ = np.linalg.svd((ppmi.T @ Q).T, full_matrices=False)
     check_stopping()
     V = (Q @ Ub)[:, :dim] * np.sqrt(S[:dim])           # project back into track space, scale by sqrt(singular value)
     V /= np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS
@@ -160,24 +177,13 @@ def _item2vec(baskets, keys, dim, epochs=5, neg=5, lr=0.025, seed=0):
     """
     rng = np.random.default_rng(seed)
     n = len(keys)
-    idx = {k: i for i, k in enumerate(keys)}
-    pairs = []
-    for b in baskets:
-        check_stopping()
-        ii = [idx[k] for k in b]
-        for a in range(len(ii)):
-            check_stopping()
-            for c in range(len(ii)):
-                if a != c:
-                    pairs.append((ii[a], ii[c]))
-    if not pairs:
+    pairs = PairStream(baskets, keys)
+    if not pairs.count:
         return keys, np.zeros((n, dim), dtype=np.float32)
-    pairs = np.asarray(pairs, dtype=np.int64)
     # Negative-sampling distribution, smoothed by the ^0.75 exponent from word2vec (Mikolov 2013):
     # flattens the unigram frequencies so popular tracks are still over-sampled as negatives but don't
     # swamp the long tail. +1.0 keeps every track sampleable.
-    counts = np.bincount(pairs[:, 1], minlength=n).astype(np.float64) + 1.0
-    pdist = counts ** _NEG_SAMPLE_SMOOTH
+    pdist = (pairs.context_counts + 1.0) ** _NEG_SAMPLE_SMOOTH
     pdist /= pdist.sum()
     # Small random init (standard SGNS): break symmetry while keeping initial dot-products near 0 so
     # early sigmoids sit in their linear region. Batch the pair stream for vectorised SGD updates.
@@ -185,12 +191,9 @@ def _item2vec(baskets, keys, dim, epochs=5, neg=5, lr=0.025, seed=0):
     Cm = rng.standard_normal((n, dim)) * _INIT_SCALE
     bs = _SGNS_BATCH
     for _ in range(epochs):
-        perm = rng.permutation(len(pairs))
-        for s in range(0, len(pairs), bs):
+        for ci, cj in pairs.batches(rng, bs):
             check_stopping()
-            bp = pairs[perm[s:s + bs]]
-            ci, cj = bp[:, 0], bp[:, 1]
-            m = len(bp)
+            m = len(ci)
             negs = rng.choice(n, size=(m, neg), p=pdist)
             wi = W[ci]                                   # (m, dim) center vectors for this batch
             gp = (_sigmoid((wi * Cm[cj]).sum(1)) - 1.0)[:, None]          # positive grad: (m,1)
@@ -204,25 +207,20 @@ def _item2vec(baskets, keys, dim, epochs=5, neg=5, lr=0.025, seed=0):
     return keys, V.astype(np.float32)
 
 
-def build_and_store(store, dim=None) -> int:
-    """Build embeddings and persist them. Returns the number of tracks embedded.
-
-    dim defaults to the recall@k-tuned `rec_dim` setting (or DIM if unset/untuned)."""
-    if dim is None:
-        dim = int(store.settings.get_setting("rec_dim") or DIM)
-    keys, V = build_vectors(store, dim)
-    check_stopping()
-    store.rec_model.replace_rec_vectors([(k, V[i].tobytes()) for i, k in enumerate(keys)])
-    return len(keys)
-
-
 def _load_vector_rows(rows):
     """Unpack persisted (key, float32-bytes) rows into (keys, V, idx); ([], None, {}) when empty.
     Shared by the collaborative, content, and discovered-content vector loaders."""
     if not rows:
         return [], None, {}
+    check_stopping()
     keys = [k for k, _ in rows]
-    V = np.stack([np.frombuffer(v, dtype=np.float32) for _, v in rows])
+    vectors = []
+    for i, (_, vector) in enumerate(rows):
+        if i % 256 == 0:
+            check_stopping()
+        vectors.append(np.frombuffer(vector, dtype=np.float32))
+    V = np.stack(vectors)
+    check_stopping()
     return keys, V, {k: i for i, k in enumerate(keys)}
 
 
@@ -387,20 +385,6 @@ def build_content_vectors(store, dim=None):  # dim kept for signature symmetry; 
     return keys, V
 
 
-def build_content_and_store(store, *, inputs=None) -> int:
-    """Build library content vectors + the shared model, persist both, and re-encode the out-of-corpus
-    pool into the (just-rebuilt) space so the two stay comparable. Returns the library count."""
-    previous = store.rec_model.content_generation()
-    inputs = inputs if inputs is not None else _content_inputs(store)
-    keys, V, model = _build_library_content(store, inputs=inputs)
-    discovered = _encode_discovered(store.discovery.get_discovered_tracks(), model)
-    if not store.rec_model.publish_content_generation(
-            [(k, V[i].tobytes()) for i, k in enumerate(keys)], discovered, json.dumps(model),
-            genre_catalog.REVISION, _content_input_fingerprint(inputs), previous["generation"]):
-        raise RuntimeError("Content generation changed during rebuild; retry the refresh")
-    return len(keys)
-
-
 def _encode_discovered(rows, model):
     out = []
     for r in rows:
@@ -432,27 +416,6 @@ def load_content_vectors(store, *, snapshot=None):
 def load_discovered_content_vectors(store, *, snapshot=None):
     """Return (keys, V, idx) of out-of-corpus content vectors, or ([], None, {}) if none built."""
     return _load_vector_rows(snapshot["discovered"] if snapshot is not None else store.rec_model.get_rec_discovered_content_vectors())
-
-
-def maybe_rebuild_content_vectors(store, step=0.05) -> bool:
-    """Refresh changed model inputs, including edits that leave coverage unchanged.
-
-    The recommendation worker coalesces bursts before calling this function. Persist the inputs
-    actually used by the build, so concurrent edits remain dirty for the next refresh. Coverage is
-    retained as a diagnostic only; it never grants validity to stale vectors.
-    """
-    inputs = _content_inputs(store)
-    total = len(inputs[0])
-    if not total and not store.settings.get_setting("rec_content_model"):
-        return False
-    current_genres = store.settings.get_setting("rec_content_genre_revision") == genre_catalog.REVISION
-    if (store.settings.get_setting("rec_content_inputs") == _content_input_fingerprint(inputs)
-            and store.settings.get_setting("rec_content_model") and current_genres):
-        return False
-    build_content_and_store(store, inputs=inputs)
-    bucket = int((len(inputs[1]) / total) // step) if total else 0
-    store.settings.set_setting("rec_content_cov_bucket", str(bucket))
-    return True
 
 
 # === Ranking & neighbours: query the built vector space (taste neighbours, centroids, bridges) ===
@@ -533,42 +496,6 @@ def _centroid(V, idx, seed_groups):
                 target += w * (c / n)
     n = np.linalg.norm(target)
     return target / n if n > 0 else None
-
-
-def sims_for(store, seed_groups, keys):
-    """Cosine similarity of each given key to the weighted taste centroid (for Tier-2 re-ranking).
-    Returns {key: sim}; empty if no vectors. Spec §8 'refined by Tier-2'."""
-    allkeys, V, idx = load_vectors(store)
-    if V is None:
-        return {}
-    target = _centroid(V, idx, seed_groups)
-    if target is None:
-        return {}
-    return {k: float(V[idx[k]] @ target) for k in keys if k in idx}
-
-
-def blended_neighbors(store, seed_groups, topn=12, exclude=None):
-    """Rank by a weighted blend of several seed centroids.
-
-    seed_groups = [(keys, weight), ...]: e.g. slow all-time taste at 0.6 + fast recent-mood at
-    0.4. Each group's centroid is normalised before weighting, so a small recent set still counts.
-    """
-    keys, V, idx = load_vectors(store)
-    if V is None:
-        return []
-    target = np.zeros(V.shape[1], dtype=np.float64)
-    excl = set(exclude or set())
-    for ks, w in seed_groups:
-        si = [idx[k] for k in ks if k in idx]
-        excl |= set(ks)
-        if si:
-            c = V[si].mean(0)
-            n = np.linalg.norm(c)
-            if n > 0:
-                target += w * (c / n)
-    if not np.any(target):
-        return []
-    return _rank(keys, V, _normalize(target), excl, topn)
 
 
 # === Cluster expansion: blended collaborative + content rings for the Clusters canvas ===
@@ -722,6 +649,7 @@ def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=Non
         beta = float(rec_params.get_param(store, "cluster_beta"))
     fanout = float(rec_params.get_param(store, "cluster_seed_spread"))
     ckeys, CV, cidx = _content_space(store, include_new)
+    check_stopping()
 
     # Genre-only seed: a genre picked with no artist/song seed (empty pos_keys) seeds a cluster FROM the
     # genre itself: the centroid is the genre's own tracks, and we KEEP those tracks as candidates (don't
@@ -734,12 +662,15 @@ def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=Non
                  else (_branch_scores(src, neg_keys, beta, ckeys, CV, cidx, fanout, groups=seed_groups,
                                       artist_groups=artist_groups) or {}))
     blended = _blend_spaces(collab_s, content_s, w)
+    check_stopping()
 
     preferred = set(candidate_seed_keys)
     excl = set(exclude or ()) | set(neg_keys) | (set() if seed_only else set(pos_keys) - preferred)
     allow = None if allow is None else set(allow)
     out = []
-    for k in sorted(blended, key=lambda k: (k not in preferred, -blended[k], k)):
+    for i, k in enumerate(sorted(blended, key=lambda k: (k not in preferred, -blended[k], k))):
+        if i % 256 == 0:
+            check_stopping()
         if k in excl or (allow is not None and k not in allow):
             continue
         out.append((k, blended[k]))
@@ -768,23 +699,13 @@ def connection_geometry(store, key, path_keys, exclude=()):
     c = V[idx[key]]
     score = float(c @ p)
     both = np.minimum(V @ c, V @ p)                  # close to child AND to the path
+    check_stopping()
     excl = set(path_keys) | {key} | set(exclude)
     bridge = None
-    for j in np.argsort(-both):
+    for i, j in enumerate(np.argsort(-both)):
+        if i % 256 == 0:
+            check_stopping()
         if keys[j] not in excl:
             bridge = keys[j]
             break
     return {"score": score, "bridge": bridge}
-
-
-def centroid_neighbors(store, seed_keys, topn=12, exclude=None):
-    """Tracks most similar to the centroid of a set of seeds (e.g. a playlist's vibe)."""
-    keys, V, idx = load_vectors(store)
-    if V is None:
-        return []
-    si = [idx[k] for k in seed_keys if k in idx]
-    if not si:
-        return []
-    centroid = V[si].mean(0)
-    centroid = _normalize(centroid)
-    return _rank(keys, V, centroid, set(exclude or set()) | set(seed_keys), topn)

@@ -7,6 +7,7 @@ import pytest
 
 from tests.conftest import FakeClient, _track
 from yt_playlist.library import executor
+from yt_playlist.library.playlist_writes import PlaylistAddUncertain
 
 
 @pytest.fixture
@@ -42,14 +43,16 @@ def _run(t, operation):
 
 
 @pytest.mark.parametrize("operation", ["merge", "move"])
-@pytest.mark.parametrize("failure", ["rejected", "failed_status", "missing_status", "timeout",
+@pytest.mark.parametrize("failure", ["exception", "failed_status", "missing_status", "timeout",
                                     "partial_delivery", "wrong_upload"])
 def test_failed_delivery_never_deletes_source(transfer, monkeypatch, operation, failure):
     t = transfer
     add = t.target_client.add_playlist_items
+    attempts = []
 
     def fail_add(playlist, videos):
-        if failure == "rejected":
+        attempts.append((playlist, list(videos)))
+        if failure == "exception":
             raise ValueError("Unavailable upload")
         if failure == "timeout":
             raise TimeoutError("Bridge response timed out")
@@ -64,7 +67,25 @@ def test_failed_delivery_never_deletes_source(transfer, monkeypatch, operation, 
         return result
 
     monkeypatch.setattr(t.target_client, "add_playlist_items", fail_add)
-    if operation == "merge":
+    unknown = failure in {"exception", "missing_status", "timeout"}
+    if unknown:
+        with pytest.raises(PlaylistAddUncertain) as caught:
+            _run(t, operation)
+        assert caught.value.skipped == () and caught.value.uncertain
+        action = t.store.actions.get_actions()[0]
+        params, undo = json.loads(action.params_json), json.loads(action.undo_json)
+        assert params["partial"]
+        if operation == "merge":
+            assert undo["restored"][0]["prev"] == ["v1"]
+            assert undo["restored"][0]["post_state"] is None
+            assert t.store.playlists.get_playlist_track_ids(t.keeper) == t.tids[:1]
+        else:
+            assert undo["new_ytm"] == caught.value.playlist_id == "PL_NEW_0"
+            created = next(p for p in t.store.playlists.get_playlists() if p.ytm_playlist_id == "PL_NEW_0")
+            assert t.store.playlists.get_playlist_track_ids(created.id) == []
+            assert not params["deleted"]
+        assert len(attempts) == 1
+    elif operation == "merge":
         with pytest.raises(ValueError, match="Refusing to delete"):
             _run(t, operation)
         action = t.store.actions.get_actions()[0]

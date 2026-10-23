@@ -2,45 +2,19 @@
 
 These are the rec engine's reads over the library and reconciled listening evidence:
 library primitives (keys, genres, distributions), the generated-playlist quarantine, and the
-candidate-surface generators (comfort / rotation / deep cuts / completion / enrichment). They're
-grouped here because the generators all depend on the same exclusion logic (excluded_playlist_ids).
+candidate-surface generators (comfort / rotation / deep cuts / completion / enrichment). Cluster
+relationship/seed retrieval belongs to ClusterEvidenceRepo; presentation stays above persistence.
 """
 from collections import Counter
 from yt_playlist.core import artists
 
-from yt_playlist.rec import rec_params
+from yt_playlist.core.recommendation_settings import MAX_TRACK_MINUTES
 from yt_playlist.repos.base import (  # noqa: F401  (GENERATED_GROUP re-exported)
-    GENERATED_GROUP, LIKED_EXISTS, Repo, synchronized)
+    GENERATED_GROUP, LIKED_EXISTS, Repo, synchronized, snapshot_read)
 from yt_playlist.util import genre_map
-from yt_playlist.util.matching import normalize, search_squash
-
-
-def _join_names(names, total) -> str:
-    """'Ritmo', 'Ritmo & Shpongle', 'Ritmo, Shpongle & 3 more', for a connection reason sentence."""
-    if not names:
-        return ""
-    extra = total - len(names)
-    if extra > 0:
-        return ", ".join(names) + f" & {extra} more"
-    if len(names) == 1:
-        return names[0]
-    return ", ".join(names[:-1]) + " & " + names[-1]
-
-
-def _fam_label(fam) -> str:
-    """Display a genre family; the map's singleton 'other:<genre>' fallback shows as just the genre."""
-    return fam.split("other:", 1)[-1] if fam.startswith("other:") else fam
-
-
-def _decade(year, *, as_str=False):
-    """Floor a year-ish value to its decade as an int (1993 or '1993-05-01' -> 1990), or None when the
-    first four characters aren't a year. Centralises the `int(y[:4]) // 10 * 10` idiom that the decade
-    queries below all share. Pass as_str=True for the '1990' string form the distribution maps key on."""
-    s = str(year or "")[:4]
-    if not s.isdigit():
-        return None
-    d = int(s) // 10 * 10
-    return str(d) if as_str else d
+from yt_playlist.util.matching import normalize
+from yt_playlist.repos.playlist_eligibility import QUARANTINED_PLAYLIST_IDS_SQL
+from yt_playlist.util.years import decade as _decade
 
 
 def _exclude_clause(column, ids, *, connective="AND") -> str:
@@ -74,7 +48,8 @@ class RecQueryRepo(Repo):
 
     def _not_a_mix(self, col="duration_s") -> str:
         """Keep tracks within the saved length limit, including unknown durations (#44)."""
-        return f"({col} IS NULL OR {col} <= {60 * rec_params.setting_param(self._settings, 'max_track_minutes')})"
+        minutes = MAX_TRACK_MINUTES.parse(self._settings.get_setting('rec_param:' + MAX_TRACK_MINUTES.name))
+        return f"({col} IS NULL OR {col} <= {60 * minutes})"
 
     # --- library primitives ---
     @synchronized
@@ -150,7 +125,7 @@ class RecQueryRepo(Repo):
     def era_play_distribution(self) -> dict:
         """{decade: Σ(1 + play_count)} over dated tracks, deduped per song (mirrors genre version)."""
         rows = self.conn.execute(
-            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM listening_days GROUP BY identity_key), "
+            "WITH tp AS (SELECT identity_key, plays c FROM listening_day_counts), "
             "     songs AS (SELECT DISTINCT identity_key, mb_year FROM tracks WHERE mb_year<>'') "
             "SELECT s.mb_year y, SUM(1 + COALESCE(tp.c, 0)) w FROM songs s "
             "LEFT JOIN tp ON tp.identity_key = s.identity_key GROUP BY s.identity_key, s.mb_year").fetchall()
@@ -180,34 +155,50 @@ class RecQueryRepo(Repo):
         return {r["identity_key"] for r in self.conn.execute(
             "SELECT DISTINCT identity_key FROM tracks")}
 
-    @synchronized
+    @snapshot_read
     def library_artists(self) -> set:
         """Normalized artist names already in the library, to exclude from new-artist discovery."""
         from yt_playlist.core import artists
-        rows = self.conn.execute('SELECT DISTINCT ta.artist_id FROM track_artists ta JOIN tracks t ON t.id=ta.entry_id')
-        return {artists.public_key(self.conn,r[0]) for r in rows}
+        ids = [r[0] for r in self.conn.execute(
+            'SELECT DISTINCT ta.artist_id FROM track_artists ta JOIN tracks t ON t.id=ta.entry_id')]
+        return set(artists.public_keys(self.conn, ids).values())
 
-    @synchronized
+    @snapshot_read
     def tracks_by_artists(self, artists) -> list:
-        """Owned track dicts (one per identity_key) whose normalized artist is in `artists` (a set of
-        normalized names). Powers the #28 artist model's track-candidate expansion. The identity_key's
-        artist segment is already normalized, so it is matched directly."""
+        """Playable owned recordings credited to requested artists, on a private reader.
+
+        Constrain recordings through the credit index before choosing each one's
+        first playable library entry. Credits and display fields come from that
+        same entry, preserving the playable-library representative contract.
+        """
         from yt_playlist.core import artists as artist_catalog
         want = {artist_catalog.lookup(self.conn,a) for a in artists}
         want.discard(None)
         if not want:
             return []
-        out = []
-        for r in self.conn.execute(
-                "SELECT t.identity_key k, MIN(title) title, MIN(artist) artist, MIN(album) album, "
-                "MIN(video_id) vid, MIN(thumbnail) thumb, MIN(NULLIF(genre,'')) genre,ta.artist_id "
-                "FROM playable_library_tracks t JOIN track_artists ta ON ta.entry_id=t.id WHERE title<>'' "
-                "GROUP BY identity_key,ta.artist_id"):
-            if r['artist_id'] in want and not any(o['key']==r['k'] for o in out):
-                out.append({"key": r["k"], "title": r["title"], "artist": r["artist"],
-                            "album": r["album"] or "", "video_id": r["vid"], "thumbnail": r["thumb"],
-                            "genre": r["genre"] or ""})
-        return out
+        wanted = sorted(want)
+        out = {}
+        for offset in range(0, len(wanted), 400):
+            batch = wanted[offset:offset + 400]
+            qs = ",".join("?" for _ in batch)
+            rows = self.conn.execute(
+                "WITH requested AS MATERIALIZED ("
+                "SELECT DISTINCT e.recording_id FROM track_artists ta "
+                "JOIN catalog_entries e ON e.id=ta.entry_id "
+                f"WHERE ta.artist_id IN ({qs})) "
+                "SELECT t.identity_key k,t.title,t.artist,t.album,t.video_id vid,t.thumbnail thumb,t.genre "
+                "FROM tracks t WHERE t.title<>'' AND t.id IN ("
+                "SELECT MIN(e.id) FROM requested r CROSS JOIN catalog_entries e ON e.recording_id=r.recording_id "
+                "JOIN library_memberships m ON m.entry_id=e.id "
+                "JOIN youtube_items y ON y.video_id=e.video_id "
+                "WHERE COALESCE(y.available,1)<>0 GROUP BY e.recording_id) "
+                "AND EXISTS (SELECT 1 FROM track_artists ta WHERE ta.entry_id=t.id "
+                f"AND ta.artist_id IN ({qs}))", [*batch, *batch])
+            for r in rows:
+                out[r["k"]] = {"key": r["k"], "title": r["title"], "artist": r["artist"],
+                               "album": r["album"] or "", "video_id": r["vid"], "thumbnail": r["thumb"],
+                               "genre": r["genre"] or ""}
+        return [out[key] for key in sorted(out)]
 
     @synchronized
     def track_content(self) -> dict:
@@ -258,14 +249,11 @@ class RecQueryRepo(Repo):
             "JOIN catalog_entries e ON e.id=ta.entry_id JOIN recordings r ON r.id=e.recording_id "
             f"WHERE r.identity_key IN ({qs}) AND f.kind='mute' AND (f.until IS NULL OR f.until>?)",
             [*keys, now]))
-        excluded = self.excluded_playlist_ids()
-        if excluded:
-            pqs = ",".join("?" * len(excluded))
-            blocked.update(r[0] for r in self.conn.execute(
-                "SELECT t.identity_key FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
-                f"WHERE t.identity_key IN ({qs}) GROUP BY t.identity_key "
-                f"HAVING SUM(CASE WHEN pt.playlist_id IN ({pqs}) THEN 0 ELSE 1 END)=0",
-                [*keys, *excluded]))
+        blocked.update(r[0] for r in self.conn.execute(
+            'SELECT DISTINCT t.identity_key FROM playlist_tracks pt '
+            'JOIN tracks t ON t.id=pt.track_id JOIN playlists p ON p.id=pt.playlist_id '
+            'JOIN quarantined_playlists g ON g.ytm=p.scope_ref '
+            f'WHERE g.name=? AND t.identity_key IN ({qs})', [GENERATED_GROUP, *keys]))
         return blocked
 
     @synchronized
@@ -304,135 +292,23 @@ class RecQueryRepo(Repo):
     @synchronized
     def tracks_by_keys(self, keys) -> dict:
         """Display metadata for a set of identity_keys: {key: {title, artist, album, video_id, thumbnail}}."""
-        keys = list(keys)
-        if not keys:
-            return {}
-        qs = ",".join("?" * len(keys))
-        rows = self.conn.execute(
-            f"SELECT identity_key k, MIN(title) title, MIN(artist) artist, MIN(album) album, "
-            f"       MIN(video_id) vid, MIN(thumbnail) thumb FROM playable_library_tracks "
-            f"WHERE identity_key IN ({qs}) GROUP BY identity_key", keys).fetchall()
-        return {r["k"]: {"title": r["title"], "artist": r["artist"], "album": r["album"] or "",
-                         "video_id": r["vid"], "thumbnail": r["thumb"]} for r in rows}
-
-    @synchronized
-    def connection_facts(self, key, path_keys, max_playlist=120, max_artists=3) -> list[dict]:
-        """Why are two Clusters tracks linked? The grounded co-occurrence facts behind an edge.
-
-        Reads the same baskets that fed the taste embedding (`rec_baskets`) and turns the concrete
-        ones into human-readable reasons: same artist, shared playlists (naming the co-occurring
-        path artists), shared album, same listening session, genre family, decade. `key` = the
-        child track; `path_keys` = its PINNED path (central seeds + ancestors). Returned
-        strongest-first as [{kind, text}, ...]. Empty when the link is purely second-order (no
-        direct shared basket) and the caller falls back to an embedding 'bridge'
-        (see embed.connection_geometry). Catch-all playlists (> max_playlist tracks) and quarantined
-        generated playlists are excluded, mirroring the embedding's own basket filtering."""
-        path = [k for k in dict.fromkeys(path_keys) if k and k != key]
-        if not key or not path:
-            return []
-        qs = ",".join("?" * len(path))
-        crow = self.conn.execute(
-            "SELECT MIN(artist) artist, MIN(NULLIF(album,'')) album, MIN(NULLIF(genre,'')) genre, "
-            "MIN(NULLIF(mb_year,'')) yr FROM tracks WHERE identity_key=?", (key,)).fetchone()
-        if crow is None:
-            return []
-        c_artist = (crow["artist"] or "").strip()
-        # Strongest-first; each phase returns one fact dict or None.
-        facts = [
-            self._fact_same_artist(key, path, qs),
-            self._fact_playlists(key, path, qs, c_artist, max_playlist, max_artists),
-            self._fact_album(key, path, qs),
-            self._fact_session(key, path, qs),
-            self._fact_genre(crow, path, qs),
-            self._fact_decade(crow, path, qs),
-        ]
-        return [f for f in facts if f]
-
-    # connection_facts phases (each returns one fact dict or None; called under its lock).
-    def _fact_same_artist(self, key, path, qs):
-        """Most certain link: the child shares an artist with something else on the branch."""
-        row = self.conn.execute(
-            f"SELECT t2.artist a FROM tracks t1 JOIN tracks t2 "
-            f"ON LOWER(TRIM(t2.artist))=LOWER(TRIM(t1.artist)) "
-            f"WHERE t1.identity_key=? AND TRIM(t1.artist)<>'' AND t2.identity_key IN ({qs}) LIMIT 1",
-            [key, *path]).fetchone()
-        return ({"kind": "same_artist", "text": f"Same artist ({row['a']}) as elsewhere on this branch."}
-                if row else None)
-
-    def _fact_playlists(self, key, path, qs, c_artist, max_playlist, max_artists):
-        """Shared playlists: count distinct (excluding catch-alls > max_playlist and quarantined
-        generated lists), naming up to max_artists of the co-occurring path artists."""
-        excl = self.excluded_playlist_ids()
-        rows = self.conn.execute(
-            f"SELECT cp.pid pid, t.artist artist FROM "
-            f"(SELECT DISTINCT pt.playlist_id pid FROM playlist_tracks pt "
-            f" JOIN tracks t ON t.id=pt.track_id WHERE t.identity_key=?) cp "
-            f"JOIN playlist_tracks pt ON pt.playlist_id=cp.pid "
-            f"JOIN tracks t ON t.id=pt.track_id "
-            f"WHERE t.identity_key IN ({qs}) "
-            f"AND cp.pid NOT IN (SELECT playlist_id FROM playlist_tracks "
-            f"                   GROUP BY playlist_id HAVING COUNT(*) > ?)",
-            [key, *path, max_playlist]).fetchall()
-        pids, artists = set(), []
-        for r in rows:
-            if r["pid"] in excl:
-                continue
-            pids.add(r["pid"])
-            a = (r["artist"] or "").strip()
-            if a and a.lower() != c_artist.lower() and a not in artists:
-                artists.append(a)
-        if not pids:
-            return None
-        n = len(pids)
-        lead = f"In {n} of your playlist" + ("s" if n != 1 else "")
-        names = _join_names(artists[:max_artists], len(artists))
-        return {"kind": "playlist",
-                "text": (f"{lead}, alongside {names}." if names else f"{lead} on this branch.")}
-
-    def _fact_album(self, key, path, qs):
-        """Shared album with another branch track."""
-        row = self.conn.execute(
-            f"SELECT a.title al,t2.artist ar FROM tracks t1 JOIN album_tracks a1 ON a1.entry_id=t1.id "
-            f"JOIN album_tracks a2 ON a2.album_id=a1.album_id JOIN albums a ON a.id=a1.album_id "
-            f"JOIN tracks t2 ON t2.id=a2.entry_id "
-            f"WHERE t1.identity_key=? AND NULLIF(a.title,'') IS NOT NULL AND t2.identity_key IN ({qs}) "
-            f"AND t2.identity_key<>? LIMIT 1", [key, *path, key]).fetchone()
-        return ({"kind": "album", "text": f"From the album “{row['al']}”, with {row['ar']}."}
-                if row else None)
-
-    def _fact_session(self, key, path, qs):
-        """Observed on the same account listening day; this does not prove a session."""
-        hit = self.conn.execute(
-            f"SELECT 1 FROM listening_days h1 JOIN listening_days h2 "
-            f"ON h2.identity_id=h1.identity_id AND h2.day=h1.day "
-            f"WHERE h1.identity_key=? AND h2.identity_key IN ({qs}) LIMIT 1",
-            [key, *path]).fetchone()
-        return ({"kind": "session", "text": "You played them on the same day."}
-                if hit else None)
-
-    def _fact_genre(self, crow, path, qs):
-        """Both sit in the same genre family (meta-genre map)."""
-        if not crow["genre"]:
-            return None
-        cf = genre_map.family(crow["genre"])
-        prows = self.conn.execute(
-            f"SELECT DISTINCT genre FROM tracks WHERE identity_key IN ({qs}) AND genre<>''",
-            path).fetchall()
-        if cf and any(genre_map.family(r["genre"]) == cf for r in prows):
-            return {"kind": "genre", "text": f"Both in your {_fam_label(cf)} family."}
-        return None
-
-    def _fact_decade(self, crow, path, qs):
-        """Both from the same decade."""
-        cd = _decade(crow["yr"])
-        if cd is None:
-            return None
-        yrows = self.conn.execute(
-            f"SELECT DISTINCT mb_year FROM tracks WHERE identity_key IN ({qs}) AND mb_year<>''",
-            path).fetchall()
-        if any(_decade(r["mb_year"]) == cd for r in yrows):
-            return {"kind": "decade", "text": f"Both from the {cd}s."}
-        return None
+        keys = list(dict.fromkeys(keys))
+        result = {}
+        for offset in range(0, len(keys), 500):
+            batch = keys[offset:offset + 500]
+            qs = ",".join("?" for _ in batch)
+            # Select the same first playable owned entry as playable_library_tracks,
+            # but constrain recordings BEFORE grouping. The view grouped the whole
+            # library even when Home needed only a handful of display rows.
+            rows = self.conn.execute(
+                "SELECT t.identity_key k,t.title,t.artist,t.album,t.video_id vid,t.thumbnail thumb "
+                "FROM tracks t WHERE t.id IN ("
+                "SELECT MIN(e.id) FROM recordings r JOIN catalog_entries e ON e.recording_id=r.id "
+                "JOIN library_memberships m ON m.entry_id=e.id JOIN youtube_items y ON y.video_id=e.video_id "
+                f"WHERE r.identity_key IN ({qs}) AND COALESCE(y.available,1)<>0 GROUP BY r.id)", batch).fetchall()
+            result.update({r["k"]: {"title": r["title"], "artist": r["artist"], "album": r["album"] or "",
+                                    "video_id": r["vid"], "thumbnail": r["thumb"]} for r in rows})
+        return result
 
     @synchronized
     def library_genre_families(self) -> list[dict]:
@@ -486,61 +362,11 @@ class RecQueryRepo(Repo):
                 out.add(r["k"])
         return out
 
-    @synchronized
-    def cluster_search(self, q, limit=8) -> list[dict]:
-        """Autosuggest seeds for the Clusters canvas. Up to `limit` results per kind, each a dict
-        {kind, label, sub, keys}: an artist (all their modelled tracks), a playlist (its modelled
-        tracks, excluding the quarantined Generated group), or a single song. Only vector-backed
-        identity_keys are returned. A seed with no vector adds nothing to a node's centroid.
-
-        Matching is punctuation/space/accent-insensitive (searchnorm, #48): typing 'LSD' finds a
-        track titled 'L.S.D.', and 'cafe' finds 'Café'. `qn` is the query reduced to that same key,
-        so the LIKE patterns carry no special chars and need no ESCAPE."""
-        qn = search_squash(q or "")
-        if not qn:
-            return []
-        like = "%" + qn + "%"
-        prefix = qn + "%"            # for relevance ranking: a title STARTING with the query beats a mid-string hit
-        out = []
-        for r in self.conn.execute(
-                "SELECT t.artist label, COUNT(DISTINCT t.identity_key) n, "
-                "       GROUP_CONCAT(DISTINCT t.identity_key) keys "
-                "FROM tracks t JOIN rec_vectors rv ON rv.identity_key=t.identity_key "
-                "WHERE searchnorm(t.artist) LIKE ? AND t.artist<>'' "
-                "GROUP BY t.artist ORDER BY n DESC LIMIT ?", (like, limit)):
-            out.append({"kind": "artist", "label": r["label"],
-                        "sub": f"{r['n']} track" + ("" if r["n"] == 1 else "s"),
-                        "keys": r["keys"].split(",")})
-        for r in self.conn.execute(
-                "SELECT p.title label, COUNT(DISTINCT t.identity_key) n, "
-                "       GROUP_CONCAT(DISTINCT t.identity_key) keys "
-                "FROM playlists p JOIN playlist_tracks pt ON pt.playlist_id=p.id "
-                "JOIN tracks t ON t.id=pt.track_id "
-                "JOIN rec_vectors rv ON rv.identity_key=t.identity_key "
-                "LEFT JOIN quarantined_playlists g ON g.ytm=p.scope_ref "
-                "WHERE searchnorm(p.title) LIKE ? AND (g.name IS NULL OR g.name<>?) "
-                "GROUP BY p.id ORDER BY n DESC LIMIT ?", (like, GENERATED_GROUP, limit)):
-            out.append({"kind": "playlist", "label": r["label"],
-                        "sub": f"{r['n']} track" + ("" if r["n"] == 1 else "s"),
-                        "keys": r["keys"].split(",")})
-        for r in self.conn.execute(
-                "SELECT MIN(t.title) title, MIN(t.artist) artist, t.identity_key key "
-                "FROM tracks t JOIN rec_vectors rv ON rv.identity_key=t.identity_key "
-                "WHERE searchnorm(t.title) LIKE ? GROUP BY t.identity_key "
-                # Relevance order so the best match lands within the limit: exact title first, then titles
-                # starting with the query, then mid-string hits; ties broken by shorter title, then alpha.
-                "ORDER BY CASE WHEN searchnorm(MIN(t.title)) = ? THEN 0 "
-                "              WHEN searchnorm(MIN(t.title)) LIKE ? THEN 1 ELSE 2 END, "
-                "         length(MIN(t.title)), MIN(t.title) LIMIT ?", (like, qn, prefix, limit)):
-            out.append({"kind": "song", "label": r["title"], "sub": r["artist"],
-                        "keys": [r["key"]]})
-        return out
-
-    @synchronized
+    @snapshot_read
     def top_played_keys(self, limit=10) -> list[str]:
         """Identity keys of your most-played songs (for seeding taste-neighbourhood recs)."""
         rows = self.conn.execute(
-            "SELECT identity_key k, COUNT(*) c FROM listening_days GROUP BY identity_key "
+            "SELECT identity_key k, plays c FROM listening_day_counts "
             "ORDER BY c DESC LIMIT ?", (limit,)).fetchall()
         return [r["k"] for r in rows]
 
@@ -550,7 +376,30 @@ class RecQueryRepo(Repo):
         never been played (count 0), the primary signal for the Catalog card (your under-played
         catalog)."""
         return {r["identity_key"]: r["c"] for r in self.conn.execute(
-            "SELECT identity_key, COUNT(*) c FROM listening_days GROUP BY identity_key")}
+            "SELECT identity_key, plays c FROM listening_day_counts")}
+
+    @synchronized
+    def play_weighted_facets(self, plays) -> dict:
+        """Summarize Home's tagged facets once using this generation's play counts.
+
+        Uploads can disagree about genre/year. Deduplicate each song/facet pair
+        independently, exactly as the separate genre and era queries do.
+        """
+        genres, years = set(), set()
+        for row in self.conn.execute(
+                "SELECT DISTINCT identity_key,genre,mb_year FROM tracks WHERE genre<>'' OR mb_year<>''").fetchall():
+            if row['genre']:
+                genres.add((row['identity_key'], row['genre']))
+            if row['mb_year']:
+                years.add((row['identity_key'], row['mb_year']))
+        genre_plays, era_plays = {}, {}
+        for key, genre in sorted(genres, key=lambda pair: (str(pair[1]), pair[0])):
+            genre_plays[genre] = genre_plays.get(genre, 0) + 1 + plays.get(key, 0)
+        for key, year in sorted(years, key=lambda pair: (pair[0], str(pair[1]))):
+            decade = _decade(year, as_str=True)
+            if decade is not None:
+                era_plays[decade] = era_plays.get(decade, 0) + 1 + plays.get(key, 0)
+        return {'genres': genre_plays, 'eras': era_plays}
 
     @synchronized
     def library_songs(self) -> list[dict]:
@@ -583,6 +432,26 @@ class RecQueryRepo(Repo):
         return out
 
     @synchronized
+    def artist_genre_years_for(self, names, *, per_artist=64):
+        """Metadata fallback from a bounded sample of each selected artist's tracks."""
+        result = {}
+        for name in set(names):
+            # Description fallback uses exact recorded credits. A missing credit
+            # must not trigger lookup's normalized scan of every artist alias.
+            aid = artists.lookup(self.conn, name, exact=True)
+            if aid is None:
+                continue
+            rows = self.conn.execute(
+                'SELECT t.genre,t.mb_year FROM (SELECT entry_id FROM track_artists '
+                'WHERE artist_id=? ORDER BY entry_id LIMIT ?) a '
+                'JOIN tracks t ON t.id=a.entry_id', (aid, per_artist)).fetchall()
+            genres = Counter(r['genre'] for r in rows if r['genre'])
+            years = [int(str(r['mb_year'])[:4]) for r in rows if str(r['mb_year'] or '')[:4].isdigit()]
+            result[name] = {'genre': genres.most_common(1)[0][0] if genres else '',
+                            'year': min(years) if years else None}
+        return result
+
+    @synchronized
     def artist_genre_years(self) -> dict:
         """{artist: {"genre": g, "year": y}} inferred from that artist's TAGGED tracks: their most
         common genre and earliest known year. A per-artist stand-in for tracks enrichment hasn't
@@ -604,7 +473,7 @@ class RecQueryRepo(Repo):
                            "year": years.get(artist)}
         return out
 
-    # --- genre distributions / adjacency ---
+    # --- genre distributions ---
     @synchronized
     def genre_distribution(self) -> dict:
         """{genre: track_count} over tagged tracks, feeds the taste-breadth/palette computation."""
@@ -620,40 +489,15 @@ class RecQueryRepo(Repo):
         # (same identity_key, different video_id uploads). Without the DISTINCT, the LEFT JOIN below
         # would add (1 + plays) once per upload, multiplying a song's weight by its duplicate count.
         rows = self.conn.execute(
-            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM listening_days GROUP BY identity_key), "
+            "WITH tp AS (SELECT identity_key, plays c FROM listening_day_counts), "
             "     songs AS (SELECT DISTINCT identity_key, genre FROM tracks WHERE genre <> '') "
             "SELECT s.genre g, SUM(1 + COALESCE(tp.c, 0)) w FROM songs s "
             "LEFT JOIN tp ON tp.identity_key = s.identity_key GROUP BY s.genre").fetchall()
         return {r["g"]: r["w"] for r in rows}
 
     @synchronized
-    def genre_cooccurrence(self) -> dict:
-        """How often each unordered genre pair shares a playlist: the corpus adjacency signal.
-
-        Returns {"pairs": {(g1,g2): count}, "occ": {genre: #playlists}}. Used to pull genres the
-        user repeatedly playlists together closer than the static map alone (spec §2.1/§5.3).
-        """
-        excl = self.excluded_playlist_ids()
-        pl = {}
-        for r in self.conn.execute(
-            "SELECT pt.playlist_id pid, t.genre g FROM playlist_tracks pt "
-            "JOIN tracks t ON t.id=pt.track_id WHERE t.genre<>''"):
-            if r["pid"] in excl:                         # generated playlists don't shape adjacency
-                continue
-            pl.setdefault(r["pid"], set()).add(r["g"])
-        pairs, occ = Counter(), Counter()
-        for genres in pl.values():
-            gs = sorted(genres)
-            for g in gs:
-                occ[g] += 1
-            for i in range(len(gs)):
-                for j in range(i + 1, len(gs)):
-                    pairs[(gs[i], gs[j])] += 1
-        return {"pairs": dict(pairs), "occ": dict(occ)}
-
-    @synchronized
     def playlist_track_genres(self, playlist_id) -> list[str]:
-        """Non-empty genres of a playlist's tracks (for the genre-diversity stat)."""
+        """Non-empty genres of a playlist's tracks for taste context summaries."""
         return [r["g"] for r in self.conn.execute(
             "SELECT t.genre g FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
             "WHERE pt.playlist_id=? AND t.genre<>''", (playlist_id,))]
@@ -662,11 +506,7 @@ class RecQueryRepo(Repo):
     @synchronized
     def excluded_playlist_ids(self, group=GENERATED_GROUP) -> set:
         """Generated playlists remain excluded until explicit adoption, regardless of group."""
-        rows = self.conn.execute(
-            "SELECT p.id id FROM playlists p "
-            "JOIN quarantined_playlists g ON g.ytm=p.scope_ref WHERE g.name=:grp",
-            {"grp": group}).fetchall()
-        return {r["id"] for r in rows}
+        return {r['id'] for r in self.conn.execute(QUARANTINED_PLAYLIST_IDS_SQL, (group,))}
 
     @synchronized
     def generated_track_keys(self, group=GENERATED_GROUP) -> set:
@@ -773,6 +613,7 @@ class RecQueryRepo(Repo):
             "SELECT playlist_id pid, COUNT(*) n FROM playlist_tracks GROUP BY playlist_id HAVING n > ?",
             (size_floor,))}
 
+    @snapshot_read
     def rec_baskets(self, max_album=30, max_session=120) -> list[list[str]]:
         """Co-occurrence baskets for the embedding model: playlists, albums, listening sessions.
 
@@ -835,7 +676,7 @@ class RecQueryRepo(Repo):
         out += [list(s) for s in yr.values() if 1 < len(s) <= _CONTENT_BASKET_CAP]
         return out
 
-    @synchronized
+    @snapshot_read
     def rec_baskets_as_of(self, cutoff, max_album=30, max_session=120) -> tuple[list[list[str]], dict]:
         """Conservative, reconstructable basket snapshot strictly before ``cutoff``.
 

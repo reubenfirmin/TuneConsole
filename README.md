@@ -35,7 +35,7 @@ b) And I find YouTube's discovery and playlist management to be pretty bad
 
 1. **Start the app:**
    ```bash
-   uv sync
+   uv sync                 # requires Python 3.12+; uv can download a compatible interpreter
    uv run yt-playlist        # serves http://127.0.0.1:8765
    ```
 2. **Install the browser extension** (Chrome/Chromium/Edge): go to `chrome://extensions`, turn on

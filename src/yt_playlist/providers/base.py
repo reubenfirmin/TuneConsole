@@ -14,6 +14,7 @@ import time
 import math
 from dataclasses import dataclass, field
 from typing import Protocol
+from yt_playlist.util import genre_catalog
 
 
 class LookupUnavailable(Exception):
@@ -72,9 +73,16 @@ class Numeric:
         except (TypeError, ValueError):
             return a == b
 
+
+class Genre(Discrete):
+    """A parent and its subgenre are compatible; unrelated styles still disagree."""
+    def agree(self, a, b) -> bool:
+        return (super().agree(genre_catalog.canonical_name(a), genre_catalog.canonical_name(b))
+                or genre_catalog.is_subgenre(a, b) or genre_catalog.is_subgenre(b, a))
+
 # Only fields that >=2 providers can supply ever actually conflict; the rest are harmless to list.
 FIELD_SPECS = {
-    "genre": Discrete(),
+    "genre": Genre(),
     "year": Discrete(),
     "music_key": Discrete(),
     "music_scale": Discrete(),

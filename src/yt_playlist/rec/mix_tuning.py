@@ -26,6 +26,10 @@ def reset(store) -> None:
 
 
 def expire(store, now) -> bool:
+    # Maintenance readers inherit an already-expired, committed tuning state.
+    # They must never try to mutate their pinned read-only snapshot.
+    if getattr(store, "_read_only", False):
+        return False
     # Recheck under the shared lock: a simultaneous new adjustment must survive.
     with store._lock:
         if store.settings.get_setting(UPDATED_AT_SETTING) is None or remaining(store, now) > 0:

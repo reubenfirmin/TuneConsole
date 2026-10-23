@@ -37,9 +37,10 @@ def penalties(store, vectors, index, *, evidence_vecs=None):
 def for_keys(store, keys):
     """Bounded live adjustments for prepared cards; reuse persisted collaborative vectors."""
     keys = set(keys)
-    if not keys or not store.rec_model.disliked_identity_keys():
+    disliked = store.rec_model.disliked_identity_keys()
+    if not keys or not disliked:
         return {}
-    _, vectors, index = embed.load_vectors(store)
+    _, vectors, index = embed._load_vector_rows(list(store.rec_model.vectors_by_keys(keys | disliked).items()))
     if vectors is None:
         return {}
     present = sorted(keys & index.keys())

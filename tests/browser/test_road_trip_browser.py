@@ -78,6 +78,49 @@ def live_road_trip_app(monkeypatch):
     thread.join(timeout=5)
 
 
+@pytest.mark.parametrize('save_outcome', ['success', 'http', 'network', 'timeout'])
+def test_recipe_loader_covers_lookup_save_and_failure(live_road_trip_app, page, save_outcome):
+    base_url, store = live_road_trip_app
+    lookups, saves = [], []
+    page.route('**/road_trip/artist_genre?*', lambda route: lookups.append(route))
+    page.route('**/road_trip/recipes', lambda route: saves.append(route))
+    page.goto(f'{base_url}/road_trip')
+    page.get_by_role('textbox', name='Route name', exact=True).fill('Evening drive')
+    page.get_by_role('button', name='Choose passenger music').click()
+    page.fill("form input[x-model='artistQuery']", 'Tame Impala')
+    page.locator('.rt-suggestion').first.click()
+    loader = page.locator('.rt-loading-screen')
+    expect(loader).to_be_visible()
+    expect(loader).to_contain_text('Finding music')
+    expect(page.locator('#road-trip-body').locator('..')).to_have_js_property('inert', True)
+    assert len(lookups) == 1
+    lookups[0].fulfill(json={'genre': 'Psychedelic Rock'})
+    expect(loader).to_be_hidden()
+    if save_outcome == 'timeout':
+        # Leave the actual POST pending so the bundled HTMX receives XHR's
+        # native timeout, including its afterRequest-before-timeout ordering.
+        page.evaluate('htmx.config.timeout = 1500')
+    page.get_by_role('button', name='Save recipe', exact=True).click()
+    expect(loader).to_be_visible()
+    expect(loader).to_contain_text('Updating your route')
+    assert len(saves) == 1
+    if save_outcome != 'success':
+        if save_outcome == 'network':
+            saves[0].abort('failed')
+        elif save_outcome == 'http':
+            saves[0].fulfill(status=503, body='Unavailable')
+        expect(page.get_by_role('alert')).to_contain_text('could not be completed')
+        expect(page.get_by_role('button', name='Save recipe', exact=True)).to_be_enabled()
+        expect(page.get_by_role('textbox', name='Route name', exact=True)).to_have_value('Evening drive')
+        expect(page.locator('.genre-chip')).to_contain_text(['Tame Impala', 'Psychedelic Rock'])
+        assert store.road_trip.list_road_trip_recipes() == []
+    else:
+        saves[0].continue_()
+        expect(page.locator('.rt-recipe')).to_contain_text('Evening drive')
+    expect(loader).to_be_hidden()
+    expect(page.locator('#road-trip-body').locator('..')).to_have_js_property('inert', False)
+
+
 def test_build_curate_then_save_road_trip_recipe(live_road_trip_app, page, monkeypatch):
     base_url, store = live_road_trip_app
     page.goto(f"{base_url}/road_trip")

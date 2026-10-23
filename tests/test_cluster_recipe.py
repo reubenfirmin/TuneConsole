@@ -89,6 +89,16 @@ def test_cluster_recipe_remembers_inputs_in_params(store):
     assert recipe["params"]["genre_whitelist"] == ["techno"]
 
 
+def test_cluster_recipe_shuffle_spaces_artists_for_track_keys(store):
+    keys = [_track(store, f"v{artist}{i}", f"Song {i}", artist, genre="techno")
+            for artist, count in [("A", 3), ("B", 2), ("C", 2)] for i in range(count)]
+    _, order = recipes.cluster_recipe(store, keys, journey="shuffle")
+    meta = store.rec_query.tracks_by_keys(keys)
+    assert sorted(order) == sorted(keys)
+    assert all(meta[a]["artist"] != meta[b]["artist"] for a, b in zip(order, order[1:]))
+    assert order == recipes.cluster_recipe(store, keys, journey="shuffle")[1]
+
+
 # --- /clusters/save persists the recipe --------------------------------------------------------
 
 def test_save_tags_cluster_recipe(store):

@@ -1,5 +1,7 @@
 """Low-overhead CPU spike snapshots and named background-work phases."""
 from contextlib import contextmanager
+from contextvars import ContextVar
+from collections import Counter
 import logging
 import os
 from pathlib import Path
@@ -11,18 +13,24 @@ import traceback
 logger = logging.getLogger("yt_playlist.work")
 _lock = threading.Lock()
 _spans = {}
+_phase = ContextVar("tuneconsole_work_phase", default="unscoped")
+
+
+def current_phase():
+    return _phase.get()
 
 
 @contextmanager
-def work_span(name, *, announce=False):
-    """Identify running work without sampling models or retaining frame locals."""
+def work_span(name, *, announce=False, level=logging.INFO):
+    """Identify running work; callers can lower routine announcements, keeping slow work at INFO."""
     token = object()
+    phase_token = _phase.set(name)
     started, cpu = time.monotonic(), time.thread_time()
     tid = threading.get_native_id()
     with _lock:
         _spans[token] = (tid, name, started)
     if announce:
-        logger.info("work start: pid=%d tid=%d phase=%s", os.getpid(), tid, name)
+        logger.log(level, "work start: pid=%d tid=%d phase=%s", os.getpid(), tid, name)
     outcome = "done"
     try:
         yield
@@ -33,9 +41,60 @@ def work_span(name, *, announce=False):
         elapsed = time.monotonic() - started
         with _lock:
             _spans.pop(token, None)
+        _phase.reset(phase_token)
         if announce or elapsed >= 2:
-            logger.info("work %s: pid=%d tid=%d phase=%s elapsed=%.2fs thread_cpu=%.2fs",
-                        outcome, os.getpid(), tid, name, elapsed, time.thread_time() - cpu)
+            logger.log(max(logging.INFO, level) if elapsed >= 2 else level,
+                       "work %s: pid=%d tid=%d phase=%s elapsed=%.2fs thread_cpu=%.2fs",
+                       outcome, os.getpid(), tid, name, elapsed, time.thread_time() - cpu)
+
+
+class MaintenanceDiagnostics:
+    """Per-store publication progress, with bounded summaries and full DEBUG detail."""
+
+    def __init__(self, *, interval=60.0, clock=None):
+        self.interval = interval
+        self.clock = clock or time.monotonic
+        self.lock = threading.Lock()
+        self.started = self.clock()
+        self.phases = Counter()
+        self.reasons = Counter()
+        self.waiting = {}
+
+    def record(self, outcome, *, reasons=(), phase=None):
+        phase = phase or current_phase()
+        now = self.clock()
+        with self.lock:
+            self.phases[phase, outcome] += 1
+            self.reasons.update((phase, reason) for reason in set(reasons))
+            if outcome == 'deferred':
+                self.waiting.setdefault(phase, now)
+            elif outcome == 'published':
+                self.waiting.pop(phase, None)
+            self._flush(now, force=False)
+
+    def flush(self, *, force=False):
+        with self.lock:
+            self._flush(self.clock(), force=force)
+
+    def _flush(self, now, *, force):
+        elapsed = now - self.started
+        if not self.phases or (not force and elapsed < self.interval):
+            return
+        totals = Counter()
+        phases = {}
+        for (phase, outcome), count in sorted(self.phases.items()):
+            totals[outcome] += count
+            phases.setdefault(phase, {})[outcome] = count
+        reasons = {}
+        for (phase, reason), count in sorted(self.reasons.items()):
+            reasons.setdefault(phase, {})[reason] = count
+        logger.info('Maintenance summary: interval=%.1fs published=%d deferred=%d failed=%d '
+                    'phases=%s reasons=%s waiting_s=%s', elapsed, totals['published'],
+                    totals['deferred'], totals['failed'], phases, reasons,
+                    {phase: round(now - start, 1) for phase, start in sorted(self.waiting.items())})
+        self.started = now
+        self.phases.clear()
+        self.reasons.clear()
 
 
 class CpuDiagnostics:

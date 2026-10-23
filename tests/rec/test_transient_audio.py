@@ -5,6 +5,7 @@ you have been playing, not only its genre/era/artist facets. This is the produce
 import numpy as np
 
 from yt_playlist.rec import embed, rec_params, scoring, transient
+from tests import model_support
 
 
 class _FakeDao:
@@ -27,7 +28,7 @@ def _store_with_content(tmp_path, monkeypatch, content, audio):
     s.init_schema()
     for method in ("library_keys", "track_content", "track_audio_features"):
         monkeypatch.setattr(s.rec_query, method, getattr(_FakeDao(content, audio), method))
-    embed.build_content_and_store(s)            # persist audio-aware content vectors
+    model_support.build_content_model(s)       # persist audio-aware content vectors
     return s
 
 

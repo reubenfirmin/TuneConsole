@@ -213,6 +213,7 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
         from yt_playlist.rec import fresh_pool
         monkeypatch.setattr(fresh_pool, "populate", blocking)
         monkeypatch.setattr(fresh_pool, "prepare", lambda *a: None)
+        ctx.rec_worker = SimpleNamespace(trigger_home_refresh=lambda **kw: None)
         ctx.now_fn = lambda: 1000
         job = jobs.start_fresh_pool(ctx, {})
     else:

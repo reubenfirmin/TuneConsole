@@ -121,11 +121,21 @@ def test_history_upload_reaches_home_learning_and_requests_model_refresh(store, 
     assert refreshes == [True]
     assert transient.play_facet_leans(store, now)
     assert client.get('/').status_code == 200
+    assert store.rec_model.get_weights(now=now) == {}
+
+    # Daily exposure belongs to background Home preparation, including after an import.
+    worker = app.state.ctx.rec_worker
+    worker.enabled = True
+    worker.debounce_s = 0
+    worker.trigger_home_refresh(force=True)
+    worker.join(5)
     weights = store.rec_model.get_weights(now=now)
     assert weights and all(weight > 1.0 for weight in weights.values())
 
     client.post('/import/spotify/v2', files={'file': ('history.zip', _payload(), 'application/zip')})
     assert client.get('/').status_code == 200
+    worker.trigger_home_refresh(force=True)
+    worker.join(5)
     assert store.history.spotify_history_stats()['events'] == 1
     assert store.rec_model.get_weights(now=now) == weights
     assert refreshes == [True]

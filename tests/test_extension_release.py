@@ -9,7 +9,7 @@ import pytest
 @pytest.mark.parametrize("scenario", [
     "missing_receiver", "lost_reply", "empty_reply", "failed_injection", "lost_retry_reply",
     "refresh_views", "install", "user_tabs", "audible", "playing", "paused", "unknown", "idle",
-    "playpause_lost_reply", "rating_lost_reply",
+    "playpause_lost_reply", "rating_lost_reply", "next_lost_reply", "next_missing_receiver",
 ])
 def test_release_tab_and_delivery_safety(scenario):
     node = shutil.which("node")
@@ -46,17 +46,18 @@ const chrome = {
     onUpdated: event(), onRemoved: event(),
     sendMessage: async (id, msg) => {
       sends.push({id, type: msg.type, playlist: msg.playlist});
-      if (['fetch', 'playpause', 'rate'].includes(msg.type)) {
+      if (msg.type === 'sensor-ping') return {ok: true, receiverRevision: 3, mainVersion: 4, mainRevision: 4, mainAgeMs: 0};
+      if (['fetch', 'playpause', 'rate', 'next'].includes(msg.type)) {
         attempts += 1;
-        if (['missing_receiver', 'failed_injection', 'lost_retry_reply'].includes(scenario)
+        if (['missing_receiver', 'failed_injection', 'lost_retry_reply', 'next_missing_receiver'].includes(scenario)
             && attempts === 1) {
           throw Error('Could not establish connection. Receiving end does not exist.');
         }
-        if (['lost_reply', 'lost_retry_reply', 'playpause_lost_reply', 'rating_lost_reply'].includes(scenario)) {
+        if (['lost_reply', 'lost_retry_reply', 'playpause_lost_reply', 'rating_lost_reply', 'next_lost_reply'].includes(scenario)) {
           throw Error('The message port closed before a response was received.');
         }
         if (scenario === 'empty_reply') return undefined;
-        return {status: 200, body: '{}'};
+        return {ok: true, status: 200, body: '{}'};
       }
       return {ok: true};
     },
@@ -112,8 +113,13 @@ const {playback, sensors, requests} = require('./tests/extension_worker.cjs').lo
     const result = await sensors.reloadUnresponsive(1);
     assert.equal(result, scenario === 'idle');
     assert.deepEqual(reloads, scenario === 'idle' ? [1] : []);
-  } else if (['playpause_lost_reply', 'rating_lost_reply'].includes(scenario)) {
-    await (scenario === 'playpause_lost_reply' ? playback.playPause() : playback.rate('like', 'v'));
+  } else if (scenario === 'next_missing_receiver') {
+    assert.equal((await playback.next('v')).ok,true);
+    assert.equal(attempts,2,'retry only after a proven missing receiver');
+    assert(injections.length>0);
+  } else if (['playpause_lost_reply', 'rating_lost_reply', 'next_lost_reply'].includes(scenario)) {
+    await (scenario === 'playpause_lost_reply' ? playback.playPause()
+      : scenario === 'next_lost_reply' ? playback.next('v') : playback.rate('like', 'v'));
     assert.equal(attempts, 1, 'a lost click reply must not replay the toggle');
     assert.equal(injections.length, 0);
   } else {
@@ -183,7 +189,7 @@ const chrome = {
       messages.push(msg.type);
       if (msg.type === 'sensor-ping') {
         if (!sensorReady) throw Error('Could not establish connection. Receiving end does not exist.');
-        return {ok: true};
+        return {ok: true, receiverRevision: 3, mainVersion: 4, mainRevision: 4, mainAgeMs: 0};
       }
       assert.equal(msg.type, 'fetch');
       assert.equal(tabs[0].status, 'complete');

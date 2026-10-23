@@ -10,7 +10,8 @@ def playlist_state(detail):
 
 def require_unchanged_copy(expected, current):
     if expected is None:
-        raise ValueError("This older action has no verified copy snapshot. The copy was preserved. "
+        raise ValueError("The post-action copy snapshot could not be verified or was not saved. "
+                         "The copy was preserved. "
                          "Review it in YouTube Music before removing it manually.")
     changed = expected["videos"] != current["videos"]
     for field in ("title", "description"):
@@ -27,7 +28,7 @@ def keeper_target(entry, current):
     after = entry.get("post")
     videos = current["videos"]
     if after is None:
-        raise ValueError("This older or incomplete action has no verified post-action snapshot. "
+        raise ValueError("The post-action snapshot could not be verified or was not saved. "
                          "The playlist was preserved. Compare it with the backup before recovering manually.")
     # An item removed and re-added later is a different occurrence, even if its video matches.
     post = entry.get("post_state") or {}

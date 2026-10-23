@@ -9,6 +9,7 @@ import json
 import time
 
 from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.core.db_diagnostics import database_operation
 from yt_playlist.core import catalog, metadata
 
 # field concept name -> (tracks column, caster). The whitelist that makes a user-chosen resolution
@@ -61,7 +62,7 @@ class EnrichmentRepo(Repo):
 
     @synchronized
     def record_enrichment_attempt(self, identity_key, provider, fields, *, retry=False, now=None,
-                                  video_id=None, error="", cooldown=False, retry_after=0):
+                                  video_id=None, error="", cooldown=False, retry_after=0, providers=()):
         key = catalog.resolve_key(self.conn, identity_key, video_id)
         row = self.conn.execute("SELECT id,COALESCE(last_enriched_at,-1) cycle FROM recordings WHERE identity_key=?", (key,)).fetchone()
         result = {"at": time.time() if now is None else now,
@@ -95,6 +96,22 @@ class EnrichmentRepo(Repo):
             elif not retry:
                 self.conn.execute("DELETE FROM enrichment_provider_cooldowns WHERE provider=?", (provider,))
             if not retry:
+                refresh = self.conn.execute("SELECT 1 FROM enrichment_provider_jobs "
+                    "WHERE recording_id=? AND provider=?", (row['id'], provider)).fetchone()
+                if refresh:
+                    # A policy/configuration refresh may reject an old artist fallback.
+                    # Reconsider completed answers after each provider: a later
+                    # replacement must not stay blocked by the retained old value.
+                    answers = {r['provider']: json.loads(r['fields_json']).get('genre')
+                        for r in self.conn.execute("SELECT s.provider,s.fields_json FROM "
+                            "enrichment_provider_state s WHERE s.recording_id=? AND s.status<>'retry' "
+                            "AND NOT EXISTS (SELECT 1 FROM enrichment_provider_jobs j "
+                            "WHERE j.recording_id=s.recording_id AND j.provider=s.provider)", (row['id'],))}
+                    answers[provider] = fields.get('genre')
+                    if not providers:
+                        from yt_playlist.providers.enrichment import load_config
+                        providers = [p['name'] for p in load_config(self._store) if p['enabled']]
+                    metadata.refresh_genre(self.conn, row['id'], answers, providers)
                 self.conn.execute("DELETE FROM enrichment_provider_jobs WHERE recording_id=? AND provider=?",
                                   (row["id"], provider))
         self.conn.commit()
@@ -489,7 +506,8 @@ class EnrichmentRepo(Repo):
             "AND (genre IS NULL OR genre='' OR mb_year IS NULL OR mb_year='') "
             "AND (first_enriched_at IS NULL OR last_enriched_at<:stale_before OR " +
             self._pending_coverage() + ") AND " + self._eligible_providers() +
-            " ORDER BY queue_order LIMIT :limit",
+            " ORDER BY (SELECT CAST(key AS INTEGER) FROM json_each(:keys) "
+            "WHERE value=t.identity_key), queue_order LIMIT :limit",
             {"keys": json.dumps(list(dict.fromkeys(keys))[:96]), "limit": limit,
              "stale_before": stale_before, "providers": json.dumps(providers) if providers is not None else None,
              "now": time.time() if now is None else now}).fetchall()
@@ -500,11 +518,60 @@ class EnrichmentRepo(Repo):
                 track["provider_jobs"] = jobs
         return result
 
-    @synchronized
     def next_enrich_batch(self, limit, offset=0, *, providers=None, now=None) -> list:
         """One priority queue across library and discovery tracks, ordered by tier:
         (0) new arrivals (created after the worker last caught up), (1) played songs by playcount,
-        (2) zero-play songs in a played playlist/album/artist by that container's plays, (3) orphans."""
+        (2) zero-play songs in a played playlist/album/artist by that container's plays, (3) orphans.
+
+        Account-wide ranking runs on a pinned reader. Before handing jobs to the worker,
+        recheck only the selected inputs against current membership, pass and provider state.
+        """
+        with database_operation("EnrichmentRepo.next_enrich_batch"):
+            if getattr(self._store, "_read_only", False):
+                return self._select_enrich_batch(limit, offset, providers=providers, now=now)
+            with self._store.read_snapshot() as snapshot:
+                reader = snapshot.store.enrichment
+                configuration = reader._queue_provider_configuration(providers)
+                candidates = reader._select_enrich_batch(limit, offset, providers=providers, now=now)
+            result = []
+            # Normal worker batches contain 40 tracks. Pagination and diagnostic callers
+            # may ask for more; they must still release the serving lock between chunks.
+            for start in range(0, len(candidates), 64):
+                result.extend(self._admit_enrich_batch(candidates[start:start + 64], configuration,
+                                                      providers=providers, now=now))
+            return result
+
+    @synchronized
+    def _queue_provider_configuration(self, providers):
+        return [tuple(row) for row in self.conn.execute(
+            "SELECT provider,fingerprint,status FROM enrichment_provider_config "
+            "WHERE :providers IS NULL OR provider IN (SELECT value FROM json_each(:providers)) "
+            "ORDER BY provider", {"providers": json.dumps(providers) if providers is not None else None})]
+
+    @synchronized
+    def _admit_enrich_batch(self, candidates, configuration, *, providers, now):
+        # Configuration changes can replace jobs for the same recording/provider.
+        # Defer that selection rather than mistaking a new job for the captured one.
+        if self._queue_provider_configuration(providers) != configuration:
+            return []
+        rows = self.conn.execute(
+            "WITH " + self._TRACKS_CTE + " SELECT t.* FROM json_each(:candidates) selected "
+            # queue_order is the view's outer recordings primary key. Constrain it
+            # explicitly so SQLite does not scan that relation to find each input.
+            "JOIN enrichment_tracks t ON t.queue_order=json_extract(selected.value,'$.recording_id') "
+            "AND t.recording_id=t.queue_order "
+            "AND t.id IS json_extract(selected.value,'$.id') "
+            "AND t.last_enriched_at IS json_extract(selected.value,'$.last_enriched_at') "
+            "WHERE (t.first_enriched_at IS NULL OR " + self._pending_coverage() + ") AND " +
+            self._eligible_providers(coverage=True) + " ORDER BY CAST(selected.key AS INTEGER)",
+            {"candidates": json.dumps([{key: track.get(key) for key in
+                                        ("recording_id", "id", "last_enriched_at")} for track in candidates]),
+             "providers": json.dumps(providers) if providers is not None else None,
+             "now": time.time() if now is None else now}).fetchall()
+        return [self._queue_track(row) for row in rows]
+
+    @synchronized
+    def _select_enrich_batch(self, limit, offset=0, *, providers=None, now=None):
         row = self.conn.execute(
             "SELECT value FROM settings WHERE key='enrich_caught_up_at'").fetchone()
         caught_up = float(row["value"]) if row and row["value"] else 0.0
@@ -604,6 +671,16 @@ class EnrichmentRepo(Repo):
             "WITH " + self._TRACKS_CTE +
             " SELECT COUNT(*) n FROM enrichment_tracks t WHERE first_enriched_at IS NULL OR " +
             self._pending_coverage()).fetchone()["n"]
+
+    @synchronized
+    def queue_stats(self) -> dict:
+        """Separate first passes from refreshes without counting provider jobs as tracks."""
+        row = self.conn.execute(
+            "WITH " + self._TRACKS_CTE +
+            " SELECT COUNT(*) total, SUM(first_enriched_at IS NULL) first_pass, "
+            "SUM(first_enriched_at IS NOT NULL) refresh FROM enrichment_tracks t "
+            "WHERE first_enriched_at IS NULL OR " + self._pending_coverage()).fetchone()
+        return {key: row[key] or 0 for key in ("total", "first_pass", "refresh")}
 
     @synchronized
     def outstanding_conflicts(self) -> int:
@@ -738,28 +815,29 @@ class EnrichmentRepo(Repo):
 
     @synchronized
     def processed_timeline(self, buckets=40) -> list:
-        """Cumulative processed-track count over time, as up to `buckets` (t, cumulative) points,
-        for the trend sparkline. Empty list when nothing's been processed yet."""
-        rng = self.conn.execute(
-            "WITH " + self._TRACKS_CTE +
-            " SELECT MIN(first_enriched_at) lo, MAX(first_enriched_at) hi, COUNT(*) n "
-            "FROM enrichment_tracks WHERE first_enriched_at IS NOT NULL").fetchone()
-        if not rng["n"] or rng["lo"] is None:
-            return []
-        lo, hi, total = rng["lo"], rng["hi"], rng["n"]
-        if hi <= lo:
-            return [{"t": hi, "n": total}]
-        width = (hi - lo) / buckets
-        out, cum, i = [], 0, 0
+        """Cumulative first checks and each track's latest re-enrichment, on the same timeline."""
         rows = self.conn.execute(
             "WITH " + self._TRACKS_CTE +
-            " SELECT first_enriched_at e FROM enrichment_tracks WHERE first_enriched_at IS NOT NULL "
+            " SELECT first_enriched_at first, last_enriched_at last "
+            "FROM enrichment_tracks WHERE first_enriched_at IS NOT NULL "
             "ORDER BY first_enriched_at").fetchall()
+        if not rows:
+            return []
+        refreshed = sorted(row["last"] for row in rows
+                           if row["last"] is not None and row["last"] > row["first"])
+        lo, hi, total = rows[0]["first"], max(rows[-1]["first"], max(refreshed, default=0)), len(rows)
+        if hi <= lo:
+            return [{"t": hi, "n": total, "refresh": 0}]
+        width = (hi - lo) / buckets
+        out, cum, i, refreshed_count = [], 0, 0, 0
         for b in range(1, buckets + 1):
             edge = lo + width * b
-            while i < len(rows) and rows[i]["e"] <= edge:
+            while i < len(rows) and rows[i]["first"] <= edge:
                 cum += 1
                 i += 1
-            out.append({"t": edge, "n": cum})
+            while refreshed_count < len(refreshed) and refreshed[refreshed_count] <= edge:
+                refreshed_count += 1
+            out.append({"t": edge, "n": cum, "refresh": refreshed_count})
         out[-1]["n"] = total
+        out[-1]["refresh"] = len(refreshed)
         return out

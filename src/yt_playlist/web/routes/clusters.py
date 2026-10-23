@@ -12,7 +12,12 @@ from fastapi.responses import JSONResponse, Response
 
 from yt_playlist.util import genre_map
 from yt_playlist.rec import embed, measurement, recipes
+from yt_playlist.rec.cluster_explain import connection_reasons
 from yt_playlist.library import executor
+from yt_playlist.library.playlist_writes import PlaylistAddUncertain
+from yt_playlist.web.cluster_scans import ClusterScans
+from yt_playlist.web.cluster_projection import search_results
+from yt_playlist.core.activity import check_stopping
 
 RING_SIZE = 6        # tracks added per "grow", a small ring keeps the canvas legible
 ALBUM_CAP = 2        # #14: at most this many tracks from one album per ring (untagged albums uncapped)
@@ -21,6 +26,7 @@ ALBUM_CAP = 2        # #14: at most this many tracks from one album per ring (un
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates, now_fn = ctx.store, ctx.templates, ctx.now_fn
+    scans = ClusterScans(ctx)
 
     @router.get("/clusters")
     def clusters_page(request: Request):
@@ -34,7 +40,7 @@ def build(ctx) -> APIRouter:
     @router.get("/clusters/search")
     def clusters_search(q: str = ""):
         """Library autosuggest: vector-backed seeds across artists / playlists / songs."""
-        return JSONResponse(store.rec_query.cluster_search(q, limit=6))
+        return JSONResponse(search_results(store.cluster_evidence.seed_matches(q, limit=6)))
 
     @router.get("/clusters/state/{ytm}")
     def clusters_state(ytm: str):
@@ -52,14 +58,12 @@ def build(ctx) -> APIRouter:
         return JSONResponse({"families": store.rec_query.library_genre_families(),
                              "genres": store.rec_query.library_genres()})
 
-    @router.post("/clusters/expand")
-    async def clusters_expand(request: Request):
+    def _expand(store, body):
         """A node's next ring. Body: {pos_keys, neg_keys, exclude, k, allow_families}. pos_keys = the
         pinned path's keys (its centroid); neg_keys = every pruned key (push-away); exclude = keys
         already on the canvas; allow_families = optional genre-family whitelist (#29), when set, the
         ring is restricted to tracks in those families (untagged tracks dropped). Returns
         {ring: [{key, video_id, title, artist, album, thumbnail, score}]}."""
-        body = await request.json()
         pos = body.get("pos_keys") or []
         neg = body.get("neg_keys") or []
         exclude = body.get("exclude") or []
@@ -95,8 +99,6 @@ def build(ctx) -> APIRouter:
         cand = [key for key, _ in nbrs]
         meta = store.rec_query.tracks_by_keys(cand)
         dmeta = store.discovery.discovered_tracks_by_keys(cand) if include_new else {}   # out-of-corpus tracks
-        if dmeta:
-            store.discovery.mark_offered("track", list(dmeta), now_fn())   # #53 offered-in-cluster count
         genres = store.rec_query.track_genres(cand)               # for the client-side genre filter (#29)
         # Seeded variation among near matches, stable when a saved canvas is reopened. Balance the
         # artists while selecting (after album eligibility), so a large catalog cannot crowd out a
@@ -111,6 +113,7 @@ def build(ctx) -> APIRouter:
                       if (meta.get(key) or dmeta.get(key) or {}).get("video_id")}
         ring = []
         while candidates and len(ring) < k:
+            check_stopping()
             eligible = [key for key in candidates
                         if not (album := ((meta.get(key) or dmeta[key]).get("album") or "").strip().lower())
                         or album_count.get(album, 0) < ALBUM_CAP]
@@ -133,26 +136,35 @@ def build(ctx) -> APIRouter:
                          "artist": m["artist"], "album": m["album"], "thumbnail": m["thumbnail"],
                          "genre": g, "family": genre_map.family(g), "score": round(score, 4),
                          "out_of_corpus": new})
-        measurement.record_recommendations(store, "clusters", ring, now_fn(), lane="ring",
-                                           ranker="cluster-expand",
-                                           provenance={"positive_seeds": pos, "negative_seeds": neg,
-                                                       "genre_selection": tokens})
-        return JSONResponse({"ring": ring})
+        return {"ring": ring}, list(dmeta)
 
-    @router.post("/clusters/explain")
-    async def clusters_explain(request: Request):
+    def _record_expand(payload, offered, body):
+        if offered:
+            store.discovery.mark_offered("track", offered, now_fn())
+        measurement.record_recommendations(store, "clusters", payload['ring'], now_fn(), lane="ring",
+                                           ranker="cluster-expand",
+                                           provenance={"positive_seeds": body.get('pos_keys') or [],
+                                                       "negative_seeds": body.get('neg_keys') or [],
+                                                       "genre_selection": body.get('allow_genres') or
+                                                       body.get('allow_families') or []})
+
+    @router.post("/clusters/expand")
+    async def clusters_expand(request: Request):
+        body = await request.json()
+        return JSONResponse(await scans.run(_expand, body, _record_expand))
+
+    def _explain(store, body):
         """Why is this edge here? Body: {key, path_keys}. key = the child track; path_keys = its
         pinned path (central + ancestors). Returns the grounded co-occurrence reasons behind the
         link (shared playlists/album/session, same artist, genre family, decade), falling back to an
         embedding 'bridge' track when nothing is directly shared, plus the taste-space match score.
         Shape: {key, title, artist, headline, reasons:[{kind,text}], score, match_pct}."""
-        body = await request.json()
         key = (body.get("key") or "").strip()
         path = [k for k in (body.get("path_keys") or []) if k and k != key]
         if not key:
-            return JSONResponse({"key": "", "title": "", "artist": "", "headline": "",
-                                 "reasons": [], "score": None, "match_pct": None})
-        reasons = list(store.rec_query.connection_facts(key, path))
+            return {"key": "", "title": "", "artist": "", "headline": "",
+                    "reasons": [], "score": None, "match_pct": None}, None
+        reasons = connection_reasons(store.cluster_evidence.connection(key, path))
         geo = embed.connection_geometry(store, key, path)
         if not reasons and geo["bridge"]:
             bm = store.rec_query.tracks_by_keys([geo["bridge"]]).get(geo["bridge"])
@@ -163,11 +175,16 @@ def build(ctx) -> APIRouter:
         headline = reasons[0]["text"] if reasons else "Similar to the music you chose."
         meta = store.rec_query.tracks_by_keys([key]).get(key, {})
         score = geo["score"]
-        return JSONResponse({
+        return {
             "key": key, "title": meta.get("title", ""), "artist": meta.get("artist", ""),
             "headline": headline, "reasons": reasons,
             "score": round(score, 4) if score is not None else None,
-            "match_pct": round(max(0.0, score) * 100) if score is not None else None})
+            "match_pct": round(max(0.0, score) * 100) if score is not None else None}, None
+
+    @router.post("/clusters/explain")
+    async def clusters_explain(request: Request):
+        body = await request.json()
+        return JSONResponse(await scans.run(_explain, body))
 
     @router.post("/clusters/save")
     async def clusters_save(request: Request):
@@ -176,6 +193,11 @@ def build(ctx) -> APIRouter:
         keep_keys = every non-pruned track on the canvas; central_keys = the seed group's own tracks,
         always folded in when present."""
         form = await request.form()
+        return await activity_for(ctx).to_thread(_save_cluster, request, form)
+
+    def _save_cluster(request, form):
+        # Metadata, greedy ordering and save bookkeeping can all wait on substantial work.
+        # Track the whole operation outside the event loop, including any remote mutation.
         name = (form.get("name") or "").strip()
         try:
             keep = list(json.loads(form.get("keep_keys") or "[]"))
@@ -204,9 +226,8 @@ def build(ctx) -> APIRouter:
             result["error"] = account_error or "Keep at least one track to create a playlist."
         else:
             try:
-                res = await activity_for(ctx).to_thread(
-                    executor.create_generated_playlist, store, name, tracks, client, now_fn(),
-                    identity_id, recipe=recipe)
+                res = executor.create_generated_playlist(store, name, tracks, client, now_fn(),
+                                                         identity_id, recipe=recipe)
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
                 if res["added"]:
                     measurement.record_action(store, "save", now_fn(), playlist_id=res["pid"],
@@ -228,6 +249,8 @@ def build(ctx) -> APIRouter:
                         store.rec_surface.set_cluster_canvas(res["new_ytm"], state, now_fn())
                     except (ValueError, TypeError):
                         pass
+            except PlaylistAddUncertain as exc:
+                result.update(error=str(exc), partial_ytm=exc.playlist_id)
             except Exception:  # noqa: BLE001 - surface a friendly card, log the detail
                 ctx.logger.exception("save cluster %r failed", name)
                 result["error"] = "YouTube returned an unexpected response."

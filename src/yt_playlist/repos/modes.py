@@ -16,6 +16,18 @@ from yt_playlist.repos.base import Repo, synchronized
 
 class ModesRepo(Repo):
     @synchronized
+    def publish_generation(self, rows, retired):
+        """Apply prepared stable mode identities within the model publication transaction."""
+        if not self.conn.in_transaction:
+            raise RuntimeError('Mode publication requires an outer transaction')
+        self.conn.executemany(
+            'INSERT INTO taste_modes(mode_id,label,families,centroid,size,rep_keys,first_seen,last_seen,space,active) '
+            'VALUES (?,?,?,?,?,?,?,?,?,1) ON CONFLICT(mode_id) DO UPDATE SET '
+            'label=excluded.label,families=excluded.families,centroid=excluded.centroid,size=excluded.size,'
+            'rep_keys=excluded.rep_keys,last_seen=excluded.last_seen,space=excluded.space,active=1', rows)
+        self.conn.executemany('UPDATE taste_modes SET active=0 WHERE mode_id=?', [(mid,) for mid in retired])
+
+    @synchronized
     def list_modes(self, active_only=True) -> list[dict]:
         sql = "SELECT * FROM taste_modes"
         if active_only:
@@ -216,24 +228,3 @@ class ModesRepo(Repo):
             "WHERE m.active=1 AND (o.n IS NOT NULL OR p.n IS NOT NULL) "
             "ORDER BY updated_at DESC, m.mode_id").fetchall()
         return [dict(row) for row in rows]
-
-    @synchronized
-    def ranker_impression_counts(self, since=None) -> dict:
-        """#57 {ranker: impressions}; NULL (pre-#57 rows) counts as 'cosine'."""
-        sql = "SELECT COALESCE(ranker, 'cosine') r, COUNT(*) c FROM rec_mode_impressions"
-        args = []
-        if since is not None:
-            sql += " WHERE created_at >= ?"
-            args.append(float(since))
-        sql += " GROUP BY r"
-        return {row["r"]: row["c"] for row in self.conn.execute(sql, args).fetchall()}
-
-    @synchronized
-    def ranker_pick_rows(self, since=None) -> list:
-        """#57 [(playlist_id, ranker)]; NULL counts as 'cosine'."""
-        sql = "SELECT playlist_id, COALESCE(ranker, 'cosine') r FROM rec_mode_picks"
-        args = []
-        if since is not None:
-            sql += " WHERE created_at >= ?"
-            args.append(float(since))
-        return [(row["playlist_id"], row["r"]) for row in self.conn.execute(sql, args).fetchall()]

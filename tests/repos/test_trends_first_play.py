@@ -176,3 +176,19 @@ def test_takeout_backfill_moves_first_play_earlier(store):
     assert backfilled == {"k1": 1}
     assert backfilled["k1"] < recent["k1"]
     assert store.trends.first_play_map("artist") == {"A1": 1}
+
+
+def test_artist_derivation_reads_track_credits_once_instead_of_once_per_artist(store):
+    for i in range(60):
+        _track(store, f"k{i}", f"Artist {i // 3}")
+    store.trends.upsert_first_play_min(
+        [("track", f"k{i}", i + 1, (i + 1) * 86400, f"source-{i}") for i in range(60)])
+    reads = []
+    store.conn.create_function("observe_credit", 1, lambda artist: (reads.append(artist), artist)[1])
+    store.conn.execute("CREATE TEMP VIEW tracks AS SELECT identity_key,observe_credit(artist) artist "
+                       "FROM main.tracks")
+    store.trends.rebuild_artist_first_play()
+    assert len(reads) <= 60 * 4
+    assert store.trends.first_play_map("artist") == {f"Artist {i}": i * 3 + 1 for i in range(20)}
+    assert store.conn.execute("SELECT source FROM trend_first_play WHERE kind='artist' "
+                              "AND id_key='Artist 2'").fetchone()[0] == "source-6"

@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from yt_playlist.rec import embed, model_selection as ms
+from tests import model_support
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.util.matching import identity_key
 
@@ -142,19 +143,30 @@ def test_forecast_has_same_universe_and_does_not_replace_live_vectors(store):
     assert store.rec_model.get_rec_vectors() == [("unchanged", b"original")]
 
 
-def test_startup_recovers_interrupted_comparison_and_worker_checks_automatically(store, monkeypatch):
+def test_startup_recovers_interrupted_comparison_and_unchanged_refresh_reuses_models(store, monkeypatch):
     store.model_selection.start_selection(100, _result(100, "running"))
+    store.tracks.upsert_track("warm", "Warm", "Artist", None, None)
+    warm_key = identity_key("Warm", "Artist")
+    warm_vector = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32).tobytes()
+    store.rec_model.replace_rec_vectors([(warm_key, warm_vector)])
+    store.tracks.upsert_track("new", "New", "Other Artist", None, None)
+    new_key = identity_key("New", "Other Artist")
     worker = RecWorker(SimpleNamespace(store=store, now_fn=lambda: 1000, logger=logging.getLogger("test")))
     assert store.model_selection.selection_runs()[0]["status"] == "failed"
-    calls = []
-    def stage(name,fn,*args,**kwargs):
-        if name=='model comparison':
-            calls.append(fn)
-            assert args==(store,1000)
-        return {'count':0,'scanned':0} if name in {'playlist cleanup','discovery'} else 0
-    monkeypatch.setattr(worker,'_stage',stage)
-    worker._do_rebuild()
-    assert calls == [ms.maintain]
+    monkeypatch.setattr(ms, "maintain", lambda *args, **kwargs: None)
+    monkeypatch.setattr(worker, "_start_loop", lambda: None)
+    try:
+        worker._do_rebuild()
+        before = store.rec_model.content_generation()
+        def forbidden(*args, **kwargs):
+            raise AssertionError("Unchanged inputs must reuse the completed model")
+        monkeypatch.setattr(embed, "build_vectors_from_baskets", forbidden)
+        worker._do_rebuild()
+        assert store.rec_model.content_generation() == before
+        assert not store.rec_refresh.has_pending_changes()
+        assert len(store.model_selection.selection_runs()) == 1
+    finally:
+        worker.shutdown()
 
 
 def test_real_history_drives_automatic_comparison_without_manual_action(store, monkeypatch):
@@ -171,7 +183,7 @@ def test_real_history_drives_automatic_comparison_without_manual_action(store, m
         store.history.record_history_plays(iid, period * 10 * ms.DAY,
             [key for keys in all_keys for key in keys[period * 5:period * 5 + 5]], source_timezone="UTC")
     store.settings.set_setting("rec_dim", "4")
-    embed.build_and_store(store)
+    model_support.build_track_model(store)
     monkeypatch.setattr(ms, "CONFIGS", [("svd", 4), ("svd", 8)])
     now = 31 * ms.DAY
     assert ms.readiness(store, now)["state"] == "ready"

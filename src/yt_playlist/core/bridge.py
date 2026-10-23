@@ -36,6 +36,11 @@ class Bridge:
     def connected(self) -> bool:
         return self._send is not None
 
+    @property
+    def connection_id(self):
+        """Changes on reconnect so failed reads can retry before their backoff expires."""
+        return self._conn_id
+
     def connect(self, send_coro_fn, loop) -> int:
         with self._lock:
             self._conn_id = next(self._conn_ids)

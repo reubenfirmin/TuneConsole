@@ -11,6 +11,7 @@ import zipfile
 from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.library.album_fetch import shareable_album_tracks
 from yt_playlist.library.playlist_mutation import _read as _read_playlist
+from yt_playlist.library.playlist_mutation import apply_playlist_permutation
 from yt_playlist.util.matching import fuzzy_ratio, identity_key, normalize, track_artist
 from yt_playlist.util.retry import with_retry
 from yt_playlist.util.thumbnails import best_thumb
@@ -350,26 +351,7 @@ def _order_imported_tracks(client, remote_id, source_videos):
     managed = {occurrences[video] for video in source_videos}
     ordered = iter(occurrences[video] for video in source_videos)
     target = [next(ordered) if index in managed else index for index in range(len(tracks))]
-    order = list(range(len(tracks)))
-    for index in range(len(target) - 1, -1, -1):
-        item = target[index]
-        if item not in managed:
-            continue
-        successor = target[index + 1] if index + 1 < len(target) else None
-        position = order.index(item)
-        if (successor is None and position == len(order) - 1) or (
-                successor is not None and position + 1 < len(order) and order[position + 1] == successor):
-            continue
-        handle = tracks[item].get("setVideoId")
-        following = tracks[successor].get("setVideoId") if successor is not None else None
-        if not handle or (successor is not None and not following):
-            raise ValueError("YouTube has not exposed the playlist ordering handles yet; retry the import")
-        result = client.edit_playlist(remote_id, moveItem=(handle, following) if following else handle)
-        status = result.get("status") if isinstance(result, dict) else result
-        if status != "STATUS_SUCCEEDED":
-            raise ValueError("YouTube did not confirm the imported playlist order")
-        order.remove(item)
-        order.insert(order.index(successor) if successor is not None else len(order), item)
+    apply_playlist_permutation(client, remote_id, tracks, target, movable=managed)
     confirmed = _read_playlist(client, remote_id)
     if [t["videoId"] for t in confirmed] != [tracks[index]["videoId"] for index in target]:
         raise ValueError("Imported playlist order is still unresolved; retry the import")

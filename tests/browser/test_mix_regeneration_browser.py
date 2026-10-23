@@ -3,6 +3,7 @@ import pytest
 from playwright.sync_api import expect
 
 from tests.test_home_other_genres import seed_genres
+from tests.test_mode_cards_route import prepare_home
 
 
 @pytest.mark.parametrize("endpoint", ["/home/refresh-cards", "/home/refresh-card/wheelhouse"])
@@ -11,6 +12,7 @@ def test_mix_regeneration_recovers_from_failure(live_app, store, page, endpoint,
     seed_genres(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
+    prepare_home(store, 1)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))

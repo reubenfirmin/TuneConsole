@@ -1,6 +1,9 @@
 """Playlists tab: browse every playlist, sort, assign user groups, and run bulk actions."""
 from yt_playlist.core.activity import activity_for
+from yt_playlist.core.accounts import client_for
+from yt_playlist.core.playlist_snapshot import playlist_read_report
 import json
+import hashlib
 import re
 from datetime import datetime
 from urllib.parse import quote
@@ -14,6 +17,7 @@ from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.library import executor
 from yt_playlist.library.playlist_metadata import PROMOTED_DESCRIPTION
 from yt_playlist.library.playlist_positions import pending_insertions
+from yt_playlist.library.playlist_writes import PlaylistAddUncertain
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.library.live_plays import resolve_identity
 from yt_playlist.web.jobs import start_playlist_enrichment
@@ -59,6 +63,10 @@ def build(ctx) -> APIRouter:
     def _is_generated(pid):
         pl = store.playlists.get_playlist(pid)
         return pl is not None and store.playlists.is_quarantined_playlist(pl.scope_ref)
+
+    def _feedback_version(tracks):
+        fields = sorted((t['identity_key'], t.get('genre') or '', t.get('year') or '') for t in tracks)
+        return hashlib.sha256(json.dumps(fields).encode()).hexdigest()[:20]
 
     def _record_alt_version_events(pid, old_video_id, tracks):
         # #95: choosing an alternate version off the alternates modal is the user saying "these two
@@ -114,7 +122,8 @@ def build(ctx) -> APIRouter:
                 return templates.TemplateResponse(request, "_partials/track_row.html",
                     {"t": t, "idx": i, "pl": store.playlists.get_playlist(pid),
                      "is_generated": gen,
-                     "mood_states": taste_analysis.track_mood_states(store, now_fn()) if gen else {}})
+                     "mood_states": taste_analysis.track_mood_states(store, now_fn()) if gen else {}},
+                    headers={"HX-Trigger": "playlist-metadata-changed"})
         return Response(status_code=204)         # row no longer present, nothing to swap
 
     @router.get("/playlists")
@@ -189,6 +198,7 @@ def build(ctx) -> APIRouter:
             "show_identity": len(labels) > 1,
             "is_generated": is_generated,
             "facets": taste_analysis.playlist_facets(store, pid) if is_generated else None,
+            "feedback_version": _feedback_version(tracks) if is_generated else None,
             "mood_state": taste_analysis.playlist_mood_state(store, pid, now_fn()) if is_generated else 0,
             "mood_states": taste_analysis.track_mood_states(store, now_fn()) if is_generated else {},
             "recipe": recipe,
@@ -215,7 +225,31 @@ def build(ctx) -> APIRouter:
         cells = [{"video_id": t["video_id"], "genre": t.get("genre") or "", "year": t.get("year") or ""}
                  for t in tracks]
         pending = sum(1 for t in tracks if not (t.get("genre") and t.get("year")))
-        return JSONResponse({"cells": cells, "pending": pending})
+        return JSONResponse({"cells": cells, "pending": pending, "feedback_version": _feedback_version(tracks)})
+
+    @router.get('/playlist/{pid}/snapshot-report')
+    def playlist_snapshot_report(pid: int):
+        """Read-only support report scoped to a saved playlist's configured account."""
+        playlist = store.playlists.get_playlist(pid)
+        if playlist is None:
+            raise HTTPException(404, 'Playlist not found')
+        try:
+            identity_id, client = client_for(store, ctx.client_provider(), playlist_id=pid)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        report = playlist_read_report(client, playlist.ytm_playlist_id)
+        return JSONResponse({'identity_id': identity_id, 'playlist_id': pid, 'reads': report},
+                            headers={'Cache-Control': 'no-store'})
+
+    @router.get("/playlist/{pid}/feedback-facets")
+    def playlist_feedback_facets(request: Request, pid: int):
+        if not _is_generated(pid):
+            raise HTTPException(status_code=404, detail="generated playlist not found")
+        tracks = store.charts.playlist_tracks_detail(pid)
+        return templates.TemplateResponse(request, "_partials/feedback_facets.html", {
+            "pid": pid, "facets": taste_analysis.playlist_facets(store, pid),
+            "feedback_version": _feedback_version(tracks),
+        })
 
     @router.get("/playlist/{pid}/share.txt")
     def playlist_share(pid: int):
@@ -549,6 +583,17 @@ def build(ctx) -> APIRouter:
         ids = _ids(form)
         try:
             result = await activity_for(ctx).to_thread(ctx.ops().copy, ids, form.get("name", ""))
+        except PlaylistAddUncertain as exc:
+            created = next((p for p in store.playlists.get_playlists()
+                            if p.ytm_playlist_id == exc.playlist_id), None)
+            return _action_result({"status": "partial", "operation": "copy",
+                "message": str(exc), "items": [],
+                "copy": {"new_ytm": exc.playlist_id, "title": created.title if created else "Partial copy",
+                         "added": len(exc.confirmed), "skipped": len(exc.skipped),
+                         "uncertain": len(exc.uncertain)},
+                "guidance": "The partial copy is saved and the source playlists were kept. "
+                            "Review the destination and Action Log before recovering. "
+                            "Repeating Copy creates another playlist."})
         except Exception as exc:
             logger.exception("copy of %s failed", ids)
             return _action_result({"status": "failed", "operation": "copy",
