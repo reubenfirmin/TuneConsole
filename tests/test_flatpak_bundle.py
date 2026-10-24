@@ -4,13 +4,57 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
 import runpy
+import shlex
 import shutil
 import subprocess
 import threading
 
 import pytest
+import yaml
 
 bundle = runpy.run_path(Path(__file__).parents[1] / "packaging/flatpak/bundle.py")
+
+
+def test_workflow_candidate_command_installs_an_unsigned_bundle(tmp_path):
+    """Exercise the workflow's install options with the real Flatpak CLI."""
+    if not shutil.which("flatpak"):
+        pytest.skip("flatpak is required for candidate installation")
+    definition = yaml.load(
+        (Path(__file__).parents[1] / ".github/workflows/flatpak.yml").read_text(),
+        Loader=yaml.BaseLoader,
+    )
+    script = next(step["run"] for step in definition["jobs"]["build"]["steps"]
+                  if step.get("name") == "Build candidate and check packaged startup and bridge")
+    unsigned = script.rsplit("\nelse\n", 1)[1]
+    install = next(shlex.split(line.strip()) for line in unsigned.splitlines()
+                   if line.strip().startswith("flatpak install "))
+    isolated = {**os.environ, "XDG_DATA_HOME": str(tmp_path / "data"),
+                "XDG_CONFIG_HOME": str(tmp_path / "config"), "XDG_CACHE_HOME": str(tmp_path / "cache"),
+                "TMPDIR": str(tmp_path)}
+
+    def run(args):
+        result = subprocess.run([str(arg) for arg in args], env=isolated, text=True,
+                                capture_output=True, timeout=60)
+        assert result.returncode == 0, f"{result.args}\n{result.stdout}\n{result.stderr}"
+        return result.stdout.strip()
+
+    arch = run(["flatpak", "--default-arch"])
+    build = tmp_path / "build"
+    (build / "files/bin").mkdir(parents=True)
+    (build / "export").mkdir()
+    (build / "metadata").write_text(
+        f"[Application]\nname={bundle['APP_ID']}\n"
+        f"runtime=org.freedesktop.Platform/{arch}/25.08\ncommand=version\n")
+    (build / "files/bin/version").write_text("candidate version\n")
+    repo = tmp_path / "repo"
+    run(["flatpak", "build-export", "--disable-sandbox", repo, build])
+    archive = tmp_path / f"TuneConsole-{arch}.flatpak"
+    run(["flatpak", "build-bundle", repo, archive, bundle["APP_ID"]])
+    command = [str(archive) if arg == "TuneConsole-$ARCH.flatpak" else arg for arg in install]
+    # The tiny fixture needs no runtime downloads and uses only the private installation.
+    run([*command[:2], "--no-deps", "--no-related", *command[2:]])
+    location = run(["flatpak", "info", "--user", "--show-location", bundle["APP_ID"]])
+    assert (Path(location) / "files/bin/version").read_text() == "candidate version\n"
 
 
 @pytest.mark.parametrize("initial_runtime", ["25.08", "24.08"])

@@ -75,7 +75,7 @@ jobs:
             flatpak build-bundle --repo-url="file://$PWD/repo" \
               --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo \
               repo "TuneConsole-$ARCH.flatpak" com.tuneconsole.TuneConsole
-            flatpak install --user --noninteractive --no-gpg-verify "TuneConsole-$ARCH.flatpak"
+            flatpak install --user --noninteractive "TuneConsole-$ARCH.flatpak"
           fi
           python3 smoke.py "$VERSION"
           tar -cf "flatpak-repo-$ARCH.tar" repo
