@@ -140,10 +140,17 @@ class _PlaylistRead:
         self.item_index = None
         self.validation_stage = 'contents.parse'
         parsed = parse_playlist_items(contents, is_collaborative=self.collaborative)
+        raw_rows = [item['musicResponsiveListItemRenderer'] for item in contents
+                    if 'musicResponsiveListItemRenderer' in item]
         rows = sum('musicResponsiveListItemRenderer' in item for item in contents)
+        if rows == len(parsed):
+            for raw, track in zip(raw_rows, parsed):
+                original = nav(raw, ['playlistItemData', 'videoId'], True)
+                if isinstance(original, str) and original.strip():
+                    # Upstream videoId is the play button's upload, which Music
+                    # can substitute. Keep the saved membership identity as well.
+                    track['playlistVideoId'] = original
         if self.identity_rows is not None and rows == len(parsed):
-            raw_rows = [item['musicResponsiveListItemRenderer'] for item in contents
-                        if 'musicResponsiveListItemRenderer' in item]
             self.identity_rows.extend(_item_identities(raw, track) for raw, track in zip(raw_rows, parsed))
         self.raw_items += rows
         self.omitted += rows - len(parsed)

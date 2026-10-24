@@ -1,21 +1,39 @@
-{% macro album_save_control(browse_id, saved, owners=[]) %}
+{% macro library_bookmark(saved) -%}
+<svg viewBox="0 0 24 24" width="22" height="22" fill="{{ 'currentColor' if saved else 'none' }}" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M5 3h14v19l-7-4-7 4z"/></svg>
+{%- endmacro %}
+{% macro album_save_control(browse_id, saved, owners=[], icons=false, opportunity_id=none) %}
 {% if saved %}
   {% for owner in owners %}
     {% if owner.identity_id is not none %}
     <form hx-post="/collection/unsave-album" hx-swap="none" hx-disabled-elt="find button" class="inline">
       <input type="hidden" name="browse_id" value="{{ browse_id }}">
       <input type="hidden" name="identity_id" value="{{ owner.identity_id }}">
-      <button type="submit" class="btn-ghost btn-sm"
+      <button type="submit" class="{{ 'head-icon album-library on' if icons else 'btn-ghost btn-sm' }}"
               {% if not owner.active %}disabled{% endif %}
-              title="{% if owner.active %}Remove from {{ owner.label }}'s YouTube library{% else %}Reconnect {{ owner.label }} to remove this album{% endif %}">{% if owners|length > 1 %}Unsave from {{ owner.label }}{% else %}Unsave{% endif %}</button>
-      {% if owners|length == 1 %}<span class="muted">{{ owner.label }}</span>{% endif %}
+              {% if icons %}aria-label="Remove album from {{ owner.label }}'s library" aria-pressed="true"{% endif %}
+              title="{% if owner.active %}Remove from {{ owner.label }}'s YouTube library{% else %}Reconnect {{ owner.label }} to remove this album{% endif %}">{% if icons %}{{ library_bookmark(true) }}{% elif owners|length > 1 %}Unsave from {{ owner.label }}{% else %}Unsave{% endif %}</button>
+      {% if not icons and owners|length == 1 %}<span class="muted">{{ owner.label }}</span>{% endif %}
     </form>
-    {% else %}<span class="muted">Sync accounts to confirm ownership</span>{% endif %}
-  {% else %}<span class="muted">Sync accounts to confirm ownership</span>{% endfor %}
+    {% else %}{% if icons %}<button type="button" class="head-icon album-library on" disabled aria-label="Album is in your library" title="In your library. Sync accounts to confirm ownership.">{{ library_bookmark(true) }}</button>{% else %}<span class="muted">Sync accounts to confirm ownership</span>{% endif %}{% endif %}
+  {% else %}{% if icons %}<button type="button" class="head-icon album-library on" disabled aria-label="Album is in your library" title="In your library. Sync accounts to confirm ownership.">{{ library_bookmark(true) }}</button>{% else %}<span class="muted">Sync accounts to confirm ownership</span>{% endif %}{% endfor %}
 {% else %}
   <form hx-post="/collection/save-album" hx-swap="none" hx-disabled-elt="find button" class="inline">
     <input type="hidden" name="browse_id" value="{{ browse_id }}">
-    <button type="submit" class="btn-ghost btn-sm" title="Save to your YouTube library">Save</button>
+    {% if opportunity_id %}<input type="hidden" name="opportunity_id" value="{{ opportunity_id }}">{% endif %}
+    <button type="submit" class="{{ 'head-icon album-library' if icons else 'btn-ghost btn-sm' }}" title="Save album to library"{% if icons %} aria-label="Save album to library" aria-pressed="false"{% endif %}>{% if icons %}{{ library_bookmark(false) }}{% else %}Save{% endif %}</button>
   </form>
 {% endif %}
+{% endmacro %}
+
+{% macro album_play_control(browse_id, title, opportunity_id=none, playlist='', css='album-play btn-primary', fallback='') %}
+<button type="button" class="{{ css }}" x-data='albumPlayback({{ browse_id|tojson }}, {{ playlist|tojson }}, {{ fallback|tojson }})'
+        @bridge-status.window="apply($event.detail)" @click="play($el)"
+        hx-post="/album/play" hx-trigger="album-start" hx-swap="none" hx-disabled-elt="this"
+        hx-vals='{{ {"browse_id": browse_id, "opportunity_id": opportunity_id}|tojson }}'
+        aria-label="Play {{ title }}" title="Play {{ title }}"
+        :aria-label='(playing ? "Pause " : "Play ") + {{ title|tojson }}'
+        :title='(playing ? "Pause " : "Play ") + {{ title|tojson }}'>
+  <svg x-show="!playing" viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M7 3.5v17l14-8.5Z"/></svg>
+  <svg x-show="playing" x-cloak viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M5 4h5v16H5zm9 0h5v16h-5z"/></svg>
+</button>
 {% endmacro %}

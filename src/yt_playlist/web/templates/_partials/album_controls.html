@@ -1,0 +1,10 @@
+{% from '_album_actions.html' import album_save_control, album_play_control %}
+{{ album_play_control(browse_id, album.title, opportunity_id, album.audio_playlist_id or '',
+    fallback=('https://music.youtube.com/browse/' ~ browse_id) if is_upload else '') }}
+{% if is_upload %}
+<button class="head-icon album-library on" type="button" disabled aria-label="Your upload is in your library" title="Your upload is in your library">
+  <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" aria-hidden="true"><path d="M5 3h14v19l-7-4-7 4z"/></svg>
+</button>
+{% else %}
+{{ album_save_control(browse_id, saved, saved_owners, icons=true, opportunity_id=opportunity_id) }}
+{% endif %}

@@ -5,6 +5,14 @@ from yt_playlist.core.db_revisions import setting_reads
 
 class SettingsRepo(Repo):
     @synchronized
+    def set_values(self, values):
+        """Save related settings together, so workers cannot observe half a form."""
+        with self.conn:
+            self.conn.executemany('INSERT INTO settings(key,value) VALUES (?,?) '
+                'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                [(key, value or '') for key, value in values.items()])
+
+    @synchronized
     def publish_values(self, values):
         """Publish serialized settings in the caller's atomic transaction."""
         if not self.conn.in_transaction:

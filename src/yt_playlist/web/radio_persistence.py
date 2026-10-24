@@ -63,6 +63,7 @@ def encode(s: Session) -> str:
         "started_at": s.started_at, "tracks": s.tracks, "position": s.position, "furthest": s.furthest,
         "fingerprint": s.candidates.fingerprint, "heard": s.heard, "transition": s.transition,
         **operation_values(s.edits.active), "initial_tracks": s.initial_tracks,
+        "initial_handles": s.initial_handles,
         "tuning": s.candidates.tuning, "recent_states": s.edits.recent_states,
         "requested_direction": s.requested_direction, "choices": s.choices, "rejected": sorted(s.rejected),
         "stopped": s.stopped_by_user, "halted": s.halted, "error": s.error,
@@ -88,6 +89,7 @@ def restore(state: dict, client, identity, candidates) -> Session:
     s.selected = list(s.tracks) + ([s.pending] if s.pending else [])
     s.furthest = state.get("furthest", s.position)
     s.initial_tracks = state.get("initial_tracks", [])
+    s.initial_handles = state.get("initial_handles", {})
     s.edits.recent_states = state.get("recent_states", [])
     s.edits.requested = state.get("requested_direction")
     s.rejected = set(state.get("rejected", []))

@@ -20,6 +20,39 @@ _COMPLETE_ALBUM_TRACKLISTS = (
 
 class CollectionRepo(Repo):
     @synchronized
+    def taste_album_contexts(self, *, include_browse=()):
+        """Stable release contexts; return days count once regardless of album length/accounts.
+
+        Listening days already exclude known generated playback. Album membership supplies
+        geometry, not an independent endorsement for every song on a saved record.
+        """
+        rows = self.conn.execute(
+            "SELECT a.id,a.title,a.artist,p.provider_id browse,a.year,a.genre,a.thumbnail,"
+            "COALESCE(r.identity_key,er.identity_key,at.legacy_track_key) key,"
+            "EXISTS(SELECT 1 FROM album_library_memberships m WHERE m.album_id=a.id) saved "
+            "FROM albums a JOIN album_tracks at ON at.album_id=a.id "
+            "LEFT JOIN catalog_entries e ON e.id=at.entry_id "
+            "LEFT JOIN recordings er ON er.id=e.recording_id "
+            "LEFT JOIN recordings r ON r.id=at.recording_id "
+            "JOIN album_provider_ids p ON p.album_id=a.id AND p.provider='youtube'").fetchall()
+        days = {}
+        for row in self.conn.execute("SELECT DISTINCT identity_key,day FROM listening_days"):
+            days.setdefault(row["identity_key"], set()).add(row["day"])
+        albums = {}
+        for row in rows:
+            album = albums.setdefault(row["id"], {k: row[k] for k in
+                ("id", "title", "artist", "browse", "year", "genre", "thumbnail", "saved")})
+            album.setdefault("keys", set()).add(row["key"])
+            album.setdefault("days", set()).update(days.get(row["key"], ()))
+        result = []
+        for album in albums.values():
+            album["keys"] = sorted(k for k in album["keys"] if k)
+            album["return_days"] = len(album.pop("days"))
+            if album["saved"] or album["return_days"] >= 2 or album["browse"] in include_browse:
+                result.append(album)
+        return sorted(result, key=lambda a: a["id"])
+
+    @synchronized
     def cache_album_tracklist(self, browse_id, title, artist, thumbnail, keys, *, video_ids=None, entries=None, credits=None, year=None, album_type=None):
         """Only full album fetches may write this denominator; playlist sync cannot."""
         with self.conn:
@@ -223,6 +256,44 @@ class CollectionRepo(Repo):
         return {r["browse"]: r["last"] for r in rows}
 
     # --- aggregate library views ---
+    @synchronized
+    def album_listening_counts(self, browse_ids):
+        """Recorded track plays, counting each recording once per requested release.
+
+        Include recommendation playback here, even though it is quarantined from
+        organic taste learning. Dated history supplies one play per track/day only
+        when no exact event already represents that account's day.
+        """
+        return {browse: summary['plays'] for browse, summary in self.album_listening_summary(browse_ids).items()}
+
+    @synchronized
+    def album_listening_summary(self, browse_ids):
+        """Track-play totals and release coverage for a familiarity indicator."""
+        browse_ids = list(dict.fromkeys(browse_ids))
+        if not browse_ids:
+            return {}
+        placeholders = ','.join('?' for _ in browse_ids)
+        rows = self.conn.execute(
+            "SELECT m.browse,COUNT(m.key) tracks,MAX(m.complete) complete,"
+            "SUM((SELECT COUNT(*) FROM play_events pe "
+            "WHERE pe.identity_key=m.key)+(SELECT COUNT(*) FROM listening_days d "
+            "WHERE d.identity_key=m.key AND NOT EXISTS(SELECT 1 FROM play_events pe "
+            "JOIN play_event_calendar c ON c.event_id=pe.id "
+            "WHERE pe.identity_key=d.identity_key AND pe.identity_id=d.identity_id "
+            "AND c.day=d.day))) plays FROM ("
+            "SELECT DISTINCT p.provider_id browse,"
+            "COALESCE(r.identity_key,er.identity_key,at.legacy_track_key) key,COALESCE(f.complete,0) complete "
+            "FROM album_provider_ids p JOIN album_tracks at ON at.album_id=p.album_id "
+            "LEFT JOIN album_fetch_state f ON f.album_id=p.album_id "
+            "LEFT JOIN recordings r ON r.id=at.recording_id "
+            "LEFT JOIN catalog_entries e ON e.id=at.entry_id "
+            "LEFT JOIN recordings er ON er.id=e.recording_id "
+            f"WHERE p.provider='youtube' AND p.provider_id IN ({placeholders})"
+            ") m GROUP BY m.browse", browse_ids).fetchall()
+        return {**{browse: {'plays': 0, 'tracks': 0, 'complete': False} for browse in browse_ids},
+                **{row['browse']: {'plays': row['plays'], 'tracks': row['tracks'],
+                                  'complete': bool(row['complete'])} for row in rows}}
+
     def _play_counts(self):
         return {r["identity_key"]: r["c"]
                 for r in self.conn.execute("SELECT identity_key, COUNT(*) c FROM listening_days GROUP BY identity_key")}

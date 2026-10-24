@@ -66,7 +66,7 @@ def _score_candidates(store, pt, keys, V, idx, now, include_traces=False):
     surfaces. Caller loads pt/keys/V/idx (Catalog needs `keys` afterward) and guards V is not None."""
     if include_traces:
         return score_with_traces(store, pt, keys, V, idx, now)
-    scores = _apply_mood(pt.score_all(V), store, now, V, idx)
+    scores = _apply_mood(pt.allocated_scores(V), store, now, V, idx)
     return _apply_axis_weights(store, {keys[i]: float(scores[i]) for i in range(len(keys))}, now)
 
 
@@ -122,7 +122,7 @@ def for_you(store, now, limit=24, include_traces=False) -> list[ForYouItem]:
     # lane's candidate selection AND every lane's final ordering: no separate recency mechanism.
     sims, traces, pt, V, idx = None, None, None, None, None
     if store.rec_model.rec_vectors_count():
-        pt = playlist_taste(store)
+        pt = playlist_taste(store, now=now)
         keys, V, idx = vectors.load_vectors(store)
         if pt and V is not None:
             scored = _score_candidates(store, pt, keys, V, idx, now, include_traces=include_traces)
@@ -272,7 +272,7 @@ def taste_comparison(store, now, keys=None, limit=24) -> list[dict]:
     keys are retained even when they leave that cohort (or become suppressed), allowing an honest
     before/after explanation without treating random live-sample turnover as model movement.
     """
-    pt = playlist_taste(store)
+    pt = playlist_taste(store, now=now)
     model_keys, V, idx = vectors.load_vectors(store)
     if not pt or V is None:
         return []
@@ -360,7 +360,7 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
     if not rows:
         return []
     proj = ContentProjection.fit(store)
-    pt = playlist_taste(store) if proj is not None else None
+    pt = playlist_taste(store, now=now) if proj is not None else None
     keys, vecs = [], []
     if proj is not None and pt:
         for r in rows:
@@ -382,7 +382,7 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
             evidence_idx = {k: len(warm_V) + i for k, i in idx.items()}
             evidence_idx.update(warm_idx)  # prefer the actual library vector for overlapping keys
         content_snapshot = store.rec_model.content_generation()
-        values = _apply_mood(pt.score_all(V), store, now, V, idx,
+        values = _apply_mood(pt.allocated_scores(V), store, now, V, idx,
                              content_vecs=vectors.load_discovered_content_vectors(store, snapshot=content_snapshot),
                              content_snapshot=content_snapshot,
                              evidence_vecs=(evidence_V, evidence_idx))
@@ -485,7 +485,7 @@ def _content_only_scores(store, plays, now) -> dict:
     overlay, so mutes/steering still apply) x novelty, the same shape as the collaborative Catalog score
     so they interleave. Empty when content vectors or the content-taste model are absent."""
     snapshot = store.rec_model.content_generation()
-    ct = content_taste(store, snapshot=snapshot)
+    ct = content_taste(store, snapshot=snapshot, now=now)
     if not ct:
         return {}
     ckeys, CV, _cidx = vectors.load_content_vectors(store, snapshot=snapshot)
@@ -496,7 +496,7 @@ def _content_only_scores(store, plays, now) -> dict:
     cands = [(i, k) for i, k in enumerate(ckeys) if k in owned and k not in idx]   # owned, content-only
     if not cands:
         return {}
-    csims = ct.score_all(CV)
+    csims = ct.allocated_scores(CV)
     fit = _apply_axis_weights(store, {k: float(csims[i]) for i, k in cands}, now)
     return _catalog_scores(fit, plays)
 
@@ -514,7 +514,7 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
     vectors remain eligible, ranked by novelty after the model-ranked candidates.
     """
     plays = store.rec_query.play_counts()                                  # {key: count}; absent = never played
-    pt = playlist_taste(store)
+    pt = playlist_taste(store, now=now)
     keys, V, idx = vectors.load_vectors(store)
     # Catalog score = novelty(lack of plays, PRIMARY) × taste-fit rank base (a percentile in (0, 1],
     # so it only ever scales, never zeroes: "weighted, not filtered").

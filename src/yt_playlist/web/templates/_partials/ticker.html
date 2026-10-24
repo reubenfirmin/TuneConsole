@@ -31,7 +31,7 @@
              onerror="this.remove()">{% endif %}
       </span></td>
       {% endif %}
-      <td class="tklabel">{% set lbl = (r.cat ~ 's') if dim == 'year' else r.cat %}{% if r.link %}<a class="alink" href="{{ r.link }}">{{ lbl }}</a>{% else %}{{ lbl }}{% endif %}</td>
+      <td class="tklabel">{% set lbl = (r.cat ~ 's') if dim == 'year' else r.label|default(r.cat) %}{% if r.link %}<a class="alink" href="{{ r.link }}">{{ lbl }}</a>{% else %}{{ lbl }}{% endif %}</td>
       <td class="tkcell">
         <span class="ticker-candle dim-{{ dim }}" tabindex="0" {{ vt.ticker_tip(r, dim, cd, sd, cmp) }}>
           {% if r.high > r.low %}<i class="tk-whisker" style="left:{{ g.whisker_lo_pct|round(2) }}%;width:{{ (g.whisker_hi_pct - g.whisker_lo_pct)|round(2) }}%"></i>{% endif %}

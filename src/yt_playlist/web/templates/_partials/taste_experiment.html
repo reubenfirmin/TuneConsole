@@ -7,7 +7,7 @@
 <div {{ tt.panel('starting', prefix='taste-experiment', state='experimentTab', extra_class='taste-experiment-panel') }}>
 <section class="taste-starting-point" aria-labelledby="taste-starting-point-title">
   <h2 id="taste-starting-point-title">Your starting point</h2>
-  <p class="section-note">Keep a setup you can return to after experimenting. This snapshot saves settings across Taste Model, including Recommendations, Recent &amp; learning, and Generated playlists, plus your genre, era, artist, and mix preferences. Restoring it keeps your listening history, feedback, and trained model. Saving a new starting point replaces the previous snapshot.</p>
+  <p class="section-note">Keep a setup you can return to after experimenting. This snapshot saves settings across Taste Model, including Recommendations, Recent &amp; learning, and Listening choices, plus your genre, era, artist, and mix preferences. Restoring it keeps your listening history, feedback, and trained model. Saving a new starting point replaces the previous snapshot.</p>
   {% include "_partials/taste_checkpoint.html" %}
 </section>
 
@@ -23,7 +23,7 @@
 <section class="taste-settings-section" id="taste-preview" aria-labelledby="taste-preview-title">
 <header class="taste-preview-intro" hx-get="/taste/preview" hx-trigger="intersect once" hx-target="#sample-body">
   <h2 id="taste-preview-title">Preview &amp; compare</h2>
-  <p>Compare Home’s familiar-music suggestions as you adjust balance, genres, or shared ranking controls in <strong>Recommendations</strong>; recent-listening influence or memory in <strong>Recent &amp; learning</strong>; or source weights in <strong>Generated playlists</strong>. Capture picks before changing one of these controls, then compare and listen to check whether you prefer the result.</p>
+  <p>Compare Home’s familiar-music suggestions as you adjust balance, genres, or shared ranking controls in <strong>Recommendations</strong>; recent-listening influence or memory in <strong>Recent &amp; learning</strong>; or source weights in <strong>Listening choices</strong>. Capture picks before changing one of these controls, then compare and listen to check whether you prefer the result.</p>
 </header>
 <div class="taste-preview-guide">
   <div>
@@ -33,7 +33,7 @@
   </div>
   <div>
     <h3>Settings that shape these picks</h3>
-    <p><a href="#recommendations/main" @click.prevent="selectRecommendation('main')">Main controls</a>, <a href="#recommendations/genres" @click.prevent="selectRecommendation('genres')">Genres</a>, and shared ranking settings under <a href="#recommendations/features" @click.prevent="selectRecommendation('features')">Settings by feature</a> apply here. So do recent-listening influence and memory in <a href="#learning" @click.prevent="select('learning')">Recent &amp; learning</a>, and <a href="#generated" @click.prevent="select('generated')">Source weights in Generated playlists</a>.</p>
+    <p><a href="#recommendations/main" @click.prevent="selectRecommendation('main')">Main controls</a>, <a href="#recommendations/genres" @click.prevent="selectRecommendation('genres')">Genres</a>, and shared ranking settings under <a href="#recommendations/features" @click.prevent="selectRecommendation('features')">Settings by feature</a> apply here. So do recent-listening influence and memory in <a href="#learning" @click.prevent="select('learning')">Recent &amp; learning</a>, and <a href="#generated" @click.prevent="select('generated')">Source weights in Listening choices</a>.</p>
     <p>Your library, listening, feedback, and trained model also shape these picks. Check other Home mixes, Discover searches, and cleanup in those features.</p>
   </div>
 </div>
@@ -53,7 +53,7 @@
   <p class="section-note">Compare the <strong>top 24 picks</strong> from the same shortlist. This uses a fixed ranking so random sample changes don’t obscure the effect of your settings.</p>
   <ol class="taste-comparison-steps">
     <li><strong>Capture current picks</strong> to keep the current top 24 as “Before”. Capturing again replaces them.</li>
-    <li><strong>Change one setting</strong> in Recommendations, Recent &amp; learning, or Generated playlists using the links above.</li>
+    <li><strong>Change one setting</strong> in Recommendations, Recent &amp; learning, or Listening choices using the links above.</li>
     <li><strong>Compare changes</strong> to see which songs enter, leave, or move in the ranking.</li>
   </ol>
   <div class="sample-head" id="taste-comparison-actions">

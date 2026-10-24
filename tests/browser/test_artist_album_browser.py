@@ -97,7 +97,7 @@ def test_album_status_track_links_and_save_from_artist(live_artist_app, page, wi
     expect(rows.locator('a.alink')).to_have_count(2)
     expect(rows.locator('a.alink').last).to_have_attribute('href', '/artist?name=Artist%20X')
     assert page.locator('.track-table').evaluate('''table =>
-        table.querySelector('thead').getBoundingClientRect().bottom <=
+        Math.max(...[...table.querySelectorAll('thead th')].map(th => th.getBoundingClientRect().bottom)) <=
         table.querySelector('tbody tr').getBoundingClientRect().top + 1''')
     page.screenshot(path=f'/tmp/tuneconsole-album-preview-{width}.png')
     rows.locator('a.alink').first.click()

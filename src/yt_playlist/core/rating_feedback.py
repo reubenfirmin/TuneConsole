@@ -29,7 +29,11 @@ def aggregate(conn, keys):
         batch = keys[offset:offset + 500]
         slots = ','.join('?' for _ in batch)
         rows = conn.execute(
-            'SELECT r.identity_key,ir.status,ir.source,ir.observed_at FROM item_ratings ir '
+            "SELECT r.identity_key,ir.source,ir.observed_at,CASE WHEN ir.status='DISLIKE' "
+            "AND EXISTS (SELECT 1 FROM rec_feedback f WHERE f.item_key=r.identity_key "
+            "AND f.surface='rating_override' AND f.kind='unban' "
+            "AND (ir.source<>'api' OR ir.observed_at<=f.created_at)) THEN 'INDIFFERENT' "
+            'ELSE ir.status END status FROM item_ratings ir '
             'JOIN youtube_items y ON y.video_id=ir.video_id '
             'JOIN recordings r ON r.id=y.recording_id '
             f'WHERE r.identity_key IN ({slots})', batch)

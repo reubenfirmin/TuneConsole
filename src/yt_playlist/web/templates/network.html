@@ -30,6 +30,15 @@
       {% for method, url in allowed_requests %}<li><code class="mono break-anywhere">{{ method }} {{ url }}</code></li>{% endfor %}
     </ul>
   </section>
+  {% if allowed_post_requests is defined %}<section class="space-before" aria-labelledby="network-album-descriptions">
+    <h3 class="section section-flush" id="network-album-descriptions">Album Descriptions</h3>
+    <p class="section-note">Optional DeepSeek Flash descriptions use your API key and balance.
+      Only the artist, album title and year are sent. Requests are limited daily and saved descriptions
+      are reused. Only this exact HTTPS POST is permitted; keys and request bodies are never logged.</p>
+    <ul class="section-note flush">
+      {% for method, url in allowed_post_requests %}<li><code class="mono break-anywhere">{{ method }} {{ url }}</code></li>{% endfor %}
+    </ul>
+  </section>{% endif %}
 </div>
 
 <div class="card workflow-sheet">

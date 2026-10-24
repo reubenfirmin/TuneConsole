@@ -141,6 +141,7 @@
          @mouseleave="_overOverlay = false; hovered = null">
       <template x-if="hoveredNode()">
         <div class="ca-row">
+          <a class="cn-btn" x-show="hoveredNode().vid" :href="trackUrl({video_id: hoveredNode().vid, title: hoveredNode().label, artist: hoveredNode().sub})" title="Track details">Details</a>
           <button type="button" class="cn-btn play" x-show="hoveredNode().vid && hoveredNode().state !== 'pruned'"
                   @click="play(hoveredNode())" title="Play on YouTube Music">▶</button>
           <button type="button" class="cn-btn boost" x-show="hoveredNode().kind === 'track' && hoveredNode().state !== 'pruned'"

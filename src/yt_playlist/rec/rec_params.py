@@ -39,6 +39,77 @@ class ParamSpec:
 
 # Each default equals the constant it replaced, so behaviour is unchanged until a user moves it.
 PARAMS = [
+    ParamSpec("album_menu_novelty", "Album menus: comfort and novelty", "discovery",
+              "Comfort favors familiar releases and close model fits. Novelty reserves more places for "
+              "unsaved releases and reaches further within the model-ranked frontier. Half requests two "
+              "unsaved releases; unsaved does not mean unheard. Genres are chosen explicitly in the "
+              "Albums tuner. Temporary adjustments last four hours without changing lasting taste.",
+              0, 1, .05, .5, low="Comfort", high="Novelty", percentage=True),
+    ParamSpec("bandit_reward_choice", "Mix response: deliberate choice", "discovery",
+              "Positive support for the selected mix and relative choice evidence for its visible alternatives. "
+              "Capped per group and UTC day; unchosen music is not a general dislike.", 0, 1, .05, .25),
+    ParamSpec("bandit_reward_open", "Mix response: opening details", "discovery",
+              "Weak positive allocation support for an observed opening. Missing opens supply no failure. "
+              "Shares the same group-day cap as other mix responses.", 0, 1, .05, .05),
+    ParamSpec("bandit_reward_start", "Mix response: confirmed start", "discovery",
+              "Additional support after exact-context playback is confirmed. Successful creation alone "
+              "does not supply this support. Shared response mass is capped per group and UTC day.", 0, 1, .05, .25),
+    ParamSpec("bandit_reward_completion", "Mix response: observed track completion", "discovery",
+              "Additional support when an attributed playhead reaches the existing completion rule. "
+              "One or many completions share a group-day cap; completion does not prove enjoyment.", 0, 1, .05, .5),
+    ParamSpec("bandit_reward_promotion", "Mix response: explicit adoption", "discovery",
+              "Support for explicitly adopting a generated playlist into the collection. Saving a generated "
+              "copy alone is not adoption. Shared response mass is capped per group and UTC day.", 0, 1, .05, 1),
+    ParamSpec("bandit_reward_early_exit", "Mix response: observed early exit", "discovery",
+              "Contextual counterevidence for an attributed early track exit under the existing skip rule. "
+              "Closing a tab or a missing ending supplies no counterevidence; no artist or genre dislike is inferred.", 0, 1, .05, .25),
+    ParamSpec("bandit_window_d", "Mix choice evidence window (days)", "discovery",
+              "Mix menu allocation uses offers and successful creations within this wall-clock window. "
+              "Older evidence expires; this does not remove saved musical interests.", 1, 365, 1, 90, integer=True),
+    ParamSpec("bandit_exploration", "Mix menu exploration share", "discovery",
+              "Share of new Home mix menus allocated uniformly across the eligible prepared menus. "
+              "The remaining share follows windowed choice support; each whole-menu probability is recorded.",
+              0, 1, 0.05, 0.15),
+    ParamSpec("bandit_size_power", "Mix cluster size prior", "discovery",
+              "Standing Home menu allocation multiplier: cluster size raised to this power. "
+              "Zero removes the popularity prior; one gives proportional cluster-size influence.", 0, 1, 0.1, 0),
+    ParamSpec("choice_recent_w", "Recent listening choices", "discovery",
+              "Shared interest support from deliberate album, mix and On air choices. "
+              "Episode influence is capped; passive generated tracks add no separate support.",
+              0, 2, .05, .3),
+    ParamSpec("choice_retention_d", "Unanswered choice retention (days)", "discovery",
+              "Daily maintenance retires older menus with no choice, listening, save or feedback. "
+              "Chosen menus and corrections remain within the storage budget. Reports cover retained evidence.",
+              7, 730, 1, 180, integer=True),
+    ParamSpec("choice_halflife_d", "Choice memory half-life (days)", "discovery",
+              "Recent choice influence halves after this many days of wall time. NOW and Session "
+              "use their existing hour-scale controls; saved support requires separate return days.",
+              1, 90, 1, 7, integer=True),
+    ParamSpec("choice_saved_days", "Choice days for saved support", "discovery",
+              "Distinct UTC choice days before an interest earns lasting support shared across formats. "
+              "Radio branches within one episode are correlated and capped.",
+              2, 30, 1, 3, integer=True),
+    ParamSpec("choice_saved_w", "Saved choice support", "discovery",
+              "Standing support after repeated choice days clear the threshold. Removing source "
+              "choices removes their contribution when the worker compiles evidence again.",
+              0, 2, .05, .5),
+    ParamSpec("choice_attribution_h", "Playback observation window (hours)", "discovery",
+              "Maximum time after an album choice to link its exact queue, and after a confirmed "
+              "context start to link a raw track exit. Applies across formats; missing exits remain unknown. "
+              "Navigation alone is never confirmed listening.",
+              1, 48, 1, 6, integer=True),
+    ParamSpec("album_saved_weight", "Saved album interest", "discovery",
+              "Standing support per saved record in shared taste contexts, in both scoring spaces. "
+              "Albums share recommendation slots with curated playlists. Zero removes saved-only support.",
+              0, 3, 0.1, 1),
+    ParamSpec("album_feedback_weight", "More like this album", "discovery",
+              "Standing multiplier for a saved or repeatedly heard album marked More like this. "
+              "It changes that record's shared context weight; clearing album feedback removes it. "
+              "Individual track ratings remain separate.", 1, 3, .1, 1.5),
+    ParamSpec("album_return_weight", "Album return days", "discovery",
+              "Standing support for returning to an album on separate days. Growth is logarithmic; "
+              "track count and uninterrupted album length do not increase it. Shared across listening formats.",
+              0, 3, 0.1, 1),
     ParamSpec("max_track_minutes", "Maximum track length (minutes)", "discovery",
               "Longest track allowed in generated song playlists. Lower limits keep DJ mixes and "
               "concerts out. Tracks with unknown length remain eligible.",

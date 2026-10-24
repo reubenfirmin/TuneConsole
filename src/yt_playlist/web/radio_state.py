@@ -48,6 +48,7 @@ class Session:
     furthest: int = -1
     edits: RadioEdits = field(default_factory=RadioEdits)
     initial_tracks: list = field(default_factory=list)
+    initial_handles: dict = field(default_factory=dict)
     error: str | None = None
     exhausted: bool = False
     browser: dict | None = None

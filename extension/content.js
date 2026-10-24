@@ -6,12 +6,12 @@
 
 (() => {
   const SENSOR_VERSION = 4;
-  const SENSOR_REVISION = 8;
-  const RECEIVER_REVISION = 7;
+  const MIN_SENSOR_REVISION = 8;
+  const RECEIVER_REVISION = 9;
   const previous = window.__tcBridgeLoaded;
-  if (previous?.revision === RECEIVER_REVISION && !previous.stopped) return;
+  if (Number.isSafeInteger(previous?.revision) && previous.revision >= RECEIVER_REVISION && !previous.stopped) return;
   // A legacy boolean guard owns anonymous listeners that cannot be removed safely. Let the
-  // worker report that this page needs a reload instead of installing two click receivers.
+  // worker keep playback connected while withholding unsupported native rating commands.
   if (previous && typeof previous.stop !== "function") return;
   if (previous) previous.stop();
   const cleanups = [];
@@ -381,7 +381,17 @@
       });
       return true;
     }
-    if (msg.type === "playpause") { clickPlayPause(); return; }
+    if (msg.type === "playpause" || msg.type === "player-control") {
+      const control = snapshot => {
+        const video = document.querySelector("video");
+        if (!video || (msg.resumeOnly && (!msg.videoId || snapshot?.videoId !== msg.videoId))) return;
+        if ((msg.action === "play" && !video.paused) || (msg.action === "pause" && video.paused)) return;
+        clickPlayPause();
+      };
+      if (msg.resumeOnly) probePlayer(control);
+      else control(null);
+      return;
+    }
     if (msg.type === "ensure-playing") {
       ensurePlaying(msg).then(sendResponse, () => sendResponse({ playing: false }));
       return true; // keep the response channel open until playback has been checked
@@ -511,7 +521,7 @@
     if (!ev.data.__tcNow) return;
     mainFrameAt = Date.now(); // Incomplete snapshots still prove that MAIN is alive.
     mainRevision = ev.data.__tcSensorRevision ?? null;
-    if (mainRevision !== SENSOR_REVISION) return;
+    if (!Number.isSafeInteger(mainRevision) || mainRevision < MIN_SENSOR_REVISION) return;
     const finishProbe = sensorProbes.get(ev.data.__tcSensorProbeId);
     const np = ev.data.__tcNow;
     lastAccount = np.brandKnown ? { brandId: np.brandId || "" } : null;

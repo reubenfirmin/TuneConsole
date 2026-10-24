@@ -453,7 +453,7 @@
 .page-home .dash-directions .gen-reason-badge { display: none; }
 
 @media (min-width: 60.01rem) {
-  .page-home .home-dashboard:has(.gen-lanes.has-focus) > .dash-nav { visibility: hidden; }
+  .page-home .home-dashboard:has(.gen-lanes.has-focus) > .dash-navigation { visibility: hidden; }
   .page-home .dash-directions .gen-lanes.has-focus { height: calc(100dvh - 7.45rem); min-height: 36rem; }
   .page-home .dash-directions .gen-lanes.has-focus .gen-card.is-focused { height: 100%; overflow: visible; }
   .page-home .dash-directions .gen-card.is-focused .gen-back { top: -4.25rem; left: 0; height: 2.4rem; background: transparent; }

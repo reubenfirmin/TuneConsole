@@ -260,7 +260,7 @@ function radioHome(initial = {}) {
         if (this.destroyed) return;
         this.seeds = offer.tracks; this.seedMenu = offer.menu_id; this.loaded = true;
         this.cacheView();
-        this.$nextTick(() => this.fitSpace());
+        this.$nextTick(() => { this.fitSpace(); document.dispatchEvent(new Event('listening-options')); });
       } catch (error) { console.debug('[Radio] seed refresh deferred', error); }
       finally { this.seedsLoading = false; this.loading = false; }
     },
@@ -269,7 +269,7 @@ function radioHome(initial = {}) {
       this.visible = value;
       this.syncArtworkMotion();
       if (value) {
-        this.$nextTick(() => this.fitSpace()); this.poll();
+        this.$nextTick(() => { this.fitSpace(); document.dispatchEvent(new Event('listening-options')); }); this.poll();
       }
       else { clearTimeout(this.timer); this.timer = null; }
     },

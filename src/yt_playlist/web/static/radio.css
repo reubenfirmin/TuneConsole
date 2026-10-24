@@ -26,27 +26,29 @@ body:has(.home-dashboard.is-radio) { isolation: isolate; }
 .radio-seeds { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-rows: repeat(4, minmax(0, 1fr)); height: var(--radio-grid-height); gap: .5rem; }
 .radio-home .radio-seed { position: relative; isolation: isolate; overflow: hidden; min-width: 0; min-height: 0; padding: 0; text-align: left; border: 0; border-radius: 8px; background: var(--surface-sunk); color: var(--on-accent); transition: opacity .2s ease, box-shadow .2s ease, transform .2s ease; }
 .radio-seed::after { content: ''; position: absolute; inset: 0; z-index: 2; border: 2px solid transparent; border-radius: inherit; pointer-events: none; transition: border-color .2s ease; }
-.radio-seed:is(:hover, :focus-visible) { z-index: 3; box-shadow: 0 6px 24px color-mix(in srgb, var(--shadow-ink) 50%, transparent), 0 0 20px color-mix(in srgb, var(--accent) 20%, transparent); }
-.radio-seed:is(:hover, :focus-visible)::after { border-color: var(--accent); }
-.radio-seed:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.radio-seed:is(:hover, :focus-within) { z-index: 3; box-shadow: 0 6px 24px color-mix(in srgb, var(--shadow-ink) 50%, transparent), 0 0 20px color-mix(in srgb, var(--accent) 20%, transparent); }
+.radio-seed:is(:hover, :focus-within)::after { border-color: var(--accent); }
+.radio-seed:focus-within { outline: 3px solid var(--accent); outline-offset: 3px; }
 .radio-seed-info { position: absolute; inset: auto 0 0; z-index: 1; display: block; padding: 2.5rem .85rem .75rem; background: linear-gradient(transparent, var(--scrim-heavy)); opacity: 0; transform: translateY(.3rem); transition: opacity .2s ease, transform .2s ease; pointer-events: none; }
-.radio-seed:is(:hover, :focus-visible) .radio-seed-info { opacity: 1; transform: translateY(0); }
+.radio-seed:is(:hover, :focus-within) .radio-seed-info { opacity: 1; transform: translateY(0); }
 .radio-seed-info strong, .radio-seed-info > span, .radio-seed-info small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .radio-seed-info strong { font-size: .9rem; line-height: 1.4; }
 .radio-seed-info > span { color: color-mix(in srgb, var(--on-accent) 85%, transparent); font-size: .8rem; line-height: 1.4; }
 .radio-seed-art { display: block; position: absolute; inset: 0; overflow: hidden; transition: filter .25s ease; }
+.radio-home .radio-seed-start { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; border-radius: inherit; background: transparent; color: inherit; }
+.radio-seed-info a { pointer-events: auto; color: inherit; }
 .radio-seed-art img, .radio-seed-art svg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transition: transform .5s cubic-bezier(.2,.7,.2,1); }
 .radio-seed-art svg { padding: 20%; fill: none; stroke: var(--border-2); stroke-width: 2; }
-.radio-seed:is(:hover, :focus-visible) .radio-seed-art { filter: brightness(.65); }
-.radio-seed:is(:hover, :focus-visible) .radio-seed-art img { transform: scale(1.07); }
+.radio-seed:is(:hover, :focus-within) .radio-seed-art { filter: brightness(.65); }
+.radio-seed:is(:hover, :focus-within) .radio-seed-art img { transform: scale(1.07); }
 .radio-seed-launch { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: .6rem; padding-bottom: 1.5rem; opacity: 0; transform: translateY(.4rem) scale(.95); transition: opacity .2s ease, transform .2s ease; }
 .radio-seed-launch > span:last-child { padding: .3rem .45rem .3rem 0; font-size: .8rem; font-weight: 700; text-shadow: 0 2px 8px var(--shadow-ink); }
 .radio-seed-play { display: grid; place-items: center; flex: 0 0 auto; width: clamp(2.5rem, 3.5vw, 3.5rem); height: clamp(2.5rem, 3.5vw, 3.5rem); border-radius: 50%; background: var(--accent); color: var(--on-accent); box-shadow: 0 4px 20px color-mix(in srgb, var(--shadow-ink) 50%, transparent); }
 .radio-seed-play svg { width: 55%; height: 55%; fill: currentColor; }
-.radio-seed:is(:hover, :focus-visible) .radio-seed-launch { opacity: 1; transform: translateY(0) scale(1); }
-.radio-seed:disabled { opacity: .55; }
+.radio-seed:is(:hover, :focus-within) .radio-seed-launch { opacity: 1; transform: translateY(0) scale(1); }
+.radio-seed:has(:disabled) { opacity: .55; }
 @media (hover: hover) {
-  .radio-seeds:has(.radio-seed:hover) .radio-seed:not(:hover), .radio-seeds:not(:has(.radio-seed:hover)):has(.radio-seed:focus-visible) .radio-seed:not(:focus-visible) { opacity: .55; }
+  .radio-seeds:has(.radio-seed:hover) .radio-seed:not(:hover), .radio-seeds:not(:has(.radio-seed:hover)):has(.radio-seed:focus-within) .radio-seed:not(:focus-within) { opacity: .55; }
 }
 .radio-launch.gen-stage { position: relative; inset: auto; height: var(--radio-launch-height); min-height: 0; border: 1px solid var(--border); border-radius: 12px; animation: radio-arrive .35s ease both; }
 .radio-launch-graph { position: absolute; width: min(80%, 48rem); height: 65%; left: 50%; top: 38%; transform: translate(-50%, -50%); }
@@ -72,7 +74,7 @@ body:has(.home-dashboard.is-radio) { isolation: isolate; }
 .radio-record-ground { fill: var(--canvas); }
 .radio-record-groove { fill: none; stroke: var(--accent-2); stroke-width: .8; opacity: .32; }
 .radio-record-shine { fill: none; stroke: var(--accent-2); stroke-width: 3; opacity: .45; stroke-linecap: round; }
-.radio-record-cover { display: block; width: 100%; height: 100%; object-fit: cover; opacity: .85; }
+.radio-record-cover { opacity: .85; }
 .radio-record-rim { fill: none; stroke: var(--accent-2); stroke-width: 1.5; }
 .radio-record-spindle { fill: var(--canvas); stroke: var(--accent-2); stroke-width: 1; }
 .radio-record-pin { fill: var(--accent-2); }
@@ -212,9 +214,4 @@ body:has(.home-dashboard.is-radio) { isolation: isolate; }
   .radio-seed-launch { align-items: flex-start; justify-content: flex-end; padding: .5rem; }
   .radio-seed-play { width: 2.5rem; height: 2.5rem; }
   .radio-seed-launch > span:last-child { display: none; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .radio-home *, .radio-home *::after { animation: none !important; transition: none !important; }
-  .radio-home .radio-junction-flow { animation: radio-stream-drift 16s linear infinite !important; }
-  .radio-seed:is(:hover, :focus-visible) .radio-seed-art img { transform: none; }
 }

@@ -6,12 +6,12 @@
 
 <div x-data="tastePage()" @hashchange.window="readHash()">
   {{ tt.bar([('overview', 'Overview'), ('experiment', 'Experiment'), ('profile', 'Taste profile'),
-             ('generated', 'Generated playlists'),
+             ('generated', 'Listening choices'),
              ('recommendations', 'Recommendations'), ('learning', 'Recent & learning'),
              ('health', 'Model health'), ('feedback', 'Feedback')]) }}
 
   {% for key, title in [('overview', 'Overview'), ('experiment', 'experiments'), ('profile', 'taste profile'),
-                         ('generated', 'generated playlists'), ('recommendations', 'recommendations'),
+                         ('generated', 'listening choices'), ('recommendations', 'recommendations'),
                          ('learning', 'recent listening and learning'), ('health', 'model health'),
                          ('feedback', 'feedback')] %}
   <div {{ tt.panel(key) }}>

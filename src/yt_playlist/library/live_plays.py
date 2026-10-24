@@ -49,11 +49,15 @@ def handle_play_event(ctx, msg, now) -> bool:
         # An API write does not refresh YTM's player bar. Its old readout must not undo the
         # confirmed result; another confirmed action or a library sync can reconcile it.
         status = rating["status"]
+    from yt_playlist.rec import choice_evidence
+    context_choice = choice_evidence.album_playback_context(store, msg, now, identity_id=ident)
     new = store.history.record_play_event(ident, key, (msg.get("videoId") or None), now,
                                   playlist_ytm_id=(msg.get("playlist") or None),
-                                  like_status=(status or None),source_timezone=msg.get('timeZone'))
+                                  like_status=(status or None),source_timezone=msg.get('timeZone'),
+                                  context_choice=bool(context_choice))
     if new:
         store.settings.set_setting("last_plays_sync_at", str(now))   # plays-freshness for the sync-status badge
+        choice_evidence.record_playback(store, msg, now, identity_id=ident)
     # A title alone cannot attribute an account's rating to an exact upload.
     if status in _STATUSES and msg.get('videoId'):
         if not confirmed:

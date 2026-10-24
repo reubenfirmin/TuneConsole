@@ -11,15 +11,16 @@
     <div class="track-cell">
     <span class="pl-cover">
       {% if t.thumbnail %}<img class="pl-thumb" src="{{ t.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
-      <a class="pl-play" href="https://music.youtube.com/watch?v={{ t.video_id }}"
-         target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
+      {% if t.video_id %}<a class="pl-play" href="https://music.youtube.com/watch?v={{ t.video_id }}"
+         target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>{% endif %}
     </span>
     </div>
   </td>
-  {% with video_id = t.video_id, liked = t.liked %}{% include "_partials/liked_cell.html" %}{% endwith %}
+  {% if t.video_id %}{% with video_id = t.video_id, liked = t.liked %}{% include "_partials/liked_cell.html" %}{% endwith %}
+  {% else %}<td class="liked-col"></td>{% endif %}
   <td class="t-wrap" title="{{ t.title }}">
     <div class="track-cell track-cell--text">
-    <span class="ptitle">{{ t.title }}</span>
+    {% if t.video_id %}<a class="ptitle" href="{{ track_url(t) }}">{{ t.title }}</a>{% else %}<span class="ptitle">{{ t.title }}</span>{% endif %}
     {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
     </div>
   </td>

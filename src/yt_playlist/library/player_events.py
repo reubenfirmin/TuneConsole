@@ -1,10 +1,10 @@
 """#91 Ingest raw player/curation events pushed by the extension ({type:'pevent'} bridge frames).
 
-Everything lands append-only in player_events; the ONLY consumer wired here is an observed rate
-action feeding the like/dislike model (off-player likes, the #39 gap). Unseen uploads retain their
-exact-video rating while the recommendation worker resolves metadata. All other
-interpretation (skip vs completion, sessions, curation signals) happens later, at read time, so
-thresholds stay server-tunable without extension releases."""
+Everything lands append-only in player_events. Confirmed rating actions feed the like/dislike
+model; exact choice-linked exits are also copied to immutable response evidence. Unseen uploads
+retain their exact-video rating while the recommendation worker resolves metadata. Interpretation
+(skip vs completion, sessions, curation signals) happens later, at read time, so thresholds stay
+server-tunable without extension releases."""
 import json
 from urllib.parse import urlsplit
 
@@ -83,8 +83,11 @@ def handle_player_event(ctx, msg, now) -> bool:
         if action:
             payload["action"] = action
         payload.update({k: msg[k] for k in ("phase", "success", "httpStatus", "error") if k in msg})
-    store.player_events.record_player_event(ident, kind, video_id, position, duration, playlist,
+    event_id = store.player_events.record_player_event(ident, kind, video_id, position, duration, playlist,
                               json.dumps(payload) if payload else None, now)
+    if kind in {'track_exit', 'ended', 'bye'}:
+        from yt_playlist.rec import choice_outcomes
+        choice_outcomes.observe(store, ident, playlist, video_id, kind, position, duration, event_id, now)
     if kind == "rate" and confirmed_rate(msg) and video_id and action in _RATE_STATUS:
         ratings.record_confirmed(store, ident, video_id, _RATE_STATUS[action], now)
         worker = getattr(ctx, "rec_worker", None)

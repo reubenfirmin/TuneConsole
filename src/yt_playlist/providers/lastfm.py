@@ -68,10 +68,10 @@ def probe(track, store=None, key=None) -> EnrichmentResult:
     return EnrichmentResult("lastfm", fields)
 
 
-def _get(params):
+def _get(params, *, timeout=_HTTP_TIMEOUT_S):
     url = _API + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, "Accept": "application/json"})
-    data = transport.request_json(req, timeout=_HTTP_TIMEOUT_S, pace=_pacer.wait, breaker=_breaker)
+    data = transport.request_json(req, timeout=timeout, pace=_pacer.wait, breaker=_breaker)
     if isinstance(data, dict) and data.get("error") and data["error"] != 6:
         # Last.fm reports invalid credentials, rate limits and service failures inside HTTP 200.
         # Error 6 is a missing artist/track, which is a valid no-match answer.

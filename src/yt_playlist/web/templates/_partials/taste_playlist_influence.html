@@ -2,7 +2,7 @@
 <div class="playlist-influence"
      x-data='{ selected: null, hover: null, shares: {{ influence.segments|map(attribute="percent_label")|list|tojson }}, get active() { return this.hover ?? this.selected; } }'
      @keydown.escape="selected = null; hover = null">
-  <p class="section-note playlist-influence-intro">{% if influence.basis == 'listening' %}The model uses the sound of the tracks you’ve played as your starting taste match.{% else %}Your playlists give the model different sounds to match. Their shares combine into your starting taste match; a track’s fit to each playlist also affects its score.{% endif %}</p>
+  <p class="section-note playlist-influence-intro">{% if influence.basis == 'listening' %}The model uses the sound of the tracks you’ve played as your starting taste match.{% else %}Each interest ranks music separately. These weights share recommendation slots across interests; they are not percentages of predicted enjoyment.{% endif %}</p>
   {% if influence.basis == 'equal' %}
   <p class="playlist-influence-notice">Equal shares for now. As listening history arrives, plays of tracks in these playlists set their influence.</p>
   {% elif influence.basis == 'listening' %}
@@ -12,7 +12,7 @@
   <div class="playlist-influence-layout">
     <figure class="playlist-blend">
       <div class="playlist-blend-chart">
-        <svg viewBox="-112 -112 224 224" role="img" aria-label="Playlist shares of your starting taste match" class="playlist-blend-ring">
+        <svg viewBox="-112 -112 224 224" role="img" aria-label="Interest allocation weights" class="playlist-blend-ring">
           <circle r="105" class="playlist-blend-guide"/>
           <circle r="82" class="playlist-blend-track"/>
           {% for c in influence.segments %}
@@ -28,19 +28,21 @@
         </svg>
         <div class="playlist-blend-center" aria-hidden="true">
           <strong x-text="active === null ? '100%' : shares[active]">100%</strong>
-          <span x-text="active === null ? 'taste blend' : 'of the blend'">taste blend</span>
+          <span x-text="active === null ? 'slot weights' : 'of allocation'">slot weights</span>
         </div>
       </div>
       <figcaption class="playlist-blend-caption">
         <div x-show="active === null">
-          <h3>{% if influence.basis == 'listening' %}From your listening{% else %}{{ influence.playlist_total }} {{ 'playlist shapes' if influence.playlist_total == 1 else 'playlists shape' }} this match{% endif %}</h3>
-          <p>{% if influence.active_total > 1 %}<strong>{{ influence.top_share }}</strong> comes from your top {{ influence.top_count }}.{% else %}One source supplies the whole blend.{% endif %}</p>
+          <h3>{% if influence.basis == 'listening' %}From your listening{% else %}{{ influence.active_total }} {{ 'interest shapes' if influence.active_total == 1 else 'interests shape' }} this match{% endif %}</h3>
+          <p>{% if influence.active_total > 1 %}<strong>{{ influence.top_share }}</strong> comes from your top {{ influence.top_count }}.{% else %}One interest supplies the allocation weight.{% endif %}</p>
           <span class="playlist-blend-hint">Select a row to explore its share.</span>
         </div>
         {% for c in influence.segments %}
         <div x-show="active === {{ loop.index0 }}" x-cloak>
           <h3>{{ c.title }}</h3>
-          <p><strong>{{ c.percent_label }}</strong> of your starting taste match.</p>
+          <p><strong>{{ c.percent_label }}</strong> of the interest allocation weight.</p>
+          {% if c.source is defined and c.source.kind == 'album' %}<p>{{ 'Saved album' if c.source.saved else 'Listening returns' }} · {{ c.source.return_days }} listening days · {{ c.source.modeled_tracks }}/{{ c.source.known_tracks }} known tracks modeled.</p><a class="playlist-blend-link" href="/album?browse={{ c.source.browse|urlencode }}">Open album</a>{% endif %}
+          {% if c.source is defined and c.source.layer_weights is defined %}<p>{{ c.source.days }} choice days across {{ c.source.episodes }} episodes. Current {{ '%.2f'|format(c.source.layer_weights.now) }} · Session {{ '%.2f'|format(c.source.layer_weights.session) }} · Recent {{ '%.2f'|format(c.source.layer_weights.recent) }} · Saved {{ '%.2f'|format(c.source.layer_weights.saved) }} support.</p>{% endif %}
           {% if c.pid is not none %}<a class="playlist-blend-link" href="/playlist/{{ c.pid }}">Open playlist</a>{% endif %}
         </div>
         {% endfor %}
@@ -48,8 +50,8 @@
     </figure>
 
     <div class="playlist-influence-ranking">
-      <div class="playlist-influence-columns" aria-hidden="true"><span>Playlist / sound</span><span>Matched plays</span><span>Influence</span></div>
-      <ol class="playlist-influence-list" aria-label="Playlists ranked by influence">
+      <div class="playlist-influence-columns" aria-hidden="true"><span>Interest / sound</span><span>Support</span><span>Slot weight</span></div>
+      <ol class="playlist-influence-list" aria-label="Taste interests ranked by allocation weight">
         {% for c in influence.segments %}
         {% set pc = 'var(--faint)' if c.is_other else 'var(--rose-' ~ loop.index0 ~ ')' %}
         <li style="--playlist-c:{{ pc }}">
@@ -59,23 +61,23 @@
             <span class="playlist-influence-identity">
               <span class="playlist-influence-swatch" aria-hidden="true"></span>
               <span><span class="playlist-influence-title">{{ c.title }}</span>
-                <span class="playlist-influence-genres">{% if c.is_other %}The rest of your contributing playlists{% elif c.genres %}{{ c.genres|join(' · ') }}{% elif c.pid is none %}From your listening history{% else %}Genre not tagged{% endif %}</span></span>
+                <span class="playlist-influence-genres">{% if c.is_other %}The rest of your contributing interests{% elif c.source is defined and c.source.kind == 'album' %}Album · {{ c.source.return_days }} listening days{% elif c.source is defined and c.source.kind in ['albums', 'mixes', 'radio'] %}{{ {'albums':'Album choices','mixes':'Mix tape choices','radio':'On air choices'}[c.source.kind] }} · {{ c.source.days }} choice days{% elif c.genres %}{{ c.genres|join(' · ') }}{% elif c.pid is none %}From your listening history{% else %}Genre not tagged{% endif %}</span></span>
             </span>
-            <span class="playlist-influence-plays">{% if c.listens is not none %}{{ '{:,}'.format(c.listens) }}<span class="playlist-influence-mobile-label"> matched plays</span>{% else %}History{% endif %}</span>
+            <span class="playlist-influence-plays">{% if c.listens is not none %}{{ '{:,}'.format(c.listens) }}<span class="playlist-influence-mobile-label"> matched plays</span>{% elif c.source is defined and c.source.kind in ['albums', 'mixes', 'radio'] %}{{ c.source.episodes }} episodes{% elif c.source is defined and c.source.kind == 'album' %}{{ c.source.return_days }} days{% else %}History{% endif %}</span>
             <span class="playlist-influence-share">{{ c.percent_label }}<span class="playlist-influence-mobile-label"> influence</span></span>
             <span class="playlist-influence-bar" aria-hidden="true"><i style="width:{{ '%.6f'|format(c.percent) }}%"></i></span>
           </button>
         </li>
         {% endfor %}
       </ol>
-      <div class="playlist-influence-scale" aria-hidden="true"><span>0%</span><span>50%</span><span>100% of the blend</span></div>
+      <div class="playlist-influence-scale" aria-hidden="true"><span>0%</span><span>50%</span><span>100% of allocation weight</span></div>
     </div>
   </div>
-  <p class="section-note playlist-influence-footnote">{% if influence.basis != 'listening' %}Matched plays are plays of tracks saved in a playlist, wherever you listened. A track in multiple playlists can count toward each. {% endif %}{% if influence.other %}The top {{ influence.contexts|length }} are shown individually; the remaining shares are grouped. {% endif %}{% if influence.unplayed_total %}{{ influence.unplayed_total }} {{ 'playlist has' if influence.unplayed_total == 1 else 'playlists have' }} no listening weight yet. {% endif %}Generated playlists and broad catch-all collections are excluded.</p>
+  <p class="section-note playlist-influence-footnote">{% if influence.playlist_total %}Matched plays describe curated playlist tracks, wherever you listened. A track in multiple playlists can count toward each. {% endif %}{% if influence.other %}The top {{ influence.contexts|length }} are shown individually; the remaining shares are grouped. {% endif %}{% if influence.unplayed_total %}{{ influence.unplayed_total }} {{ 'context has' if influence.unplayed_total == 1 else 'contexts have' }} no allocation weight yet. {% endif %}Passive generated playback supplies no independent track endorsement; deliberate choices are attributed separately. Broad catch-all playlists are excluded.</p>
 </div>
 {% else %}
 <div class="playlist-influence-empty">
-  <p class="section-note">Build the model and play some playlists to see their influence.</p>
-  <p>Your playlists will appear here with their sounds, matched listening, and share of your taste blend.</p>
+  <p class="section-note">Build the model to see the interests supported by your saved records, playlists and listening choices.</p>
+  <p>Missing or unmapped evidence is not zero preference.</p>
 </div>
 {% endif %}

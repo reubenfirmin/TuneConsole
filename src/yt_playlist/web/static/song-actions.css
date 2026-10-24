@@ -56,10 +56,11 @@
   max-width: calc(100vw - 1rem); max-height: calc(100dvh - 1rem); overflow-y: auto;
   background: var(--surface); border: 1px solid var(--border-2); border-radius: 10px;
   box-shadow: 0 16px 40px -12px color-mix(in srgb, var(--shadow-ink) 70%, transparent); padding: 0.3rem; }
-.song-action-menu button { display: block; width: 100%; text-align: left; background: transparent;
+.song-action-menu :is(button, a[role="menuitem"]) { display: block; width: 100%; text-align: left; background: transparent;
   border: none; box-shadow: none; color: var(--text); font-weight: 500; font-size: var(--type-ui);
   padding: 0.6rem; border-radius: 6px; cursor: pointer; }
-.song-action-menu button:hover, .song-action-menu button:focus-visible { background: var(--accent-soft); box-shadow: none; }
+.song-action-menu :is(button, a[role="menuitem"]):is(:hover, :focus-visible) { background: var(--accent-soft); box-shadow: none; }
+.song-action-menu a[role="menuitem"] { box-sizing: border-box; text-decoration: none; }
 .song-action-menu button.danger { color: var(--danger); }
 .song-action-menu button.danger:hover { background: var(--danger-soft); }
 .song-action-menu [role="group"] { border-top: 1px solid var(--border); margin-top: .25rem; padding-top: .25rem; }

@@ -149,13 +149,7 @@ def test_taste_topics_show_one_group_at_a_time(store, page, monkeypatch, request
             assert slider.bounding_box()["height"] >= 44
         for reset in recommendations.locator(".knob-reset:visible").all():
             assert reset.bounding_box()["height"] >= 44
-        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), page.evaluate("""() => ({
-            width: innerWidth, scroll: document.documentElement.scrollWidth, x: scrollX,
-            overflow: [...document.querySelectorAll('body *')]
-              .filter(el => !el.closest('.taste-feature-nav') && el.getBoundingClientRect().right > innerWidth
-                            && getComputedStyle(el).display !== 'none')
-              .map(el => ({tag: el.tagName, cls: el.className, text: el.textContent.slice(0, 80),
-                           width: el.getBoundingClientRect().width}))})""")
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), button.inner_text()
         if button.inner_text() == "Genres":
             genre_controls = recommendations.locator(".taste-genre-controls")
             assert abs(genre_controls.bounding_box()["x"] + genre_controls.bounding_box()["width"] - dimensions["contentRight"]) <= 1

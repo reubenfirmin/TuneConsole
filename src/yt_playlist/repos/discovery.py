@@ -359,6 +359,14 @@ class DiscoveryRepo(Repo):
         return [self._dtrack_row(r) for r in self.conn.execute("SELECT * FROM discovered_tracks")]
 
     @synchronized
+    def identity_keys_for_video(self, video_id) -> list[str]:
+        """Resolve discovery membership without decoding unrelated metadata or cached-only items."""
+        return [r[0] for r in self.conn.execute(
+            "SELECT DISTINCT r.identity_key FROM discovery_memberships d "
+            "JOIN catalog_entries e ON e.id=d.entry_id AND e.recording_id=d.recording_id "
+            "JOIN recordings r ON r.id=e.recording_id WHERE e.video_id=?", (video_id,))]
+
+    @synchronized
     def discovered_tracks_by_keys(self, keys, *, available_only=False) -> dict:
         keys = list(keys)
         if not keys:

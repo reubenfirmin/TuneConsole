@@ -61,10 +61,10 @@ _pacer = RateLimiter(_MIN_INTERVAL)
 _breaker = net.CircuitBreaker()           # stop a run once the host looks unreachable
 
 
-def _get(path, params):
+def _get(path, params, *, timeout=_HTTP_TIMEOUT_S):
     url = f"{_API}/{path}?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, "Accept": "application/json"})
-    return transport.request_json(req, timeout=_HTTP_TIMEOUT_S, pace=_pacer.wait, breaker=_breaker)
+    return transport.request_json(req, timeout=timeout, pace=_pacer.wait, breaker=_breaker)
 
 
 def _lucene_escape(text):

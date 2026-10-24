@@ -563,9 +563,14 @@ def build(ctx) -> APIRouter:
         if store.playlists.get_playlist_groups().get(pl.scope_ref) == GENERATED_GROUP:
             store.playlists.set_playlist_group(pl.scope_ref, "")
         if was_generated:
-            from yt_playlist.rec import measurement
+            from yt_playlist.rec import choice_evidence, measurement
             measurement.record_action(store, "promotion", now_fn(), playlist_id=pid,
                                       event_id=f"promote:{pl.ytm_playlist_id}")
+            recipe = store.playlist_recipes.get_recipe(pl.scope_ref) or {}
+            if recipe.get('opportunity_id') and recipe.get('option_id'):
+                choice_evidence.safe_respond(store, recipe['opportunity_id'], 'promote', now_fn(),
+                    option_id=recipe['option_id'], action_id=f'promote:{pl.ytm_playlist_id}',
+                    details={'playlist_id': pid})
         client = (ctx.client_provider() or {}).get(pl.identity_id)
         if client is not None:
             try:

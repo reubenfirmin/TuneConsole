@@ -39,3 +39,22 @@ def test_radio_starts_with_ordered_contours(page, radio_ui, width, height):
     expect(page.locator('.radio-record-echo').first).to_be_visible()
     assert page.locator('.radio-record-echo').count() <= 24
     page.screenshot(path=f'/tmp/tuneconsole-radio-297-start-{width}.png')
+    orbit_snapshot = '''() => {
+      const model = Alpine.$data(document.querySelector('.radio-home'));
+      return {copies: model.recordEchoes, width: model.drawingSpace.width,
+        height: model.drawingSpace.historyHeight,
+        transforms: [...document.querySelectorAll('.radio-record-echo')]
+          .filter(el => getComputedStyle(el).display !== 'none')
+          .map(el => el.getAttribute('transform'))};
+    }'''
+    before = page.evaluate(orbit_snapshot)
+    page.clock.run_for(30_000)
+    after = page.evaluate(orbit_snapshot)
+    assert len(after['copies']) == len(before['copies'])
+    assert after['transforms'] != before['transforms']
+    assert any(abs(copy['x'] - initial['x']) + abs(copy['y'] - initial['y']) > 1
+               for copy, initial in zip(after['copies'], before['copies']))
+    for copy in after['copies']:
+        assert 0 <= copy['x'] - copy['r'] < copy['x'] + copy['r'] <= after['width']
+        assert 0 <= copy['y'] - copy['r'] < copy['y'] + copy['r'] <= after['height']
+    page.screenshot(path=f'/tmp/tuneconsole-radio-297-orbit-{width}.png')

@@ -63,6 +63,46 @@ def test_setup_tab_deep_link_opens_enrichment(live_setup_app, page):
     expect(page.get_by_text("Shared secret")).to_be_visible()
 
 
+@pytest.mark.parametrize('width', [1440, 390])
+def test_album_description_settings_save_pause_and_remove_without_exposing_key(live_setup_app, page, width):
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.goto(f'{live_setup_app}/setup?tab=enrichment')
+    panel = page.get_by_role('region', name='Album descriptions', exact=True)
+    key = panel.get_by_label('Connect DeepSeek', exact=True)
+    expect(key).to_have_attribute('type', 'text')
+    key.fill('sk-test-0123456789')
+    expect(key).to_have_value('sk-test-0123456789')
+    panel.get_by_role('button', name='Save key', exact=True).click()
+    expect(panel.get_by_text('API key saved', exact=False)).to_be_visible()
+    expect(key).to_have_value('')
+    expect(panel.get_by_role('button', name='Remove key', exact=True)).to_be_visible()
+    panel.get_by_role('button', name='Replace', exact=True).click()
+    expect(key).to_be_visible()
+    key.fill('sk-replacement-0123456789')
+    panel.get_by_role('button', name='Save key', exact=True).click()
+    expect(key).to_be_hidden()
+    panel.get_by_label('Maximum requests per day', exact=True).fill('8')
+    panel.get_by_role('button', name='Save', exact=True).click()
+    expect(panel.get_by_role('status')).to_have_text('Album description settings saved.')
+    expect(panel.get_by_label('Connect DeepSeek', exact=True)).to_have_value('')
+    assert 'sk-test-0123456789' not in page.content()
+    assert 'sk-replacement-0123456789' not in page.content()
+    panel.get_by_label('Generate missing album descriptions', exact=True).uncheck()
+    with page.expect_response('**/settings/deepseek') as saved:
+        panel.get_by_role('button', name='Save', exact=True).click()
+    assert saved.value.ok
+    expect(panel.get_by_role('status')).to_have_text('Album description settings saved.')
+    page.reload()
+    panel = page.get_by_role('region', name='Album descriptions', exact=True)
+    expect(panel.get_by_label('Generate missing album descriptions', exact=True)).not_to_be_checked()
+    expect(panel.get_by_label('Maximum requests per day', exact=True)).to_have_value('8')
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    panel.screenshot(path=f'/tmp/tuneconsole-deepseek-settings-{width}.png')
+    panel.get_by_role('button', name='Remove key', exact=True).click()
+    expect(panel.get_by_role('status')).to_contain_text('saved key removed')
+    expect(panel.get_by_role('button', name='Remove key', exact=True)).to_be_hidden()
+
+
 def test_setup_identities_tab_accepts_manual_label(live_setup_app, page):
     page.goto(f"{live_setup_app}/setup")
     page.get_by_role("tab", name="Identities").click()

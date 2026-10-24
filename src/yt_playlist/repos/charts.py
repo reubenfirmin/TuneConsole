@@ -4,6 +4,7 @@
 from yt_playlist.repos.base import LIKED_EXISTS, Repo, synchronized, snapshot_read
 from yt_playlist.core import artists
 from yt_playlist.core.catalog_query import playable_tracks_sql
+from yt_playlist.util.matching import recording_title
 
 # Per-identity category expression for the non-playlist ticker dimensions. Each picks one
 # representative value per identity_key (dup uploads of the same song collapse to one), and
@@ -43,10 +44,10 @@ class ChartsRepo(Repo):
                 "GROUP BY a.id").fetchall()
         elif dimension == "playlist":
             rows = self.conn.execute(
-                "SELECT p.title cat, COALESCE(MIN(NULLIF(p.thumbnail,'')), "
+                "SELECT '@playlist:'||p.id cat, COALESCE(MIN(NULLIF(p.thumbnail,'')), "
                 "MIN(NULLIF(t.thumbnail,''))) thumbnail FROM playlists p "
                 "LEFT JOIN playlist_tracks pt ON pt.playlist_id=p.id "
-                "LEFT JOIN tracks t ON t.id=pt.track_id GROUP BY p.title").fetchall()
+                "LEFT JOIN tracks t ON t.id=pt.track_id GROUP BY p.id").fetchall()
         else:
             raise ValueError(f"No ticker artwork for dimension: {dimension}")
         return {r["cat"]: r["thumbnail"] for r in rows if r["thumbnail"]}
@@ -64,6 +65,12 @@ class ChartsRepo(Repo):
     def album_labels(self):
         return {f'@album:{r[0]}':r[1] or 'Album' for r in self.conn.execute(
             "SELECT a.id,a.title FROM albums a JOIN album_provider_ids p ON p.album_id=a.id AND p.provider='youtube'")}
+
+    @synchronized
+    def playlist_labels(self):
+        """Playlist titles are presentation labels; local IDs retain account scope."""
+        return {f'@playlist:{r[0]}': r[1] or 'Playlist' for r in self.conn.execute(
+            "SELECT id,title FROM playlists")}
 
     @synchronized
     def history_bounds(self) -> tuple:
@@ -86,7 +93,7 @@ class ChartsRepo(Repo):
         if dimension == "playlist":
             rows = self.conn.execute(
                 f"WITH pl AS ({_PL_MEMBERSHIP}) "
-                "SELECT p.title cat, COUNT(DISTINCT pl.ik) c "
+                "SELECT '@playlist:'||p.id cat, COUNT(DISTINCT pl.ik) c "
                 "FROM pl JOIN playlists p ON p.id=pl.pid GROUP BY p.id").fetchall()
         elif dimension == 'album':
             rows = self.conn.execute(
@@ -111,7 +118,7 @@ class ChartsRepo(Repo):
         if dimension == "playlist":
             rows = self.conn.execute(
                 f"WITH pl AS ({_PL_MEMBERSHIP}) "
-                "SELECT p.title cat, COUNT(*) c "
+                "SELECT '@playlist:'||p.id cat, COUNT(*) c "
                 "FROM listening_days hi "
                 "JOIN pl ON pl.ik=hi.identity_key JOIN playlists p ON p.id=pl.pid "
                 f"WHERE {bounds} GROUP BY p.id", args).fetchall()
@@ -259,8 +266,12 @@ class ChartsRepo(Repo):
 
         The worker calls this on its private snapshot. Scope history reads to the
         matching songs, and use the library projection to collapse upload aliases.
+        Identical displayed titles/credits appear once even when their catalog
+        identities are unresolved; that presentation rule does not merge evidence.
         Artist credits include collaborations; genres are exact stored labels.
         """
+        if limit <= 0:
+            return []
         if artist:
             aid = artists.lookup(self.conn, artist)
             if aid is None:
@@ -280,9 +291,18 @@ class ChartsRepo(Repo):
             '(SELECT MAX(hi.day_ts) FROM listening_days hi '
             ' WHERE hi.identity_key=t.identity_key) last_played '
             f'FROM playable_library_tracks t WHERE {selection} AND t.title<>\'\' '
-            'ORDER BY recent_plays DESC,last_played DESC,LOWER(t.title),t.identity_key LIMIT ?',
-            [since, *params, limit]).fetchall()
-        return [dict(row) for row in rows]
+            'ORDER BY recent_plays DESC,last_played DESC,LOWER(t.title),t.identity_key',
+            [since, *params])
+        songs, seen = [], set()
+        for row in rows:
+            display = recording_title(row['title']), recording_title(row['artist'])
+            if display in seen:
+                continue
+            seen.add(display)
+            songs.append(dict(row))
+            if len(songs) >= limit:
+                break
+        return songs
 
     @synchronized
     def playlist_tracks_detail(self, playlist_id) -> list[dict]:

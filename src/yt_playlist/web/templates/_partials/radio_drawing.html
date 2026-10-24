@@ -12,24 +12,32 @@
       <path id="radio-landscape-{{ i }}" :style="landscapeStyle({{ i }})"/>
       {% endfor %}
     </g>
+    <g class="radio-record-echoes">
+      {# SVG template elements lack HTMLTemplateElement.content, which Alpine's
+         x-for needs. Reserve the bounded set of SVG uses on the server instead. #}
+      {% for i in range(24) %}
+      <use class="radio-record-echo" href="#radio-record-disc" x-show="recordEchoes.length > {{ i }}"
+           :transform="recordEchoes[{{ i }}]?.transform || ''"
+           :opacity=".7 / (recordEchoes[{{ i }}]?.depth || 1)"/>
+      {% endfor %}
+    </g>
     <g :transform="engravingTransform">
     <g class="radio-orbit-lines">
-      <ellipse cx="244" cy="171" rx="203" ry="117" transform="rotate(-19 244 171)"/>
-      <ellipse cx="244" cy="171" rx="179" ry="139" transform="rotate(28 244 171)"/>
+      <ellipse cx="244" cy="171" rx="203" ry="117" :transform="orbitTransform(0)"/>
+      <ellipse cx="244" cy="171" rx="179" ry="139" :transform="orbitTransform(1)"/>
       <path d="M16 171H74m340 0h50M244 9v22m0 279v22"/>
       <circle cx="244" cy="171" r="145" stroke-dasharray="1 9"/>
     </g>
-    <g class="radio-record">
+    <g class="radio-record" id="radio-record-disc">
       <circle class="radio-record-ground" cx="244" cy="171" r="119"/>
       {% for radius in [65, 70, 77, 81, 88, 94, 100, 107, 113, 119] %}
       <circle class="radio-record-groove" cx="244" cy="171" r="{{ radius }}"/>
       {% endfor %}
       <path class="radio-record-shine" d="M155 112a107 107 0 0 1 137-37m40 155a107 107 0 0 1-137 37"/>
-      <foreignObject x="187" y="114" width="114" height="114" clip-path="url(#radio-record-label)">
-        <img xmlns="http://www.w3.org/1999/xhtml" class="radio-record-cover" :src="recordCover || null" alt=""
-             x-show="recordCover && recordCoverFailed !== recordCover" referrerpolicy="no-referrer"
-             @error="if ($el.currentSrc === recordCover) recordCoverFailed = recordCover">
-      </foreignObject>
+      <image class="radio-record-cover" x="187" y="114" width="114" height="114"
+             clip-path="url(#radio-record-label)" preserveAspectRatio="xMidYMid slice"
+             :href="recordCover || null" x-show="recordCover && recordCoverFailed !== recordCover"
+             @error="if ($el.getAttribute('href') === recordCover) recordCoverFailed = recordCover"/>
       <circle class="radio-record-rim" cx="244" cy="171" r="57"/>
       <circle class="radio-record-spindle" cx="244" cy="171" r="9"/>
       <circle class="radio-record-pin" cx="244" cy="171" r="2.5"/>

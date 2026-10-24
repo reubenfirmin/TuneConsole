@@ -13,7 +13,7 @@ import random
 import time
 
 from yt_playlist.core.activity import check_cancellable_work, work_budget, WorkBudgetExceeded
-from yt_playlist.rec import (discover, fresh_pool, home_cards, home_themes, home_vibe,
+from yt_playlist.rec import (album_choices, choice_evidence, discover, fresh_pool, home_cards, home_themes, home_vibe,
                              mode_eval, mode_surfaces, rec_params, surfaces, taste_analysis,
                              transient, mix_tuning)
 from yt_playlist.util import genre_map
@@ -42,6 +42,7 @@ def tuning_key(store, now=None):
     return _digest({"leans": store.rec_model.get_leans(),
                     "preferences": candidate_refresh.preferences(store, now),
                     "vibe": store.settings.get_setting(home_vibe.SETTING),
+                    "album_feedback": store.settings.get_setting("album_feedback"),
                     "breadth": rec_params.get_param(store, "breadth_bias"),
                     "include": genres.get("include_genres", []),
                     "avoid": genres.get("avoid_genres", [])})
@@ -101,6 +102,11 @@ def _prepare(store, now):
             "rediscover_albums": surfaces.rediscover_albums(reader, now, count=9, pool=9),
             "discovery_albums": discover.pick_discovered_albums(reader, 60, now, facet_leans=fingerprint['transient']),
             "discovery_artists": discover.pick_discovered_artists(reader, 40, now, facet_leans=fingerprint['transient'])}
+        albums = reader.rec_proposals.get_proposals(album_choices.SURFACE) or {}
+        collections["album_choices"] = albums.get('items', [])
+        collections["album_choice_context"] = albums.get('context', {})
+        collections["choice_context"] = choice_evidence.freeze_context(reader,
+            choice_evidence.model_context(reader, now, facet_leans=fingerprint["transient"]))
         # These inputs belong to this snapshot, not to each recipe/menu. Re-reading
         # recent evidence for every card multiplied a small read into seconds of
         # repeated metadata queries during ordinary catch-up.
@@ -288,7 +294,16 @@ def remember(store, payload, result, now):
                     "breadth": {"families": {}, "breadth": 0}, "eras": [], "transient": {}})}
     for field in ('rediscover', 'rediscover_albums', 'discovery_albums', 'discovery_artists', 'discovery_tracks'):
         tailored.setdefault(field, [])
-    store.rec_proposals.remember_home(json.dumps(tailored, separators=(",", ":")), now)
+    # An explicit tuning/build replaces the displayed menu even within the same
+    # choice window. Preserve that choice across refills without attributing the
+    # replacement to the earlier randomized menu assignment.
+    held = {"epoch": result.epoch, "tuning": tailored["tuning"],
+            "experiments": [p["experiment_id"] for p in menu["protos"]],
+            "menu": menu, "choice_context": (result.choice_context if result.choice_context is not None
+                                              else tailored.get("choice_context")),
+            "assignment": None}
+    store.rec_proposals.remember_home(json.dumps(tailored, separators=(",", ":")),
+                                      json.dumps(held, separators=(",", ":")), now)
 
 
 def _eligible_protos(store, protos, now):
@@ -352,29 +367,55 @@ def cards(store, payload, now, service, schedule=lambda: None, *, record=True):
     except (TypeError, ValueError):
         held = {}
     if held.get("epoch") == epoch and held.get("tuning") == tuning:
-        identities = set(held["experiments"])
-        chosen = max(candidates, key=lambda m: sum(p["experiment_id"] in identities for p in m["protos"]))
+        chosen = held.get("menu")
+        if not chosen:
+            identities = set(held["experiments"])
+            chosen = max(candidates, key=lambda m: sum(p["experiment_id"] in identities for p in m["protos"]))
+            # Legacy held records did not freeze their menu. Its replacement has no
+            # known probability, even when some experiment IDs still match.
+            held["assignment"] = None
     else:
         # Only a new choice window reads historical evidence. The displayed choice
         # survives refills; new feedback influences the next window.
         started = store.modes.epoch_started_at(epoch)
-        stats = mode_eval.mode_bandit_stats(store, before=started)
+        stats = mode_eval.mode_bandit_stats(store, before=started, now=now)
         modes = payload.get("modes", [])
-        priorities = mode_surfaces.thompson_mode_scores(stats, sorted(m["mode_id"] for m in modes), random.Random(epoch))
+        priorities = {m["mode_id"]: (lambda ab: ab[0] / sum(ab))(
+            mode_eval.choice_posterior(*stats.get(m["mode_id"], (0, 0)))) for m in modes}
         context = (payload.get("fingerprint") or {}).get("transient", {})
-        priorities = {m["mode_id"]: priorities[m["mode_id"]] * max(1, m["size"])
+        size_power = rec_params.get_param(store, "bandit_size_power")
+        priorities = {m["mode_id"]: priorities[m["mode_id"]] * max(1, m["size"]) ** size_power
                       * mode_surfaces._mode_mood_weight(m, context) for m in modes}
         def score(menu):
             mids = {p.get("mode_id") for p in menu["protos"] if p.get("mode_id") is not None}
             return sum(priorities.get(mid, 0.5) for mid in mids) / max(1, len(mids))
-        chosen = max(candidates, key=lambda m: (score(m), -abs(m["epoch"] - epoch % MAX_MENUS)))
+        values = [max(0.001, score(menu)) for menu in candidates]
+        exploration = rec_params.get_param(store, "bandit_exploration")
+        probabilities = [(1 - exploration) * value / sum(values) + exploration / len(values)
+                         for value in values]
+        rng = random.SystemRandom() if record else random.Random(epoch)
+        index = rng.choices(range(len(candidates)), weights=probabilities, k=1)[0]
+        chosen = candidates[index]
+        held = {"choice_context": payload.get('choice_context'),
+                "assignment": {"policy": "prepared-menu-categorical-v1", "unit": "whole_menu",
+                "menu": chosen["epoch"], "probability": probabilities[index],
+                "candidates": [{"menu": menu["epoch"], "probability": probability}
+                               for menu, probability in zip(candidates, probabilities)],
+                "generation": payload.get("generation"), "at": now}}
     protos = _eligible_protos(store, chosen["protos"], now)
     if (len(protos) != len(chosen["protos"])
             or sum(len(p["tracks"]) for p in protos) != sum(len(p["tracks"]) for p in chosen["protos"])):
         schedule()
+        if held.get("assignment"):
+            held["assignment"] = {**held["assignment"], "censored": True,
+                                  "reason": "eligibility_changed_after_assignment"}
     for proto in protos:
+        proto["assignment"] = held.get("assignment")
         if proto.get("experiment"):
             proto["experiment"]["cluster"] = f"{epoch}:{proto.get('mode_id')}"
+            proto["experiment"]["assignment"] = held.get("assignment")
+            # Randomizing whole menus does not isolate an individual ranker's effect.
+            proto["experiment"]["ranker_controlled"] = False
     by_lane = {p["lane"]: p for p in protos}
     slots = []
     for slot in chosen["slots"]:
@@ -391,11 +432,15 @@ def cards(store, payload, now, service, schedule=lambda: None, *, record=True):
             slots.append({"proto": None, "pool": pool})
     result = home_cards.CardsResult(protos, slots,
         chosen["genre_notice"], chosen["genre_warning"], payload["genre_options"],
-        chosen["requested_genres"], epoch, home_vibe.current(store, now))
+        chosen["requested_genres"], epoch, home_vibe.current(store, now),
+        choice_context=held.get('choice_context') or {})
     if record and protos:
         if held.get("epoch") != epoch or held.get("tuning") != tuning:
             store.rec_proposals.put_proposals("home_choice", {"epoch": epoch, "tuning": tuning,
-                "experiments": [p["experiment_id"] for p in protos]}, now)
+                "experiments": [p["experiment_id"] for p in protos],
+                "menu": chosen,
+                "choice_context": held.get('choice_context'),
+                "assignment": held.get("assignment")}, now)
         service.record_modes(protos, epoch, now)
         service.record_offer(protos, now, epoch=epoch)
     return result

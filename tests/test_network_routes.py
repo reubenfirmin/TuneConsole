@@ -24,6 +24,9 @@ def test_network_page_renders_allowlist(store, tmp_path, monkeypatch):
     assert "GET https://api.github.com/repos/reubenfirmin/TuneConsole/releases/latest" in r.text
     assert '<span class="tag teal mono">github.com</span>' not in r.text
     assert "request bodies, and methods are blocked" in r.text
+    assert 'Album Descriptions</h3>' in r.text
+    assert 'POST https://api.deepseek.com/chat/completions' in r.text
+    assert '<span class="tag teal mono">deepseek.com</span>' not in r.text
     assert "<th>Failure</th>" in r.text and "<td>timeout</td>" in r.text
 
 def test_network_log_line_parser():

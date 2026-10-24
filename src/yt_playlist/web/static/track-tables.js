@@ -50,14 +50,17 @@ document.addEventListener('htmx:afterSwap', (e) => {
   function highlight(np) {
     var rows = document.querySelectorAll('tr[data-vid]');
     rows.forEach(function (r) { r.classList.remove('now-playing'); });
-    if (!np || !np.title) return false;
-    var match = np.video_id ? rowByVid(np.video_id) : null;
-    if (!match) {
+    if (!np) return false;
+    var matches = np.video_id ? Array.from(rows).filter(r => r.getAttribute('data-vid') === np.video_id) : [];
+    if (!np.video_id && np.title) {
       var nt = norm(np.title);
-      rows.forEach(function (r) { if (!match && norm(r.getAttribute('data-title')) === nt) match = r; });
+      rows.forEach(function (r) {
+        if (norm(r.getAttribute('data-title')) === nt &&
+            (!np.artist || norm(r.getAttribute('data-artist')) === norm(np.artist))) matches.push(r);
+      });
     }
-    if (match) { match.classList.add('now-playing'); return true; }
-    return false;
+    matches.forEach(r => r.classList.add('now-playing'));
+    return matches.length > 0;
   }
 
   function refreshCells() {

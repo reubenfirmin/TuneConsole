@@ -6,7 +6,7 @@
     {% if item.thumbnail %}<img src="{{ item.thumbnail }}" alt="" width="48" height="48" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
   </span>
   <div class="taste-track-info">
-    {% if item.video_id %}<a class="ptitle" href="https://music.youtube.com/watch?v={{ item.video_id|urlencode }}" target="_blank" rel="noopener" data-yt-info>{{ item.title }}</a>
+    {% if item.video_id %}<a class="ptitle" href="{{ track_url(item) }}">{{ item.title }}</a>
     {% else %}<strong>{{ item.title }}</strong>{% endif %}
     <a class="alink" href="/artist?name={{ item.artist|urlencode }}">{{ item.artist }}</a>
     {% if item.album %}<span class="taste-track-album">{{ item.album }}</span>{% endif %}

@@ -20,6 +20,7 @@ from yt_playlist.library.spotify_library import (SpotifyLibraryFormatError,
                                                   prepare_spotify_library,
                                                   save_selected_album)
 from yt_playlist.providers import enrichment, lastfm, spotify
+from yt_playlist.rec import album_descriptions
 from yt_playlist.web.identity_checks import check_identities
 from yt_playlist.web.history_imports import HistoryImports
 from yt_playlist.web.spotify_import import (ACTIVE_STATUSES, JOB_KEY, TransferPreviews, current_job,
@@ -53,6 +54,7 @@ def build(ctx) -> APIRouter:
             "flash": request.query_params.get("flash"),
             "enrichment": enrichment.load_config(store),
             "lastfm_configured": lastfm.api_key(store) is not None,
+            "deepseek": album_descriptions.settings(store, ctx.now_fn()),
             "spotify_library_job": current_job(ctx),
             "spotify_history": store.history.spotify_history_stats(),
             "spotify_legacy_unattributed": store.settings.get_setting('spotify_legacy_discovery_unattributed') == '1',
@@ -117,6 +119,50 @@ def build(ctx) -> APIRouter:
             if ctx.enrich_worker:
                 ctx.enrich_worker.trigger()
         return _enrichment_panel(request)
+
+    @router.post('/settings/deepseek-key')
+    async def deepseek_key(request: Request):
+        import re
+        key = str((await request.form()).get('key') or '').strip()
+        if not re.fullmatch(r'sk-[A-Za-z0-9_-]{8,240}', key):
+            return Response(status_code=400)
+        store.settings.set_setting('deepseek_api_key', key)
+        store.rec_proposals.wake_album_descriptions(ctx.now_fn())
+        if ctx.rec_worker:
+            ctx.rec_worker.trigger_home_refresh()
+        return Response(status_code=204)
+
+    @router.post('/settings/deepseek')
+    async def deepseek_settings(request: Request):
+        import re
+        form = await request.form()
+        error, message = None, None
+        if form.get('action') == 'disconnect':
+            store.settings.set_values({'deepseek_api_key': '', 'deepseek_album_descriptions_enabled': '0'})
+            message = 'Generation paused and the saved key removed. Existing descriptions are kept.'
+        else:
+            key = str(form.get('key') or '').strip()
+            try:
+                limit = int(form.get('daily_limit', ''))
+                if not 0 <= limit <= album_descriptions.MAX_DAILY_LIMIT:
+                    raise ValueError
+            except (TypeError, ValueError):
+                error = 'Choose a daily request limit between 0 and 100.'
+            if key and not re.fullmatch(r'sk-[A-Za-z0-9_-]{8,240}', key):
+                error = 'Enter a valid DeepSeek API key.'
+            if not error:
+                values = {'deepseek_daily_limit': str(limit),
+                          'deepseek_album_descriptions_enabled': '1' if form.get('enabled') == 'on' else '0'}
+                if key:
+                    values['deepseek_api_key'] = key
+                store.settings.set_values(values)
+                store.rec_proposals.wake_album_descriptions(ctx.now_fn())
+                if ctx.rec_worker:
+                    ctx.rec_worker.trigger_home_refresh()
+                message = 'Album description settings saved.'
+        return templates.TemplateResponse(request, '_partials/album_description_settings.html', {
+            'deepseek': album_descriptions.settings(store, ctx.now_fn()),
+            'description_error': error, 'description_message': message}, status_code=200)
 
     @router.post("/setup")
     async def setup_submit(request: Request):

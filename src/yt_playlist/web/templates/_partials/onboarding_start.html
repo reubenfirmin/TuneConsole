@@ -24,8 +24,7 @@
             data-title="{{ f.title }}" data-artist="{{ f.artist }}" data-album="{{ f.album }}" data-thumb="{{ f.thumbnail or '' }}"
             style="--track-delay: {{ loop.index0 * 35 }}ms">
           <span class="starter-number" aria-hidden="true">{{ loop.index }}</span>
-          <a class="starter-song" href="https://music.youtube.com/watch?v={{ f.video_id|urlencode }}" target="_blank" rel="noopener"
-             aria-label="Play {{ f.title }} on YouTube Music">
+          <a class="starter-song" href="{{ track_url(f) }}" aria-label="Track details for {{ f.title }}">
             <span class="starter-thumb"><img src="{{ f.thumbnail or ('https://i.ytimg.com/vi/' ~ (f.video_id|urlencode) ~ '/hqdefault.jpg') }}"
                  alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()"></span>
             <span class="starter-meta"><span class="gen-title">{{ f.title }}</span><span class="gen-artist">{{ f.artist }}</span></span>

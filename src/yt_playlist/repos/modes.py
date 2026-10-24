@@ -177,6 +177,14 @@ class ModesRepo(Repo):
         return [(r["playlist_id"], r["mode_id"]) for r in self.conn.execute(sql, args).fetchall()]
 
     @synchronized
+    def pick_counts(self, since=None, *, before=None) -> dict:
+        """Compact effective choice evidence; playlist handles are needed only for engagement."""
+        return {r["mode_id"]: r["n"] for r in self.conn.execute(
+            "SELECT mode_id,COUNT(*) n FROM rec_mode_picks WHERE mode_id IS NOT NULL "
+            "AND (? IS NULL OR created_at>=?) AND (? IS NULL OR created_at<?) GROUP BY mode_id",
+            (since, since, before, before))}
+
+    @synchronized
     def playlist_engagement(self, since=None) -> dict:
         """Engagement with picked playlists, attributed by playlist AND account, after the pick.
 

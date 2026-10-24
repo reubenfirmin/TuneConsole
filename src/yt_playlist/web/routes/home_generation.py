@@ -7,7 +7,7 @@ from yt_playlist.core.accounts import client_for
 from yt_playlist.core.activity import activity_for
 from yt_playlist.library import playlist_generated, playlist_navigation
 from yt_playlist.library.playlist_writes import PlaylistAddUncertain
-from yt_playlist.rec import measurement
+from yt_playlist.rec import choice_evidence, measurement
 from yt_playlist.web.context import request_form
 from yt_playlist.web.jobs import start_playlist_enrichment
 
@@ -59,6 +59,13 @@ def build(ctx):
                 if res.get("pid") and res.get("added"):
                     measurement.record_action(store, "save", now_fn(), playlist_id=res["pid"],
                                               event_id=f"generate:{res['new_ytm']}", generated=True)
+                    if isinstance(recipe, dict) and recipe.get("opportunity_id") and recipe.get("option_id"):
+                        for kind in ("choice", "save"):
+                            choice_evidence.safe_respond(store, recipe["opportunity_id"], kind, now_fn(),
+                                option_id=recipe["option_id"], action_id=f"generate:{res['new_ytm']}:{kind}",
+                                details={"playlist_id": res["pid"], "tracks": tracks})
+                        if ctx.rec_worker:
+                            ctx.rec_worker.trigger_home_refresh()
                 if isinstance(recipe, dict) and recipe.get("mode_id") is not None and res.get("pid"):
                     try:
                         store.modes.log_pick(res["pid"], int(recipe["mode_id"]), now_fn(),

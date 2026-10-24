@@ -54,7 +54,7 @@ def _ticker_linker(store, dim):
         browse = store.charts.album_browse_ids()
         return lambda cat: (f"/album?browse={browse[cat]}" if cat in browse else None)
     if dim == "playlist":
-        ids = {p.title: p.id for p in store.playlists.get_playlists()}
+        ids = {f'@playlist:{p.id}': p.id for p in store.playlists.get_playlists()}
         return lambda cat: (f"/playlist/{ids[cat]}" if cat in ids else None)
     return lambda cat: None
 
@@ -68,12 +68,13 @@ def _build_ticker(store, dim, periods):
     rows = [r for r in data["rows"] if r["high"] > 0][:_TICKER_TOP]
     link = _ticker_linker(store, dim)
     thumbnails = store.charts.ticker_thumbnails(dim) if dim in ("artist", "album", "playlist") else {}
-    labels = store.charts.album_labels() if dim=='album' else {}
+    labels = (store.charts.album_labels() if dim == 'album' else
+              store.charts.playlist_labels() if dim == 'playlist' else {})
     for r in rows:
         r["geo"] = candle_geometry(r, data["axis_max"])
         r["link"] = link(r["cat"])
         r["thumbnail"] = thumbnails.get(r["cat"])
-        r['cat'] = labels.get(r['cat'],r['cat'])
+        r['label'] = labels.get(r['cat'], r['cat'])
     return {"rows": rows, "axis_max": data["axis_max"]}
 
 

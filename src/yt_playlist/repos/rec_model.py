@@ -226,6 +226,34 @@ class RecModelRepo(Repo):
         self.conn.commit()
 
     @synchronized
+    def unban(self, identity_key, now) -> None:
+        """Allow a recording locally until a new explicit confirmed dislike.
+
+        Retained account/upload ratings stay intact. The typed feedback row
+        follows verified recording reassociation and survives sync and restart.
+        """
+        identity_key = catalog.resolve_key(self.conn, identity_key) or identity_key
+        recording = self.conn.execute('SELECT id FROM recordings WHERE identity_key=?', (identity_key,)).fetchone()
+        with self.conn:
+            cutoff = self.conn.execute(
+                "SELECT MAX(ir.observed_at) FROM item_ratings ir JOIN youtube_items y "
+                "ON y.video_id=ir.video_id JOIN recordings r ON r.id=y.recording_id "
+                "WHERE r.identity_key=? AND ir.source='api' AND ir.status='DISLIKE'",
+                (identity_key,)).fetchone()[0]
+            # A local allowance supersedes every retained command, even after
+            # the wall clock moved backwards. A later command advances this cutoff.
+            cutoff = max(now, cutoff) if cutoff is not None else now
+            self.conn.execute("DELETE FROM rec_feedback WHERE item_key=? AND kind='dislike'", (identity_key,))
+            self.conn.execute(
+                'INSERT INTO rec_feedback(surface,item_key,kind,scope,created_at,target_type,recording_id) '
+                "VALUES ('rating_override',?,'unban','',?,?,?) "
+                'ON CONFLICT(surface,item_key,scope) DO UPDATE SET '
+                'kind=excluded.kind,created_at=excluded.created_at,target_type=excluded.target_type,'
+                'recording_id=excluded.recording_id',
+                (identity_key, cutoff, 'recording' if recording else 'legacy_unresolved',
+                 recording[0] if recording else None))
+
+    @synchronized
     def disliked_identity_keys(self) -> set:
         return {r["item_key"] for r in self.conn.execute(
             "SELECT item_key FROM rec_feedback WHERE kind='dislike'")}
@@ -407,7 +435,7 @@ class RecModelRepo(Repo):
     def feedback_summary(self) -> dict:
         """{kind: count} of stored feedback events, for the Taste Model page."""
         return {r["kind"]: r["c"] for r in self.conn.execute(
-            "SELECT kind, COUNT(*) c FROM rec_feedback GROUP BY kind")}
+            "SELECT kind, COUNT(*) c FROM rec_feedback WHERE kind<>'unban' GROUP BY kind")}
 
     @synchronized
     def recent_rating_inputs(self, since, until) -> dict:

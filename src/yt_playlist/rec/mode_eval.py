@@ -2,10 +2,13 @@
 
 Aggregates the non-circular signal: how often each mode was offered (impressions), how often it was
 picked (Save & play), and the playlist-attributed plays, skips and completions after each pick.
-Pick and impression counts drive theme selection across the row via Thompson sampling; mode_scoreboard
-also provides display aggregation. Reads only; writes nothing."""
+The legacy chart retains these counts. Serving uses compiled, windowed context-response evidence
+when available, with legacy counts only before the first compilation. Reads only; writes nothing."""
+
+import math
 
 import numpy as np
+from yt_playlist.rec import choice_bandit, rec_params
 
 
 def choice_posterior(picks, offers):
@@ -30,18 +33,18 @@ def _choice_contrast(rows, strongest):
     return None
 
 
-def choice_evidence(store):
-    """Expose the sampler's evidence without interpreting saves as confirmed listening.
+def choice_evidence(store, now=None):
+    """Expose legacy creation/impression evidence without calling saves confirmed listening.
 
     Picks are successful playlist creations, not unique clicks per offer. Preserve both raw
     counts, including repeat selections, and use the sampler's bounded posterior rather than
     presenting their ratio as a click-through rate. Intervals use a fixed simulation so the
     read-only chart stays stable between visits and needs no statistics dependency.
     """
-    offered = store.modes.impression_counts()
-    picked = {}
-    for _playlist_id, mid in store.modes.pick_rows():
-        picked[mid] = picked.get(mid, 0) + 1
+    since = max(0, now - rec_params.get_param(store, "bandit_window_d") * 86400) if now is not None else None
+    until = math.nextafter(now, math.inf) if now is not None else None
+    offered = store.modes.impression_counts(since, before=until)
+    picked = store.modes.pick_counts(since, before=until)
     rows = []
     for color, mode in enumerate(store.modes.list_modes(active_only=True)):
         mid = mode["mode_id"]
@@ -57,17 +60,29 @@ def choice_evidence(store):
     strongest = sorted((r for r in rows if r["picked"] and r["offered"]),
                        key=lambda r: (-r["low"], r["mode_id"]))[:3]
     return {"rows": rows, "strongest": strongest, "contrast": _choice_contrast(rows, strongest),
+            "window_days": rec_params.get_param(store, "bandit_window_d") if now is not None else None,
             "offered": sum(r["offered"] for r in rows),
             "picked": sum(r["picked"] for r in rows)}
 
 
-def mode_bandit_stats(store, *, before=None) -> dict:
-    """{mode_id: (picks, impressions)}, pooled across framings. `before` freezes the evidence at
-    a menu's first display so its own impressions/picks only influence the next rotation."""
-    offered = store.modes.impression_counts(before=before)
-    picked = {}
-    for _playlist_id, mode_id in store.modes.pick_rows(before=before):
-        picked[mode_id] = picked.get(mode_id, 0) + 1
+def mode_bandit_stats(store, *, before=None, now=None) -> dict:
+    """{mode_id: (positive mass, total mass)}, pooled across framings.
+
+    Compiled responses use their declared cutoff, generation and policy. Legacy creation counts
+    are a compatibility fallback before the first compilation. `before` freezes legacy evidence
+    at a menu's first display so that menu only influences a later rotation.
+    """
+    # Explicit dates select the serving window. Undated callers retain the legacy
+    # all-time diagnostic; serving always supplies its decision timestamp.
+    end = before if before is not None else now
+    if end is not None:
+        compiled = choice_bandit.stats(store, end)
+        if compiled is not None:
+            return compiled
+    since = max(0, end - rec_params.get_param(store, "bandit_window_d") * 86400) if end is not None else None
+    until = before if before is not None else math.nextafter(now, math.inf) if now is not None else None
+    offered = store.modes.impression_counts(since, before=until)
+    picked = store.modes.pick_counts(since, before=until)
     return {mid: (picked.get(mid, 0), n) for mid, n in offered.items()}
 
 

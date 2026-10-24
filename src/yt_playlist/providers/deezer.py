@@ -51,10 +51,10 @@ _pacer = RateLimiter(_MIN_INTERVAL)
 _breaker = net.CircuitBreaker()
 
 
-def _get_json(url):
+def _get_json(url, *, timeout=_HTTP_TIMEOUT_S):
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT,
                                                "Accept": "application/json"})
-    data = transport.request_json(req, timeout=_HTTP_TIMEOUT_S, pace=_pacer.wait, breaker=_breaker)
+    data = transport.request_json(req, timeout=timeout, pace=_pacer.wait, breaker=_breaker)
     if isinstance(data, dict) and data.get("error"):
         # Deezer reports quota/API errors as HTTP 200. Code 800 means no catalogue entry.
         if data["error"].get("code") != 800:

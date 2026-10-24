@@ -168,14 +168,30 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
     }
   }
 
-  async function playPause() {
-    const tab = await pickTab();
-    if (!tab) return;
-    try { await chrome.tabs.sendMessage(tab.id, {type: "playpause"}); }
+  async function playPause(frame = {}) {
+    // A retained paused player must never fall through to an unrelated browsing tab.
+    const tab = frame.resumeOnly ? (await musicTabs.list()).find(t => t.id === playbackTabId) : await pickTab();
+    if (!tab) {
+      if (frame.resumeOnly) send({type: "player-closed"});
+      return;
+    }
+    const guarded = frame.resumeOnly || frame.action;
+    if (guarded) {
+      let receiver = await sensors.ping(tab.id, false);
+      if (!(receiver.reply?.receiverRevision >= 9)) {
+        await sensors.inject(tab.id);
+        receiver = await sensors.ping(tab.id, false);
+      }
+      if (!(receiver.reply?.receiverRevision >= 9)) return;
+    }
+    const message = {type: guarded ? "player-control" : "playpause"};
+    if (frame.action) message.action = frame.action;
+    if (frame.resumeOnly) Object.assign(message, {resumeOnly: true, videoId: frame.videoId});
+    try { await chrome.tabs.sendMessage(tab.id, message); }
     catch (e) {
       if (!isMissingReceiver(e)) return;
       await sensors.inject(tab.id);
-      try { await chrome.tabs.sendMessage(tab.id, {type: "playpause"}); } catch (e2) {}
+      try { await chrome.tabs.sendMessage(tab.id, message); } catch (e2) {}
     }
   }
 
@@ -253,7 +269,10 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
     playingTabs.delete(tabId);
     mediaMutedTabs.delete(tabId);
     pendingPlays.delete(tabId);
-    if (playbackTabId === tabId) playbackTabId = null;
+    if (playbackTabId === tabId) {
+      playbackTabId = null;
+      relay = relay.then(() => send({type: "player-closed"}));
+    }
     if (rescue && rescue.tabId === tabId) cancelRescue();
   }
 

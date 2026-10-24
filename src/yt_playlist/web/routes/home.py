@@ -70,6 +70,9 @@ def build(ctx) -> APIRouter:
         getting_started = (not feed["protos"] and
                            (onboarding.initial_setup_pending(store, now) or onboarding.onboarding_active(store, now)))
         return templates.TemplateResponse(request, "home.html", {
+            "home_default_panel": {"albums": "album-choices", "mixes": "directions", "radio": "radio",
+                "both": store.settings.get_setting("home_last_panel") or "directions"}.get(
+                    store.settings.get_setting("home_format"), "directions"),
             "radio_bootstrap": radio_bootstrap,
             "radio_tracks": radio_tracks,
             "actions": actions.take_action(store, now, ctx.auth_expired),

@@ -31,7 +31,7 @@
   </section>
 
   <section class="taste-profile-section" aria-labelledby="taste-playlist-influence-title">
-    <h2 class="section section-flush" id="taste-playlist-influence-title">Playlist influence <span class="scope-tag">saved</span></h2>
+    <h2 class="section section-flush" id="taste-playlist-influence-title">Taste influences <span class="scope-tag">saved</span></h2>
     <div id="taste-playlist-influence" hx-get="/taste/viz/playlist-influence" hx-trigger="intersect once, taste-retry" hx-swap="innerHTML"
          hx-on::after-request="if(event.detail.elt === this &amp;&amp; !event.detail.successful) { this.querySelector('[role=status]').textContent = 'Could not load playlist influence.'; this.querySelector('button').hidden = false; }">
       <p class="section-note" role="status">Loading playlist influence…</p>

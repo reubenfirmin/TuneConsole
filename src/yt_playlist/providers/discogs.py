@@ -69,12 +69,12 @@ def _search(query, tok):
     return (_get("database/search", params, tok) or {}).get("results") or []
 
 
-def _get(path, params, tok):
+def _get(path, params, tok, *, timeout=_HTTP_TIMEOUT_S):
     if tok:
         params["token"] = tok
     url = f"{_API}/{path}?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, "Accept": "application/json"})
-    return transport.request_json(req, timeout=_HTTP_TIMEOUT_S, pace=lambda: _pace(tok), breaker=_breaker)
+    return transport.request_json(req, timeout=timeout, pace=lambda: _pace(tok), breaker=_breaker)
 
 
 def _artist_key(artist):

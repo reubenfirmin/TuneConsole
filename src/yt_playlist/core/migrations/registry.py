@@ -13,7 +13,8 @@ from . import (v001_baseline, v002_enrichment, v003_discovery_audit, v004_playli
                v036_progressive_signals,v037_home_query_plans,v038_listening_day_counts,
                v039_background_refresh,v040_player_refresh_inputs,v041_scorecard_lookups,
                v042_foreign_calendar_scopes,v043_retire_palette_penalty,v044_prepared_content,
-               v045_pending_deletions,v046_retire_onboarding_thresholds)
+               v045_pending_deletions,v046_retire_onboarding_thresholds,
+               v047_playlist_revisions,v048_playback_alternates)
 
 MIGRATIONS = (
     Migration(1, 'legacy_baseline', v001_baseline.apply),
@@ -62,4 +63,6 @@ MIGRATIONS = (
     Migration(44, 'prepared_content_inputs', v044_prepared_content.apply, replaces_data=False),
     Migration(45, 'pending_deletion_lookup', v045_pending_deletions.apply, replaces_data=False),
     Migration(46, 'retire_onboarding_thresholds', v046_retire_onboarding_thresholds.apply, replaces_data=False),
+    Migration(47, 'playlist_publication_revisions', v047_playlist_revisions.apply, replaces_data=False),
+    Migration(48, 'youtube_playback_alternates', v048_playback_alternates.apply, replaces_data=False),
 )

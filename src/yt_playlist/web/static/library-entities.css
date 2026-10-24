@@ -314,6 +314,10 @@
   color: var(--light-source);
   text-decoration: underline;
 }
+.page-album .album-release-hero .album-library.on {
+  color: var(--canvas);
+  background: var(--accent);
+}
 
 @media (max-width: 45rem) {
   .artist-hero {

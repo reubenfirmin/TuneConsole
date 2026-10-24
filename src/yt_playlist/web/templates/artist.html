@@ -60,7 +60,7 @@
           </span>
         </td>
         <td class="liked-col">{% if s.liked %}<span class="liked-heart" title="In your Liked Music">♥</span>{% endif %}</td>
-        <td><span class="ptitle">{{ s.title }}</span></td>
+        <td>{% if s.video_id %}<a class="ptitle" href="{{ track_url(dict(s, artist=artist)) }}">{{ s.title }}</a>{% else %}<span class="ptitle">{{ s.title }}</span>{% endif %}</td>
         <td>{% if s.album_browse %}<a class="alink" href="/album?browse={{ s.album_browse }}">{{ s.album }}</a>{% else %}<span class="muted">{{ s.album }}</span>{% endif %}</td>
         <td class="small">{% for p in s.playlists %}<a class="alink"
               href="https://music.youtube.com/playlist?list={{ p.ytm }}" target="_blank" rel="noopener">{{ p.title }}</a>{{ ', ' if not loop.last }}{% endfor %}</td>

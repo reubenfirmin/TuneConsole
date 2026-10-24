@@ -108,9 +108,7 @@
       <span class="rt-c-art{{ ' no-art' if not t.thumbnail }}">{% if t.thumbnail %}<img
            src="{{ t.thumbnail }}" alt="" loading="lazy" referrerpolicy="no-referrer"
            onerror="this.closest('.rt-c-art').classList.add('no-art'); this.remove()">{% endif %}</span>
-      <a class="rt-c-title" href="https://music.youtube.com/watch?v={{ t.video_id }}"
-         target="_blank" rel="noopener" data-yt-info
-         title="{{ t.title }} — preview on YouTube Music">{{ t.title }}</a>
+      <a class="rt-c-title" href="{{ track_url(t) }}" title="{{ t.title }} — track details">{{ t.title }}</a>
       <span class="rt-c-artist" title="{{ t.artist }}">{{ t.artist }}</span>
       <span class="rt-c-genre" title="{{ t.genre }}">{{ t.genre }}</span>
       <span class="rt-c-year">{{ t.year or '' }}</span>

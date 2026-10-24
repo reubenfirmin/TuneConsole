@@ -28,6 +28,7 @@ from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.context import Ctx
 from yt_playlist.web.jobs import SyncJobs
 from yt_playlist.web.provider_links import provider_search_url
+from yt_playlist.web.track_links import track_url
 from yt_playlist.web.request_priority import RequestPriorityMiddleware
 from yt_playlist.web.routes import build_all
 from yt_playlist.web.routes.bridge import build as build_bridge_route
@@ -286,6 +287,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
     templates.env.globals["journey_labels"] = JOURNEY_LABELS
     templates.env.filters["linkify"] = _linkify
     templates.env.globals["provider_search_url"] = provider_search_url
+    templates.env.globals["track_url"] = track_url
 
     @app.middleware("http")
     async def guard_state_changes(request: Request, call_next):

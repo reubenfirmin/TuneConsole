@@ -1,5 +1,6 @@
 import sqlite3
 import threading
+import uuid
 from pathlib import Path
 
 from yt_playlist.core.activity import interrupt_query
@@ -53,6 +54,7 @@ class Store:
         # is touched from multiple threads. Access is serialized by self._lock (see _synchronized).
         self.conn = sqlite3.connect(str(db_path), check_same_thread=False, factory=DiagnosticConnection)
         self._db_path = None if str(db_path) == ":memory:" else Path(db_path).resolve()
+        self._evidence_key = uuid.uuid4().hex
         self._configure_connection()
         self.priority = RequestPriority()
         self._lock = ServingLock(self.priority)
@@ -74,6 +76,7 @@ class Store:
         def make_reader():
             reader = Store.__new__(Store)
             reader._db_path = self._db_path
+            reader._evidence_key = self._evidence_key
             path = self._db_path.as_uri() + "?mode=ro" if self._db_path else ":memory:"
             reader.conn = sqlite3.connect(path, uri=self._db_path is not None,
                                           check_same_thread=False, cached_statements=0,

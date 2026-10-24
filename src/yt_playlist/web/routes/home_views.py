@@ -6,7 +6,7 @@ board and tuning routes.
 """
 from fastapi import Response
 
-from yt_playlist.rec import home_cards, home_prepared, home_vibe, mix_tuning, onboarding, rec_params
+from yt_playlist.rec import choice_evidence, home_cards, home_prepared, home_vibe, mix_tuning, onboarding, rec_params
 from yt_playlist.rec.home_cards import _epoch
 from yt_playlist.web.jobs import start_fresh_pool, start_library_pool
 from yt_playlist.web.theme import genre_tint
@@ -58,6 +58,24 @@ class HomeViews:
             result = home_prepared.cards(store, payload, now, self.recommendations, self.schedule,
                                         record=record)
         context = vars(result).copy()
+        frozen_context = result.choice_context if result.choice_context is not None else (payload or {}).get('choice_context')
+        if result.protos and frozen_context is not None:
+            for proto in result.protos:
+                if proto.get('experiment'):
+                    proto['experiment']['ranker_controlled'] = False
+            options = [{"id": p["experiment_id"], "position": i + 1,
+                        "label": p["label"], "note": p["note"], "mode_id": p.get("mode_id"),
+                        "intent": p["lane"], "recipe": {k: v for k, v in p.get("recipe", {}).items()
+                                                        if k not in {"opportunity_id", "option_id"}},
+                        "tracks": p["tracks"], "assignment": p.get("assignment")} for i, p in enumerate(result.protos)]
+            try:
+                oid = choice_evidence.present(store, "mixes", options, now,
+                    context=frozen_context, window=result.epoch)
+                for proto in result.protos:
+                    proto["recipe"] = {**proto.get("recipe", {}), "opportunity_id": oid,
+                                       "option_id": proto["experiment_id"]}
+            except Exception:
+                self.ctx.logger.warning("Mix choice capture failed", exc_info=True)
         try:
             attempt = max(0, int(request.query_params.get("prepare_attempt", "0")))
         except ValueError:

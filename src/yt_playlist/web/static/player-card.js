@@ -48,6 +48,7 @@ function playerStatus() {
       window.dispatchEvent(new CustomEvent('track-like-changed', { detail: {
         videoId: this.nowPlaying.video_id,
         liked: this.nowPlaying.likeStatus === 'LIKE',
+        likeStatus: this.nowPlaying.likeStatus,
       }}));
     },
     updateMetadata(detail) {

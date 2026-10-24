@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% from "_partials/song_menu_button.html" import song_menu %}
+{% block title %}{{ track.title }} · TuneConsole{% endblock %}
+{% block page_class %}page-track{% endblock %}
+{% block body %}
+<article class="track-detail" x-data='trackDetails({{ track.video_id|tojson }}, {{ rating|tojson }})'
+         @track-like-changed.window="ratingChanged($event.detail)"
+         @song-metadata-updated.window="if ($event.detail.videoId === videoId) location.reload()">
+  <div class="track-detail-layout">
+  <aside class="track-art-column">
+    <img class="track-detail-art" src="{{ cover|default(track.thumbnail) }}" data-fallback="{{ track.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="if(this.src !== new URL(this.dataset.fallback, location.href).href) this.src = this.dataset.fallback; else this.style.visibility='hidden'">
+    {% if track.album or track.album_browse %}
+    <section class="track-album" aria-labelledby="track-album-title">
+      <h2 id="track-album-title">From the album</h2>
+      {% if track.album_browse %}
+        <a class="track-album-name" href="/album?browse={{ track.album_browse|urlencode }}">{{ track.album or 'Open album' }}</a>
+        {% if is_upload %}<p class="muted">In your uploaded collection</p>
+        {% elif saved %}<p class="muted">Saved to collection</p>
+        {% else %}<form hx-post="/collection/save-album" hx-swap="none"><input type="hidden" name="browse_id" value="{{ track.album_browse }}"><button class="btn-ghost track-text-action" type="submit">Save album to collection</button></form>{% endif %}
+      {% else %}<p class="track-album-name">{{ track.album }}</p>{% endif %}
+    </section>
+    {% endif %}
+  </aside>
+  <div class="track-detail-main">
+  <header class="track-detail-head">
+    <div class="track-detail-heading">
+      {% if track.artist %}<a class="track-detail-artist" href="/artist?name={{ track.artist|urlencode }}">{{ track.artist }}</a>{% endif %}
+      <h1>{{ track.title }}</h1>
+      <div class="track-detail-actions">
+        <a class="btn btn-primary track-play" href="https://music.youtube.com/watch?v={{ track.video_id|urlencode }}" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M7 3v18l15-9z"/></svg>Play on YouTube Music</a>
+        <button type="button" class="btn-ghost" @click="rate('LIKE')" :aria-pressed="status === 'LIKE'" :disabled="busy">Like</button>
+        <button type="button" class="btn-ghost" @click="rate('DISLIKE')" :aria-pressed="status === 'DISLIKE'" :disabled="busy">Dislike</button>
+        {{ song_menu(track, {"refresh_on_save": true}) }}
+      </div>
+      <p class="track-detail-error" role="alert" x-show="error" x-text="error" x-cloak></p>
+    </div>
+  </header>
+  <section class="track-detail-facts" aria-labelledby="track-metadata-title">
+    <div class="track-section-head"><h2 id="track-metadata-title">Metadata</h2>
+      <button type="button" class="btn-ghost track-text-action" data-song='{{ track|tojson }}' data-song-action="metadata">Edit metadata</button>
+    </div>
+    <dl class="track-metadata">
+      {% if track.genre %}<div><dt>Genre</dt><dd>{{ track.genre }}</dd></div>{% endif %}
+      {% if track.year %}<div><dt>Year</dt><dd>{{ track.year }}</dd></div>{% endif %}
+      <div><dt>Length</dt><dd>{% if track.duration %}{{ '%d:%02d'|format(track.duration // 60, track.duration % 60) }}{% else %}Unknown{% endif %}</dd></div>
+      {% if track.bpm is defined and track.bpm is not none %}<div><dt>Tempo</dt><dd>{{ '%.0f'|format(track.bpm) }} BPM</dd></div>{% endif %}
+      {% if track.music_key %}<div><dt>Key</dt><dd>{{ track.music_key }} {{ track.music_scale or '' }}</dd></div>{% endif %}
+      {% if track.energy is defined and track.energy is not none %}<div><dt>Energy</dt><dd>{{ '%.0f'|format(track.energy * 100) }}%</dd></div>{% endif %}
+      {% if track.danceability is defined and track.danceability is not none %}<div><dt>Danceability</dt><dd>{{ '%.0f'|format(track.danceability * 100) }}%</dd></div>{% endif %}
+    </dl>
+  </section>
+    <section class="track-detail-section" aria-labelledby="track-playlists-title">
+      <div class="track-section-head"><h2 id="track-playlists-title">In playlists</h2></div>
+      {% if track.playlists %}<ul class="track-memberships">{% for playlist in track.playlists %}
+        <li><a href="/playlist/{{ playlist.id }}">{{ playlist.title }}</a><span class="muted">{{ playlist.identity }}</span></li>
+      {% endfor %}</ul>{% else %}<p class="muted">This upload is not in any synced playlists.</p>{% endif %}
+      <div class="track-detail-actions">
+        <button type="button" class="btn-ghost track-text-action" data-song='{{ track|tojson }}' data-song-action="create" data-song-context='{"refresh_on_save":true}'>Create playlist with song</button>
+        <button type="button" class="btn-ghost track-text-action" data-song='{{ track|tojson }}' data-song-action="add" data-song-context='{"refresh_on_save":true}'>Add to playlist</button>
+      </div>
+    </section>
+  {% if track.playback_alternates %}
+  <section class="track-detail-section" aria-labelledby="track-alternates-title">
+    <h2 id="track-alternates-title">Playback alternatives</h2>
+    <ul class="track-memberships">{% for alternate in track.playback_alternates %}
+      <li><a href="/track/{{ alternate.video_id|urlencode }}">{{ alternate.title }}</a><span class="muted">{{ alternate.artist }}</span></li>
+    {% endfor %}</ul>
+  </section>
+  {% endif %}
+  <section class="track-detail-section" aria-labelledby="track-ledger-title">
+    <h2 id="track-ledger-title">Play ledger</h2>
+    {% if ledger %}<p class="track-ledger-note muted">Exact plays and history observations across your accounts. History observations do not establish an exact play time or count.</p>{% endif %}
+    {% if ledger %}<ol class="track-ledger">{% for row in ledger %}
+      <li>
+        <div class="track-ledger-time">{% if row.kind == 'play' %}<time datetime="{{ row.at_iso }}">{{ row.at_label }}</time>{% elif row.precision == 'calendar_day' %}{{ row.day or 'Day unavailable' }}{% else %}Play time unknown{% endif %}
+          <strong>{{ 'Played' if row.kind == 'play' else 'History observation' }}</strong></div>
+        <div><span>{{ row.identity }}</span><span class="muted">{{ row.source or 'Unknown source' }}{% if row.is_generated %} · Generated queue{% endif %}</span>
+          {% if row.kind == 'observation' %}<small class="muted">Last observed <time datetime="{{ row.at_iso }}">{{ row.at_label }}</time></small>{% endif %}
+          {% if row.kind == 'observation' and row.timezone %}<small class="muted">Calendar: {{ row.timezone }}</small>{% endif %}
+          {% if row.video_id and row.video_id != track.video_id %}<small class="muted">Another upload of this recording</small>{% endif %}
+        </div>
+      </li>
+    {% endfor %}</ol>{% else %}<p class="muted">No listening evidence recorded{% if page %} on this page{% endif %}.</p>{% endif %}
+    {% if page or more %}<nav class="track-ledger-pages" aria-label="Play ledger pages">
+      {% if page %}<a href="{{ request.url.include_query_params(page=page-1) }}">Newer entries</a>{% endif %}
+      {% if more %}<a href="{{ request.url.include_query_params(page=page+1) }}">Older entries</a>{% endif %}
+    </nav>{% endif %}
+  </section>
+  </div>
+  </div>
+</article>
+{% endblock %}

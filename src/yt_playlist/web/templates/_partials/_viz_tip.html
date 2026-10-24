@@ -48,7 +48,7 @@ data-tip='{{ {"title": title, "accent": accent, "dot": dot, "desc": desc, "rows"
 {# Charts ticker candle. Keep this interpretive: exact geometry is documented by the chart key;
    the hover should answer what happened, not expose the calculation vocabulary. #}
 {% macro ticker_tip(r, dim, close_days=7, span_days=365, compare=true) -%}
-{%- set name = (r.cat ~ 's') if dim == 'year' else r.cat -%}
+{%- set name = (r.cat ~ 's') if dim == 'year' else r.label|default(r.cat) -%}
 {%- set rows = [{"l": "Latest period", "v": "%.1f"|format(r.close * 100) ~ "% of your plays", "t": "strong"}] -%}
 {%- set accent = "" -%}
 {%- if r.open is not none -%}

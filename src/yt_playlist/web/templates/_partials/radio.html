@@ -36,7 +36,9 @@
   </div>
   <div class="radio-seeds" x-ref="seeds" x-show="showSeeds" :aria-busy="busy || loading">
     <template x-for="song in seeds" :key="song.video_id">
-      <button type="button" class="radio-seed" :disabled="busy" @click="start(song)"
+      <div class="radio-seed">
+      <button type="button" class="radio-seed-start" :disabled="busy" @click="start(song)"
+              :data-choice-opportunity="seedMenu" :data-choice-option="song.video_id"
               :aria-label="'Start radio with ' + song.title + ' by ' + song.artist">
         <span class="radio-seed-art">
           <svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="24"/><circle cx="32" cy="32" r="8"/></svg>
@@ -46,11 +48,12 @@
           <span class="radio-seed-play"><svg viewBox="0 0 24 24"><path d="M8 4.5a1 1 0 0 1 1.5-.86l11 6.5a1 1 0 0 1 0 1.72l-11 6.5A1 1 0 0 1 8 17.5z"/></svg></span>
           <span>Start radio</span>
         </span>
+      </button>
         <span class="radio-seed-info">
-          <strong x-text="song.title" :title="song.title"></strong>
+          <a :href="trackUrl(song)"><strong x-text="song.title" :title="song.title"></strong></a>
           <span x-text="song.artist" :title="song.artist"></span>
         </span>
-      </button>
+      </div>
     </template>
   </div>
   <div class="radio-session" x-ref="session" x-show="state.active && state.local_id && !state.starting" x-cloak
@@ -116,7 +119,7 @@
                   <svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="24"/><circle cx="32" cy="32" r="8"/></svg>
                   <template x-if="song.thumbnail"><img :src="song.thumbnail" alt="" referrerpolicy="no-referrer" loading="lazy" @error="$el.remove()"></template>
                 </span>
-                <span class="radio-proposed-info"><strong x-text="song.title"></strong><span x-text="song.artist"></span>
+                <span class="radio-proposed-info"><a :href="trackUrl(song)"><strong x-text="song.title"></strong></a><span x-text="song.artist"></span>
                 </span>
                 <span class="radio-saved-dot" x-show="branch.active && index === 0" title="Up next" aria-label="Up next"></span>
               </li>

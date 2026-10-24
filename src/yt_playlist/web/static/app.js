@@ -60,35 +60,75 @@ function omniSearch() {
   };
 }
 
-// hx-confirm -> styled modal (replaces the native window.confirm dialog). htmx fires `htmx:confirm`
-// for any element carrying hx-confirm; we intercept it, show our own modal, and only issue the
-// request if the user confirms. Reuses the .modal-backdrop/.modal/.modal-actions styles.
+// One owner for deferred hx-confirm requests. Native modality makes the background inert;
+// the owner also contains Tab/shortcuts and releases the request if its invoker disappears.
+let pendingConfirmation = null;
 document.addEventListener('htmx:confirm', (e) => {
   const question = e.detail.question;
   if (!question) return;                       // no hx-confirm on this element: proceed normally
   e.preventDefault();                          // suppress htmx's native confirm
+  if (pendingConfirmation) return;
 
-  const backdrop = document.createElement('div');
-  backdrop.className = 'modal-backdrop';
-  backdrop.innerHTML =
-    '<div class="modal" role="dialog" aria-modal="true">' +
-    '<h3>Confirm</h3><p></p>' +
+  const invoker = e.detail.elt || e.target;
+  if (!invoker?.isConnected) return;
+  let issueRequest = e.detail.issueRequest;
+  const dialog = document.createElement('dialog');
+  dialog.className = 'modal shared-confirmation';
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.setAttribute('aria-labelledby', 'shared-confirmation-title');
+  dialog.setAttribute('aria-describedby', 'shared-confirmation-question');
+  dialog.innerHTML =
+    '<h3 id="shared-confirmation-title">Confirm</h3><p id="shared-confirmation-question"></p>' +
     '<div class="modal-actions">' +
     '<button type="button" class="btn-ghost" data-act="cancel">Cancel</button>' +
-    '<button type="button" data-act="ok">Confirm</button>' +
-    '</div></div>';
-  backdrop.querySelector('p').textContent = question;   // textContent: never inject markup
+    '<button type="button" data-act="ok" autofocus>Confirm</button>' +
+    '</div>';
+  dialog.querySelector('p').textContent = question;   // textContent: never inject markup
 
-  const close = () => { backdrop.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = (ev) => { if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
-  backdrop.addEventListener('click', (ev) => { if (ev.target === backdrop) close(); });
-  backdrop.querySelector('[data-act="cancel"]').addEventListener('click', close);
-  backdrop.querySelector('[data-act="ok"]').addEventListener('click', () => {
-    close();
-    document.removeEventListener('keydown', onKey);
-    e.detail.issueRequest(true);               // true = skip the confirm check, avoid recursion
+  let finished = false;
+  const close = (confirmed = false) => {
+    if (finished) return;
+    finished = true;
+    observer.disconnect();
+    document.removeEventListener('htmx:beforeCleanupElement', onCleanup);
+    dialog.removeEventListener('close', onClose);
+    const request = confirmed && invoker.isConnected ? issueRequest : null;
+    issueRequest = null;
+    pendingConfirmation = null;
+    dialog.close();
+    dialog.remove();
+    if (invoker.isConnected) invoker.focus({preventScroll: true});
+    request?.(true);                            // skip htmx's confirm check, avoiding recursion
+  };
+  const onCleanup = event => {
+    if (event.detail.elt?.contains(invoker)) close();
+  };
+  const onClose = () => close();
+  const observer = new MutationObserver(() => {
+    if (!invoker.isConnected || !dialog.isConnected) close();
   });
-  document.addEventListener('keydown', onKey);
-  document.body.appendChild(backdrop);
-  backdrop.querySelector('[data-act="ok"]').focus();
+  dialog.addEventListener('keydown', event => {
+    event.stopPropagation();                   // background document/window shortcuts stay idle
+    if (event.key === 'Escape') { event.preventDefault(); close(); }
+    if (event.key === 'Tab') {
+      const buttons = [...dialog.querySelectorAll('button')];
+      const index = buttons.indexOf(document.activeElement);
+      event.preventDefault();
+      buttons[(index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length].focus();
+    }
+  });
+  dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
+  dialog.addEventListener('close', onClose);
+  dialog.addEventListener('click', event => {
+    const bounds = dialog.getBoundingClientRect();
+    if (event.target === dialog && (event.clientX < bounds.left || event.clientX > bounds.right
+        || event.clientY < bounds.top || event.clientY > bounds.bottom)) close();
+  });
+  dialog.querySelector('[data-act="cancel"]').addEventListener('click', () => close());
+  dialog.querySelector('[data-act="ok"]').addEventListener('click', () => close(true));
+  document.addEventListener('htmx:beforeCleanupElement', onCleanup);
+  document.body.appendChild(dialog);
+  pendingConfirmation = dialog;
+  observer.observe(document.body, {childList: true, subtree: true});
+  dialog.showModal();
 });

@@ -1,6 +1,6 @@
 import pytest
 
-from yt_playlist.providers import discogs, musicbrainz, release_notes, wikipedia, album_editorial, album_facts
+from yt_playlist.providers import discogs, musicbrainz, release_notes, wikipedia, album_editorial, deepseek
 from yt_playlist.providers.album_editorial import lookup as editorial_lookup
 from yt_playlist.rec import album_notes
 
@@ -13,8 +13,7 @@ def healthy_providers(monkeypatch):
     monkeypatch.setattr(musicbrainz, 'tripped', lambda: False)
     monkeypatch.setattr(discogs, 'tripped', lambda: False)
     monkeypatch.setattr(album_editorial, 'lookup', lambda *args: None)
-    monkeypatch.setattr(album_facts, 'from_deezer', lambda *args: (None, {'provider': 'deezer_album', 'status': 'miss'}))
-    monkeypatch.setattr(album_facts, 'from_lastfm', lambda *args: (None, {'provider': 'lastfm_album', 'status': 'not_configured'}))
+    monkeypatch.setattr(deepseek, 'api_key', lambda *args: None)
 
 
 def release():
@@ -73,9 +72,7 @@ def test_notes_worker_publishes_json_evidence_and_preserves_last_good_on_outage(
     assert note['rating'] == rating and 'artist_note' not in note
     raw = store.rec_ledger.evidence().get('artifact', note['evidence'])
     assert raw['sources'] == [{'provider': 'discogs', 'id': '456'},
-                              {'provider': 'deezer_album', 'status': 'miss'},
-                              {'provider': 'lastfm_album', 'status': 'not_configured'},
-                              {'provider': 'youtube_album', 'status': 'not_connected'}]
+                              {'provider': 'deepseek', 'response': {'status': 'not_configured'}}]
     monkeypatch.setattr(release_notes, 'fetch', lambda *args: {
         'rating': None, 'links': [], 'label': None, 'track_count': None, 'evidence': [], 'retry': True})
     album_notes.prepare(store, 100 + 8 * 86400, [ALBUM])
@@ -137,7 +134,7 @@ def test_previous_metadata_cache_gets_prose_without_waiting_seven_days(store, mo
     album_notes.prepare(store, 2, [ALBUM])
     note = album_notes.read(store, ALBUM)
     assert note['description']['text'] == 'Album prose.'
-    assert note['editorial_version'] == 5
+    assert note['editorial_version'] == 6
     store.rec_proposals.request_album_notes([ALBUM], 3)
     assert not store.rec_proposals.get_proposals('album_note_requests')
 
@@ -173,7 +170,7 @@ def test_worker_artwork_uses_matching_artist_results_not_album_thumbnails():
     assert art['kind'] == 'artist' and art['source_url'].endswith('/UCduo')
 
 
-def test_worker_fills_missing_copy_with_verified_album_facts_without_saving(store, monkeypatch):
+def test_worker_caches_complete_tracklist_for_familiarity_without_filler_copy_or_saving(store, monkeypatch):
     from types import SimpleNamespace
     monkeypatch.setattr(release_notes, 'fetch', lambda *args: {'evidence': [], 'retry': False})
     album = {**ALBUM, 'browse_id': 'MPREb_x'}
@@ -185,9 +182,7 @@ def test_worker_fills_missing_copy_with_verified_album_facts_without_saving(stor
                              search=lambda *args, **kwargs: [])
     album_notes.prepare(store, 100, [album], client=client)
     note = album_notes.read(store, album)
-    assert note['description']['text'] == '2 tracks, released in 2024, 3 minutes in all. Opens with Opener and closes with Closer.'
-    assert note['description']['source'] == 'YouTube Music · release details'
-    assert note['description']['kind'] == 'catalog' and not note['description']['quote']
+    assert not note.get('description')
     assert store.collection.album_listening_summary(['MPREb_x'])['MPREb_x'] == {
         'plays': 0, 'tracks': 2, 'complete': True}
     # Library completeness deliberately excludes fetched, unsaved catalog entries.
@@ -203,12 +198,12 @@ def test_worker_fills_missing_copy_with_verified_album_facts_without_saving(stor
     {'title': 'Different record'}, {'artists': [{'name': 'Someone Else'}]},
     {'trackCount': 3}, {'continuations': ['unfinished']},
 ])
-def test_catalog_copy_rejects_wrong_editions_artists_and_partial_tracklists(store, changed):
+def test_catalog_metadata_rejects_wrong_editions_artists_and_partial_tracklists(store, changed):
     from types import SimpleNamespace
     album = {**ALBUM, 'browse_id': 'MPREb_x'}
     release = {'title': album['title'], 'artists': [{'name': album['artist']}],
                'trackCount': 1, 'tracks': [{'title': 'One', 'videoId': 'v1'}], **changed}
-    assert album_notes._catalog_description(SimpleNamespace(get_album=lambda browse: release), album, store) == (None, None)
+    assert album_notes._catalog_metadata(SimpleNamespace(get_album=lambda browse: release), album, store) is None
     assert not store.collection.cached_album_tracklist_ids()
 
 
@@ -225,7 +220,7 @@ def test_upgraded_copy_preserves_existing_art_and_previous_prose_on_outage(store
     album_notes.prepare(store, 2, [ALBUM])
     note = album_notes.read(store, ALBUM)
     assert note['description'] == description and note['artwork'] == art
-    assert note['editorial_version'] == 5 and note['retry_at'] == 3602
+    assert note['editorial_version'] == 6 and note['retry_at'] == 3602
 
 
 def test_hand_written_cache_is_excluded_and_worker_gets_automatic_copy(store, monkeypatch):
@@ -235,10 +230,54 @@ def test_hand_written_cache_is_excluded_and_worker_gets_automatic_copy(store, mo
         'editorial_version': 4, 'retry_at': 999999}, 1)
     assert not album_notes.read(store, ALBUM)['description']
     monkeypatch.setattr(release_notes, 'fetch', lambda *args: {'evidence': [], 'retry': False})
-    description = {'text': 'Verified album facts.', 'source': 'Deezer · release details',
-                   'url': 'https://www.deezer.com/album/42', 'kind': 'catalog',
-                   'acquisition': 'automatic'}
-    monkeypatch.setattr(album_facts, 'from_deezer', lambda *args:
-                        (description, {'provider': 'deezer_album', 'response': {'id': 42}}))
+    monkeypatch.setattr(deepseek, 'api_key', lambda *args: 'test-key')
+    monkeypatch.setattr(deepseek, 'describe', lambda album, key: {
+        'description': 'A generated, album-specific description.', 'confidence': 'moderate',
+        'uncertainty': '', 'model': deepseek.MODEL, 'usage': {}, 'prompt_version': 1})
     album_notes.prepare(store, 2, [ALBUM])
-    assert album_notes.read(store, ALBUM)['description'] == description
+    description = album_notes.read(store, ALBUM)['description']
+    assert description['text'] == 'A generated, album-specific description.'
+    assert description['kind'] == 'generated' and not description['quote']
+
+
+def test_old_catalogue_filler_is_hidden_and_replaced_by_persistent_generated_copy(store, monkeypatch):
+    store.rec_proposals.publish_album_note(ALBUM['browse_id'], {
+        'description': {'text': 'Catalogued as Electro, Dance.', 'source': 'Deezer',
+                        'url': 'https://www.deezer.com/album/42', 'kind': 'catalog',
+                        'acquisition': 'automatic'},
+        'editorial_version': 5, 'retry_at': 999999}, 1)
+    assert not album_notes.read(store, ALBUM)['description']
+    monkeypatch.setattr(release_notes, 'fetch', lambda *args: {'evidence': [], 'retry': False})
+    monkeypatch.setattr(deepseek, 'api_key', lambda *args: 'test-key')
+    calls = []
+    def generate(album, key):
+        calls.append(album)
+        return {'description': 'Album-specific prose.', 'model': deepseek.MODEL, 'usage': {}}
+    monkeypatch.setattr(deepseek, 'describe', generate)
+    album_notes.prepare(store, 2, [{**ALBUM, 'year': '2024'}])
+    assert album_notes.read(store, ALBUM)['description']['text'] == 'Album-specific prose.'
+    assert calls[0]['year'] == '2024'
+    # Refreshing optional public metadata does not buy the description again.
+    album_notes.prepare(store, 2 + 8 * 86400, [ALBUM])
+    assert len(calls) == 1
+
+
+def test_refreshed_menu_discards_old_queue_without_paying_for_hidden_records(store, monkeypatch):
+    old = {**ALBUM, 'browse_id': 'previous', 'title': 'Previous album'}
+    store.rec_proposals.request_album_notes([old], 1)
+    monkeypatch.setattr(release_notes, 'fetch', lambda *args: {'evidence': [], 'retry': False})
+    monkeypatch.setattr(deepseek, 'api_key', lambda *args: 'test-key')
+    calls = []
+    def generate(album, key):
+        calls.append(album['browse_id'])
+        return {'description': 'Album-specific prose.', 'model': deepseek.MODEL, 'usage': {}}
+    monkeypatch.setattr(deepseek, 'describe', generate)
+    assert not album_notes.prepare(store, 2, [ALBUM])
+    assert album_notes.read(store, ALBUM)['description']['text'] == 'Album-specific prose.'
+    assert not album_notes.prepare(store, 3, [ALBUM])
+    assert calls == [ALBUM['browse_id']]
+    assert not album_notes.read(store, old)['description']
+    assert store.rec_proposals.get_proposals('album_description_usage')['requests'] == 1
+    # The discarded record has no fresh negative cache to suppress it later.
+    assert not album_notes.prepare(store, 4, [old])
+    assert calls == [ALBUM['browse_id'], old['browse_id']]

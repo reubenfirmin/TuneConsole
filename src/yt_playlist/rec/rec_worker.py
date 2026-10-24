@@ -73,6 +73,7 @@ class RecWorker:
                 self._retry_bundles()
                 self.projections.poll()
                 self._poll_refresh()
+                self._poll_choices()
             except Exception:
                 self.ctx.logger.warning('recommendation change polling failed', exc_info=True)
 
@@ -93,6 +94,13 @@ class RecWorker:
                    or candidate_refresh.due(self.ctx.store, self.ctx.now_fn()))):
             # Decay/expiry changes rankings, not model fitting inputs.
             self._schedule(full=False, bundles=True)
+
+    def _poll_choices(self):
+        from yt_playlist.rec import choice_evidence
+        if self.busy or time.monotonic() < self.jobs.retry[Job.CHOICES].retry_at:
+            return
+        if choice_evidence.daily_due(self.ctx.store, self.ctx.now_fn()):
+            self._schedule(full=False, choices=True)
 
     def shutdown(self):
         self._stop.set()
@@ -223,6 +231,10 @@ class RecWorker:
         """Resolve exact-video rating subjects without blocking the bridge's response reader."""
         self._schedule(full=False, ratings=True)
 
+    def trigger_candidate_refresh(self):
+        """Rerank completed models after a Taste control edit, reset or restore."""
+        self._schedule(full=False, bundles=True)
+
     def trigger_home_refresh(self, *, force=False):
         """Coalesce disposable Home preparation without asking for any model fit.
 
@@ -277,13 +289,13 @@ class RecWorker:
         return self._schedule(full=False, **dict.fromkeys(kinds, True))
 
     def _schedule(self, *, full, modes=False, keys=(), ratings=False, trends=False, cleanup=False, bundles=False, home=False,
-                  stories=False, artist_images=(), prepare=False):
+                  stories=False, artist_images=(), prepare=False, choices=False):
         with self._lock:
             if not self._accepting():
                 return False
             requested = {Job.FULL: full, Job.MODES: modes, Job.RATINGS: ratings, Job.PREPARE: prepare, Job.TRENDS: trends,
                          Job.CLEANUP: cleanup, Job.BUNDLES: bundles, Job.HOME: home, Job.STORIES: stories,
-                         Job.ARTWORK: artist_images, Job.CONTENT: keys}
+                         Job.ARTWORK: artist_images, Job.CONTENT: keys, Job.CHOICES: choices}
             for job, payload in requested.items():
                 if payload:
                     self.jobs.merge(job, payload)
@@ -404,6 +416,18 @@ class RecWorker:
                     with self._lock:
                         self.jobs.retry[Job.HOME].dirty = True
                     self.ctx.logger.warning("Home preparation failed; retaining previous collections", exc_info=True)
+            if Job.CHOICES in batch:
+                state = self.jobs.retry[Job.CHOICES]
+                state.started(time.monotonic())
+                try:
+                    with self.model_lock:
+                        self.tasks.choices()
+                    state.succeeded()
+                except WorkClosing:
+                    raise
+                except Exception:
+                    state.failed(time.monotonic(), base=60, cap=3600)
+                    self.ctx.logger.warning("Daily listening evaluation failed; retaining previous report", exc_info=True)
             if Job.ARTWORK in batch:
                 try:
                     self.tasks.artwork(batch[Job.ARTWORK])

@@ -20,6 +20,7 @@ from yt_playlist.util import genre_map
 CLUSTER_POOL_LIMIT = 96
 NEIGHBOUR_COUNT = 4
 GENRE_POOL_LIMIT = 4
+ARTIST_GAP = 6
 logger = logging.getLogger(__name__)
 
 
@@ -30,6 +31,16 @@ def _unit(vector):
 
 def _cosine(a, b):
     return float(np.einsum("i,i->", a, b, optimize=False))
+
+
+def _artist_gap(track, history):
+    """Unknown artists do not collide; thin pools prefer the oldest repeat."""
+    artist = " ".join((track.get("artist") or "").casefold().split())
+    if artist:
+        for gap, previous in enumerate(reversed(history[-ARTIST_GAP:]), 1):
+            if artist == " ".join((previous.get("artist") or "").casefold().split()):
+                return gap
+    return ARTIST_GAP + 1
 
 
 class RadioCandidates:
@@ -202,6 +213,8 @@ class RadioCandidates:
         keys = [t["key"] for t in pool]
         library = self.store.rec_query.tracks_by_keys(keys)
         videos = [t["video_id"] for t in pool]
+        identity = next((i for i in self.store.identities.get_identities() if i.is_master), None)
+        alternates = self.store.tracks.playback_alternates(identity.id, videos) if identity else {}
         with self.store._lock:
             qs = ",".join("?" * len(videos))
             details = {r["video_id"]: dict(r) for r in self.store.conn.execute(
@@ -213,8 +226,9 @@ class RadioCandidates:
             key = old["key"]
             if old["video_id"] not in details:
                 continue
-            # Keep the prepared upload when multiple uploads share a recording.
-            track = {**old, **details[old["video_id"]]}
+            # Prefer a provider-witnessed playable upload over the old ID that
+            # Music substitutes. Other recordings' uploads remain independent.
+            track = {**old, **(alternates.get(old['video_id']) or details[old["video_id"]])}
             for metric in ("plays", "liked"):
                 if metric in library.get(key, {}):
                     track[metric] = library[key][metric]
@@ -353,9 +367,9 @@ class RadioCandidates:
             eligible = [t for t in eligible if genres.contrast(t) == contrast]
         fit = [t for t in eligible if self.fits(t, genres.current if genres.pinned else target)]
         eligible = fit or eligible  # Thin pools soften preferences, never eligibility.
-        artists = {(t.get("artist") or "").casefold() for t in history[-3:]}
-        spaced = [t for t in eligible if (t.get("artist") or "").casefold() not in artists]
-        eligible = spaced or eligible
+        gaps = [_artist_gap(t, history) for t in eligible]
+        longest = max(gaps)
+        eligible = [t for t, gap in zip(eligible, gaps) if gap == longest]
         recent = history[-5:]
         share = .85 * (1 - self.tuning["comfort"])
         discovery = share * (len(recent) + 1) - sum(bool(t.get("_radio_fresh")) for t in recent) >= .5
@@ -455,11 +469,14 @@ class RadioCandidates:
             modes += [mid for mid in self._genre_modes(genres, excluded) if mid not in modes][:2]
         modes = list(dict.fromkeys(modes))
         eligible = [t for mid in modes for t in self._load(mid) if t["video_id"] not in excluded]
-        if not eligible:
-            for neighbour in self.neighbours[context]:
-                eligible = [t for t in self._load(neighbour) if t["video_id"] not in excluded]
-                if eligible:
-                    break
+        # A busy local cluster is not evidence that the library has run out of
+        # artists. Inspect only its bounded prepared neighbours before relaxing.
+        for neighbour in self.neighbours[context]:
+            if any(_artist_gap(t, history) > ARTIST_GAP and genres.allows(t)
+                   and self.fits(t, target) for t in eligible):
+                break
+            if neighbour not in modes:
+                eligible += [t for t in self._load(neighbour) if t["video_id"] not in excluded]
         if not eligible:
             return None
         return self._choose(eligible, history, target, feedback, genres)
@@ -480,8 +497,13 @@ class RadioCandidates:
             destinations = [mid for mid in [current, *neighbours] if mid not in taken]
         if not destinations:
             destinations = [current, *neighbours]
+        # Distinct style edges are preferred, but another branch's cluster
+        # must not force a repeat of an artist that just played.
+        destinations += [mid for mid in [current, *neighbours] if mid not in destinations]
+        eligible = []
+        target = history[-1] if history and self.tuning["theme"] > .8 else None
         for mid in destinations:
-            eligible = [t for t in self._load(mid) if t["video_id"] not in excluded]
-            if eligible:
-                return self._choose(eligible, history, history[-1] if history and self.tuning["theme"] > .8 else None, feedback, genres)
-        return None
+            eligible += [t for t in self._load(mid) if t["video_id"] not in excluded]
+            if any(_artist_gap(t, history) > ARTIST_GAP and self.fits(t, target) for t in eligible):
+                break
+        return self._choose(eligible, history, target, feedback, genres)

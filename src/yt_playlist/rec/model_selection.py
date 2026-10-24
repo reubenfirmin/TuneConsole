@@ -6,7 +6,6 @@ the number of alternatives. Daily shadow forecasts are saved BEFORE their outcom
 syncs score both setups against the same eligible, independently played tracks.
 """
 import math
-import json
 from datetime import datetime, timezone
 
 import numpy as np
@@ -30,6 +29,8 @@ def current_setup(store):
 
 
 def _tracked_run(store, latest):
+    if latest and latest.get("diagnostic_challenger"):
+        return latest
     active = store.settings.get_setting("rec_selection_active_run")
     if active:
         return store.model_selection.selection_run(active)
@@ -224,7 +225,7 @@ def update_followup(store, now, *, now_fn=None):
     store.model_selection.save_selection(run["id"], run)
     if (run["status"] != "restored" and not run.get("ended_at") and store.settings.get_setting("rec_selection_paused") != "1"
             and (not forecasts or now - forecasts[-1]["made_at"] >= DAY)):
-        forecast = _forecast(store, run["previous"], run["selected"], now)
+        forecast = _forecast(store, run["previous"], run.get("diagnostic_challenger", run["selected"]), now)
         if forecast:
             store.model_selection.save_model_forecast(run["id"], now_fn() if now_fn else now, forecast)
             run["followup"]["forecasts"] = len(forecasts) + 1
@@ -257,22 +258,14 @@ def run(store, now, *, now_fn=None):
                     result["grid"].append({**setup, "eligible": False, "reason": "Could not fit this setup"})
             contenders = [g for g in result["grid"] if g.get("promote")]
             best = max(contenders, key=lambda g: g["score"]) if contenders else None
-            if best and store.settings.get_setting("rec_selection_paused") != "1":
-                selected = {k: best[k] for k in ("method", "dim")}
-                # Fit in memory, then publish exactly once. A failed fit leaves the live model alone.
-                with store.read_snapshot() as snapshot:
-                    keys, vectors = _build(snapshot.store, selected)
-                    if not keys:
-                        raise ValueError("Selected setup could not build a serving model")
-                    published = {**result, "status": "applied", "selected": selected, "comparison": best,
-                                 "reason": "Improved predictions across multiple test periods."}
-                    rows = [(k, vectors[i].tobytes()) for i, k in enumerate(keys)]
-                    encoded = json.dumps(published)
-                    if snapshot.publish(lambda: store.model_selection.publish_selection(
-                            run_id, encoded, rows, selected)):
-                        result = published
-                    else:
-                        result.update(status="failed", reason="Inputs changed during fitting. Your current setup was kept.")
+            if best:
+                # First-play recall is a representation diagnostic. It cannot establish
+                # quality of the menus actually served, or an album-format benefit.
+                result.update(status="retained", comparison=best,
+                    diagnostic_challenger={k: best[k] for k in ("method", "dim")},
+                    promotion_gate="awaiting_validated_product_outcomes",
+                    reason="A setup improved first-play prediction. Your current model was kept: "
+                           "promotion requires validated listening-choice evidence.")
             else:
                 result.update(status="retained", comparison=baseline_check,
                               reason="No alternative showed a reliable improvement. Your current setup was kept.")

@@ -4,8 +4,10 @@
 {% block page_styles %}
 <link rel="stylesheet" href="/static/generating.css?v={{ asset_v }}">
 <link rel="stylesheet" href="/static/radio.css?v={{ asset_v }}">
+<link rel="stylesheet" href="/static/album-choices.css?v={{ asset_v }}">
 <script src="/static/radio-artwork.js?v={{ asset_v }}"></script>
 <script src="/static/radio.js?v={{ asset_v }}"></script>
+<script src="/static/album-choices.js?v={{ asset_v }}"></script>
 {% endblock %}
 {# Transient success toast (e.g. re-authed with auto-sync on, nothing for them to do). Mirrors the
    OOB error toast: Alpine auto-dismisses after 5s. Renders into base.html's #toasts container. #}
@@ -65,15 +67,16 @@
 
   {% if sync.last_synced_ago and not onboarding %}
   {% set spotify_result_waiting = spotify_library_job and spotify_library_job.status in ('done', 'error', 'preview') %}
-  {% set dash_default = 'notices' if spotify_result_waiting else ('start' if onboarding else 'directions') %}
+  {% set dash_default = 'notices' if spotify_result_waiting else ('start' if onboarding else home_default_panel|default('directions')) %}
   {% set has_notices = show_takeout_nag or actions or show_intro or show_lastfm_nudge or
       show_identities_nudge or show_backend_update or recap or spotify_library_job %}
   <div class="home-dashboard"
        :class="{'is-radio': panel === 'radio'}"
        x-data="{ panel: location.hash.slice(1) || '{{ dash_default }}',
-                 go(p) { this.panel = p; history.replaceState(null, '', '#' + p); window.dispatchEvent(new Event('hashchange')); } }"
+                 go(p) { this.panel = p; history.replaceState(null, '', '#' + p); window.dispatchEvent(new Event('hashchange')); fetch('/home/format', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: new URLSearchParams({panel:p})}).catch(() => {}); } }"
        @hashchange.window="panel = location.hash.slice(1) || '{{ dash_default }}'"
        x-init='$nextTick(() => { if (!$el.querySelector(`[data-dash="${panel}"]`)) go({{ dash_default|tojson }}) })'>
+    <div class="dash-navigation">
     <nav class="dash-nav" aria-label="Home areas" role="tablist"
          @keydown.right.prevent="$event.target.nextElementSibling?.focus()"
          @keydown.left.prevent="$event.target.previousElementSibling?.focus()">
@@ -89,6 +92,8 @@
               @click="go('radio')">On air <span class="dash-on-air-dot" x-show="radioPlaybackState" x-cloak
                 :class="{'is-paused': radioPlaybackState === 'paused'}"
                 aria-hidden="true"></span></button>
+      <button type="button" role="tab" :class="{ on: panel === 'album-choices' }" :aria-selected="panel === 'album-choices'"
+              @click="go('album-choices')">Long play</button>
       {% if not onboarding and (rediscover_albums or rediscover) %}
       <button type="button" role="tab" :class="{ on: panel === 'rediscover' }" :aria-selected="panel === 'rediscover'"
               @click="go('rediscover')">Revisit</button>
@@ -104,9 +109,18 @@
               @click="go('notices')">Needs attention <span class="dash-attention-dot" aria-hidden="true"></span></button>
       {% endif %}
     </nav>
+    <button class="album-tune" type="button" x-show="panel === 'album-choices'" x-cloak
+            @click="$dispatch('album-tuning-open')" aria-label="Adjust album parameters"
+            aria-haspopup="dialog" title="Adjust parameters">
+      <svg viewBox="0 0 32 24" aria-hidden="true"><path d="M3 5h5m6 0h15M3 12h16m6 0h4M3 19h8m6 0h12"/><circle cx="11" cy="5" r="3"/><circle cx="22" cy="12" r="3"/><circle cx="14" cy="19" r="3"/></svg>
+    </button>
+    </div>
 
     <section class="dash-panel dash-radio" data-dash="radio" role="tabpanel" x-show="panel === 'radio'" x-cloak>
       {% include "_partials/radio.html" %}
+    </section>
+    <section class="dash-panel" data-dash="album-choices" role="tabpanel" x-show="panel === 'album-choices'" x-cloak>
+      <div hx-get="/home/album-choices" hx-trigger="load" hx-swap="innerHTML"></div>
     </section>
 
     {% if onboarding %}

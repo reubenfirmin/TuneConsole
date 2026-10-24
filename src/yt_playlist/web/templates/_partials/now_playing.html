@@ -19,7 +19,7 @@
           <span class="hs-eq" x-show="!nowPlaying.paused" x-cloak aria-hidden="true"><i></i><i></i><i></i></span>
         </span>
         <span class="hs-now-text">
-          <span class="hs-now-title" x-text="nowPlaying.title || ''" :title="nowPlaying.title || ''"></span>
+          <a class="hs-now-title" :href="trackUrl(nowPlaying)" x-text="nowPlaying.title || ''" :title="nowPlaying.title || ''"></a>
           <span class="hs-now-artist" x-show="nowPlaying.artist" x-text="nowPlaying.artist || ''" :title="nowPlaying.artist || ''"></span>
         </span>
         <template x-if="sourceLinkVisible()">

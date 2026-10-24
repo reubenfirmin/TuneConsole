@@ -18,7 +18,7 @@
                             "album": f.album, "thumbnail": f.thumbnail}|tojson }}'>{% endif %}
           {% if f.thumbnail %}<img class="album-thumb" src="{{ f.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
           <span class="alt-meta">
-            <span class="alt-title">{{ f.title }}</span>
+            <a class="alt-title" href="{{ track_url(f) }}" @click.stop>{{ f.title }}</a>
             <span class="alt-sub">{{ f.artist }}{% if f.album %} · {{ f.album }}{% endif %}</span>
           </span>
           <a class="alink" href="https://music.youtube.com/watch?v={{ f.video_id }}"

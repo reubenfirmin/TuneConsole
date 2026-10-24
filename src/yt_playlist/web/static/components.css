@@ -58,6 +58,9 @@ a:has(> .ui-arrow--external) {
 .skeleton-row-compact { min-height: 2.6rem; }
 .table-scroll { max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; }
 .table-scroll > table { min-width: var(--table-min, 46rem); }
+/* This wrapper owns sticky positioning, so the document's navbar offset would
+   move its header over the first data row. */
+.table-scroll > table thead th { top: 0; }
 
 .section-label { display: inline-flex; align-items: center; gap: .4rem;
   font-size: var(--type-ui); font-weight: var(--weight-bold); color: var(--text); }
@@ -376,6 +379,9 @@ ol.steps > li::before {
 .modal h3 { margin: 0 0 0.6rem; font-family: var(--font-sans); font-size: var(--type-lg); font-weight: var(--weight-bold); }
 .modal p { margin: 0 0 1.1rem; color: var(--dim); font-size: var(--type-ui); line-height: var(--leading-body); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 0.6rem; }
+.shared-confirmation { color: var(--text); width: calc(100vw - 2rem);
+  max-height: calc(100dvh - 2rem); overflow: auto; }
+.shared-confirmation::backdrop { background: var(--scrim-space); backdrop-filter: blur(2px); }
 .modal-wide { max-width: 40rem; width: calc(100vw - 3rem); }
 hr { border: none; border-top: 1px solid var(--border); margin: 1.375rem 0; }
 .cols { display: flex; gap: 1.375rem; flex-wrap: wrap; }

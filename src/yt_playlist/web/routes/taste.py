@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
-from yt_playlist.rec import autotune_run, eval_recs, experiments, model_selection, rec_params, rose, scorecard, surfaces, taste_analysis, taste_viz
+from yt_playlist.rec import album_tuning, autotune_run, eval_recs, experiments, model_selection, rec_params, rose, scorecard, surfaces, taste_analysis, taste_viz
 from yt_playlist.web.context import form_float, request_form
 
 
@@ -78,23 +78,42 @@ def build(ctx) -> APIRouter:
                           "fresh": (now - m["first_seen"]) < MODE_NEW_S, "tracks": tracks})
         return {"modes": modes}
 
+    def _refresh_rankings():
+        from yt_playlist.rec import candidate_refresh
+        if candidate_refresh.due(store, ctx.now()):
+            ctx.rec_worker.trigger_candidate_refresh()
+
     def _refresh():
+        _refresh_rankings()
         return Response(status_code=200, headers={"HX-Refresh": "true"})
 
     def _stale():
         # Save without reloading the page: just flag the live sample as out of date (the user
         # refreshes it manually). Avoids the full-page reload that made every bar re-animate.
+        _refresh_rankings()
         return Response(status_code=200, headers={"HX-Trigger": "taste-stale"})
 
     def _param_view(spec):
         value = rec_params.get_param(store, spec.name)
         def display(number):
             return f"{100 * (number - spec.min) / (spec.max - spec.min):g}%" if spec.percentage else number
-        return {"name": spec.name, "label": spec.label, "help": spec.explanation,
+        param = {"name": spec.name, "label": spec.label, "help": spec.explanation,
                 "min": spec.min, "max": spec.max, "step": spec.step, "default": spec.default,
                 "boolean": spec.boolean, "value": value, "value_label": display(value),
                 "default_label": display(spec.default), "percentage": spec.percentage,
                 "low": spec.low, "high": spec.high}
+        if spec.name.startswith('album_menu_'):
+            tuning = album_tuning.state(store, ctx.now())
+            effective = display(tuning['values'][spec.name.removeprefix('album_menu_')])
+            duration = f"temporary · {max(1, round(tuning['remaining'] / 60))} min left" if tuning['remaining'] else 'standing setting'
+            param['effective_note'] = f'Effective in Albums: {effective} · {duration}'
+            param['effective_reset'] = bool(tuning['remaining']) and spec.name == 'album_menu_novelty'
+        return param
+
+    @router.post('/taste/reset-album-tuning')
+    def reset_album_tuning():
+        album_tuning.reset(store)
+        return _refresh()
 
     def _settings_sections(definitions, param_groups):
         sections = []
@@ -117,7 +136,12 @@ def build(ctx) -> APIRouter:
         return sections
 
     def _feature_sections():
+        tuning = album_tuning.state(store, ctx.now())
+        genres = ', '.join(genre.removeprefix('other:').title() for genre in tuning['genres']) or 'All genres'
         return _settings_sections([
+            ("album-menus", "Album menus", "teal",
+             "Standing defaults for Home Albums. The Albums tuner overrides them for four hours and does not change lasting taste. "
+             f"Current genre filter: {genres}.", [("", ("album_menu_",))]),
             ("home", "Home cards", "teal",
              "Choose how often Home changes and how much variety fits on each card. Limits that are too strict can leave fewer suggestions available.", [
                  ("Refresh & preparation", ("erosion_", "candidate_", "modes_pool_", "modes_cand_")),
@@ -137,6 +161,9 @@ def build(ctx) -> APIRouter:
             ("preferences", "Ranking & feedback", "amber",
              "Set how strongly stated preferences affect rankings, how long dislikes exclude tracks, and what counts as mainstream for feedback.", [
                  ("", ("breadth_gain", "axis_weight_cap", "dislike_suppress_", "dislike_durable_w", "pop_")),
+                 ("Album interests · shared, standing support", ("album_saved_", "album_feedback_", "album_return_")),
+                 ("Listening choice measurement", ("choice_",)),
+                 ("Mix menu allocation", ("bandit_",)),
              ]),
             ("artists", "Related artists", "blue",
              "Choose how the app finds connections between artists. These settings affect related-artist suggestions.", [
@@ -274,11 +301,13 @@ def build(ctx) -> APIRouter:
             data = {**_viz_context(), **_modes_context()}
         elif panel == "generated":
             data = {"viz": taste_viz.source_weights(store, ctx.now()),
+                    "listening_choices": store.rec_proposals.get_proposals("listening_choices"),
+                    "choice_daily": store.rec_proposals.get_proposals("choice_daily"),
                     "generation": taste_viz.generated_playlists(store, ctx.now()),
                     "lane_min": rec_params.LANE_MIN, "lane_max": rec_params.LANE_MAX,
                     "lane_default": rec_params.LANE_DEFAULT, "lane_step": 0.05}
         elif panel == "recommendations":
-            data = _recommendation_context()
+            data = {**_recommendation_context(), "home_format": store.settings.get_setting("home_format") or "mixes"}
         elif panel == "learning":
             data = {"learning": taste_viz.learning_progress(store, ctx.now()),
                     "learning_sections": _learning_sections()}
@@ -286,7 +315,8 @@ def build(ctx) -> APIRouter:
             data = {**_model_context(), **_autotune_context(),
                     'spotify_history': store.history.spotify_history_stats()}
         elif panel == "feedback":
-            data = _feedback_context()
+            from yt_playlist.rec.album_choices import feedback_state
+            data = {**_feedback_context(), "album_feedback": feedback_state(store)}
         else:
             raise HTTPException(status_code=404)
         return templates.TemplateResponse(request, "_partials/taste_panel.html", {"panel": panel, **data})
@@ -559,7 +589,7 @@ def build(ctx) -> APIRouter:
     def taste_unban(request: Request, form=Depends(request_form)):
         key = form.get("key")
         if key:
-            store.rec_model.clear_dislike(key)
+            store.rec_model.unban(key, ctx.now())
         return _refresh()
 
     return router

@@ -108,13 +108,19 @@
   <script src="/static/setup-status.js?v={{ asset_v }}"></script>
   {% endif %}
   <script src="/static/playback-controls.js?v={{ asset_v }}"></script>
+  {% if path == '/' or path.startswith('/album') %}<script src="/static/album-player.js?v={{ asset_v }}"></script>{% endif %}
   <script src="/static/app.js?v={{ asset_v }}"></script>
+  {% if path == '/' or path.startswith('/album') %}<script src="/static/listening-choices.js?v={{ asset_v }}"></script>{% endif %}
   <script src="/static/player-card.js?v={{ asset_v }}"></script>
   <script src="/static/song-actions.js?v={{ asset_v }}"></script>
+  {% if path.startswith('/track/') %}
+  <link rel="stylesheet" href="/static/track-detail.css?v={{ asset_v }}">
+  <script src="/static/track-detail.js?v={{ asset_v }}"></script>
+  {% endif %}
   {# Shared song dialogs can be opened from any page, including HTMX results. #}
   <script src="/static/genre-dialog.js?v={{ asset_v }}"></script>
   <script src="/static/visualization-tooltips.js?v={{ asset_v }}"></script>
-  {% if path.startswith(('/playlist', '/album', '/artist', '/cleanup', '/taste')) %}
+  {% if path == '/' or path.startswith(('/playlist', '/album', '/artist', '/cleanup', '/taste')) %}
   <script src="/static/table-controls.js?v={{ asset_v }}"></script>
   {% endif %}
   {% if path.startswith(('/playlist', '/move')) %}

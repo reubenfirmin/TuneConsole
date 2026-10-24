@@ -1,3 +1,8 @@
+# Motion
+
+- Do not respect reduced-motion preferences. Do not disable, simplify, or pause
+  animations in response to `prefers-reduced-motion`.
+
 # Test coordination
 
 - One agent owns test execution at a time. During delegated work, the coordinator

@@ -93,8 +93,8 @@ class SearchRepo(Repo):
             shown_keys = {r["key"] for r in picked}
             sections.append({"kind": "tracks_by", "title": f"Tracks by {name}", "rows": [
                 {"type": "track", "label": r["title"], "sub": r["artist"],
-                 "href": "https://music.youtube.com/watch?v=" + r["vid"],
-                 "thumbnail": r["thumb"], "external": True} for r in picked]})
+                 "href": "/track/" + quote(r["vid"], safe=""),
+                 "thumbnail": r["thumb"], "external": False} for r in picked]})
 
         arows = self.conn.execute(
             "SELECT a.title album,p.provider_id browse,COALESCE(a.thumbnail,("
@@ -144,8 +144,8 @@ class SearchRepo(Repo):
         if picked:
             sections.append({"kind": "songs", "title": "Songs", "rows": [
                 {"type": "track", "label": r["title"], "sub": r["artist"],
-                 "href": "https://music.youtube.com/watch?v=" + r["vid"],
-                 "thumbnail": r["thumb"], "external": True} for r in picked]})
+                 "href": "/track/" + quote(r["vid"], safe=""),
+                 "thumbnail": r["thumb"], "external": False} for r in picked]})
 
     # --- direct playlist-title matches, minus generated + ones already shown ---
     def _playlists_section(self, like, q, per_section, shown_pids, sections):

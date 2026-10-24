@@ -212,6 +212,67 @@ function radioArtwork() {
       const scale = Math.max(width / 1200, historyHeight / 340);
       return `translate(0 ${(historyHeight - 340 * scale) / 2}) scale(${scale})`;
     },
+    get recordEchoes() {
+      const {width, historyHeight: height} = this.drawingSpace;
+      const scale = Math.max(width / 1200, height / 340);
+      const primary = {x: 244 * scale, y: height / 2 + scale, r: 119 * scale, depth: 0};
+      const placed = [primary], echoes = [], pending = [primary];
+      const sweep = .2;
+      const fitsOrbit = copy => {
+        const dx = copy.x - primary.x, dy = copy.y - primary.y;
+        const distance = Math.hypot(dx, dy), angle = Math.atan2(dy, dx);
+        const angles = [angle - sweep, angle + sweep];
+        // Include every horizontal/vertical extremum along the entire orbital
+        // arc, so its clearance never depends on the current animation frame.
+        for (let quarter = Math.ceil((angle - sweep) / (Math.PI / 2));
+             quarter * Math.PI / 2 < angle + sweep; quarter++) angles.push(quarter * Math.PI / 2);
+        return angles.every(at => {
+          const x = primary.x + Math.cos(at) * distance, y = primary.y + Math.sin(at) * distance;
+          return x - copy.r >= 8 && x + copy.r <= width - 8 &&
+            y - copy.r >= 8 && y + copy.r <= height - 8;
+        });
+      };
+      // Reuse the same disc at smaller scales. Only place complete, separated
+      // copies in the measured history area; cap both recursion and SVG work.
+      while (pending.length && echoes.length < 24) {
+        const parent = pending.shift();
+        if (parent.depth >= 4) continue;
+        for (const angle of [0, -.7, .7, Math.PI]) {
+          const r = parent.r * (angle === 0 || angle === Math.PI ? .46 : .31);
+          if (r < 14) continue;
+          const distance = parent.r + r + 10;
+          const copy = {x: parent.x + Math.cos(angle) * distance,
+            y: parent.y + Math.sin(angle) * distance, r, depth: parent.depth + 1};
+          if (!fitsOrbit(copy) ||
+              placed.some(other => Math.hypot(copy.x - other.x, copy.y - other.y) < r + other.r + 8)) continue;
+          placed.push(copy);
+          echoes.push({...copy, id: echoes.length});
+          pending.push(copy);
+          if (echoes.length === 24) break;
+        }
+      }
+      // Move the constellation together around the main record. A bounded
+      // sweep fits even a shallow phone viewport, preserves every separation,
+      // and leaves each cover upright. Its phase already survives navigation
+      // and pauses while the page is hidden.
+      const turn = sweep * Math.sin(this.artworkPhase * this.artworkRhythms[0].rate * .7);
+      return echoes.map(copy => {
+        const dx = copy.x - primary.x, dy = copy.y - primary.y;
+        const x = primary.x + dx * Math.cos(turn) - dy * Math.sin(turn);
+        const y = primary.y + dx * Math.sin(turn) + dy * Math.cos(turn);
+        return {...copy, x, y,
+          transform: `translate(${x} ${y}) scale(${copy.r / 119}) translate(-244 -171)`};
+      });
+    },
+    orbitTransform(index) {
+      const phase = this.artworkPhase;
+      const rhythm = this.artworkRhythms[index + 1];
+      const sway = Math.sin(phase * rhythm.rate + rhythm.offset) - Math.sin(rhythm.offset);
+      const tilt = (index ? 28 : -19) + sway * (index ? 34 : 26);
+      const flatten = 1 + .18 * sway;
+      return `translate(${244 + sway * 9} ${171 + sway * (index ? -7 : 7)}) ` +
+        `rotate(${tilt}) scale(1 ${flatten}) translate(-244 -171)`;
+    },
     get landscapeToJunction() {
       const {width, historyHeight, gapHeight} = this.drawingSpace;
       return `matrix(${1000 / width} 0 0 ${112 / gapHeight} 0 ${-historyHeight * 112 / gapHeight})`;
@@ -356,7 +417,7 @@ function radioArtwork() {
       this.measureQueues();
     },
     animateQueues(slots) {
-      if (!slots.length || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      if (!slots.length) return;
       this.$nextTick(() => {
         for (const slot of slots) {
           const card = this.$refs.directions?.querySelector(`[data-slot="${slot}"]`);

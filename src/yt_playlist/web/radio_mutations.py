@@ -8,6 +8,7 @@ from typing import Literal
 from yt_playlist.library.playlist_catalog import fetch_song_duration
 from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.matching import track_album, track_artist
+from yt_playlist.util.thumbnails import best_thumb
 from yt_playlist.web.radio_edits import AppendOperation, PlaylistOperation, RadioEdits
 from yt_playlist.web.radio_playlist_io import (
     PendingWrite, PlaylistChanged, PlaylistEdit, PlaylistPending, append_receipt, matches_substitution,
@@ -79,20 +80,26 @@ class RadioMutations:
             window[1] = self.now_fn() + 3
         return True
 
-    def _substitute(self, requested, row, known):
+    def substitute(self, requested, row, known, *, identity_id=None, playlist=None):
         """Retain the actual upload without declaring two recordings equivalent."""
         video = row['videoId']
-        accepted = known.get(video)
-        if accepted is None:
-            accepted = {**requested, 'video_id': video,
-                'title': row.get('title') or requested.get('title') or '',
-                'artist': track_artist(row) or requested.get('artist') or '',
-                'album': track_album(row) or requested.get('album') or '',
-                'duration': row.get('duration_seconds') or parse_duration(row.get('duration')) or requested.get('duration')}
-            tid = self.catalog.upsert_track(video, accepted['title'], accepted['artist'],
-                accepted['album'], accepted['duration'], thumbnail=accepted.get('thumbnail'))
-            accepted['key'] = self.catalog.catalog_subject(tid)['identity_key']
+        previous = known.get(video) or {}
+        accepted = {**requested, **previous, 'video_id': video,
+            'title': row.get('title') or previous.get('title') or '',
+            'artist': track_artist(row) or previous.get('artist') or '',
+            'album': track_album(row) or previous.get('album') or '',
+            'thumbnail': best_thumb(row.get('thumbnails')) or previous.get('thumbnail'),
+            'duration': duration_seconds(row.get('duration_seconds'))
+                        or duration_seconds(parse_duration(row.get('duration')))
+                        or duration_seconds(previous.get('duration'))}
+        tid = self.catalog.upsert_track(video, accepted['title'], accepted['artist'],
+            accepted['album'], accepted['duration'], thumbnail=accepted.get('thumbnail'))
+        accepted['key'] = self.catalog.catalog_subject(tid)['identity_key']
         log.info('Radio accepted upload substitution: requested=%s actual=%s', requested['video_id'], video)
+        if identity_id is not None:
+            self.catalog.remember_playback_alternate(identity_id, requested, accepted,
+                evidence={'playlist': playlist, 'set_video_id': row.get('setVideoId'),
+                          'source': 'youtube-music-playlist-occurrence'}, now=self.now_fn())
         return UploadSubstitution(requested, accepted)
 
     def _publish(self, target, view, tracks, remote):
@@ -133,7 +140,9 @@ class RadioMutations:
             actual = [t['videoId'] for t in remote]
         accepted, substitutions = operation.track, ()
         if self.append_substitution(operation, view.tracks, remote):
-            substitution = self._substitute(operation.track, remote[-1], view.known)
+            substitution = self.substitute(operation.track, remote[-1], view.known,
+                identity_id=self.playlists.playlists.get_playlist(target.local_id).identity_id,
+                playlist=target.playlist)
             accepted, substitutions = substitution.accepted, (substitution,)
             desired = expected + [accepted['video_id']]
         if actual == desired:
@@ -168,7 +177,9 @@ class RadioMutations:
         substitutions = ()
         known = dict(view.known)
         if isinstance(accepted, Substitution):
-            substitution = self._substitute(accepted.requested, accepted.row, known)
+            substitution = self.substitute(accepted.requested, accepted.row, known,
+                identity_id=self.playlists.playlists.get_playlist(target.local_id).identity_id,
+                playlist=target.playlist)
             known[substitution.accepted['video_id']] = substitution.accepted
             substitutions = (substitution,)
             tail.adopt(tuple(row['videoId'] for row in remote), accepted.requested, substitution.accepted)

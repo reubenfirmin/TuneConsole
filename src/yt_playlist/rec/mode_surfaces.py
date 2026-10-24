@@ -450,7 +450,7 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=(), mod
         now_posterior = layers.now_mode_posterior(store, now)
         evidence_before = store.modes.epoch_started_at(epoch)
         chosen = select_modes(store, modes, leans, epoch, n=len(modes) if vibe_rank.preset else max(n, 4),
-                              stats=mode_eval.mode_bandit_stats(store, before=evidence_before),
+                              stats=mode_eval.mode_bandit_stats(store, before=evidence_before, now=now),
                               now_posterior=now_posterior)
     if not chosen:
         return []

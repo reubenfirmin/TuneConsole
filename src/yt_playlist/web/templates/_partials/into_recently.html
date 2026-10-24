@@ -48,7 +48,7 @@
           <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M8 4.5v15L20 12Z"/></svg>
         </span>
       </a>
-      <span class="into-song-title" title="{{ song.title }}">{{ song.title }}</span>
+      <a class="into-song-title" href="{{ track_url(song) }}" title="{{ song.title }}">{{ song.title }}</a>
       <a class="into-song-artist" href="/artist?name={{ song.artist|urlencode }}" title="{{ song.artist }}">{{ song.artist }}</a>
     </li>
     {% endfor %}

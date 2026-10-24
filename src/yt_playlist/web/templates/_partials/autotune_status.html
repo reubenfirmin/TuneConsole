@@ -36,7 +36,7 @@
       {% elif r and r.status == 'restored' %}
       <p class="selection-note">Previous model restored. Measurements below stopped at restoration.</p>
       {% elif latest and latest.status != 'running' %}
-      <p class="selection-note">Kept the current model.{% if latest.status == 'retained' %} No alternative showed a reliable improvement.{% endif %}</p>
+      <p class="selection-note">{{ latest.reason }}</p>
       {% else %}<p class="selection-note">Regular training continues when your library syncs.</p>{% endif %}
     </section>
 
@@ -101,12 +101,13 @@
   </div>
 
   <div class="selection-schedule">
+    {% if r and r.diagnostic_challenger %}<p class="selection-note">Shadow forecasts compare the current setup with {{ methods.get(r.diagnostic_challenger.method, r.diagnostic_challenger.method) }}, {{ r.diagnostic_challenger.dim }} features. This setup has not been applied.</p>{% endif %}
     <p>{% if not busy and s.state != 'paused' %}<strong>Next check.</strong> {% endif %}{{ s.reason }}{% if s.next_date %} Retries from {{ s.next_date }}.{% endif %}</p>
     {% for c in s.checks[2:] if c.value < c.total %}{{ gate('selection-fresh-tracks', 'New tracks since last comparison', c.value, c.total, c.unit) }}{% endfor %}
     {% if measured %}<p class="selection-note">Scores show the share of your later first plays that appeared in those 20 predictions. For example, 40% means 4 of 10 eligible tracks you played were predicted.</p>{% endif %}
   </div>
   <footer class="selection-footer">
-    <div><a href="/taste/model-selection/history">History and test details</a><p>Your preferences are kept. Regular training continues.</p></div>
+    <div><a href="/taste/model-selection/history">History and test details</a><p>First-play diagnostic. Model changes wait for validated choice evidence; regular training continues.</p></div>
     {% if s.state == 'paused' %}
     <button type="button" hx-post="/taste/model-selection/resume" hx-target="#autotune-status" hx-swap="outerHTML">Resume automatic selection</button>
     {% elif s.restore_id and not busy %}

@@ -186,6 +186,7 @@ class Backend:
     def __init__(self, repository, *, budget_seconds=None):
         self.repository = repository
         self.deadline = time.monotonic() + budget_seconds if budget_seconds is not None else None
+        self.last_response = None
 
     def timeout(self, maximum):
         remaining = self.deadline - time.monotonic() if self.deadline is not None else maximum
@@ -205,8 +206,10 @@ class Backend:
             request.add_header("Cache-Control", "no-cache")
         try:
             with urllib.request.urlopen(request, timeout=self.timeout(60)) as response:
+                self._response_evidence(path, response)
                 content = response.read()
         except urllib.error.HTTPError as exc:
+            self._response_evidence(path, exc)
             if exc.code == 404 and not cloudflare and method == "GET":
                 return None
             raise
@@ -218,6 +221,13 @@ class Backend:
                 raise RuntimeError("Cloudflare API request failed")
             return result["result"]
         return result
+
+    def _response_evidence(self, path, response):
+        """Keep only public request identity/cache evidence, never headers or bodies wholesale."""
+        headers = getattr(response, "headers", {})
+        self.last_response = {"path": path, "status": getattr(response, "status", None),
+            **{name: headers.get(name) for name in
+               ("X-GitHub-Request-Id", "Date", "Age", "Cache-Control")}}
 
     def run(self, *args):
         try:

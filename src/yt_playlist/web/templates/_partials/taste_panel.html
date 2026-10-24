@@ -19,6 +19,15 @@
 
 <div {{ tt.panel('intro', prefix='taste-recommendation', state='recommendationTab', extra_class='taste-recommendation-panel') }}>
 <section class="taste-intro" aria-labelledby="taste-intro-context-title">
+  <form hx-post="/home/format" hx-trigger="change" hx-swap="none">
+    <label for="taste-home-format">Start Home with</label>
+    <select id="taste-home-format" name="format">
+      {% for value, label in [('mixes','Mix tapes'), ('albums','Albums'), ('radio','On air'), ('both','My last listening tab')] %}
+      <option value="{{ value }}" {{ 'selected' if home_format == value }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <p class="section-note">A remembered navigation preference. All formats use your shared musical interests. Default: Mix tapes.</p>
+  </form>
   <h2 id="taste-intro-context-title">How your picks take shape</h2>
   <p>TuneConsole combines several signals: track similarity, relationships between artists, and information about genre, era, and sound. Your playlists, listening history, and feedback help it work out which music fits your taste. Recent activity can shift that balance toward what you’re enjoying now.</p>
   <p>These settings let you change that balance: give less-played genres more room, make recommendations follow recent listening more closely, or favor specific genres. If a week of jazz is crowding out the rest of your collection, for example, reducing recent-play influence gives your broader taste more say.</p>
@@ -64,6 +73,20 @@
 {% elif panel == 'feedback' %}
 {% from "_macros.html" import sort_indicator %}
 <h2 class="section">Your saved feedback</h2>
+{% if album_feedback %}
+<section class="card" aria-label="Album feedback">
+  <h3>Album feedback</h3>
+  <p class="section-note">More like this adjusts a saved record's shared interest weight. Not for me excludes that release. Already know it records familiarity. Clearing removes this album adjustment.</p>
+  {% for browse, item in album_feedback.items() %}
+  <form hx-post="/album/feedback" hx-swap="none" @htmx:after-request="if ($event.detail.successful) $el.remove()">
+    <a href="/album?browse={{ browse|urlencode }}">{{ browse }}</a>
+    <span>{{ {'more':'More like this', 'known':'Already know it', 'reject':'Not for me'}.get(item.kind, item.kind) }}</span>
+    <input type="hidden" name="browse_id" value="{{ browse }}"><input type="hidden" name="kind" value="clear">
+    <button class="btn-ghost">Clear album feedback</button>
+  </form>
+  {% endfor %}
+</section>
+{% endif %}
 <div class="card taste-feedback-summary-card">
   <p class="section-note">Likes and dislikes come from YouTube Music. Choices on suggestions tell TuneConsole what you want more of, less of, or later. These counts show the feedback currently saved.</p>
   {% if feedback %}
@@ -115,8 +138,7 @@
                target="_blank" rel="noopener" aria-label="Play {{ b.title }} on YouTube Music">▶</a>{% endif %}
           </span>
         </td>
-        <td>{% if b.video_id %}<a class="ptitle" href="https://music.youtube.com/watch?v={{ b.video_id|urlencode }}"
-               target="_blank" rel="noopener" data-yt-info>{{ b.title }}</a>{% else %}{{ b.title }}{% endif %}</td>
+        <td>{% if b.video_id %}<a class="ptitle" href="{{ track_url(b) }}">{{ b.title }}</a>{% else %}{{ b.title }}{% endif %}</td>
         <td><a class="alink" href="/artist?name={{ b.artist|urlencode }}">{{ b.artist }}</a></td>
         <td class="muted">{{ b.album or '—' }}</td>
         <td class="text-dim">{% if b.until_iso %}<time datetime="{{ b.until_iso }}" title="{{ b.until_iso }}">{{ b.until_label }}</time>{% else %}{{ b.until_label }}{% endif %}</td>

@@ -15,6 +15,42 @@ POLICY_RETENTION_CURSOR = 'rec_policy_retention_cursor'
 
 class RecLedgerRepo(Repo):
     @synchronized
+    def bind_choice_playback(self, identity_id, playlist, video, opportunity, option, now, window_s):
+        """Small exact-context index for delayed player observations; raw evidence stays in JSON.
+
+        Retain recent track bindings across a restart and a direction change. Evicted or expired
+        observations remain unattributed. The bound is a storage/work limit, not a taste weight.
+        """
+        rows = json.loads(self._store.settings.get_setting('listening_playback_bindings') or '[]')
+        key = (identity_id, playlist, video)
+        rows = [row for row in rows if 0 <= now - row['at'] <= window_s
+                and (row['identity_id'], row['playlist'], row['video']) != key]
+        rows.append({'identity_id': identity_id, 'playlist': playlist, 'video': video,
+                     'opportunity_id': opportunity, 'option_id': str(option), 'at': now})
+        self._store.settings.set_setting('listening_playback_bindings', json.dumps(rows[-64:]))
+
+    @synchronized
+    def choice_playback(self, identity_id, playlist, video, now, window_s):
+        rows = json.loads(self._store.settings.get_setting('listening_playback_bindings') or '[]')
+        return next((row for row in reversed(rows)
+                     if (row['identity_id'], row['playlist']) == (identity_id, playlist)
+                     and (video is None or row['video'] == video)
+                     and 0 <= now - row['at'] <= window_s), None)
+
+    @synchronized
+    def evidence(self):
+        """Size replay evidence from current library membership, including after imports."""
+        from yt_playlist.core.evidence_ledger import EvidenceLedger, library_byte_budget
+        from yt_playlist.core import paths
+        store = self._store
+        directory = (store._db_path.parent / (store._db_path.name + ".evidence") if store._db_path
+                     else paths.data_dir() / "test-evidence" / store._evidence_key)
+        recordings = self.conn.execute(
+            'SELECT COUNT(DISTINCT e.recording_id) FROM library_memberships m '
+            'JOIN catalog_entries e ON e.id=m.entry_id').fetchone()[0]
+        return EvidenceLedger(directory, library_byte_budget(recordings))
+
+    @synchronized
     def publish_prepared_policies(self, rows) -> None:
         """Join the snapshot publisher's transaction without committing proposals early."""
         self.conn.executemany("INSERT OR IGNORE INTO rec_serving_policies VALUES (?,?,?)", rows)

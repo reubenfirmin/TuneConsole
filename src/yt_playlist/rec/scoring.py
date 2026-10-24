@@ -2,6 +2,7 @@
 re-weighted by genre/era/artist preferences, the breadth steer, and the transient mood/facet overlay.
 
 Consumers import scoring directly; surface assembly depends on this layer."""
+import json
 import math
 import time
 
@@ -70,7 +71,88 @@ def _behavior_centroid(store, M, idx):
     return c / n if n > 0 else None
 
 
-def playlist_taste(store) -> PlaylistTaste:
+def _with_albums(store, taste, matrix, index):
+    """Keep release interests separate in either vector space, including cold saved libraries."""
+    titles, cents = list(taste.titles), list(taste.centroids)
+    weights = list(taste.weights * max(1, len(taste.titles)))
+    pids = list(taste.pids)
+    contexts = list(getattr(taste, "sources", [{"kind": "playlist", "id": p} for p in pids]))
+    base = rec_params.get_param(store, "album_saved_weight")
+    returns = rec_params.get_param(store, "album_return_weight")
+    feedback = json.loads(store.settings.get_setting("album_feedback") or "{}")
+    for album in store.collection.taste_album_contexts(
+            include_browse={browse for browse, item in feedback.items() if item["kind"] == "more"}):
+        judgment = feedback.get(album["browse"], {}).get("kind")
+        if judgment == "reject":
+            continue
+        rows = [index[k] for k in album["keys"] if k in index]
+        if not rows:
+            continue
+        center = matrix[rows].mean(0)
+        norm = np.linalg.norm(center)
+        if norm == 0:
+            continue
+        weight = base * bool(album["saved"]) + returns * math.log1p(max(0, album["return_days"] - 1))
+        if judgment == "more":
+            weight = max(1., weight) * rec_params.get_param(store, "album_feedback_weight")
+        if weight <= 0:
+            continue
+        titles.append(f"{album['artist']} · {album['title']}")
+        cents.append(center / norm)
+        weights.append(weight)
+        pids.append(None)
+        contexts.append({"kind": "album", "id": album["id"], "browse": album["browse"],
+                         "saved": bool(album["saved"]), "return_days": album["return_days"],
+                         "feedback": judgment,
+                         "modeled_tracks": len(rows), "known_tracks": len(album["keys"])})
+    if not titles:
+        return taste
+    weights = np.asarray(weights, dtype=np.float64)
+    result = PlaylistTaste(titles, np.asarray(cents), weights / weights.sum(), pids)
+    result.sources = contexts
+    return result
+
+
+def _with_choices(store, taste, matrix, index, *, content=False, now=None):
+    from yt_playlist.rec import choice_learning
+    interests = choice_learning.contexts(store, now)
+    if not interests:
+        return taste
+    titles, cents = list(taste.titles), list(taste.centroids)
+    weights = list(taste.weights * max(1, len(taste.titles)))
+    pids = list(taste.pids)
+    sources = list(getattr(taste, "sources", [{"kind": "playlist" if p is not None else "history"} for p in pids]))
+    saved_albums = {source.get("browse") for source in sources if source["kind"] == "album"}
+    feedback = json.loads(store.settings.get_setting("album_feedback") or "{}")
+    for interest in interests:
+        # Saved releases already supply a deliberate collecting context. Do not count that
+        # same album again merely because the listener launched it from our surface.
+        if interest["format"] == "albums" and (interest["option_id"] in saved_albums
+                or feedback.get(interest["option_id"], {}).get("kind") == "reject"):
+            continue
+        rows = [index[key] for key in interest["keys"] if key in index]
+        center = matrix[rows].mean(0) if rows else None
+        if center is None and content and interest.get("feature"):
+            if interest.get("basis") == vectors.content_space_id(store):
+                center = np.asarray(interest["feature"])
+        if center is None or len(center) != matrix.shape[1] or np.linalg.norm(center) == 0:
+            continue
+        titles.append({"albums": "Album choice", "mixes": "Mix choice", "radio": "On air choice"}[interest["format"]])
+        cents.append(center / np.linalg.norm(center))
+        weights.append(interest["weight"])
+        pids.append(None)
+        sources.append({"kind": interest["format"], "id": interest["option_id"],
+                        "days": interest["days"], "episodes": interest["episodes"],
+                        "layer_weights": interest["layer_weights"], "at": interest["at"]})
+    if not titles:
+        return taste
+    weights = np.asarray(weights, dtype=np.float64)
+    result = PlaylistTaste(titles, np.asarray(cents), weights / weights.sum(), pids)
+    result.sources = sources
+    return result
+
+
+def playlist_taste(store, *, now=None) -> PlaylistTaste:
     """Per-playlist taste from the co-occurrence embedding, blended with a behavior centroid (#38): the
     tracks you actually play form one extra taste context weighted BEHAVIOR_TASTE_W, so taste leans on
     listening, not only playlist curation. Falls back to behavior-only when you have no shaping playlists,
@@ -78,7 +160,7 @@ def playlist_taste(store) -> PlaylistTaste:
     keys, V, idx = vectors.load_vectors(store)
     if V is None:
         return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
-    pt = _playlist_centroids(store, V, idx)
+    pt = _with_choices(store, _with_albums(store, _playlist_centroids(store, V, idx), V, idx), V, idx, now=now)
     bc = _behavior_centroid(store, V, idx)
     if bc is None:
         return pt
@@ -92,7 +174,7 @@ def playlist_taste(store) -> PlaylistTaste:
     return PlaylistTaste(titles, cents, w, list(pt.pids) + [None])
 
 
-def content_taste(store, *, snapshot=None) -> PlaylistTaste:
+def content_taste(store, *, snapshot=None, now=None) -> PlaylistTaste:
     """The content-space (genre/era + audio) sibling of playlist_taste (#38). Builds per-playlist taste
     centroids over the CONTENT vectors, so genre/era-described tracks that have no co-occurrence vector
     can still be ranked by how well they fit the contexts you actually play, no projection needed.
@@ -101,7 +183,7 @@ def content_taste(store, *, snapshot=None) -> PlaylistTaste:
     ckeys, CV, cidx = vectors.load_content_vectors(store, snapshot=snapshot)
     if CV is None:
         return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
-    return _playlist_centroids(store, CV, cidx)
+    return _with_choices(store, _with_albums(store, _playlist_centroids(store, CV, cidx), CV, cidx), CV, cidx, content=True, now=now)
 
 
 # The largest preference multiplier the axes can produce: four axes, each clamped to GENRE_MAX. At
@@ -207,7 +289,7 @@ def center_known_weights(weights, present):
             for k, v in weights.items()}
 
 
-def _axis_weights_for(store, keys, now=None, with_details=False):
+def _axis_weights_for(store, keys, now=None, with_details=False, *, metadata=None):
     """{key: genre_w * era_w * artist_w * pop_w}, where each axis weight is permanent x standing lean x
     the transient facet multiplier (live 'more/less this facet'). None if every factor is neutral."""
     mix_tuning.expire(store, time.time() if now is None else now)
@@ -229,9 +311,13 @@ def _axis_weights_for(store, keys, now=None, with_details=False):
     if perm_neutral and not leans and not standing and not bfac:
         return None
     keys = list(keys)
-    dao = store.rec_query
-    genres, decades, artists = dao.track_genres(keys), dao.track_decades(keys), dao.track_artists(keys)
-    pops = dao.track_popularity(keys)
+    if metadata is None:
+        dao = store.rec_query
+        genres, decades, artists = dao.track_genres(keys), dao.track_decades(keys), dao.track_artists(keys)
+        pops = dao.track_popularity(keys)
+    else:
+        genres, decades, artists, pops = ({k: row[name] for k, row in metadata.items() if row.get(name) is not None}
+                                         for name in ('genre', 'decade', 'artist', 'popularity'))
     pop_min = rec_params.get_param(store, "pop_mainstream_min")
     lo, hi = rec_params.GENRE_MIN, rec_params.GENRE_MAX
     fparams = (rec_params.get_param(store, "facet_gain"),
@@ -284,6 +370,15 @@ def _apply_axis_weights(store, sims, now=None):
     if mult is None:
         return sims
     return axis_adjusted_scores(sims, mult, cap=rec_params.get_param(store, "axis_weight_cap"))
+
+
+def metadata_axis_weights(store, metadata, now):
+    """Shared standing, recent and permanent steering over release/candidate metadata.
+
+    Candidates need not be stored tracks. Missing axes use the same centered-neutral policy as
+    the track scorer; this does not infer missing genre/year/popularity from unrelated tracks.
+    """
+    return _axis_weights_for(store, metadata, now=now, metadata=metadata)
 
 
 def discovery_facet_weight(store, family, now, *, leans=None):
@@ -409,7 +504,7 @@ def score_with_traces(store, taste, keys, V, idx, now):
     multipliers as normal serving; the returned final scores are contract-tested against the lean
     production path so transparency cannot become a parallel scoring implementation.
     """
-    components = _mood_components(taste.score_all(V), store, now, V, idx)
+    components = _mood_components(taste.allocated_scores(V), store, now, V, idx)
     combined = {keys[i]: float(components["combined"][i]) for i in range(len(keys))}
     weighted = _axis_weights_for(store, keys, now=now, with_details=True)
     if weighted is None:

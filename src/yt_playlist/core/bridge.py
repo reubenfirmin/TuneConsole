@@ -29,6 +29,7 @@ class Bridge:
         self._lock = threading.Lock()
         self.now_playing = None    # {"title", "artist"} pushed by the extension, or None
         self.now_playing_seen_at = None  # monotonic heartbeat; expires stale state after a tab vanishes
+        self.resumable_player = None  # last owned player; paused controls survive throttled heartbeats
         self.sensor_health = None  # latest extension probe of YTM tab/content-script health
         self.source_timezone = None  # browser timezone for YouTube's local-day history shelves
 
@@ -62,6 +63,7 @@ class Bridge:
             self.source_timezone = None
             self.now_playing = None
             self.now_playing_seen_at = None
+            self.resumable_player = None
             self.sensor_health = None
             pending, self._pending = self._pending, {}
         for fut in pending.values():

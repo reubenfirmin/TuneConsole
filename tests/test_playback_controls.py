@@ -27,7 +27,9 @@ const source = fs.readFileSync('src/yt_playlist/web/static/playback-controls.js'
 vm.runInContext(source,context); vm.runInContext(source,context);
 const key = (properties={}) => {
   const event = new Event('keydown',{cancelable:true});
-  Object.assign(event,{key:' ',code:'Space',...properties});
+  const {target,...keys}=properties;
+  Object.assign(event,{key:' ',code:'Space',...keys});
+  if(target) Object.defineProperty(event,'target',{value:target});
   document.dispatchEvent(event); return event;
 };
 const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -44,7 +46,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   Object.assign(prevented,{key:' ',code:'Space'}); prevented.preventDefault();
   document.dispatchEvent(prevented); assert.equal(calls.length,1);
   // Each interactive target uses its own native action (including a nested editable element).
-  for (const selector of ['input','button','a','[contenteditable]','[role="slider"]','[role="checkbox"]']) {
+  for (const selector of ['input','button','[contenteditable]','[role="slider"]','[role="checkbox"]']) {
     const target = new EventTarget(); target.closest = filter => {assert(filter.includes(selector)); return target;};
     const event = new Event('keydown',{cancelable:true}); Object.assign(event,{key:' ',code:'Space'});
     Object.defineProperty(event,'target',{value:target}); document.dispatchEvent(event);
@@ -82,6 +84,11 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(calls.length,resumedCalls,'expired display cannot skip and pause is idempotent');
   window.playbackStatus.snapshot.connected=false;
   assert(!key().defaultPrevented); handlers.play(); assert.equal(calls.length,resumedCalls);
+  // Clicking a playback anchor leaves it focused, but anchors have no native Space action.
+  window.playbackStatus.snapshot = {connected:true,now_playing:{video_id:'one',paused:false}};
+  const anchor = {closest: filter => filter.split(',').some(part => part.trim() === 'a') ? anchor : null};
+  assert(key({target:anchor}).defaultPrevented); await flush();
+  assert.equal(calls.length,resumedCalls+1);
   // Browsers without Media Session retain the keyboard shortcut.
   const plainWindow = new EventTarget(); plainWindow.playbackStatus = window.playbackStatus;
   vm.runInContext(source,vm.createContext({window:plainWindow,document:new EventTarget(),fetch:()=>{},encodeURIComponent}));

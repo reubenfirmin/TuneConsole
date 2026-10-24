@@ -1,3 +1,14 @@
+function trackUrl(song) {
+  const video = song?.video_id || song?.videoId || song?.vid;
+  if (!video) return '';
+  const query = new URLSearchParams();
+  for (const field of ['title', 'artist', 'album', 'thumbnail', 'duration']) {
+    if (song[field] !== undefined && song[field] !== null && song[field] !== '') query.set(field, song[field]);
+  }
+  if (song.album_browse || song.album_browse_id) query.set('album_browse', song.album_browse || song.album_browse_id);
+  return '/track/' + encodeURIComponent(video) + (query.size ? '?' + query : '');
+}
+
 // Launchers carry song data only. Every view uses the same menu, dialog, and operations.
 document.addEventListener('click', event => {
   const trigger = event.target.closest('[data-song]');
@@ -5,7 +16,8 @@ document.addEventListener('click', event => {
   event.preventDefault();
   event.stopPropagation();
   window.dispatchEvent(new CustomEvent('song-menu-open', { detail: {
-    trigger, song: JSON.parse(trigger.dataset.song), context: JSON.parse(trigger.dataset.songContext || '{}')
+    trigger, song: JSON.parse(trigger.dataset.song), context: JSON.parse(trigger.dataset.songContext || '{}'),
+    action: trigger.dataset.songAction
   }}));
 });
 
@@ -85,6 +97,10 @@ function songActions() {
       this.song = detail.song;
       this.artworkFailed = false;
       this.context = detail.context;
+      if (['create', 'add', 'metadata'].includes(detail.action)) {
+        this.openDialog(detail.action);
+        return;
+      }
       this.$nextTick(() => {
         const menu = this.$refs.menu, rect = trigger.getBoundingClientRect();
         menu.showPopover({ source: trigger });
@@ -249,7 +265,7 @@ function songActions() {
       lookupStream?.close();
       this.$refs.dialog.close();
       trigger?.focus();
-      if (this.result?.url === location.pathname) location.reload();
+      if (this.result && (this.context.refresh_on_save || this.result.url === location.pathname)) location.reload();
     },
     backdropClick(event) {
       if (event.target !== this.$refs.dialog) return;

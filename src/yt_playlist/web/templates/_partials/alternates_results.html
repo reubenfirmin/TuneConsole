@@ -14,7 +14,7 @@
     <input type="checkbox" name="track" value='{{ r|tojson }}'>
     {% if r.thumbnail %}<img class="album-thumb" src="{{ r.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
     <span class="alt-meta">
-      <span class="alt-title">{{ r.title }}</span>
+      <a class="alt-title" href="{{ track_url(r) }}" @click.stop>{{ r.title }}</a>
       <span class="alt-sub">{{ r.artist }}{% if r.album %} · {{ r.album }}{% endif %}
         {% if r.kind %}<span class="alt-kind">{{ r.kind }}</span>{% endif %}</span>
     </span>

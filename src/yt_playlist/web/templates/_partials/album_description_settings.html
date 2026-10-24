@@ -1,0 +1,38 @@
+{% from '_partials/provider_key.html' import key_entry with context %}
+<section class="card album-description-settings" id="album-description-settings" aria-labelledby="album-description-heading"
+         x-data='{ savedKey: {{ deepseek.saved_key|tojson }} }' @provider-key-saved="savedKey = true">
+  <h2 class="section section-flush" id="album-description-heading">Album descriptions</h2>
+  <p class="section-note">Use DeepSeek Flash to write short descriptions for Long play. Only the artist,
+    album title and release year are sent. Descriptions are saved locally and reused.</p>
+  {% if description_error %}<p class="notice err" role="alert">{{ description_error }}</p>{% endif %}
+  {% if description_message %}<p class="notice ok" role="status">{{ description_message }}</p>{% endif %}
+  {% if deepseek.status == 'auth' %}<p class="notice err" role="status">DeepSeek rejected the key. Update it to resume generation.</p>
+  {% elif deepseek.status == 'balance' %}<p class="notice err" role="status">DeepSeek reports insufficient balance. Generation will retry later.</p>
+  {% elif deepseek.status == 'rate_limit' %}<p class="section-note" role="status">DeepSeek is rate limiting requests. Generation is waiting before retrying.</p>
+  {% elif deepseek.status in ('unavailable', 'invalid_response') %}<p class="section-note" role="status">The last description could not be obtained. Existing descriptions are kept.</p>{% endif %}
+  {% call key_entry('deepseek', 'DeepSeek', deepseek.configured, '/settings/deepseek-key', 'https://platform.deepseek.com/api_keys') %}
+    Your key is stored locally. Descriptions use your DeepSeek API balance.
+    {% if deepseek.key_source == 'environment' %}DEEPSEEK_API_KEY is configured and takes precedence over a saved key.
+    {% elif deepseek.key_source == 'config' %}Using the key from config.toml.{% endif %}
+  {% endcall %}
+  <form method="post" action="/settings/deepseek" hx-post="/settings/deepseek"
+        hx-target="#album-description-settings" hx-swap="outerHTML">
+    <label class="album-description-toggle"><input type="checkbox" name="enabled"{% if deepseek.enabled %} checked{% endif %}>
+      Generate missing album descriptions</label>
+    <div class="album-description-fields">
+      <div>
+        <label for="deepseek-daily-limit">Maximum requests per day</label>
+        <input id="deepseek-daily-limit" type="number" name="daily_limit" min="0" max="100" step="1"
+               value="{{ deepseek.daily_limit }}" required>
+        <p class="provider-key-help">{{ deepseek.requests_today }} used today. Resets at midnight UTC. Set to 0 to pause.</p>
+      </div>
+    </div>
+    <p class="section-note">Uses your DeepSeek API balance. Refreshing albums reuses saved copy;
+      failures count toward the daily limit. Generated descriptions are labelled and may contain errors.</p>
+    <div class="btn-row">
+      <button type="submit" class="btn btn-primary">Save</button>
+      <button type="submit" name="action" value="disconnect" class="btn" formnovalidate
+              x-show="savedKey" x-cloak>Remove key</button>
+    </div>
+  </form>
+</section>

@@ -9,7 +9,7 @@ import logging
 import uuid
 from copy import deepcopy
 
-from yt_playlist.rec import embedding_vectors as vectors, rec_params, scoring, transient
+from yt_playlist.rec import choice_bandit, embedding_vectors as vectors, rec_params, scoring, transient
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.repos.base import synchronized
 from yt_playlist.util import genre_map
@@ -70,7 +70,7 @@ def _serving_policy(store, now, ranker):
     """
     params = {spec.name: rec_params.get_param(store, spec.name) for spec in rec_params.PARAMS}
     configuration = {
-        "schema": 2, "algorithm": "served-ranking-v2", "ranker": ranker,
+        "schema": 4, "algorithm": "served-ranking-v2", "ranker": ranker,
         "params": params,
         "weights": store.rec_model.get_weights(now=now, revert_halflife_d=params["weight_revert_halflife_d"]),
         "weight_records": store.rec_model.weight_records(), "leans": store.rec_model.get_leans(),
@@ -88,7 +88,8 @@ def _serving_policy(store, now, ranker):
                  "genre_request": store.rec_proposals.get_proposals("home_genre_request")},
         "modes": {"definitions": [{k: v for k, v in m.items() if k != "centroid"}
                                    for m in store.modes.list_modes()],
-                  "offered": store.modes.impression_counts(), "picks": store.modes.pick_rows()},
+                  "offered": store.modes.impression_counts(), "picks": store.modes.pick_counts(),
+                  "response_evidence": choice_bandit.stats(store, now)},
         "models": store.memoized_read("serving-model-identities", lambda: _model_identities(store)),
     }
     raw = json.dumps(configuration, sort_keys=True, separators=(",", ":"))
@@ -216,7 +217,13 @@ def _prepare_impressions(store, items, now, *, lane="", mode_id=None, ranker="la
         raw = json.dumps(config, sort_keys=True, separators=(",", ":"))
         version = hashlib.sha256(raw.encode()).hexdigest()[:16]
     if experiment:
-        config = {**config, "experiment": experiment, "schema": 3}
+        # Assignment and opportunity identities belong to the impression. The reusable policy
+        # retains the experiment definition, including its cohort and actual ranker inputs.
+        definition = {k: v for k, v in experiment.items() if k not in {"comparison_id", "cluster", "assignment"}}
+        if experiment.get("assignment"):
+            definition["assignment"] = {key: experiment["assignment"][key]
+                                        for key in ("policy", "unit") if key in experiment["assignment"]}
+        config = {**config, "experiment": definition}
         version = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:16]
     keys = [it.get("key") or it.get("identity_key") for it in items]
     offered = [key for key in keys if key]
@@ -283,8 +290,7 @@ def record_action(store, kind, now, *, keys=(), video_id=None, playlist_id=None,
             if row:
                 keys.add(row["identity_key"])
             else:
-                keys.update(r["identity_key"] for r in store.discovery.get_discovered_tracks()
-                            if r["video_id"] == video_id)
+                keys.update(store.discovery.identity_keys_for_video(video_id))
         if playlist_id is not None:
             keys.update(store.playlists.get_playlist_track_keys(playlist_id))
         store.rec_ledger.record_recommendation_outcomes(event_id or uuid.uuid4().hex, kind, keys, now,

@@ -5,8 +5,10 @@
 
   function command(action) {
     const status = window.playbackStatus?.snapshot;
-    const playing = status?.connected && status.now_playing;
+    const playing = status?.connected && (status.now_playing || status.resumable_player);
     if (!playing?.video_id) return false;
+    const resume = !status.now_playing;
+    if (resume && action === 'next') return false;
     if ((action === 'play' && playing.paused === false) ||
         (action === 'pause' && playing.paused === true)) return true;
     const next = action === 'next';
@@ -17,7 +19,12 @@
       options.headers = {'Content-Type': 'application/json'};
       options.body = JSON.stringify({videoId: playing.video_id});
     }
-    fetch(next ? '/now-playing/next' : '/now-playing/toggle', options)
+    let url = next ? '/now-playing/next' : '/now-playing/toggle';
+    if (!next && (resume || action !== 'toggle')) {
+      url += '?action=' + encodeURIComponent(action);
+      if (resume) url += '&resume=true&videoId=' + encodeURIComponent(playing.video_id);
+    }
+    fetch(url, options)
       .catch(() => {})
       .finally(() => {
         if (next) nextPending = false;
@@ -32,8 +39,9 @@
     const media = {MediaPlayPause: 'toggle', MediaPlay: 'play', MediaPause: 'pause', MediaTrackNext: 'next'};
     let action = media[event.key];
     if (!action && (event.code === 'Space' || event.key === ' ')) {
-      // Native activation of controls and editing always take precedence over the page shortcut.
-      if (event.target?.closest?.('input, textarea, select, button, a, summary, audio, video, '
+      // Native Space activation and editing take precedence. Anchors activate
+      // with Enter, so a focused playback link must not swallow this shortcut.
+      if (event.target?.closest?.('input, textarea, select, button, summary, audio, video, '
           + '[contenteditable]:not([contenteditable="false"]), '
           + '[role="button"], [role="textbox"], [role="combobox"], [role="slider"], '
           + '[role="checkbox"], [role="switch"], [role="tab"], [role="menuitem"]')) return;
@@ -46,7 +54,7 @@
   function updateMedia() {
     if (!session) return;
     const status = window.playbackStatus?.snapshot;
-    const playing = status?.connected && status.now_playing;
+    const playing = status?.connected && (status.now_playing || status.resumable_player);
     const active = !!playing?.video_id;
     session.playbackState = active && typeof playing.paused === 'boolean' ?
       (playing.paused ? 'paused' : 'playing') : 'none';

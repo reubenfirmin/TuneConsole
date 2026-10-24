@@ -30,6 +30,11 @@ b) And I find YouTube's discovery and playlist management to be pretty bad
   names and aliases. Expand or search the genre families there; equivalent names share an entry,
   while distinct subgenres retain their identity. Vocabulary upgrades preserve custom additions
   and disabled genres. Changes apply to future matching; existing song tags stay as saved.
+- **Album descriptions**: Long play can optionally use your DeepSeek Flash API key in
+  Settings / Enrichment. Descriptions are saved locally and reused; generation defaults to
+  at most 20 requests per UTC day, with a configurable limit and pause switch. Only artist,
+  album title and year are sent. `DEEPSEEK_API_KEY` or `deepseek_api_key` in config.toml
+  also work; the environment takes precedence over a saved key.
 
 ## Quickstart
 

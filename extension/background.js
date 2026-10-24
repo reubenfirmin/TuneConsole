@@ -20,7 +20,7 @@ const tuneConsole = (() => {
 
   async function dispatch(frame) {
     if (frame && frame.type === "navigate") { playback.navigate(frame.url); return; }
-    if (frame && frame.type === "playpause") { playback.playPause(); return; }
+    if (frame && frame.type === "playpause") { playback.playPause(frame); return; }
     if (frame && frame.type === "refresh-view") { playback.refreshView(frame.playlist); return; }
     if (frame && ["rate", "next", "radio-session", "playlist-session-poc"].includes(frame.type)) {
       let result;

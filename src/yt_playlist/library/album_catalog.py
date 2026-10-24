@@ -1,6 +1,7 @@
 """Keep full fetched album track lists for measured listening coverage."""
 from yt_playlist.util.thumbnails import best_thumb
 from yt_playlist.library.album_fetch import shareable_album_tracks
+from yt_playlist.util.duration import parse_duration
 
 
 def remember_album(store, browse_id, album, fallback=None):
@@ -24,7 +25,9 @@ def remember_album(store, browse_id, album, fallback=None):
 
     entries = [dict(entry_id=store.tracks.observe_track_entry(
         t.get('videoId'),t['title'],artists(t) or artist,album=title,
-        album_browse_id=browse_id,credits=t.get('artists') or album.get('artists')),
+        album_browse_id=browse_id,credits=t.get('artists') or album.get('artists'),
+        duration_s=parse_duration(t.get('duration')),
+        thumbnail=best_thumb(t.get('thumbnails')) or best_thumb(album.get('thumbnails'))),
         disc_number=positive(t.get('discNumber',t.get('disc_number'))),
         track_number=positive(t.get('trackNumber',t.get('track_number')))) for t in tracks]
     try:

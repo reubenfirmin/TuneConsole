@@ -33,9 +33,9 @@ def radio_list_ids(store) -> list[str]:
     all radio-queued, took over 3 of 7 picks). Machine-queued radio plays are therefore excluded
     from every plays-read that feeds the taste model; the user's OWN signals on those same tracks -
     skips, ratings, explicit steering - are unaffected, since those flow through their own channels.
-    Plays from any OTHER generated playlist still count: pressing play on a non-radio playlist is a
-    deliberate user action, not continuous machine playback. Trends/stats keep counting radio plays
-    (descriptive, a different pipeline)."""
+    Other generated sources also retain their provenance/identity quarantine in the history reader
+    and evidence_plays. Deliberate context choices enter through choice learning. Trends/stats keep
+    counting plays (descriptive, a different pipeline)."""
     ids = [store.settings.get_setting(k) for k in _RADIO_SETTING_KEYS]
     sessions = json.loads(store.settings.get_setting("radio_session_playlist_ids") or "[]")
     return list(dict.fromkeys(i for i in ids + sessions if i))

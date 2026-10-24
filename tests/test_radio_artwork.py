@@ -193,7 +193,7 @@ assert.equal(radio.artworkView.moving, false);
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_record_clones_fit_available_space_and_rings_resume_the_same_motion():
+def test_record_orbits_fit_available_space_and_resume_the_same_motion():
     node = shutil.which('node')
     if node is None:
         pytest.skip('Node.js is required to exercise radio artwork')
@@ -207,24 +207,42 @@ const artwork=vm.runInContext('radioArtwork()',context);
 artwork.artworkView={playlistId:'one'}; artwork.syncArtworkSession();
 for(const [width,height] of [[1440,250],[1792,450],[390,140],[390,480],[120,60]]) {
   artwork.drawingSpace={width,historyHeight:height,gapHeight:112};
-  const copies=artwork.recordEchoes;
-  assert(copies.length<=24,'the drawing has a fixed upper cost');
-  if(width>=390) assert(copies.length>0,'available space gains smaller records');
-  for(const [index,copy] of copies.entries()) {
-    assert(copy.x-copy.r>=0 && copy.x+copy.r<=width);
-    assert(copy.y-copy.r>=0 && copy.y+copy.r<=height);
-    assert(!/NaN|Infinity/.test(copy.transform));
-    for(const other of copies.slice(index+1))
-      assert(Math.hypot(copy.x-other.x,copy.y-other.y)>copy.r+other.r,'records remain separated');
+  artwork.artworkPhase=0;
+  const starting=artwork.recordEchoes;
+  assert(starting.length<=24,'the drawing has a fixed upper cost');
+  if(width>=390) assert(starting.length>0,'available space gains smaller records');
+  for(const phase of [0,.2,1,2,7,1000]) {
+    artwork.artworkPhase=phase;
+    const copies=artwork.recordEchoes;
+    assert.equal(copies.length,starting.length,'orbiting records do not appear or disappear');
+    for(const [index,copy] of copies.entries()) {
+      assert(copy.x-copy.r>=0 && copy.x+copy.r<=width);
+      assert(copy.y-copy.r>=0 && copy.y+copy.r<=height);
+      assert(!/NaN|Infinity/.test(copy.transform));
+      for(const other of copies.slice(index+1))
+        assert(Math.hypot(copy.x-other.x,copy.y-other.y)>copy.r+other.r,'records remain separated');
+    }
   }
+  artwork.artworkPhase=2;
+  const moved=artwork.recordEchoes;
+  if(width>=390) assert(moved.some((copy,i)=>Math.hypot(copy.x-starting[i].x,copy.y-starting[i].y)>1),
+    'smaller records orbit the main record');
+  artwork.artworkPhase+=.00001;
+  assert(artwork.recordEchoes.every((copy,i)=>Math.hypot(copy.x-moved[i].x,copy.y-moved[i].y)<.01),
+    'orbital movement stays continuous');
 }
+artwork.drawingSpace={width:1440,historyHeight:250,gapHeight:112};
+artwork.artworkPhase=0;
 const composed=[artwork.orbitTransform(0),artwork.orbitTransform(1)];
 artwork.artworkPhase=2;
-const shifted=[artwork.orbitTransform(0),artwork.orbitTransform(1)];
+const shifted=[artwork.orbitTransform(0),artwork.orbitTransform(1)], copies=artwork.recordEchoes;
 assert.notDeepEqual(shifted,composed,'both rings change their position and plane');
 artwork.pauseArtworkMotion();
 const resumed=vm.runInContext('radioArtwork()',context);
-resumed.artworkView={playlistId:'one'}; resumed.syncArtworkSession();
+resumed.artworkView={playlistId:'one'};
+resumed.drawingSpace=artwork.drawingSpace;
+resumed.syncArtworkSession();
+assert.deepEqual(resumed.recordEchoes,copies,'navigation restores the same orbital positions');
 assert.deepEqual([resumed.orbitTransform(0),resumed.orbitTransform(1)],shifted);
 artwork.artworkPhase+=.00001;
 const numbers=value=>value.match(/-?\d+(?:\.\d+)?/g).map(Number);

@@ -24,6 +24,42 @@ def test_allowlist_membership():
     assert not host_allowed("notyoutube.com")       # suffix must fall on a dot boundary
     assert not host_allowed("youtube.com.evil.com")
     assert not host_allowed("")
+    assert not host_allowed('api.deepseek.com')  # Only the exact optional POST is permitted.
+
+
+@pytest.mark.parametrize('stack', ['requests', 'urllib'])
+@pytest.mark.parametrize('method,url', [
+    ('POST', 'https://api.deepseek.com/chat/completions'),
+    ('GET', 'https://api.deepseek.com/chat/completions'),
+    ('POST', 'http://api.deepseek.com/chat/completions'),
+    ('POST', 'https://api.deepseek.com/chat/completions?key=SECRET'),
+    ('POST', 'https://api.deepseek.com/chat/completions#SECRET'),
+    ('POST', 'https://user:SECRET@api.deepseek.com/chat/completions'),
+    ('POST', 'https://api.deepseek.com:444/chat/completions'),
+    ('POST', 'https://api.deepseek.com/chat/completions/'),
+    ('POST', 'https://api.deepseek.com/files'),
+    ('POST', 'https://api.deepseek.com.evil.com/chat/completions'),
+])
+def test_deepseek_is_exact_https_post_only_and_secrets_are_not_logged(logged_transports, stack, method, url):
+    guard, reached = logged_transports, []
+    def transport(*args, **kwargs):
+        reached.append(url)
+        return _urllib_response(url, 200) if stack == 'urllib' else requests.Response()
+    allowed = method == 'POST' and url == 'https://api.deepseek.com/chat/completions'
+    if stack == 'requests':
+        guard._orig_adapter_send = transport
+        call = lambda: requests.adapters.HTTPAdapter().send(_Req(url, method, b'SECRET'))
+    else:
+        guard._orig_opener_send = transport
+        call = lambda: urllib.request.build_opener().open(
+            urllib.request.Request(url, data=b'SECRET', headers={'Authorization': 'Bearer SECRET'}, method=method))
+    if allowed:
+        call()
+    else:
+        with pytest.raises(BlockedHost):
+            call()
+    assert reached == ([url] if allowed else [])
+    assert 'SECRET' not in '\n'.join(guard.recent())
 
 
 @pytest.mark.parametrize("method,url", [

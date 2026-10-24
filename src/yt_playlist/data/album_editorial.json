@@ -1,0 +1,39 @@
+{
+  "version": 2,
+  "policy": "Artwork provenance only. Album copy is obtained mechanically by the worker from identity-checked provider responses. No hand-written copy or scores. Match artist and exact release title; list edition aliases explicitly.",
+  "entries": [
+    {
+      "artist": "Pig&Dan",
+      "title": "Destination Unknown III",
+      "checked_at": "2026-10-24",
+      "artwork": {
+        "url": "https://imagedelivery.net/gWm-cErGDmEnDn2Z5pH7Pw/medium_180821_PIG_and_DAN_JCV_6722_74c1262946/public",
+        "source_url": "https://cafedelmar.com/articles/cafe-del-mar-launches-first-artist-album-with-legendary-electronic-duo-pig-and-dan",
+        "credit": "Pig&Dan · Café del Mar artist photography",
+        "kind": "artist"
+      }
+    },
+    {
+      "artist": "Hermanos Gutiérrez",
+      "title": "Sonido Cósmico",
+      "checked_at": "2026-10-24",
+      "artwork": {
+        "url": "https://cdn.mos.cms.futurecdn.net/4YKCocgHE5bUREeRMUQvEX-1200-80.jpg",
+        "source_url": "https://www.guitarworld.com/news/hermanos-gutierrez-barrio-hustle",
+        "credit": "Barrio Hustle performance · Andy Noël / Guitar World",
+        "kind": "performance"
+      }
+    },
+    {
+      "artist": "Joris Voorn",
+      "title": "Global Underground #43: Joris Voorn - Rotterdam (Unmixed)",
+      "checked_at": "2026-10-24",
+      "artwork": {
+        "url": "https://wearebigfoot.com/lib/artist/7_primary_large.jpg",
+        "source_url": "https://wearebigfoot.com/joris-voorn/",
+        "credit": "Joris Voorn · Bigfoot Music Management",
+        "kind": "artist"
+      }
+    }
+  ]
+}

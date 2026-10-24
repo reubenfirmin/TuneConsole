@@ -52,9 +52,9 @@ def _axis_rows(prefix, shares, weights, standing, leans, fparams):
     return rows
 
 
-def mix_choices(store):
+def mix_choices(store, now=None):
     """Choice evidence with descriptions of the groups those choices actually train."""
-    evidence = mode_eval.choice_evidence(store)
+    evidence = mode_eval.choice_evidence(store, now)
     profiles = mode_profiles.describe_modes(store)
     for row in evidence["rows"]:
         row["profile"] = profiles[row["mode_id"]]
@@ -71,7 +71,7 @@ def generated_playlists(store, now):
         examples[source] = next((t for t in bundles.get("all", {}).get(source, [])
                                  if t.get("key") not in blocked and t.get("artist") not in muted), None)
     gp = rec_params.get_param
-    return {"choices": mix_choices(store), "examples": examples,
+    return {"choices": mix_choices(store, now), "examples": examples,
             "taste_rank_ready": bool(surfaces.playlist_taste(store)),
             "catalog_content_percent": round(surfaces.CATALOG_CONTENT_FRAC * 100),
             "comfort_min_plays": gp(store, "comfort_min_plays"),
@@ -195,9 +195,10 @@ def mode_layers(store, now) -> dict:
     and SESSION are confidence-gated (`now_min_events` distinct played keys with a known sound);
     below the gate they report nothing rather than a weak guess, and `segments` is empty.
     """
-    now_shares, now_n, current_modes = layers.now_mode_mix(store, now)
-    session_shares, session_n, _ = layers.session_mode_mix(store, now)
-    evidence = layers.evidence_coverage(store, now)
+    recent = layers.recent_evidence(store, now, window_h=max(24, rec_params.get_param(store, 'now_window_h')))
+    now_shares, now_n, current_modes = layers.now_mode_mix(store, now, evidence=recent)
+    session_shares, session_n, _ = layers.session_mode_mix(store, now, evidence=recent)
+    evidence = layers.evidence_coverage(store, now, evidence=recent)
     # The saved grouping remains meaningful when enrichment changes the content space. Do not
     # classify new plays against stale centroids, but keep that last library portrait visible.
     modes = store.modes.list_modes(active_only=True)
@@ -394,6 +395,7 @@ def playlist_influence_panel(store, top=8) -> dict:
     if not pt:
         return panel
     pids = [pt.pids[i] if i < len(pt.pids) else None for i in range(len(pt.titles))]
+    sources = getattr(pt, "sources", [{"kind": "playlist" if pid is not None else "history"} for pid in pids])
     stats = store.charts.get_playlist_listen_stats()
     order = sorted((i for i, weight in enumerate(pt.weights) if weight > 0),
                    key=lambda i: (-float(pt.weights[i]), pt.titles[i].casefold()))
@@ -403,6 +405,8 @@ def playlist_influence_panel(store, top=8) -> dict:
     panel.update(contexts_total=len(pt.titles), active_total=len(order), playlist_total=playlist_total,
                  unplayed_total=len(pt.titles) - len(order), basis=basis,
                  top_count=min(3, len(order)), top_share=share_label(sum(float(pt.weights[i]) for i in order[:3])))
+    if any(source["kind"] not in {"playlist", "history"} for source in sources):
+        panel["basis"] = "interests"
     offset = 0.0
     for i in order[:top]:
         pid, weight = pids[i], float(pt.weights[i])
@@ -413,14 +417,15 @@ def playlist_influence_panel(store, top=8) -> dict:
                    "percent": weight * 100, "percent_label": share_label(weight), "offset": offset,
                    "genre": genres[0] if genres else "", "genres": genres,
                    "listens": stats.get(pid, (None, 0))[1] if pid is not None else None,
-                   "is_other": False}
+                   "is_other": False, "source": sources[i]}
         panel["contexts"].append(context)
         offset += weight * 100
     panel["segments"] = list(panel["contexts"])
     remaining = order[top:]
     if remaining:
         weight = sum(float(pt.weights[i]) for i in remaining)
-        title = "Other playlist" if len(remaining) == 1 else f"Other {len(remaining)} playlists"
+        noun = "playlist" if all(pids[i] is not None for i in remaining) else "interest"
+        title = f"Other {noun}" if len(remaining) == 1 else f"Other {len(remaining)} {noun}s"
         panel["other"] = {"title": title, "weight": weight,
                           "percent": weight * 100, "percent_label": share_label(weight), "offset": offset,
                           "listens": sum(stats.get(pids[i], (None, 0))[1] for i in remaining),

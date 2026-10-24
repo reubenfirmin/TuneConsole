@@ -93,6 +93,12 @@ ALLOWED_REQUESTS = frozenset({
     ("GET", "https://api.github.com/repos/reubenfirmin/TuneConsole/releases/latest"),
 })
 
+# Optional user-key album descriptions. This permits one HTTPS POST endpoint,
+# not domain-wide DeepSeek access. Headers and bodies never enter network logs.
+ALLOWED_POST_REQUESTS = frozenset({
+    ('POST', 'https://api.deepseek.com/chat/completions'),
+})
+
 
 class BlockedHost(Exception):
     """Raised when a server-side request is outside the allowlist policy."""
@@ -180,7 +186,8 @@ class EgressGuard:
         """
         parts = urlsplit(url)
         host, path = parts.hostname or "", parts.path or "/"
-        exact_request_allowed = body is None and (method.upper(), url) in ALLOWED_REQUESTS
+        exact_request_allowed = ((body is None and (method.upper(), url) in ALLOWED_REQUESTS)
+                                 or (method.upper(), url) in ALLOWED_POST_REQUESTS)
         if not host_allowed(host) and not exact_request_allowed:
             # Record the block, shout about it on the main log too, then refuse.
             self.record(verdict="BLOCK", method=method, host=host, path=path, via=via)

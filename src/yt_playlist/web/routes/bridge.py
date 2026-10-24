@@ -139,6 +139,8 @@ def build(ctx) -> APIRouter:
             now_playing = {**now_playing, "source": source,
                            "snapshot_age": max(0, time.monotonic() - seen_at) if seen_at is not None else 0}
         return {"connected": bridge.connected, "now_playing": now_playing,
+                "resumable_player": bridge.resumable_player if bridge.connected and
+                bridge.resumable_player and bridge.resumable_player.get("paused") else None,
                 "sensor_health": getattr(bridge, "sensor_health", None),
                 "radio": bool(session.get("active")),
                 "radio_ready": bool(session.get("active") and not session.get("starting"))}
@@ -281,9 +283,20 @@ def build(ctx) -> APIRouter:
             return {"ok": False, "error": str(exc)}
 
     @router.post("/now-playing/toggle")
-    async def now_playing_toggle():
+    async def now_playing_toggle(action: str = "toggle", resume: bool = False, videoId: str = ""):
+        if action not in ("toggle", "play", "pause"):
+            return {"ok": False, "error": "invalid playback action"}
+        frame = {"type": "playpause"}
+        if action != "toggle":
+            frame["action"] = action
+        if resume:
+            player = bridge.resumable_player
+            if not bridge.connected or not player or not player.get("paused") or not videoId or \
+                    player.get("video_id") != videoId:
+                return {"ok": False, "error": "Paused player is no longer available"}
+            frame.update(resumeOnly=True, videoId=videoId)
         try:
-            bridge.send_control({"type": "playpause"})
+            bridge.send_control(frame)
             return {"ok": True}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -354,6 +367,8 @@ def build(ctx) -> APIRouter:
                         continue
                     bridge.sensor_health = {**counts, "healthy": bool(msg.get("healthy")),
                         "recovering": bool(msg.get("recovering")), "error": str(msg.get("error") or "")[:500]}
+                    if counts["ytm_tabs"] == 0:
+                        bridge.resumable_player = None
                     versions = msg.get("versions")
                     if isinstance(versions, list):
                         bridge.sensor_health["versions"] = [
@@ -363,9 +378,14 @@ def build(ctx) -> APIRouter:
                              "capture": _capture_diagnostics(item.get("capture"))}
                             for item in versions[:8] if isinstance(item, dict)]
                     continue
+                if kind == "player-closed":
+                    bridge.now_playing = bridge.resumable_player = None
+                    bridge.now_playing_seen_at = None
+                    continue
                 if kind == "now-heartbeat":
                     if msg.get("title"):
                         bridge.now_playing = _now_playing_snapshot(msg, bridge.now_playing)
+                        bridge.resumable_player = dict(bridge.now_playing)
                     if bridge.now_playing is not None:
                         bridge.now_playing_seen_at = time.monotonic()
                     if msg.get("title"):
@@ -373,6 +393,7 @@ def build(ctx) -> APIRouter:
                     continue
                 if kind == "play":
                     bridge.now_playing = _now_playing_snapshot(msg)
+                    bridge.resumable_player = dict(bridge.now_playing)
                     bridge.now_playing_seen_at = time.monotonic()
                     if (msg.get("paused") or msg.get("muted") or msg.get("tabMuted")
                             or msg.get("volume") == 0):
@@ -387,12 +408,15 @@ def build(ctx) -> APIRouter:
                     continue
                 if kind == "pevent":
                     now = getattr(ctx, "now_fn", time.time)()
-                    if msg.get("kind") == "state" and bridge.now_playing is not None:
-                        sv, nv = msg.get("videoId"), bridge.now_playing.get("video_id")
-                        if not sv or not nv or sv == nv:
-                            bridge.now_playing["paused"] = msg.get("state") == "paused"
+                    if msg.get("kind") == "state":
+                        for player in (bridge.now_playing, bridge.resumable_player):
+                            if player is not None:
+                                sv, nv = msg.get("videoId"), player.get("video_id")
+                                if not sv or not nv or sv == nv:
+                                    player["paused"] = msg.get("state") == "paused"
                     elif msg.get("kind") == "bye":
                         bridge.now_playing = None
+                        bridge.resumable_player = None
                         bridge.now_playing_seen_at = None
                     if store is not None:
                         try:

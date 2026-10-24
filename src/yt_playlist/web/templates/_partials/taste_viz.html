@@ -123,7 +123,7 @@
           <span class="mode-track-art art-album" aria-hidden="true">
             {% if t.thumbnail %}<img src="{{ t.thumbnail }}" alt="" width="48" height="48" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
           </span>
-          <span class="mode-track-copy"><span class="t-title">{{ t.title }}</span><span class="t-artist">{{ t.artist }}</span></span>
+          <span class="mode-track-copy">{% if t.video_id %}<a class="t-title" href="{{ track_url(t) }}">{{ t.title }}</a>{% else %}<span class="t-title">{{ t.title }}</span>{% endif %}<span class="t-artist">{{ t.artist }}</span></span>
         </li>
         {% endfor %}
       </ul>

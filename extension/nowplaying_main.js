@@ -5,9 +5,10 @@
 // classifies skips/completions/sessions from the raw stream.
 (function () {
   var SENSOR_VERSION = 4;
-  var SENSOR_REVISION = 8; // Implementation changes can replace a compatible, healthy sensor.
+  var SENSOR_REVISION = 9; // Implementation changes can replace a compatible, healthy sensor.
   var previous = window.__tcNowPoller;
-  if (previous && previous.version === SENSOR_VERSION && previous.revision === SENSOR_REVISION && !previous.stopped &&
+  if (previous && previous.version === SENSOR_VERSION && Number.isSafeInteger(previous.revision) &&
+      previous.revision >= SENSOR_REVISION && !previous.stopped &&
       previous.lastSampleAt != null && Date.now() - previous.lastSampleAt < 10000) return;
   if (previous && previous.stop) previous.stop();
 

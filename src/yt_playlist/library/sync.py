@@ -4,7 +4,7 @@ from yt_playlist.core.activity import WorkClosing, check_stopping
 from yt_playlist.util.matching import identity_key, track_artist, track_album
 from yt_playlist.util.retry import error_summary, with_retry
 from yt_playlist.util.thumbnails import best_thumb
-from yt_playlist.library.playlist_metadata import content_hash, is_generated_description
+from yt_playlist.library.playlist_metadata import is_generated_description
 from yt_playlist.library.playlist_snapshot import is_complete_playlist, validate_playlist
 from yt_playlist.library import ratings
 from yt_playlist.library.playlist_positions import retry_insertions
@@ -141,7 +141,9 @@ def _sync_playlists(store, identity_id, client, now, on_progress, label, on_auth
     logger.info("syncing identity %s", identity_id)
     # Only these rows can be disproved by this library snapshot. A playlist created while
     # the remote fetch is in flight may not appear in it yet, even while it is playing.
+    expected_revisions = store.playlists.playlist_revisions(identity_id)
     existing_playlists = [p for p in store.playlists.get_playlists() if p.identity_id == identity_id]
+    existing_by_remote = {p.ytm_playlist_id: p for p in existing_playlists}
     _emit(on_progress, "info", f"{label}: fetching playlists…", stage="playlists")
     try:
         if schedule.resource_due(identity_id, "playlist_listing"):
@@ -208,6 +210,8 @@ def _sync_playlists(store, identity_id, client, now, on_progress, label, on_auth
             ratings_complete = False
             continue
         _emit(on_progress, "info", f"Reading playlist {i} of {total}: {pl.get('title', '')}", i=i, total=total, stage="playlists")
+        ref = store.playlists.playlist_reference(pid, identity_id)
+        expected_revision = expected_revisions.get(ref, 0)
         try:
             detail = with_retry(lambda: client.get_playlist(pid, limit=None), operation=f"fetch {context}",
                                 attempts=1 if first_load else 3, check_cancelled=check_stopping)
@@ -244,14 +248,14 @@ def _sync_playlists(store, identity_id, client, now, on_progress, label, on_auth
                 reason += ', ' + ', '.join(f'{field}={audit.get(field)}' for field in
                     ('pages', 'raw_items', 'omitted', 'unidentified', 'exhausted'))
             items[pid] = resource("partial", reason)
-        track_ids, keys = [], []
+        track_ids = []
         for t in detail.get("tracks", []):
             if complete:
                 tid = store.tracks.upsert_track(
                     t.get("videoId"), t.get("title", ""), _artist(t),
                     _album(t), t.get("duration_seconds"), t.get("isAvailable"),
                     t.get("videoType"), _artist_id(t), _album_id(t), best_thumb(t.get("thumbnails")),
-                    credits=t.get('artists'))
+                    credits=t.get('artists'), library=False)
                 track_ids.append(tid)
             else:
                 # Retain positive catalog/rating evidence without turning a page
@@ -271,13 +275,22 @@ def _sync_playlists(store, identity_id, client, now, on_progress, label, on_auth
             _emit(on_progress, "info", f"{label} › {pl.get('title', '')} (incomplete; waiting for a complete read)",
                   i=i, total=total)
             continue
-        track_ids = list(dict.fromkeys(track_ids))   # de-dupe (YouTube can repeat a video; see set_playlist_tracks)
-        keys = [store.tracks.catalog_subject(tid)["identity_key"] for tid in track_ids]
-        chash = content_hash(keys)
-        db_pid = store.playlists.upsert_playlist(identity_id, pid, pl.get("title", ""),
-                                       len(track_ids), chash, now,
-                                       best_thumb(pl.get("thumbnails")) or best_thumb(detail.get("thumbnails")))
-        store.playlists.set_playlist_tracks(db_pid, track_ids)
+        cached = existing_by_remote.get(pid)
+        retained_listing = resources['playlist_listing'].get('_retained')
+        title = detail.get('title') or (cached.title if retained_listing and cached else pl.get('title', ''))
+        thumbnail = best_thumb(detail.get('thumbnails')) or (None if retained_listing else best_thumb(pl.get('thumbnails')))
+        db_pid = store.playlists.publish_playlist_snapshot(
+            identity_id, pid, title, track_ids, now,
+            expected_revision=expected_revision,
+            thumbnail=thumbnail)
+        if db_pid is None:
+            skipped += 1
+            ratings_complete = False
+            items[pid] = resource("partial", "Playlist changed locally during the read; retry required")
+            _emit(on_progress, "info", f"{label} › {pl.get('title', '')} (newer local edit kept; will retry)",
+                  i=i, total=total, stage="playlists")
+            continue
+        track_ids = list(dict.fromkeys(track_ids))
         retry_insertions(store, db_pid, client, now, attempts=1)
         store.playlists.ensure_playlist_thumbnail(db_pid)
         _sync_generated_group(store, pid, detail.get("description"), groups,identity_id)
@@ -294,10 +307,21 @@ def _sync_playlists(store, identity_id, client, now, on_progress, label, on_auth
     verified_empty = not playlists and resources["playlist_listing"].get("verified_empty", False)
     if (playlists or verified_empty) and not resources["playlist_listing"].get("_retained"):
         stale = [p for p in existing_playlists if p.ytm_playlist_id not in seen_ytm]
+        removed = 0
         for p in stale:
-            store.playlists.remove_playlist(p.id)
-        if stale:
-            _emit(on_progress, "info", f"{label}: removed {len(stale)} playlist(s) no longer present")
+            ref = store.playlists.playlist_reference(p.ytm_playlist_id, identity_id)
+            if store.playlists.remove_playlist(p.id, expected_revision=expected_revisions.get(ref, 0)):
+                removed += 1
+            else:
+                items[p.ytm_playlist_id] = resource("partial", "Playlist changed locally during listing; retry required")
+                # Absence came from this listing, not an individual playlist
+                # read. Retry the listing itself so a retained snapshot cannot
+                # silently discard this unresolved child on the next attempt.
+                resources["playlist_listing"].update(
+                    status="partial", message="Playlist changed locally during listing; retry required")
+                ratings_complete = False
+        if removed:
+            _emit(on_progress, "info", f"{label}: removed {removed} playlist(s) no longer present")
     elif not playlists and not verified_empty:
         # An empty library on a configured identity is, in practice, a broken/expired session. Some
         # endpoints return [] instead of raising a 401 (exactly what happened to the master account
@@ -369,26 +393,30 @@ def _sync_history(store, identity_id, client, now, on_progress, label, on_auth_e
                 on_auth_expired(identity_id, label)
         return resource("failed", error_summary(e)), auth_bad
 
-def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now, *, snapshot=None) -> None:
+def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now, *, snapshot=None,
+                     expected_revision=None, created_at=None) -> None:
     """Re-fetch a single playlist's tracks into the store, fast post-merge refresh (no full sync)."""
     if snapshot is None:
+        expected_revision = store.playlists.playlist_revision(identity_id, ytm_playlist_id)
         detail = with_retry(lambda: client.get_playlist(ytm_playlist_id, limit=None))
         if not is_complete_playlist(detail):
             raise ValueError("YouTube did not return a complete playlist; cached membership preserved")
     else:
+        if expected_revision is None:
+            raise ValueError('A supplied playlist snapshot needs its pre-fetch revision')
         detail = validate_playlist(snapshot)
-    track_ids, keys = [], []
+    track_ids = []
     for t in detail.get("tracks", []):
         tid = store.tracks.upsert_track(t.get("videoId"), t.get("title", ""), _artist(t),
                                  _album(t), t.get("duration_seconds"), t.get("isAvailable"),
                                  t.get("videoType"), _artist_id(t), _album_id(t), best_thumb(t.get("thumbnails")),
-                                 credits=t.get('artists'))
+                                 credits=t.get('artists'), library=False)
         track_ids.append(tid)
-    track_ids = list(dict.fromkeys(track_ids))   # de-dupe repeated videos
-    keys = [store.tracks.catalog_subject(tid)["identity_key"] for tid in track_ids]
-    db_pid = store.playlists.upsert_playlist(identity_id, ytm_playlist_id, title,
-                                   len(track_ids), content_hash(keys), now, best_thumb(detail.get("thumbnails")))
-    store.playlists.set_playlist_tracks(db_pid, track_ids)
+    db_pid = store.playlists.publish_playlist_snapshot(
+        identity_id, ytm_playlist_id, title, track_ids, now, expected_revision=expected_revision,
+        thumbnail=best_thumb(detail.get("thumbnails")), created_at=created_at)
+    if db_pid is None:
+        raise ValueError('Playlist changed locally during the read; newer edits kept. Retry refresh.')
     retry_insertions(store, db_pid, client, now, attempts=1)
     store.playlists.ensure_playlist_thumbnail(db_pid)
     _sync_generated_group(store, ytm_playlist_id, detail.get('description'),

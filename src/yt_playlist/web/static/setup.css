@@ -152,6 +152,10 @@
 .takeout-file-label { cursor: pointer; margin: 0; }
 .visually-hidden-file { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
 .flush-margin { margin: 0; }
+.album-description-toggle { display: flex; align-items: center; gap: .6rem; margin: 1rem 0; }
+.album-description-toggle input { width: auto; margin: 0; }
+.album-description-fields label { display: block; margin-bottom: .45rem; }
+.album-description-fields input { width: 8rem; max-width: 100%; }
 /* Setup's title and instructions use the available content width. */
 main.page-setup .page-head {
   grid-template-columns: minmax(0, 1fr);

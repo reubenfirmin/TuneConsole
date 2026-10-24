@@ -49,7 +49,7 @@
       <ol class="redis-list">
         {% for t in p.tracks %}
         <li class="redis-row">
-          <span class="redis-row-title">{{ t.title }}</span>
+          {% if t.video_id %}<a class="redis-row-title" href="{{ track_url(t) }}">{{ t.title }}</a>{% else %}<span class="redis-row-title">{{ t.title }}</span>{% endif %}
           <span class="redis-row-artist">{{ t.artist }}</span>
         </li>
         {% endfor %}

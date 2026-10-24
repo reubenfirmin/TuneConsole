@@ -112,7 +112,9 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
     new_pid = client.create_playlist(title, GENERATED_DESCRIPTION)
     store.playlists.mark_generated_playlist(new_pid)
     store.playlists.set_playlist_group(new_pid, group)
-    addition = account_additions(_add_items, client, new_pid, [t["video_id"] for t in uniq], prior_tracks=[])
+    handles = {}
+    addition = account_additions(_add_items, client, new_pid, [t["video_id"] for t in uniq],
+                                prior_tracks=[], set_video_ids=handles)
     added, skipped = addition.added, addition.skipped
     db_pid = None
     if identity_id is not None:                          # optimistic local materialization
@@ -133,7 +135,8 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
     store.actions.record_action(COPY_PLAYLIST,
                         json.dumps({"title": title, "source": "recommendations", "group": group,
                                     "added": added, "skipped": len(skipped) + excluded,
-                                    "addition": addition.diagnostics(), "partial": bool(addition.failure)}),
+                                    "addition": addition.diagnostics(), "added_handles": handles,
+                                    "partial": bool(addition.failure)}),
                         "{}", "executed", json.dumps(capture_copy(client, new_pid, identity_id,
                             [t["video_id"] for t in uniq if t["video_id"] not in skipped],
                             title=title, description=GENERATED_DESCRIPTION, addition=addition)), now)
@@ -141,5 +144,5 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
         store.playlist_recipes.set_recipe(new_pid, recipe, now)           # remember exactly how this one was made
     addition.finish()
     return {"new_ytm": new_pid, "pid": db_pid, "title": title, "added": added,
-            "skipped": len(skipped) + excluded}
+            "skipped": len(skipped) + excluded, "added_handles": handles}
 

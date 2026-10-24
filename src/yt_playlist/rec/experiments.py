@@ -49,16 +49,15 @@ def _prepare_decision(store, decision, cohort, reason, now):
     if decision == "promote":
         if not powered:
             raise ValueError("Promotion requires 100 mature epoch/mode clusters in each live arm.")
+        if any(arm['assignment_provenance']['uncontrolled']
+               or arm['assignment_provenance']['controlled'] != arm['impressions'] for arm in (ppr, cosine)):
+            raise ValueError("Affirmative controlled ranker exposure with valid assignment probabilities is required. "
+                             "Unknown, legacy and whole-menu allocation evidence remains diagnostic.")
         p, c = ppr["cluster_ci95"], cosine["cluster_ci95"]
         if not (p["played"][0] > c["played"][1] and
                 p["completion"][0] >= c["completion"][1] and p["skip"][1] <= c["skip"][0]):
             raise ValueError("Live uncertainty and listening guardrails do not support promotion.")
-        legacy = store.conn.execute(
-            "SELECT 1 FROM rec_served_impressions WHERE "
-            "json_extract(provenance,'$.experiment.cohort')=? AND "
-            "json_extract(provenance,'$.experiment.ppr_policy.algorithm')='unknown-legacy-cache' LIMIT 1",
-            (cohort,)).fetchone()
-        if legacy:
+        if any(arm['assignment_provenance']['legacy_cache'] for arm in (ppr, cosine)):
             raise ValueError("Rebuild the legacy ranking cache before evaluating promotion.")
     record = {"decision": decision, "cohort": cohort, "reason": reason.strip(), "at": now,
               "powered": bool(powered), "live_evidence": {"ppr": ppr, "cosine": cosine},

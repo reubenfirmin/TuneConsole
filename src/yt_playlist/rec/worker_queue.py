@@ -17,6 +17,7 @@ class Job(StrEnum):
     ARTWORK = "artwork"
     STORIES = "stories"
     MEASUREMENT = "measurement"
+    CHOICES = "choices"
 
 
 @dataclass
@@ -70,7 +71,7 @@ class PendingJobs:
     @property
     def visible(self):
         """Analytics alone does not show the model-refreshing indicator."""
-        return any(job != Job.MEASUREMENT for job in self.pending)
+        return any(job not in {Job.MEASUREMENT, Job.CHOICES} for job in self.pending)
 
     @property
     def measurements(self):

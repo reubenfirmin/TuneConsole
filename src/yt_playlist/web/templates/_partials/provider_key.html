@@ -1,0 +1,23 @@
+{% macro key_entry(name, label, configured, endpoint, signup_url) -%}
+<div class="provider-key" x-data='providerKey({{ configured|tojson }}, {{ endpoint|tojson }})'>
+  <div class="provider-key-saved" x-show="saved && !editing" x-cloak>
+    <span>✓ API key saved</span>
+    <button type="button" class="btn-ghost btn-sm" @click="editing = true">Replace</button>
+  </div>
+  <div class="provider-key-edit" x-show="editing" x-cloak>
+    <div class="provider-key-heading">
+      <label for="{{ name }}-api-key">Connect {{ label }}</label>
+      <a href="{{ signup_url }}" target="_blank" rel="noopener">Get a{% if name == 'lastfm' %} free{% endif %} key {{ arrow_icon('external') }}</a>
+    </div>
+    <div class="btn-row">
+      <input id="{{ name }}-api-key" type="text" x-model="val" placeholder="API key"
+             autocomplete="off" spellcheck="false" autocapitalize="none"
+             aria-describedby="{{ name }}-key-help" @keydown.enter.prevent="save()">
+      <button type="button" class="btn-primary btn-sm" :disabled="busy" @click="save()"
+              x-text="busy ? 'Saving…' : 'Save key'"></button>
+    </div>
+    <p class="provider-key-help" id="{{ name }}-key-help">{{ caller() }}</p>
+    <p class="notice err" x-show="err" x-text="err" role="alert" x-cloak></p>
+  </div>
+</div>
+{%- endmacro %}

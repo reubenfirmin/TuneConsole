@@ -14,7 +14,7 @@ from .runner import MigrationError
 
 
 CONTRACT_FLOOR = 32
-VERSION = 42
+VERSION = 48
 DEFINITION = Path(__file__).with_name('schema_v033.sql')
 SEED_SETTINGS = {
     'catalog_identity_version': '2',
@@ -30,6 +30,28 @@ TOKEN = re.compile(r"--[^\n]*|/\*.*?\*/|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|"
 
 
 def statements(version=VERSION):
+    if version == 48:
+        from .v048_playback_alternates import statements as alternate_statements
+        yield from statements(47)
+        yield from alternate_statements()
+        return
+    if version == 47:
+        from .v047_playlist_revisions import statements as playlist_statements
+        yield from statements(46)
+        yield from playlist_statements()
+        return
+    if version in (43, 46):  # These migrations only retire obsolete setting overrides.
+        yield from statements(version - 1)
+        return
+    if version == 45:
+        yield from statements(44)
+        yield "CREATE INDEX ix_actions_delete_pending ON actions(id DESC) WHERE status='delete_pending'"
+        return
+    if version == 44:
+        from .v044_prepared_content import statements as content_statements
+        yield from statements(43)
+        yield from content_statements()
+        return
     if version == 42:
         from .v042_foreign_calendar_scopes import statements as foreign_calendar_statements
         yield from statements(41)

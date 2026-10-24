@@ -230,7 +230,7 @@ MAIN and isolated scripts on Music, and the public-site script on the two TuneCo
 
 | Boundary | Messages and response |
 | --- | --- |
-| MAIN sensor to isolated content | `window.postMessage` carries `__tcSensorVersion: 4` plus `__tcNow` (player/bar metadata, queue, account availability, pause/mute, elapsed position) with `__tcSensorRevision: 8`, or `__tcPlayer` (raw playback event). The isolated receiver accepts messages from the same window, ignores obsolete sensor versions/revisions, and persists neither unknown-account nor unverified metadata snapshots as plays. |
+| MAIN sensor to isolated content | `window.postMessage` carries `__tcSensorVersion: 4` plus `__tcNow` (player/bar metadata, queue, account availability, pause/mute, elapsed position) with `__tcSensorRevision: 9`, or `__tcPlayer` (raw playback event). The isolated receiver accepts messages from the same window, accepts compatible MAIN revisions from 8 onward, and persists neither unknown-account nor unverified metadata snapshots as plays. |
 | MAIN fetch observer to isolated content | `__tcCuration` carries a bounded request body, endpoint, page URL, and account. Ratings include settled `success`/`httpStatus`; other actions report intent. The observer returns the page's original fetch promise unchanged. |
 | Isolated content to MAIN | `__tcSensorProbe: {version, id}` requests an immediate sample. MAIN echoes `__tcSensorProbeId` on `__tcNow`. Health and rating commands use this handshake instead of trusting interval timing. |
 | Worker to isolated content | `sensor-ping` replies with receiver revision and MAIN version/revision/age, plus bounded `capture` diagnostics from its fresh MAIN probe; `main: false` checks fetch readiness alone. `fetch` carries URL/method/body/auth and replies with status/body/time zone. Both worker and receiver enforce the youtubei allowlist. |
@@ -267,9 +267,16 @@ Each sensor-health version entry includes `capture`: verification/account/pause/
 bar/player credit agreement, candidate counts, and bounded Polymer field names. These probes
 omit song/account values and candidate IDs; unanswered probes report no capture snapshot.
 
-The isolated receiver now has explicit teardown for future revision changes. A legacy boolean
-guard has anonymous listeners that cannot safely be replaced: its health report requests a Music
-page reload, and native rating delivery is refused. Automatic health repair still never reloads
+Sensor protocol versions describe compatibility; implementation revisions are additive within
+that version. The sensor factory defaults omitted revision options for older bootstrap callers.
+Compatible newer receivers and MAIN sensors stay installed, and older revisions are refreshed
+in place without making a responding tab appear disconnected. Native rating delivery separately
+requires the configured minimum receiver and MAIN revisions (or newer), preserving cancellation,
+deadline, and player-binding checks.
+
+The isolated receiver has explicit teardown for revision changes. A legacy boolean guard has
+anonymous listeners that cannot safely be replaced: playback stays connected while unsupported
+native rating commands request a Music page reload. Automatic health repair still never reloads
 playing or partially played media. A matching protocol version alone does not prove current code.
 `/bridge/status` includes each tab's receiver and MAIN revisions in `sensor_health.versions`
 (at most eight entries), so the installed code can be identified without opening DevTools.

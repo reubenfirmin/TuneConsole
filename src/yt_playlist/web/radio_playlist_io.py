@@ -72,8 +72,12 @@ def append_receipt(result):
 
 
 def matches_substitution(requested, row, receipt):
-    if (receipt.get("status") == "STATUS_SUCCEEDED" and receipt.get("videoId") == row["videoId"]
-            and receipt.get("setVideoId") and row.get("setVideoId") == receipt["setVideoId"]):
+    if receipt.get("status") == "STATUS_SUCCEEDED" and receipt.get("setVideoId"):
+        # Music can acknowledge the requested video but read back another upload
+        # with different credits. The playlist occurrence handle proves which
+        # row we added; differing handles must not fall back to metadata matching.
+        return row.get("setVideoId") == receipt["setVideoId"]
+    if row.get('playlistVideoId') == requested['video_id']:
         return True
     artist = track_artist(row)
     duration = row.get("duration_seconds") or parse_duration(row.get("duration"))

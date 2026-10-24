@@ -76,6 +76,7 @@ class CardsResult:
     requested_genres: list[str]
     epoch: int
     vibe: str | None
+    choice_context: dict | None = None
 
 
 @dataclass
@@ -164,6 +165,8 @@ def _record_served_cards(store, protos, now):
         ranker = proto.get("ranker") or "lane"
         comparison = uuid.uuid4().hex
         experiment = proto.get("experiment")
+        if proto.get("assignment") and not experiment:
+            experiment = {"assignment": proto["assignment"], "ranker_controlled": False}
         if experiment:
             experiment = {**experiment, "comparison_id": comparison}
         for track_position, track in enumerate(proto["tracks"], 1):
@@ -174,8 +177,10 @@ def _record_served_cards(store, protos, now):
                          "serving_context": {**details.get("serving_context", {}), "ranker": ranker,
                                              "card_position": card_position, "track_position": track_position,
                                              "recipe": proto.get("recipe", {})}})
-        share = experiment["share"] if experiment else None
-        propensity = (share if ranker == "ppr" else 1 - share) if share is not None else 1.0
+        share = experiment.get("share") if experiment else None
+        assignment = (experiment or {}).get("assignment") or {}
+        propensity = assignment.get("probability", (share if ranker == "ppr" else 1 - share)
+                                    if share is not None else 1.0)
         offers.append({"items": rows, "ranker": ranker,
             "request_id": comparison + ":live", "experiment": experiment, "propensity": propensity})
         if experiment and (shadow := proto.get("counterfactual")):

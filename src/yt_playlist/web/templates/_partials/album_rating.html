@@ -1,0 +1,8 @@
+<a class="album-note-rating" href="{{ rating.url }}" target="_blank" rel="noopener noreferrer" data-choice-action="open"
+   aria-label="{{ rating.source }}: {{ '%g'|format(rating.value) }} out of {{ rating.scale }}{% if rating.count %}, {{ rating.count }} ratings{% endif %}">
+  <span class="album-stars" aria-hidden="true">
+    <span class="album-stars-base">{% for star in range(5) %}<svg viewBox="0 0 24 24"><path d="m12 2.5 2.94 5.96 6.58.96-4.76 4.64 1.12 6.55L12 17.52l-5.88 3.09 1.12-6.55-4.76-4.64 6.58-.96Z"/></svg>{% endfor %}</span>
+    <span class="album-stars-fill" style="width:{{ (rating.value / rating.scale * 100)|round(2) }}%">{% for star in range(5) %}<svg viewBox="0 0 24 24"><path d="m12 2.5 2.94 5.96 6.58.96-4.76 4.64 1.12 6.55L12 17.52l-5.88 3.09 1.12-6.55-4.76-4.64 6.58-.96Z"/></svg>{% endfor %}</span>
+  </span>
+  <span class="album-rating-credit">{{ rating.source }}{% if rating.count %}<span>{{ rating.count }} ratings</span>{% endif %}</span>
+</a>

@@ -81,6 +81,7 @@
       <h2 class="section section-flush">Metadata providers</h2>
       {% include "_partials/enrichment_panel.html" %}
     </div>
+    {% if deepseek is defined %}{% include '_partials/album_description_settings.html' %}{% endif %}
   </div>
 
   {# ── Tab 3: Local listening-history imports ─────────────────────────────────────────── #}

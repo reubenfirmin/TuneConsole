@@ -4,12 +4,14 @@
 {% from "_partials/song_menu_button.html" import song_menu %}
 {% from "_macros.html" import flow_badge %}
 <section class="gen-card card" id="gen-{{ p.lane }}"
+         {% if p.recipe and p.recipe.opportunity_id %}data-choice-opportunity="{{ p.recipe.opportunity_id }}" data-choice-option="{{ p.recipe.option_id }}"{% endif %}
          :class="{ 'is-focused': focus === {{ p.lane|tojson|forceescape }}, 'is-muted': focus && focus !== {{ p.lane|tojson|forceescape }} }"
          >
   <div class="gen-card-body{% if regenerating %} is-arriving{% endif %}" id="gen-body-{{ p.lane }}"
        data-genres='{{ p.genres|default([])|tojson }}'
        data-name="{{ p.name }}"{% if p.recipe %} data-recipe='{{ p.recipe|tojson }}'{% endif %}>
   <div class="gen-poster gen-poster--{{ p.tracks[:4]|length }}" role="button" tabindex="0" aria-label="Explore {{ p.note or p.label }}"
+       data-choice-action="open"
        @click="focus = {{ p.lane|tojson|forceescape }}; genReveal('gen-{{ p.lane }}')"
        @keydown.enter.prevent="focus = {{ p.lane|tojson|forceescape }}; genReveal('gen-{{ p.lane }}')"
        @keydown.space.prevent="focus = {{ p.lane|tojson|forceescape }}; genReveal('gen-{{ p.lane }}')">
@@ -65,9 +67,7 @@
       <a class="gen-track-play" href="https://music.youtube.com/watch?v={{ f.video_id|urlencode }}"
          target="_blank" rel="noopener" title="Play {{ f.title }}" aria-label="Play {{ f.title }} on YouTube Music"><span aria-hidden="true">▶</span></a>
       <span class="gen-meta">
-        <a class="gen-title" href="https://music.youtube.com/watch?v={{ f.video_id }}"
-           target="_blank" rel="noopener" data-yt-info
-           title="Preview this one on YouTube Music">{{ f.title }}</a>
+        <a class="gen-title" href="{{ track_url(f) }}" title="Track details">{{ f.title }}</a>
         <span class="gen-artist">{{ f.artist }}</span>
       </span>
       {% if f.reason %}<span class="gen-reason-badge">{{ f.reason }}</span>{% endif %}
