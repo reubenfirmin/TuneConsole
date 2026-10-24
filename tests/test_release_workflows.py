@@ -125,6 +125,38 @@ def test_packaging_waits_for_all_source_checks_on_the_same_workflow_revision():
                     assert "ref" not in step.get("with", {})
 
 
+def test_release_preparation_survives_reused_suites_without_bypassing_failed_checks():
+    jobs = workflow("ci")["jobs"]
+    for name in ("prepared", "publisher-contract"):
+        # A plain condition implicitly adds success(), which propagates skipped
+        # unit/browser ancestors despite the checks gate successfully admitting reuse.
+        condition = jobs[name]["if"]
+        assert "!cancelled()" in condition
+        assert "needs.checks.result == 'success'" in condition
+    assert "needs.plan.result == 'success'" in jobs["prepared"]["if"]
+
+
+@pytest.mark.parametrize("plan,checks,prepared,accepted", [
+    ("success", "success", "success", True),
+    ("failure", "skipped", "skipped", False),
+    ("success", "failure", "skipped", False),
+    ("success", "success", "skipped", False),
+    ("success", "success", "failure", False),
+    ("success", "success", "cancelled", False),
+])
+def test_release_readiness_rejects_missing_or_failed_preparation(plan, checks, prepared, accepted):
+    job = workflow("ci")["jobs"]["release-ready"]
+    assert job["needs"] == ["plan", "checks", "prepared"]
+    assert "!cancelled()" in job["if"]
+    assert "inputs.release_tag != ''" in job["if"]
+    script = job["steps"][0]["run"]
+    completed = subprocess.run(["bash", "-e", "-c", script], capture_output=True, env={
+        **os.environ, "RESULTS": json.dumps({"plan": {"result": plan}, "checks": {"result": checks},
+                                            "prepared": {"result": prepared}}),
+    })
+    assert (completed.returncode == 0) == accepted
+
+
 @pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
 def test_source_check_aggregate_rejects_every_non_success(result):
     script = workflow("ci")["jobs"]["checks"]["steps"][0]["run"]

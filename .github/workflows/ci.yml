@@ -230,7 +230,11 @@ jobs:
   publisher-contract:
     needs: checks
     # Secrets and write tokens are restricted to trusted default-branch runs.
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # Reused source checks have skipped ancestors; do not inherit success().
+    if: >-
+      ${{ !cancelled() && needs.checks.result == 'success' &&
+          github.ref == 'refs/heads/main' &&
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -282,7 +286,11 @@ jobs:
 
   prepared:
     needs: [plan, checks]
-    if: needs.plan.outputs.tag != '' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    # The gate explicitly admits verified reuse even when the suites were skipped.
+    if: >-
+      ${{ !cancelled() && needs.plan.result == 'success' && needs.checks.result == 'success' &&
+          needs.plan.outputs.tag != '' && github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/main' }}
     permissions:
       contents: write
       packages: write
@@ -292,3 +300,25 @@ jobs:
     with:
       version: ${{ needs.plan.outputs.version }}
       tag: ${{ needs.plan.outputs.tag }}
+
+  release-ready:
+    needs: [plan, checks, prepared]
+    # An intentionally requested release cannot pass with its candidates skipped.
+    if: >-
+      ${{ !cancelled() && inputs.release_tag != '' &&
+          github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require completed source checks and final candidate builds
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          assert all(results[name]['result'] == 'success' for name in ('plan', 'checks', 'prepared')), results
+          PY
