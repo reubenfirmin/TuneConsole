@@ -2,14 +2,19 @@
 import logging
 from types import SimpleNamespace
 
-from yt_playlist.core import work_diagnostics
+import pytest
+
+from yt_playlist.core import db_diagnostics, work_diagnostics
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.rec import home_prepared, mode_surfaces
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.worker_tasks import ServingTasks
 
 
-def test_publication_summaries_are_bounded_and_keep_phase_reason_and_progress_counts(store, caplog):
+@pytest.mark.parametrize('publication_threshold', [0., float('inf')])
+def test_publication_summaries_are_bounded_and_keep_phase_reason_and_progress_counts(
+        store, caplog, monkeypatch, publication_threshold):
+    monkeypatch.setattr(db_diagnostics, 'SLOW_LOCK_SECONDS', publication_threshold)
     clock = [0.0]
     store.maintenance_diagnostics = work_diagnostics.MaintenanceDiagnostics(clock=lambda: clock[0])
     store.settings.set_setting('input', 'initial')
@@ -29,7 +34,8 @@ def test_publication_summaries_are_bounded_and_keep_phase_reason_and_progress_co
                                                  reasons=('time_budget',))
         clock[0] = (window + 1) * 60
         store.maintenance_diagnostics.flush()
-    summaries = [r for r in caplog.records if r.levelno >= logging.INFO]
+    summaries = [r for r in caplog.records if r.name == work_diagnostics.logger.name
+                 and r.getMessage().startswith('Maintenance summary:')]
     assert len(summaries) == 3
     for index, record in enumerate(summaries):
         elapsed, published, deferred, failed, phases, reasons, waiting = record.args
@@ -47,6 +53,9 @@ def test_publication_summaries_are_bounded_and_keep_phase_reason_and_progress_co
     assert any('Maintenance publication deferred:' in r.message and r.levelno == logging.DEBUG
                for r in caplog.records)
     assert any('work start:' in r.message and r.levelno == logging.DEBUG for r in caplog.records)
+    assert any(r.name == db_diagnostics.logger.name and r.levelno == logging.INFO
+               and r.getMessage().startswith('Maintenance publication:')
+               for r in caplog.records) == (publication_threshold == 0.)
 
 
 def test_home_budget_is_counted_once_and_keeps_last_good_collections(store, monkeypatch, caplog):

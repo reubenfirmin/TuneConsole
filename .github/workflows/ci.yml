@@ -300,3 +300,25 @@ jobs:
     with:
       version: ${{ needs.plan.outputs.version }}
       tag: ${{ needs.plan.outputs.tag }}
+
+  release-ready:
+    needs: [plan, checks, prepared]
+    # An intentionally requested release cannot pass with its candidates skipped.
+    if: >-
+      ${{ !cancelled() && inputs.release_tag != '' &&
+          github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require completed source checks and final candidate builds
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          assert all(results[name]['result'] == 'success' for name in ('plan', 'checks', 'prepared')), results
+          PY
