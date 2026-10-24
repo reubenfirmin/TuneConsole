@@ -220,9 +220,13 @@ def test_uploaded_asset_metadata_must_match(monkeypatch, tmp_path, field, value)
 
 def test_preflight_reports_exact_failing_service_without_exposing_response(monkeypatch, capsys):
     backend = Backend("owner/repo")
+    checked = []
     monkeypatch.setattr(release_services.shutil, "which", lambda tool: "/bin/" + tool)
     monkeypatch.setattr(backend, "run", lambda *args: None)
     monkeypatch.setattr(release_services, "rehearse", lambda *args: None)
+    monkeypatch.setattr(release_services, "pages_permissions", lambda *args: checked.append("pages"))
+    monkeypatch.setattr(backend, "require_reconciled_channels", lambda *args: checked.append("recovery"))
+    monkeypatch.setattr(backend, "snapshot", lambda *args: checked.append("baseline"))
 
     def denied(image):
         raise urllib.error.URLError("credential=do-not-print")
@@ -233,6 +237,105 @@ def test_preflight_reports_exact_failing_service_without_exposing_response(monke
     output = capsys.readouterr().out
     assert "GHCR package push" in output
     assert "do-not-print" not in output
+    assert checked == ["pages", "recovery", "baseline"]
+
+
+@pytest.mark.parametrize("location", [
+    "/v2/owner/repo/blobs/uploads/probe",
+    "https://ghcr.io/v2/owner/repo/blobs/uploads/probe?_state=fixture-secret",
+])
+@pytest.mark.parametrize("completion_status", [201, 202])
+def test_registry_preflight_completes_untagged_blob_without_unsupported_delete(
+        monkeypatch, location, completion_status):
+    monkeypatch.setenv("GITHUB_ACTOR", "owner")
+    monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
+    requests = []
+
+    def respond(request, timeout):
+        assert timeout == 30
+        requests.append(request)
+        response = io.BytesIO(b'{"token":"registry-token"}' if len(requests) == 1 else b"")
+        response.status = 200 if len(requests) == 1 else 202 if len(requests) == 2 else completion_status
+        response.headers = {"Location": location}
+        return response
+
+    monkeypatch.setattr(release_services.urllib.request, "urlopen", respond)
+    if completion_status == 201:
+        release_services.registry_permissions("ghcr.io/owner/repo")
+    else:
+        with pytest.raises(ValueError, match="did not complete"):
+            release_services.registry_permissions("ghcr.io/owner/repo")
+    assert [request.get_method() for request in requests] == ["GET", "POST", "PUT"]
+    assert requests[0].get_header("Authorization").startswith("Basic ")
+    assert urllib.parse.parse_qs(urllib.parse.urlsplit(requests[0].full_url).query)["scope"] == [
+        "repository:owner/repo:pull,push"]
+    upload = urllib.parse.urlsplit(requests[-1].full_url)
+    assert (upload.scheme, upload.netloc, upload.path) == (
+        "https", "ghcr.io", "/v2/owner/repo/blobs/uploads/probe")
+    assert urllib.parse.parse_qs(upload.query) == {
+        **({"_state": ["fixture-secret"]} if "_state" in location else {}),
+        "digest": ["sha256:" + hashlib.sha256(b"").hexdigest()],
+    }
+    for request in requests[1:]:
+        assert request.get_header("Authorization") == "Bearer registry-token"
+        assert request.get_header("Content-type") == "application/octet-stream"
+        assert request.data == b""
+
+
+@pytest.mark.parametrize("failed_request,operation", [
+    (1, "token request"), (2, "upload initiation"), (3, "upload completion"),
+])
+@pytest.mark.parametrize("status", [401, 403, 405, 503])
+def test_registry_preflight_names_http_failure_without_upload_url_or_credentials(
+        monkeypatch, capsys, failed_request, operation, status):
+    monkeypatch.setenv("GITHUB_ACTOR", "owner")
+    monkeypatch.setenv("GITHUB_TOKEN", "credential-do-not-print")
+    requests = []
+
+    def respond(request, timeout):
+        requests.append(request)
+        if len(requests) == failed_request:
+            raise urllib.error.HTTPError(request.full_url, status, "secret-response", {}, None)
+        response = io.BytesIO(b'{"token":"registry-token-do-not-print"}')
+        response.status = 200 if len(requests) == 1 else 202
+        response.headers = {"Location": "/v2/owner/repo/blobs/uploads/probe?_state=secret-state"}
+        return response
+
+    monkeypatch.setattr(release_services.urllib.request, "urlopen", respond)
+    with pytest.raises(urllib.error.HTTPError) as failure:
+        release_services.registry_permissions("ghcr.io/owner/repo")
+    assert failure.value.code == status
+    assert len(requests) == failed_request
+    output = capsys.readouterr().out
+    assert f"GHCR {operation} (HTTP {status})" in output
+    assert not any(secret in output for secret in (
+        "credential-do-not-print", "registry-token-do-not-print", "secret-state", "secret-response"))
+
+
+def test_preflight_reports_all_service_failures_and_checks_stable_baseline(monkeypatch, capsys):
+    backend = Backend("owner/repo")
+    checked = []
+    monkeypatch.setattr(release_services.shutil, "which", lambda tool: "/bin/" + tool)
+    monkeypatch.setattr(backend, "run", lambda *args: None)
+    monkeypatch.setattr(backend, "require_reconciled_channels", lambda *args: None)
+
+    def denied(service):
+        checked.append(service)
+        raise urllib.error.HTTPError("https://example.com/?credential=secret", 403, "secret", {}, None)
+
+    monkeypatch.setattr(release_services, "rehearse", lambda *args: denied("github"))
+    monkeypatch.setattr(release_services, "registry_permissions", lambda *args: denied("registry"))
+    monkeypatch.setattr(release_services, "pages_permissions", lambda *args: denied("pages"))
+    monkeypatch.setattr(backend, "snapshot", lambda *args: denied("baseline"))
+    with pytest.raises(RuntimeError) as failure:
+        release_services.preflight(backend, "v1.2.3", "a" * 40, "publisher-contract-test", stable=True)
+    assert checked == ["github", "registry", "pages", "baseline"]
+    for service in ("GitHub contents write", "GHCR package push", "Cloudflare Pages Write",
+                    "recoverable stable-channel baseline"):
+        assert service in str(failure.value)
+    output = capsys.readouterr().out
+    assert "HTTP 403" in output
+    assert "secret" not in output
 
 
 def test_pages_write_check_requires_an_actual_grant(monkeypatch):

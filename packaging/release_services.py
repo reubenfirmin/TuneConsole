@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -23,8 +24,17 @@ def report(message):
             stream.write(message + "\n\n")
 
 
+def registry_open(request, operation):
+    try:
+        return urllib.request.urlopen(request, timeout=30)
+    except urllib.error.HTTPError as exc:
+        # Upload locations can contain credentials; expose only the named operation and status.
+        report(f"FAILED: GHCR {operation} (HTTP {exc.code}).")
+        raise
+
+
 def registry_permissions(image):
-    """Prove push permission with a disposable, cancelled blob upload; no tags change."""
+    """Prove push permission by completing an empty, untagged blob upload."""
     name = image.removeprefix("ghcr.io/")
     if name == image or not name or "@" in name or ":" in name:
         raise ValueError("Expected a GHCR repository without tag or digest")
@@ -33,20 +43,25 @@ def registry_permissions(image):
     query = urllib.parse.urlencode({"service": "ghcr.io", "scope": f"repository:{name}:pull,push"})
     request = urllib.request.Request("https://ghcr.io/token?" + query,
                                      headers={"Authorization": "Basic " + credentials})
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with registry_open(request, "token request") as response:
         token = json.load(response)["token"]
-    headers = {"Authorization": "Bearer " + token}
+    headers = {"Authorization": "Bearer " + token, "Content-Type": "application/octet-stream"}
     request = urllib.request.Request(f"https://ghcr.io/v2/{name}/blobs/uploads/",
                                      method="POST", data=b"", headers=headers)
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with registry_open(request, "upload initiation") as response:
         if response.status != 202:
             raise ValueError("GHCR did not accept a disposable upload")
         location = urllib.parse.urljoin(request.full_url, response.headers["Location"])
-    if urllib.parse.urlparse(location).netloc != "ghcr.io":
+    if urllib.parse.urlparse(location)[:2] != ("https", "ghcr.io"):
         raise ValueError("GHCR returned an unexpected upload origin")
-    request = urllib.request.Request(location, method="DELETE", headers=headers)
-    with urllib.request.urlopen(request, timeout=30):
-        pass
+    # GHCR does not implement upload cancellation (DELETE returns 405). Complete
+    # the zero-byte blob instead: one fixed digest, no manifest or image tag.
+    digest = urllib.parse.urlencode({"digest": "sha256:" + hashlib.sha256(b"").hexdigest()})
+    location += ("&" if "?" in location else "?") + digest
+    request = urllib.request.Request(location, method="PUT", data=b"", headers=headers)
+    with registry_open(request, "upload completion") as response:
+        if response.status != 201:
+            raise ValueError("GHCR did not complete the empty blob upload")
 
 
 def pages_permissions(backend):
@@ -61,9 +76,10 @@ def preflight(backend, tag, revision, rehearsal_tag, *, stable):
             raise RuntimeError(f"Publication prerequisite missing: {tool}")
     backend.run("docker", "buildx", "version")
     image = "ghcr.io/" + backend.repository.lower()
+    failures = []
     for service, check in (
         ("GitHub contents write / draft assets", lambda: rehearse(backend, rehearsal_tag, revision)),
-        ("GHCR package push / upload cleanup", lambda: registry_permissions(image)),
+        ("GHCR package push / blob completion", lambda: registry_permissions(image)),
         ("Cloudflare Pages Write", lambda: pages_permissions(backend)),
     ):
         try:
@@ -71,17 +87,23 @@ def preflight(backend, tag, revision, rehearsal_tag, *, stable):
         except Exception as exc:
             # Subprocess and HTTP exceptions can contain auth-bearing response
             # URLs or headers. Report the service and type without dumping them.
-            report(f"FAILED: {service} ({type(exc).__name__}). Check this service's credentials and permissions.")
-            raise RuntimeError(f"Publication preflight failed: {service}") from None
-        report(f"Verified: {service}")
+            status = f", HTTP {exc.code}" if isinstance(exc, urllib.error.HTTPError) else ""
+            report(f"FAILED: {service} ({type(exc).__name__}{status}). Check this service's configuration and permissions.")
+            failures.append(service)
+        else:
+            report(f"Verified: {service}")
     if stable:
-        backend.require_reconciled_channels(tag)
         try:
+            backend.require_reconciled_channels(tag)
             backend.snapshot(image)
         except Exception as exc:
-            report(f"FAILED: recoverable stable-channel baseline ({type(exc).__name__}).")
-            raise RuntimeError("Cannot recover existing Pages deployment / GHCR latest") from None
-        report("Verified: recoverable stable-channel baseline (rechecked under the production lock before promotion)")
+            status = f", HTTP {exc.code}" if isinstance(exc, urllib.error.HTTPError) else ""
+            report(f"FAILED: recoverable stable-channel baseline ({type(exc).__name__}{status}).")
+            failures.append("recoverable stable-channel baseline")
+        else:
+            report("Verified: recoverable stable-channel baseline (rechecked under the production lock before promotion)")
+    if failures:
+        raise RuntimeError("Publication preflight failed: " + ", ".join(failures))
 
 
 def public_bytes(url):
