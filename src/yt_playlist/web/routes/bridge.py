@@ -10,6 +10,7 @@ import math
 import time
 from urllib.parse import urlencode, urlparse, parse_qs
 
+from anyio import CancelScope
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from starlette.concurrency import run_in_threadpool
 
@@ -409,15 +410,18 @@ def build(ctx) -> APIRouter:
             pass
         finally:
             ping_task.cancel()
-            async with lifecycle_lock:
-                if bridge.disconnect(conn_id):
-                    try:
-                        radio = getattr(ctx, "radio", None)
-                        if radio is not None:
-                            suspend = getattr(radio, "suspend", None) or radio.stop
-                            await run_in_threadpool(suspend)
-                    except Exception:
-                        logger.warning("failed to stop Radio Session on disconnect", exc_info=True)
-                    logger.info("extension bridge disconnected")
+            # Socket cancellation must not skip suspension or release ownership
+            # while a replacement is waiting to use the Radio controller.
+            with CancelScope(shield=True):
+                async with lifecycle_lock:
+                    if bridge.disconnect(conn_id):
+                        try:
+                            radio = getattr(ctx, "radio", None)
+                            if radio is not None:
+                                suspend = getattr(radio, "suspend", None) or radio.stop
+                                await run_in_threadpool(suspend)
+                        except Exception:
+                            logger.warning("failed to stop Radio Session on disconnect", exc_info=True)
+                        logger.info("extension bridge disconnected")
 
     return router

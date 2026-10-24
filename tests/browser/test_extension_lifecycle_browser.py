@@ -278,7 +278,8 @@ def test_extension_reload_reconnect_and_throttled_main_repair_preserve_playback(
     h.drop_connection()
     h.eventually(lambda: h.bridge.connected and h.bridge._conn_id != connection_id,
                  "worker did not reconnect after the real socket dropped")
-    h.eventually(lambda: h.bridge.now_playing is not None)
+    h.eventually(lambda: (h.bridge.now_playing or {}).get("video_id") == "first",
+                 "reconnected worker did not restore the playing track")
     assert len(_plays(h)) == 1
 
     # Actual MV3 reload destroys the worker and invalidates isolated contexts. Its install
@@ -300,7 +301,10 @@ def test_extension_reload_reconnect_and_throttled_main_repair_preserve_playback(
     h.eventually(lambda: h.worker.evaluate("tuneConsole.sensors.probe()")["healthy"])
     assert page.evaluate("documentToken") == "same document"
     assert page.evaluate("!document.querySelector('video').paused")
-    h.eventually(lambda: h.bridge.now_playing is not None)
+    # Sensor health can precede backend ingestion. Wait past the DOM fallback,
+    # whose album artwork does not identify the playing video.
+    h.eventually(lambda: (h.bridge.now_playing or {}).get("video_id") == "first",
+                 "reloaded extension did not restore the playing track")
     assert len(_plays(h)) == 1, "reconnect must not duplicate persisted plays"
     assert h.bridge.now_playing["video_id"] == "first"
 

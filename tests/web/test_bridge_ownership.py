@@ -3,6 +3,7 @@ import asyncio
 import threading
 from types import SimpleNamespace
 
+from anyio import CancelScope
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
@@ -115,5 +116,24 @@ def test_replacement_waits_for_current_socket_radio_suspension():
         assert bridge.now_playing["video_id"] == "new"
         b.incoming.put_nowait(None)
         await asyncio.wait_for(task_b, 2)
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_socket_finishes_radio_suspension():
+    async def scenario():
+        bridge, suspensions = Bridge(), []
+        endpoint = handler(bridge, lambda: suspensions.append(True))
+
+        class CancelledSocket(Socket):
+            async def receive_json(self):
+                # TestClient cancels the socket's scope when its context exits.
+                scope.cancel()
+                raise WebSocketDisconnect()
+
+        with CancelScope() as scope:
+            await endpoint(CancelledSocket())
+        assert not bridge.connected
+        assert suspensions == [True]
 
     asyncio.run(scenario())
