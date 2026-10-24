@@ -19,22 +19,32 @@ SOURCES = {
         'overlap_ignored', 'overlap_kept', 'ignored_merges'},
 }
 SURFACES = {'trends': 'trend_rollups', 'cleanup': 'cleanup'}
+DEPENDENCIES = {kind: {(table, '') for table in tables} for kind, tables in SOURCES.items()}
+DEPENDENCIES['trends'].add(('settings', 'key:takeout_imported_at'))
 
 
 def inputs(store, kind, now):
+    return input_fingerprints(store, (kind,), now)[kind]
+
+
+def input_fingerprints(store, kinds, now):
+    """Capture just the summaries' dependencies once under the serving lock."""
+    dependencies = set().union(*(DEPENDENCIES[kind] for kind in kinds))
     with store._lock:
-        revisions = store._snapshot_revisions.capture()
-        values = tuple(sorted((table, revision) for (table, key), revision in revisions.items()
-                              if (not key and table in SOURCES[kind]) or
-                              (kind == 'trends' and table == 'settings'
-                               and key == 'key:takeout_imported_at')))
+        revisions = store._snapshot_revisions.capture(dependencies)
         # Importers can write through another connection. Conservatively refresh
         # on their commits; ordinary playback writes use this connection and only
         # relevant source changes invalidate these jobs.
         external = store.conn.execute('PRAGMA data_version').fetchone()[0]
-        present = bool(store.conn.execute('SELECT 1 FROM rec_proposals WHERE surface=?',
-                                          (SURFACES[kind],)).fetchone())
-    return values, external, int(now // 86400) if kind == 'trends' else None, present
+        placeholders = ','.join('?' for _ in kinds)
+        present = {row[0] for row in store.conn.execute(
+            f'SELECT surface FROM rec_proposals WHERE surface IN ({placeholders})',
+            tuple(SURFACES[kind] for kind in kinds))}
+    return {kind: (
+        tuple(sorted((table, revision) for (table, key), revision in revisions.items()
+                     if (table, key) in DEPENDENCIES[kind])),
+        external, int(now // 86400) if kind == 'trends' else None, SURFACES[kind] in present,
+    ) for kind in kinds}
 
 
 class Projections:
@@ -52,8 +62,7 @@ class Projections:
         if not self.accepting():
             return
         pending = {}
-        for kind in SURFACES:
-            fingerprint = inputs(self.store, kind, self.now_fn())
+        for kind, fingerprint in input_fingerprints(self.store, SURFACES, self.now_fn()).items():
             with self.lock:
                 if (kind not in self.active and fingerprint != self.completed.get(kind)
                         and time.monotonic() >= self.retry_at.get(kind, 0)):

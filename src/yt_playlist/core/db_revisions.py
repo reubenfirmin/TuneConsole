@@ -74,9 +74,23 @@ class Revisions:
                                  "DO UPDATE SET revision=revision+1; END")
         conn.commit()
 
-    def capture(self):
-        return {(r[0], r[1]): r[2] for r in self.conn.execute(
-            "SELECT table_name,record_key,revision FROM temp.snapshot_revisions")}
+    def capture(self, dependencies=None):
+        """Read all counters for snapshot validation, or seek only requested dependencies."""
+        if dependencies is None:
+            rows = self.conn.execute(
+                "SELECT table_name,record_key,revision FROM temp.snapshot_revisions")
+        else:
+            dependencies = sorted(set(dependencies))
+            if not dependencies:
+                return {}
+            values = ','.join('(?,?)' for _ in dependencies)
+            rows = self.conn.execute(
+                f"WITH requested(table_name,record_key) AS (VALUES {values}) "
+                "SELECT r.table_name,r.record_key,r.revision FROM requested q "
+                "JOIN temp.snapshot_revisions r "
+                "ON r.table_name=q.table_name AND r.record_key=q.record_key",
+                tuple(value for dependency in dependencies for value in dependency))
+        return {(r[0], r[1]): r[2] for r in rows}
 
 
 class Reads:

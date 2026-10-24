@@ -47,18 +47,6 @@ def test_taste_signal_modules_exclude_generated(rel):
         f"why in a comment.")
 
 
-def test_trend_rollups_repetition_series_carries_the_exclusion():
-    """The module-level guard above is satisfied by the mere PRESENCE of `day_counts_source(`, so it
-    cannot see the SECOND, separate play read feeding the repetition detector.
-    That read (play_events_since) leaked generated-playlist plays for its whole life. Pin the specific
-    call site: an unguarded `play_events_since(0)` must never come back."""
-    src = (SRC / "rec" / "trend_rollups.py").read_text()
-    assert "play_events_since(0)" not in src, (
-        "detect_insights reads play_events_since(0) with no exclusion, so generated-playlist plays feed "
-        "the repetition detector (the day_counts quarantine does NOT cover this separate read).\n"
-        "Pass exclude_list_ids=store.trends.generated_ytm_ids().")
-
-
 def test_mode_level_signal_documents_why_it_is_exempt():
     """rec_mode_picks intentionally retains generated-playlist provenance. Pin the rationale in place so
     a future cleanup does not "fix" the exemption by deleting the signal it exists to capture."""

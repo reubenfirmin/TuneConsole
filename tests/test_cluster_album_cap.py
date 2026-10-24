@@ -6,8 +6,10 @@ can't dominate a ring. Untagged-album tracks aren't capped (each is its own thin
 import math
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
+from yt_playlist.rec import embed
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
@@ -109,3 +111,41 @@ def test_album_cap_still_fills_from_other_albums(store):
     albums = [t["album"] for t in res["ring"]]
     assert albums.count("Alb One") <= 2 and albums.count("Alb Two") <= 2
     assert len(res["ring"]) == 4                        # 2 from each album
+
+
+@pytest.mark.parametrize("scenario", ["cutoff", "album_cap", "library_overlap"])
+def test_discovery_exposure_counts_only_returned_ring_tracks(store, monkeypatch, scenario):
+    client, _ = _client(store)
+    keys = [store.discovery.upsert_discovered_track(
+        f"candidate {i}|artist", f"d{i}", f"Candidate {i}", "Artist", "Shared Album",
+        "t.jpg", None, None, None, 0.1) for i in range(6)]
+    store.discovery.mark_offered("track", keys[-1:], 0.5)
+    excluded = []
+    if scenario == "album_cap":
+        for i in range(2):
+            store.tracks.upsert_track(f"canvas{i}", f"Canvas {i}", "Artist", "Shared Album", 200)
+            excluded.append(store.tracks.identity_key_for_video(f"canvas{i}"))
+    elif scenario == "library_overlap":
+        store.tracks.upsert_track("d0", "Candidate 0", "Artist", "Shared Album", 200)
+
+    def exposures():
+        return {row["identity_key"]: tuple(row)[1:] for row in store.conn.execute(
+            "SELECT identity_key,first_shown,last_shown,offered_count FROM discovered_tracks")}
+
+    before = exposures()
+    monkeypatch.setattr(embed, "cluster_expand", lambda *args, **kwargs:
+                        [(key, 1 - i / 10) for i, key in enumerate(keys)])
+    response = client.post("/clusters/expand", json={
+        "pos_keys": [], "exclude": excluded, "include_new": True, "k": 1})
+    assert response.status_code == 200
+    ring = response.json()["ring"]
+    assert [track["key"] for track in ring] == ([] if scenario == "album_cap" else keys[:1])
+    if ring:
+        assert ring[0]["out_of_corpus"] == (scenario != "library_overlap")
+    after = exposures()
+    shown = {track["key"] for track in ring}
+    for key in keys:
+        if key in shown:
+            assert after[key] == (1.0, 1.0, before[key][2] + 1)
+        else:
+            assert after[key] == before[key]

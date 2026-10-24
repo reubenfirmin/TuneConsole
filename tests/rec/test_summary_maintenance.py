@@ -173,3 +173,41 @@ def test_full_rebuild_failure_does_not_swallow_summary_jobs(store, monkeypatch):
     assert store.rec_proposals.get_proposals('trend_rollups')['story']
     assert store.rec_proposals.get_proposals('cleanup') == {'count': 0, 'thumbnails': []}
     assert not worker.projections.active
+
+
+def test_poll_shares_one_scoped_capture_despite_unrelated_key_churn(store, monkeypatch):
+    seed(store)
+    worker = worker_for(store, monkeypatch, [timestamp('2026-10')])
+    captures = []
+    original = store._snapshot_revisions.capture
+
+    def capture(*args, **kwargs):
+        result = original(*args, **kwargs)
+        captures.append(result)
+        return result
+
+    monkeypatch.setattr(store._snapshot_revisions, 'capture', capture)
+    worker.projections.poll()
+    assert len(captures) == 1
+    baseline = captures.pop()
+    assert baseline
+    assert all(not key or (table, key) == ('settings', 'key:takeout_imported_at')
+               for table, key in baseline)
+    with store.conn:
+        store.conn.executemany('INSERT INTO settings VALUES (?,?)',
+                               [(f'unrelated-{i}', 'value') for i in range(4000)])
+        store.conn.execute("DELETE FROM settings WHERE key LIKE 'unrelated-%'")
+    assert len(original()) > 4000
+    worker.projections.poll()  # Coalesced jobs are still active on this idle tick.
+    assert captures == [baseline]
+    assert worker.projections.active == {'trends', 'cleanup'}
+
+
+def test_local_import_setting_invalidates_only_trends_inputs(store):
+    now = timestamp('2026-10')
+    before = {kind: maintenance.inputs(store, kind, now) for kind in maintenance.SURFACES}
+    store.settings.set_setting('unrelated', 'new')
+    assert {kind: maintenance.inputs(store, kind, now) for kind in maintenance.SURFACES} == before
+    store.settings.set_setting('takeout_imported_at', '123')
+    assert maintenance.inputs(store, 'trends', now) != before['trends']
+    assert maintenance.inputs(store, 'cleanup', now) == before['cleanup']

@@ -1,3 +1,5 @@
+import pytest
+
 from yt_playlist.rec import trend_insights as tr
 from yt_playlist.rec.trend_rollups import repetition_series
 from yt_playlist.rec.trend_statistics import latest_full_week_start, week_start
@@ -226,46 +228,38 @@ def test_rank_insights_drops_stale_zero_score():
     assert [i["signature"] for i in ranked] == ["new"]
 
 
-def test_detect_insights_excludes_generated_playlist_plays_from_repetition():
-    """Regression: the rollup builds the repetition detector's series from a direct play_events
-    read, SEPARATE from the quarantined day_counts the other six detectors use. That read must apply
-    the GENERATED_GROUP quarantine too, or the app's own recommendations -- played back from a
-    generated playlist in machine-queued bursts with shrinking gaps -- register as the user
-    "coming back faster" and manufacture repetition insights out of nothing.
-
-    Two tracks with the identical strictly-shrinking gap pattern (14 -> 8 -> 4 -> 2 days): one played
-    entirely FROM a generated playlist, one user-driven (NULL provenance). Only the user-driven one
-    may surface."""
+@pytest.mark.parametrize("playlist", ["PLgen", "RDAMPLPLgen"])
+def test_repetition_preserves_play_time_policy_after_adoption(store, playlist):
+    """Adoption admits future plays without turning old generated plays into organic evidence."""
     D = 86400.0
-    GEN = {"PLgen"}
+    owner = store.identities.upsert_identity("main", "cred", None, True)
+    store.playlists.upsert_playlist(owner, "PLgen", "Generated", 0, "h", 1.0)
+    store.playlists.mark_generated_playlist("PLgen")
     pattern = (0, 14 * D, 22 * D, 26 * D, 28 * D)
-    gen_events = [{"identity_key": "kg", "played_at": t, "playlist_ytm_id": "PLgen"} for t in pattern]
-    real_events = [{"identity_key": "kr", "played_at": t, "playlist_ytm_id": None} for t in pattern]
-    events = gen_events + real_events
+    for ts in pattern:
+        store.history.record_play_event(owner, "kg", "vg", ts, playlist_ytm_id=playlist)
+        store.history.record_play_event(owner, "kr", "vr", ts)
+    store.history.import_plays(owner, [("imported", ts) for ts in pattern], source_timezone="UTC")
+    assert {row[0] for row in store.conn.execute(
+        "SELECT is_generated FROM play_events WHERE identity_key='kg'")} == {1}
+    assert {row[0] for row in store.conn.execute(
+        "SELECT is_generated FROM play_events WHERE identity_key='imported'")} == {None}
 
-    class _Trends:
-        def first_play_floor_day(self): return 0
-        def generated_ytm_ids(self): return set(GEN)
-        def track_cards(self, keys): return {}
+    def subjects(now):
+        got = tr.detect_insights(day_counts=[], meta={}, artist_first={}, floor_day=0,
+                                 play_series=repetition_series(store), now=now)
+        return {g["subject"] for g in got if g["kind"] == "repetition"}
 
-    class _History:
-        def play_events_since(self, since, exclude_list_ids=None):
-            # Mirror the real repo: NULL-provenance rows are always kept; only rows whose playlist is
-            # in the exclusion set are dropped.
-            if not exclude_list_ids:
-                return events
-            return [e for e in events if e["playlist_ytm_id"] is None
-                    or e["playlist_ytm_id"] not in exclude_list_ids]
+    assert subjects(29 * D) == {"kr", "imported"}
+    store.playlists.adopt_generated_playlist("PLgen")
+    assert subjects(29 * D) == {"kr", "imported"}
 
-    class _Store:
-        trends = _Trends()
-        history = _History()
-
-    got = tr.detect_insights(day_counts=[], meta={}, artist_first={}, floor_day=0,
-                             play_series=repetition_series(_Store()), now=29 * D)
-    subjects = {g["subject"] for g in got if g["kind"] == "repetition"}
-    assert "kr" in subjects, "user-driven repetition must still surface"
-    assert "kg" not in subjects, "generated-playlist-only repetition must be quarantined"
+    # General-purpose history retains all plays, including generated ones.
+    assert len(store.history.play_events_since(0)) == 15
+    for ts in (30 * D, 44 * D, 52 * D, 56 * D, 58 * D):
+        store.history.record_play_event(owner, "kg", "vg", ts, playlist_ytm_id=playlist)
+    assert "kg" in subjects(59 * D)
+    assert repetition_series(store)["kg"] == [44 * D, 52 * D, 56 * D, 58 * D]
 
 
 def test_takeout_backfill_immune_to_first_day_eq_floor_day():

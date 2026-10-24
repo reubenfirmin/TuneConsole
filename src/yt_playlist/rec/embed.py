@@ -56,12 +56,19 @@ def neighbors_blended(store, key, topn=12):
 
 
 def neighbors_for_unmodeled(store, key, topn=12):
-    """Use the modeled artist's centroid as proxy without fitting the unmodeled seed."""
+    """Proxy an unmodeled seed through recordings sharing any canonical artist credit.
+
+    Each modeled recording contributes once, even when several seed credits match.
+    Without stored seed credits or matching modeled work there is no artist proxy.
+    """
     keys, V, idx = vectors.load_vectors(store)
     if V is None or key in idx:
         return []
-    artist = key.rsplit("|", 1)[-1]
-    rows = [idx[k] for k in idx if k != key and k.rsplit("|", 1)[-1] == artist]
+    credits = store.artists.track_keys()
+    artists = credits.get(key, set())
+    if not artists:
+        return []
+    rows = [idx[k] for k in idx if artists.intersection(credits.get(k, ()))]
     if not rows:
         return []
     proxy = V[rows].mean(0)

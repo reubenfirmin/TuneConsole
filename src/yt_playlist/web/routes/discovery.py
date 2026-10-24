@@ -85,23 +85,30 @@ def build(ctx) -> APIRouter:
         library add); on the next sync the track becomes a library track and the pool prune removes it.
         Returns an empty 200 so the row is swapped out client-side. Best-effort: no client -> 503."""
         try:
-            identity_id,client = client_for(store,ctx.client_provider())
+            client_for(store, ctx.client_provider())
         except ValueError as exc:
             return Response(str(exc),status_code=503)
         if kind == "track":
             row = store.discovery.discovered_tracks_by_keys([id]).get(id)
             vid = row.get("video_id") if row else None
-            if vid:
-                try:
-                    client.rate_song(vid, "LIKE")
-                except Exception:  # noqa: BLE001 - a failed like must not 500 the page
-                    ctx.logger.warning("discovery add (like) failed for %s", id, exc_info=True)
-                    return Response(status_code=502)
-                store.tracks.upsert_track(vid,row['title'],row['artist'],row.get('album'),None)
-                store.playlists.set_song_liked(identity_id,vid,True)
-                store.tracks.record_item_rating(identity_id,vid,'LIKE',source='action',now=ctx.now_fn())
+            if not vid:
+                return Response("This track needs a YouTube video before it can be saved.", status_code=422)
+
+            def publish(identity_id):
+                # Keep acquisition and measurement inside the rating owner's turn, so a later
+                # unlike cannot be overwritten by the remainder of this save.
+                store.tracks.upsert_track(vid, row['title'], row['artist'], row.get('album'), None)
+                store.playlists.set_song_liked(identity_id, vid, True)
                 measurement.record_action(store, "save", ctx.now_fn(), keys=[id],
                                           event_id=f"discovery-save:{id}")
+
+            try:
+                result = ctx.ops().set_rating(vid, "LIKE", after_confirmed=publish)
+            except Exception:  # noqa: BLE001 - a failed like must not 500 the page
+                ctx.logger.warning("discovery add (like) failed for %s", id, exc_info=True)
+                return Response("Couldn't save this track to Liked Music. Try again.", status_code=502)
+            if result.get('player_error'):
+                return Response("YouTube saved the like, but adding it here failed. Try again.", status_code=502)
         return Response(status_code=200)
 
     return router

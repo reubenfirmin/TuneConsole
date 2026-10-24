@@ -235,7 +235,7 @@ def build(ctx) -> APIRouter:
             return HTMLResponse(
                 '<p class="section-note">Connect the extension and configure an identity first.</p>')
         try:
-            parsed = load_spotify_library(await up.read())
+            parsed = await activity_for(ctx).to_thread(load_spotify_library, await up.read())
         except SpotifyLibraryFormatError:
             return HTMLResponse(
                 '<p class="section-note">Could not find Spotify playlists or saved albums. '

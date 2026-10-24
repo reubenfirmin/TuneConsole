@@ -64,6 +64,20 @@ def test_day_counts_source_applies_the_generated_quarantine(store):
     assert tr.day_counts_source(store) == [(10, "b", 1)]
 
 
+def test_repetition_series_returns_only_latest_four_eligible_timestamps_per_key(store):
+    _generated(store, 1, "PL_gen")
+    for day in (0, 14, 22, 26, 28, 7):
+        _ev(store, "a", day * DAY)
+    _ev(store, "a", 40 * DAY, playlist="PL_gen")
+    _ev(store, "b", 9 * DAY)
+    _ev(store, "b", 9 * DAY)
+    _ev(store, "generated_only", 50 * DAY, playlist="PL_gen")
+    assert tr.repetition_series(store) == {
+        "a": [14 * DAY, 22 * DAY, 26 * DAY, 28 * DAY],
+        "b": [9 * DAY, 9 * DAY],
+    }
+
+
 # --- Task 2.2: the first-play index ---------------------------------------------------------------
 
 def test_first_play_index_retains_earlier_coarse_evidence_when_a_ledger_exists(store):

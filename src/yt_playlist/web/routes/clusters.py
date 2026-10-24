@@ -136,7 +136,7 @@ def build(ctx) -> APIRouter:
                          "artist": m["artist"], "album": m["album"], "thumbnail": m["thumbnail"],
                          "genre": g, "family": genre_map.family(g), "score": round(score, 4),
                          "out_of_corpus": new})
-        return {"ring": ring}, list(dmeta)
+        return {"ring": ring}, [track["key"] for track in ring if track["key"] in dmeta]
 
     def _record_expand(payload, offered, body):
         if offered:

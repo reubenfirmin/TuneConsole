@@ -73,6 +73,14 @@ def test_overlaps_suppress_many(store):
     assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
 
 
+@pytest.mark.parametrize('pairs', ['null', '{}', '42', '"junk"', 'broken',
+                                  '[[1,"PLB"],[{},"PLB"],["PLA",null]]'])
+def test_overlaps_suppress_many_ignores_malformed_input(store, pairs):
+    response = _client(store, lambda: {}).post('/overlaps/suppress-many', data={'pairs': pairs})
+    assert response.status_code == 200 and response.headers['HX-Refresh'] == 'true'
+    assert store.overlaps.get_suppressed_overlaps() == []
+
+
 def test_inline_dupe_delete_ok(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     iid = store.identities.upsert_identity("main", "cred", None, True)

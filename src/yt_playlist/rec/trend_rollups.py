@@ -20,14 +20,8 @@ def day_counts_source(store) -> list:
 
 
 def repetition_series(store) -> dict:
-    """Exact timestamp evidence, independently quarantined from generated-playlist feedback."""
-    generated = store.trends.generated_ytm_ids()
-    series = {}
-    for event in store.history.play_events_since(0, exclude_list_ids=generated):
-        series.setdefault(event["identity_key"], []).append(event["played_at"])
-    for timestamps in series.values():
-        timestamps.sort()
-    return series
+    """Exact, eligible evidence for the detector's shrinking return gaps."""
+    return store.trends.repetition_series(trend_insights.REPETITION_MIN_RETURNS + 1)
 
 
 def build(store, now) -> dict | None:

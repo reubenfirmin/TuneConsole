@@ -431,7 +431,8 @@ class RecModelRepo(Repo):
 
     @synchronized
     def clear_feedback(self) -> None:
-        self.conn.execute("DELETE FROM rec_feedback")
+        """Clear visible feedback while keeping receipts for the learning we retain."""
+        self.conn.execute("DELETE FROM rec_feedback WHERE kind NOT IN ('like_grad','dislike_grad')")
         self.conn.execute("DELETE FROM rec_impressions")
         self.conn.commit()
 

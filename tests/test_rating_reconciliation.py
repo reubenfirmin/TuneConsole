@@ -291,6 +291,36 @@ def _learning_state(store):
             for table in ('rec_theme', 'rec_weights', 'rec_grad_log')}
 
 
+@pytest.mark.parametrize('source', ['api', 'sync'])
+def test_clearing_feedback_cannot_relearn_retained_likes(store, source):
+    owner = store.identities.upsert_identity('Main', 'bridge', None, True)
+    store.tracks.upsert_track('rated', 'Song', 'Artist', 'Album', 200)
+    key = store.tracks.identity_key_for_video('rated')
+    rec_params.set_param(store, 'theme_threshold', 0.2)
+    ratings.record_observations(store, owner, {'rated': 'LIKE'}, source=source, now=10)
+    store.rec_model.mark_graduated_once('old dislike|artist', 'dislike_grad', 5)
+    learning = _learning_state(store)
+    assert learning['rec_theme'] and learning['rec_weights'] and learning['rec_grad_log']
+    guards = [tuple(row) for row in store.conn.execute(
+        "SELECT item_key,kind,created_at FROM rec_feedback WHERE kind IN ('like_grad','dislike_grad') "
+        "ORDER BY item_key")]
+
+    for now in (20, 30, 40):
+        retained = store.tracks.item_rating(owner, 'rated')
+        store.rec_model.record_feedback('for_you', 'dismissed|artist', 'dismiss', now=now)
+        store.rec_model.clear_feedback()
+        assert store.tracks.item_rating(owner, 'rated') == retained
+        assert store.rec_model.recent_liked_keys() == []
+        assert store.rec_model.suppressed_keys('for_you', now) == set()
+        assert [tuple(row) for row in store.conn.execute(
+            'SELECT item_key,kind,created_at FROM rec_feedback ORDER BY item_key')] == guards
+        ratings.reconcile_pending(store, owner, None)
+        sync.sync_identity(store, owner, _client([('rated', 'LIKE')]), now=now)
+        _assert_feedback(store, key, 'LIKE')
+        assert store.rec_model.like_provenance(key) == ('action' if source == 'api' else 'sync')
+        assert _learning_state(store) == learning
+
+
 @pytest.mark.parametrize('status', ['LIKE', 'DISLIKE'])
 @pytest.mark.parametrize('destination_first', [False, True])
 @pytest.mark.parametrize('partial', [False, True])

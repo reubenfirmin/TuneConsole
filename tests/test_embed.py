@@ -1,3 +1,6 @@
+import numpy as np
+import pytest
+
 from yt_playlist.rec import content_model, embed, surfaces
 from tests import model_support
 from yt_playlist.util.matching import identity_key
@@ -42,6 +45,74 @@ def test_neighbors_for_unmodeled_uses_artist_proxy(store):
     assert embed.neighbors(store, seed) == []                   # quarantined: no vector of its own
     nbrs = embed.neighbors_for_unmodeled(store, seed, topn=4)
     assert nbrs and all(k.endswith("|ab") for k, _ in nbrs)     # proxied to the artist's A-cluster
+
+
+def _credited_track(store, video, title, *credits):
+    store.tracks.upsert_track(video, title, ", ".join(name for name, _ in credits), None, None,
+                             credits=[{"name": name, "id": aid} for name, aid in credits])
+    return store.tracks.identity_key_for_video(video)
+
+
+def _fixed_vectors(store, rows):
+    store.rec_model.replace_rec_vectors([
+        (key, np.asarray(vector, dtype=np.float32).tobytes()) for key, vector in rows])
+
+
+@pytest.mark.parametrize("own_modeled", [False, True])
+def test_unmodeled_proxy_keeps_verified_homonyms_separate(store, own_modeled):
+    _credited_track(store, "seed", "Same song", ("Same", "artist-a"))
+    other = _credited_track(store, "other", "Same song", ("Same", "artist-b"))
+    seed = store.tracks.identity_key_for_video("seed")
+    assert seed != other  # even disambiguated recording keys retain the same display suffix
+    rows = [(other, [0, 1])]
+    if own_modeled:
+        own = _credited_track(store, "own", "Own song", ("Same", "artist-a"))
+        rows.append((own, [1, 0]))
+    _fixed_vectors(store, rows)
+    before = store.rec_model.get_rec_vectors()
+
+    neighbors = embed.neighbors_for_unmodeled(store, seed)
+
+    if own_modeled:
+        assert neighbors[0] == (own, pytest.approx(1))
+        assert dict(neighbors)[other] == pytest.approx(0)
+    else:
+        assert neighbors == []
+    assert store.rec_model.get_rec_vectors() == before
+
+
+def test_unmodeled_proxy_follows_identified_artist_aliases(store):
+    modeled = _credited_track(store, "modeled", "Older song", ("Old spelling", "artist-a"))
+    seed = _credited_track(store, "seed", "New song", ("New spelling", "artist-a"))
+    _fixed_vectors(store, [(modeled, [1, 0])])
+
+    assert embed.neighbors_for_unmodeled(store, seed) == [(modeled, pytest.approx(1))]
+    assert embed.neighbors_for_unmodeled(store, modeled) == []  # modeled seeds use normal retrieval
+    assert seed not in dict(store.rec_model.get_rec_vectors())
+
+
+def test_unmodeled_proxy_counts_each_recording_once_across_all_seed_credits(store):
+    first = _credited_track(store, "first", "First solo", ("First", "a"))
+    second = _credited_track(store, "second", "Second solo", ("Second", "b"))
+    duet = _credited_track(store, "duet", "Duet", ("First", "a"), ("Second", "b"))
+    seed = _credited_track(store, "seed", "New duet", ("Second alias", "b"), ("First", "a"))
+    unrelated = _credited_track(store, "other", "Unrelated", ("Other", "c"))
+    _fixed_vectors(store, [(first, [1, 0]), (second, [0, 1]), (duet, [0, 1]),
+                           (unrelated, [.6, .8])])
+
+    scores = dict(embed.neighbors_for_unmodeled(store, seed))
+
+    # Any shared canonical credit qualifies; the duet contributes one row, not one per credit.
+    assert scores == pytest.approx({first: 1 / np.sqrt(5), second: 2 / np.sqrt(5),
+                                   duet: 2 / np.sqrt(5), unrelated: 2.2 / np.sqrt(5)})
+    assert seed not in scores
+
+
+def test_unmodeled_proxy_does_not_guess_an_unresolved_seeds_credits(store):
+    modeled = _credited_track(store, "modeled", "Known song", ("Same", "artist-a"))
+    _fixed_vectors(store, [(modeled, [1, 0])])
+
+    assert embed.neighbors_for_unmodeled(store, "unknown recording|same") == []
 
 
 def test_for_you_uses_taste_neighbourhood_when_built(store):
