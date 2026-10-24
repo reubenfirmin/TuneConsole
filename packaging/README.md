@@ -315,16 +315,19 @@ observations, not successful rehearsals of the new 15-minute path.
 
 ## Serial CI shards
 
-Ordinary CI uses two unit runners and two browser runners. Each owns one serial
+Ordinary CI uses four unit runners and four browser runners. Each owns one serial
 pytest process and the usual machine lock. The `checks` job remains the admission
 gate for every packaging workflow; failed, cancelled or unexpectedly skipped matrix
 jobs or the coverage check fail admission. Python 3.12 and Node remain on the unit
 runners, with the separate packaged-resolution check on unit shard 1 only.
 
 The planner pins one immutable timing artifact from successful main-branch CI for
-all four runners. Whole files are assigned deterministically by measured duration;
+all eight runners. Whole files are assigned deterministically by measured duration;
 new files use measured median per-case estimates and join the partition automatically.
-The first run without timing history uses clearly labelled bootstrap estimates.
+Until successful main-branch timings exist, `.github/test-durations.json` supplies
+measured file durations from PR #351's retained run, with its source revision and
+failed cases recorded. That failed run is timing evidence only; it cannot admit
+packaging or stand in for a passing performance comparison.
 Every shard records normal collection before partitioning, including parametrized
 case IDs. The coverage job compares both collections, source revisions and file plans,
 then requires the union of completed cases to equal normal collection exactly once.
@@ -336,15 +339,40 @@ traces for 30 days. The combined timing artifact feeds subsequent partitions.
 failed-job links. It measures planning through the completed `checks` gate; the
 separate reporting job and downstream packaging are excluded from that source-test
 budget. Compare repeated clean runs on the same revision, including cold setup and
-repeated session-fixture cost, before increasing beyond two shards per suite.
+repeated session-fixture cost, when comparing the two- and four-runner split.
+
+Browser jobs use the [official Playwright container](https://playwright.dev/python/docs/docker)
+with the version pinned to `uv.lock`, so browsers and their OS dependencies are
+already present. The workflow contract check rejects a mismatched image version.
+Image pulling remains part of hosted setup and must be included in measurements.
+This removes the per-runner apt installation that took 363 seconds in browser
+shard 1 of [run 40050066995](https://github.com/reubenfirmin/TuneConsole/actions/runs/40050066995);
+the log attributes 344 seconds to downloading 25.9 MB of apt packages.
+
+That run's source checks took 1,357 seconds through the aggregate gate and consumed
+78.07 runner minutes (77.68 in test runners). It failed three tests and the coverage
+gate, so these numbers are diagnostics, not a clean baseline. The retained reports
+contain 5,488 unit cases across 515 files and 543 browser cases across 47 files.
+Repartitioning their measured setup/call/teardown durations gives these estimates:
+
+| Runners per suite | Longest unit file load | Longest browser file load | Total test phase minutes |
+| --- | ---: | ---: | ---: |
+| 2, rebalanced | 1,188.66s | 894.93s | 69.44 |
+| 4, rebalanced | 594.33s | 447.68s | 69.44 |
+
+These are file-load projections, excluding queues, container pulls, dependency
+setup, collection and additional session-fixture work. The four-runner split
+doubles the number of test runners; repeated setup and fixtures can increase
+runner minutes even when elapsed time falls. A hosted four-runner improvement
+has not yet been measured.
 
 For the hosted comparison, manually run **Tests** at the same fixed revision at
-least twice with `test_shards=1` and twice with `test_shards=2`, waiting for each run
+least twice with `test_shards=2` and twice with `test_shards=4`, waiting for each run
 to finish before starting the next. Leave `release_tag` empty so prior checks are
-not reused. The default remains two shards for pushes,
-pull requests and reusable calls. The one-runner control runs the whole suite
+not reused. The default is four shards for pushes,
+pull requests and reusable calls. The optional `test_shards=1` control runs the whole suite
 serially and proves coverage using the same reports and gate. Test runners restore
-no uv cache, so dependency and browser installation costs remain in the measurement.
+no uv cache; dependency installation and browser-container pulling remain in the measurement.
 Download each run's `source-test-run-metrics-<attempt>` artifact into a separate
 directory, then compare the retained JSON without executing tests:
 
@@ -359,14 +387,14 @@ fixture phase costs, runner-minute change, skipped cases and run links. It rejec
 failed or incomplete evidence, duplicate inputs, different revisions and differences
 in parametrized test coverage. Retain failed attempts as well when assessing flakes.
 If the hosted API had not finalized all job timestamps, refresh that run's metrics
-using `--repository OWNER/REPO --run-id ID --attempt N --shards 1` (or `2`) and
+using `--repository OWNER/REPO --run-id ID --attempt N --shards 2` (or `4`, or serial `1`) and
 `--timings DIR` pointing at its verified `source-test-timings-<attempt>` artifact.
 API refreshes require `GITHUB_TOKEN` with repository Actions read access.
 
 The clean baseline at `6285d06` was 774.24s for 4,914 unit passes and 1,387.71s
 for 501 browser passes; a duplicate unit run took 1,250.21s on the same revision.
-Hosted comparison runs of the new partition are **pending**; local checks and ideal
-division of those baseline times do not establish a measured speedup.
+Clean hosted comparison runs of the four-runner partition are **pending**; local
+checks and projected file loads do not establish a measured speedup.
 
 ---
 

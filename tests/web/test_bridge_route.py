@@ -303,9 +303,50 @@ def test_status_carries_progress_and_heartbeat_age_for_authoritative_interpolati
     monkeypatch.setattr(route, 'time', SimpleNamespace(monotonic=lambda: 102))
     client = TestClient(_app(bridge))
     playing = client.get('/bridge/status').json()['now_playing']
-    assert playing['position']==0 and playing['duration']==200 and playing['snapshot_age']==2
+    assert playing['position']==0 and playing['duration'] is None and playing['snapshot_age']==2
     monkeypatch.setattr(route, 'time', SimpleNamespace(monotonic=lambda: 109))
     assert client.get('/bridge/status').json()['now_playing'] is None
+
+
+def test_status_uses_stored_upload_length_despite_growing_buffer_and_track_changes(store):
+    from types import SimpleNamespace
+    from yt_playlist.web.routes.bridge import _now_playing_snapshot
+
+    store.tracks.upsert_track('qceBpFDA3U4', 'Time Hurts', 'Aurora Night', None, 258)
+    store.tracks.upsert_track('other-upload', 'Time Hurts', 'Aurora Night', None, 400)
+    store.tracks.upsert_track('next-song', 'Next', 'Artist', None, 180)
+    bridge = Bridge()
+    app = FastAPI()
+    app.include_router(build_bridge_route(SimpleNamespace(bridge=bridge, store=store)))
+    client = TestClient(app)
+
+    # Actual live samples: elapsed time was right, while the reported total grew
+    # from 0:50 through 1:50 and 2:50 before eventually reaching the real 4:18.
+    for position, buffered in ((11.554541, 49.886619), (37.554125, 109.794102),
+                               (61.552216, 169.701585), (199.548035, 257.999999)):
+        bridge.now_playing = _now_playing_snapshot({
+            'videoId':'qceBpFDA3U4', 'position':position, 'duration':buffered})
+        assert bridge.now_playing['duration'] is None, 'legacy buffer totals are discarded at ingress'
+        bridge.now_playing_seen_at = time.monotonic()
+        playing = client.get('/bridge/status').json()['now_playing']
+        assert playing['duration'] == 258
+        assert playing['position'] == position
+        assert bridge.now_playing['duration'] is None, 'catalog enrichment does not alter sensor state'
+
+    # A changeover immediately uses the next upload's length, independent of old totals.
+    bridge.now_playing = _now_playing_snapshot({'videoId':'next-song', 'position':0, 'duration':258})
+    bridge.now_playing_seen_at = time.monotonic()
+    playing = client.get('/bridge/status').json()['now_playing']
+    assert playing['position'] == 0 and playing['duration'] == 180
+
+    # Neither matching credits nor an old sensor's total can supply an unknown upload's length.
+    bridge.now_playing = _now_playing_snapshot({
+        'videoId':'unknown-upload', 'title':'Time Hurts', 'artist':'Aurora Night',
+        'position':12, 'duration':50})
+    bridge.now_playing_seen_at = time.monotonic()
+    assert client.get('/bridge/status').json()['now_playing']['duration'] is None
+    store.tracks.upsert_track('unknown-upload', 'Time Hurts', 'Aurora Night', None, 270)
+    assert client.get('/bridge/status').json()['now_playing']['duration'] == 270
 
 
 @pytest.mark.parametrize("value, expected", [(True, True), (False, False), (None, None),

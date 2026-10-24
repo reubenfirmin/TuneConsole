@@ -505,7 +505,7 @@ def _materialize_album_tracks(store, clients, saved, on_progress):
                                album_browse_id=bid, thumbnail=meta["thumbnail"],credits=t.get('artists') or album.get('artists'))
             added += 1
         remember_album(store, bid, album, meta)
-        if bid not in store.collection.complete_album_tracklist_ids():
+        if not store.collection.is_album_tracklist_complete(bid):
             failed += 1
     _emit(on_progress, "info", f"album tracks folded in: {added} from {len(todo)} album(s)")
     if failed:

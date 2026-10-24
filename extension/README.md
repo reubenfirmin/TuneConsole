@@ -84,11 +84,16 @@ Muted or paused secondary tabs cannot replace an audible tab's card. Playback la
 requests share tab-creation coordination, and concurrent library requests share the startup wait
 for a new or already-loading music tab before sending fetches.
 
-The two-second Now Playing heartbeat carries the current media position and duration through
+The two-second Now Playing heartbeat carries the player's per-song elapsed time through
 both extension worlds and the worker. The app estimates progress locally between heartbeats,
-then reconciles seeks, track changes and pause state with the next snapshot. During a track
-change, the sensor waits for the media clock to reset or the media source/metadata to change
-before using its timing, since the player's ID can change before its old clock clears.
+then reconciles seeks, track changes and pause state with the next snapshot. Timing comes from
+the same player's getCurrentTime() API as its song ID. The server supplies the full length stored
+for that exact video ID. Music's getDuration() can grow as media buffers, so it is never used
+for the progress total, including when an older extension still sends it. An unknown catalog
+length stays unknown until metadata arrives. The underlying video's media timeline can span
+multiple songs, so neither MAIN nor DOM fallback uses it for progress.
+The sensor rechecks the player's identity after reading timing to reject a changing sample.
+Missing player timing remains unknown; progress never waits for the media stream to reset.
 Reduced motion keeps the thin progress divider visible; unknown/non-finite times remain unknown.
 
 The extension observes the video element and player UI to capture listening behavior. Each event
@@ -225,7 +230,7 @@ MAIN and isolated scripts on Music, and the public-site script on the two TuneCo
 
 | Boundary | Messages and response |
 | --- | --- |
-| MAIN sensor to isolated content | `window.postMessage` carries `__tcSensorVersion: 4` plus `__tcNow` (player/bar metadata, queue, account availability, pause/mute, position/duration) with `__tcSensorRevision: 6`, or `__tcPlayer` (raw playback event). The isolated receiver accepts messages from the same window, ignores obsolete sensor versions/revisions, and persists neither unknown-account nor unverified metadata snapshots as plays. |
+| MAIN sensor to isolated content | `window.postMessage` carries `__tcSensorVersion: 4` plus `__tcNow` (player/bar metadata, queue, account availability, pause/mute, elapsed position) with `__tcSensorRevision: 8`, or `__tcPlayer` (raw playback event). The isolated receiver accepts messages from the same window, ignores obsolete sensor versions/revisions, and persists neither unknown-account nor unverified metadata snapshots as plays. |
 | MAIN fetch observer to isolated content | `__tcCuration` carries a bounded request body, endpoint, page URL, and account. Ratings include settled `success`/`httpStatus`; other actions report intent. The observer returns the page's original fetch promise unchanged. |
 | Isolated content to MAIN | `__tcSensorProbe: {version, id}` requests an immediate sample. MAIN echoes `__tcSensorProbeId` on `__tcNow`. Health and rating commands use this handshake instead of trusting interval timing. |
 | Worker to isolated content | `sensor-ping` replies with receiver revision and MAIN version/revision/age, plus bounded `capture` diagnostics from its fresh MAIN probe; `main: false` checks fetch readiness alone. `fetch` carries URL/method/body/auth and replies with status/body/time zone. Both worker and receiver enforce the youtubei allowlist. |

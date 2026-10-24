@@ -13,6 +13,7 @@ import time
 import pytest
 
 BASELINE = Path(__file__).parent / ".github/test-durations.json"
+SHARD_COUNTS = (1, 2, 4)
 
 
 def partition(nodeids, durations, count=2):
@@ -54,10 +55,10 @@ def pytest_configure(config):
         return
     try:
         index, total = map(int, shard.split("/"))
-        if total not in (1, 2) or not 1 <= index <= total:
+        if total not in SHARD_COUNTS or not 1 <= index <= total:
             raise ValueError()
     except ValueError:
-        raise pytest.UsageError("--ci-shard must be 1/2 or 2/2 (1/1 is reserved for hosted baseline measurements)") from None
+        raise pytest.UsageError("--ci-shard must be INDEX/TOTAL with 1, 2 or 4 serial runners and 1 <= INDEX <= TOTAL") from None
     path = config.getoption("ci_shard_report")
     if path is None:
         raise pytest.UsageError("--ci-shard requires --ci-shard-report so coverage can be verified")
@@ -118,7 +119,7 @@ class Shard:
 
 def verify(reports, suite, total=2):
     reports = sorted(reports, key=lambda report: report["index"])
-    if total not in (1, 2) or len(reports) != total or [report["index"] for report in reports] != list(range(1, total + 1)):
+    if total not in SHARD_COUNTS or len(reports) != total or [report["index"] for report in reports] != list(range(1, total + 1)):
         raise ValueError(f"{suite}: all {total} isolated shard reports are required")
     original = reports[0]["expected"]
     if not original or len(original) != len(set(original)):
@@ -167,7 +168,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("suite", choices=("unit", "browser"))
-    parser.add_argument("--total", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--total", type=int, choices=SHARD_COUNTS, default=4)
     args = parser.parse_args()
     reports = [json.loads(path.read_text()) for path in args.directory.rglob("shard.json")]
     result = verify([report for report in reports if report["suite"] == args.suite], args.suite, args.total)

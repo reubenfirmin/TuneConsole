@@ -1,7 +1,7 @@
 # PRs validate the synthetic merge revision; main pushes validate the landed revision.
 # Feature pushes and tag pushes deliberately do not start a second copy of these checks.
 #
-# Each suite uses two isolated runners, with serial pytest inside each runner.
+# Each suite uses four isolated runners, with serial pytest inside each runner.
 name: Tests
 
 on:
@@ -15,11 +15,11 @@ on:
         required: false
         type: string
       test_shards:
-        description: Runners per suite; use 1 for a serial benchmark on the same revision
+        description: Runners per suite; use 1 or 2 for a control on the same revision
         required: true
         type: choice
-        options: ['2', '1']
-        default: '2'
+        options: ['4', '2', '1']
+        default: '4'
   workflow_call:
 
 concurrency:
@@ -57,14 +57,14 @@ jobs:
     permissions:
       contents: read
       actions: read
-    name: unit (${{ matrix.shard }}/${{ inputs.test_shards || '2' }})
+    name: unit (${{ matrix.shard }}/${{ inputs.test_shards || '4' }})
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(inputs.test_shards == '1' && '[1]' || '[1, 2]') }}
+        shard: ${{ fromJSON(inputs.test_shards == '1' && '[1]' || inputs.test_shards == '2' && '[1, 2]' || '[1, 2, 3, 4]') }}
     env:
       UV_PYTHON: '3.12'  # Exercise the minimum supported application runtime.
-      SHARD_TOTAL: ${{ inputs.test_shards || '2' }}
+      SHARD_TOTAL: ${{ inputs.test_shards || '4' }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -101,16 +101,20 @@ jobs:
     needs: plan
     if: needs.plan.outputs.reuse_tests != 'true'
     runs-on: ubuntu-latest
+    container:
+      # Match the locked Playwright version; browsers and OS dependencies are preinstalled.
+      image: mcr.microsoft.com/playwright/python:v1.60.0-noble
+      options: --init --ipc=host
     permissions:
       contents: read
       actions: read
-    name: browser (${{ matrix.shard }}/${{ inputs.test_shards || '2' }})
+    name: browser (${{ matrix.shard }}/${{ inputs.test_shards || '4' }})
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(inputs.test_shards == '1' && '[1]' || '[1, 2]') }}
+        shard: ${{ fromJSON(inputs.test_shards == '1' && '[1]' || inputs.test_shards == '2' && '[1, 2]' || '[1, 2, 3, 4]') }}
     env:
-      SHARD_TOTAL: ${{ inputs.test_shards || '2' }}
+      SHARD_TOTAL: ${{ inputs.test_shards || '4' }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -118,8 +122,6 @@ jobs:
           enable-cache: false
       - name: Install dependencies
         run: uv sync --locked
-      - name: Install Playwright Chromium
-        run: uv run playwright install --with-deps chromium
       - uses: actions/download-artifact@v4
         if: needs.plan.outputs.timing_artifact != ''
         with:
@@ -144,7 +146,7 @@ jobs:
     needs: [plan, unit, browser]
     runs-on: ubuntu-latest
     env:
-      SHARD_TOTAL: ${{ inputs.test_shards || '2' }}
+      SHARD_TOTAL: ${{ inputs.test_shards || '4' }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -197,7 +199,7 @@ jobs:
       contents: read
       actions: read
     env:
-      SHARD_TOTAL: ${{ inputs.test_shards || '2' }}
+      SHARD_TOTAL: ${{ inputs.test_shards || '4' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

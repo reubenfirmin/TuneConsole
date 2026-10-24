@@ -8,6 +8,16 @@ from yt_playlist.core import artists as artist_catalog, albums as album_catalog
 from yt_playlist.repos.base import Repo, synchronized
 
 
+_COMPLETE_ALBUM_TRACKLISTS = (
+    "SELECT p.provider_id FROM album_fetch_state f JOIN album_provider_ids p "
+    "ON p.album_id=f.album_id AND p.provider='youtube' WHERE f.complete=1 "
+    "AND f.expected_track_count>0 AND f.expected_track_count="
+    "(SELECT COUNT(*) FROM album_tracks t WHERE t.album_id=f.album_id AND t.is_full=1) "
+    "AND NOT EXISTS(SELECT 1 FROM album_tracks t LEFT JOIN library_memberships m ON m.entry_id=t.entry_id "
+    "WHERE t.album_id=f.album_id AND t.is_full=1 AND m.entry_id IS NULL)"
+)
+
+
 class CollectionRepo(Repo):
     @synchronized
     def cache_album_tracklist(self, browse_id, title, artist, thumbnail, keys, *, video_ids=None, entries=None, credits=None, year=None, album_type=None):
@@ -21,7 +31,7 @@ class CollectionRepo(Repo):
 
     @synchronized
     def cached_album_share(self, browse_id):
-        if browse_id not in self.complete_album_tracklist_ids():
+        if not self.is_album_tracklist_complete(browse_id):
             return None
         row = self.conn.execute("SELECT title,video_ids_json FROM album_share_snapshots WHERE browse_id=?",
                                 (browse_id,)).fetchone()
@@ -34,13 +44,13 @@ class CollectionRepo(Repo):
     @synchronized
     def complete_album_tracklist_ids(self):
         """Fetched metadata alone does not mean every track was folded into the library."""
-        return {row[0] for row in self.conn.execute(
-            "SELECT p.provider_id FROM album_fetch_state f JOIN album_provider_ids p "
-            "ON p.album_id=f.album_id AND p.provider='youtube' WHERE f.complete=1 "
-            "AND f.expected_track_count>0 AND f.expected_track_count="
-            "(SELECT COUNT(*) FROM album_tracks t WHERE t.album_id=f.album_id AND t.is_full=1) "
-            "AND NOT EXISTS(SELECT 1 FROM album_tracks t LEFT JOIN library_memberships m ON m.entry_id=t.entry_id "
-            "WHERE t.album_id=f.album_id AND t.is_full=1 AND m.entry_id IS NULL)")}
+        return {row[0] for row in self.conn.execute(_COMPLETE_ALBUM_TRACKLISTS)}
+
+    @synchronized
+    def is_album_tracklist_complete(self, browse_id):
+        """Check one release using its provider ID, without enumerating the library."""
+        return self.conn.execute(
+            _COMPLETE_ALBUM_TRACKLISTS + " AND p.provider_id=?", (browse_id,)).fetchone() is not None
 
     @synchronized
     def playback_source(self, playlist_ytm_id=None, video_id=None, album_browse_id=None) -> dict | None:

@@ -249,8 +249,8 @@ def test_serial_shards_keep_minimum_runtime_resolution_checks_and_diagnostics():
     for name in ("unit", "browser"):
         job = jobs[name]
         assert job["strategy"]["fail-fast"] == "false"
-        assert job["strategy"]["matrix"]["shard"] == "${{ fromJSON(inputs.test_shards == '1' && '[1]' || '[1, 2]') }}"
-        assert job["env"]["SHARD_TOTAL"] == "${{ inputs.test_shards || '2' }}"
+        assert job["strategy"]["matrix"]["shard"] == "${{ fromJSON(inputs.test_shards == '1' && '[1]' || inputs.test_shards == '2' && '[1, 2]' || '[1, 2, 3, 4]') }}"
+        assert job["env"]["SHARD_TOTAL"] == "${{ inputs.test_shards || '4' }}"
         commands = "\n".join(step.get("run", "") for step in job["steps"])
         assert "--ci-shard=${{ matrix.shard }}/$SHARD_TOTAL" in commands
         assert "--junitxml=evidence/junit.xml" in commands
@@ -270,10 +270,21 @@ def test_serial_shards_keep_minimum_runtime_resolution_checks_and_diagnostics():
     assert "--tracing=retain-on-failure" in "\n".join(step.get("run", "") for step in jobs["browser"]["steps"])
 
 
+def test_browser_image_matches_locked_playwright_and_avoids_per_shard_os_installation():
+    import tomllib
+
+    jobs = workflow("ci")["jobs"]
+    lock = tomllib.loads((ROOT / "uv.lock").read_text())
+    version = next(package["version"] for package in lock["package"] if package["name"] == "playwright")
+    assert jobs["browser"]["container"]["image"] == f"mcr.microsoft.com/playwright/python:v{version}-noble"
+    assert "--ipc=host" in jobs["browser"]["container"]["options"]
+    assert not any("playwright install" in step.get("run", "") for step in jobs["browser"]["steps"])
+
+
 def test_hosted_baseline_is_opt_in_and_measurements_follow_the_completed_gate():
     definition = workflow("ci")
     choice = definition["on"]["workflow_dispatch"]["inputs"]["test_shards"]
-    assert choice["type"] == "choice" and choice["options"] == ["2", "1"] and choice["default"] == "2"
+    assert choice["type"] == "choice" and choice["options"] == ["4", "2", "1"] and choice["default"] == "4"
     jobs = definition["jobs"]
     assert jobs["metrics"]["needs"] == ["plan", "coverage", "checks"]
     assert "always()" in jobs["metrics"]["if"]

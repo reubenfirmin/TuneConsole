@@ -159,6 +159,14 @@ class TrackRepo(Repo):
         return row["thumbnail"] if row else None
 
     @synchronized
+    def duration_for_video(self, video_id):
+        """Stored length of this exact upload, including tracks outside the library."""
+        row = self.conn.execute(
+            "SELECT duration_s FROM catalog_tracks WHERE video_id=? AND duration_s>0 "
+            "ORDER BY id DESC LIMIT 1", (video_id,)).fetchone()
+        return row["duration_s"] if row else None
+
+    @synchronized
     def known_duration(self, title, artist):
         """A duration (seconds) we already hold for this song under ANY stored row, else None. Lets a
         generated playlist reuse a time we know from one videoId for the same song under another."""

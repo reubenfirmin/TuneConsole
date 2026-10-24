@@ -1,11 +1,13 @@
 """Exact parametrized-case coverage and measurements across isolated serial runners."""
 from copy import deepcopy
+import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 
-from ci_test_shards import partition, verify
+from ci_test_shards import BASELINE, partition, pytest_configure as configure_shard, verify
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "packaging"))
 from ci_plan import timing_source
@@ -25,19 +27,61 @@ def test_duration_balance_keeps_files_together_and_automatically_assigns_new_cas
     assert sum(loads) == 280  # unknown cases use measured median per-case time (50s)
 
 
-def reports():
-    original = ["one.py::test_case[1]", "one.py::test_case[2]", "two.py::test_case"]
-    owners, loads = partition(original, {})
+@pytest.mark.parametrize("suite", ["unit", "browser"])
+def test_retained_measured_timings_balance_four_whole_file_groups(suite):
+    baseline = json.loads(BASELINE.read_text())
+    timings = baseline[suite]
+    nodes = [f"{name}::recorded_case[{case}]" for name, row in timings.items() for case in range(row["cases"])]
+    owners, loads = partition(nodes, timings, 4)
+    assert set(owners.values()) == {1, 2, 3, 4}
+    assert sum(loads) == pytest.approx(sum(row["seconds"] for row in timings.values()))
+    assert max(loads) - min(loads) < 2
+    assert baseline["run"].endswith("/40050066995")
+    assert baseline["failed_cases"]  # Diagnostic timing input must not claim a passing source run.
+
+
+def reports(total=2, nodeids=None):
+    original = nodeids or ["one.py::test_case[1]", "one.py::test_case[2]", "two.py::test_case"]
+    owners, loads = partition(original, {}, total)
     rows = []
-    for index in (1, 2):
+    for index in range(1, total + 1):
         chosen = [node for node in original if owners[node.split("::")[0]] == index]
-        rows.append({"schema": 2, "suite": "unit", "index": index, "total": 2, "revision": "abc",
+        rows.append({"schema": 2, "suite": "unit", "index": index, "total": total, "revision": "abc",
                      "expected": original, "selected": chosen, "file_owners": owners, "estimated_seconds": loads,
                      "executions": chosen.copy(), "repeated_phases": [],
                      "exitstatus": 0, "elapsed_seconds": 10,
                      "tests": {node: {phase: {"seconds": .1, "outcome": "passed"}
                                       for phase in ("setup", "call", "teardown")} for node in chosen}})
     return rows
+
+
+def test_four_shards_cover_every_parameter_once_and_keep_modules_together():
+    nodeids = [f"file-{file}.py::test_case[{case}]" for file in range(12) for case in range(3)]
+    rows = reports(4, nodeids)
+    assert verify(rows, "unit", total=4)["case_digest"] == verify(reports(1, nodeids), "unit", total=1)["case_digest"]
+    assert all(len(row["selected"]) == 9 for row in rows)
+    assert set(rows[0]["file_owners"].values()) == {1, 2, 3, 4}
+    with pytest.raises(ValueError, match="all 4"):
+        verify(rows[:3], "unit", total=4)
+    rows[3]["exitstatus"] = 1
+    with pytest.raises(ValueError, match="did not pass"):
+        verify(rows, "unit", total=4)
+
+
+@pytest.mark.parametrize("shard", ["1/1", "2/2", "1/4", "4/4", "0/4", "5/4", "1/3", "1/8"])
+def test_runner_configuration_accepts_supported_splits_and_rejects_invalid_indices(tmp_path, shard):
+    options = {"ci_shard": shard, "ci_shard_report": tmp_path / "shard.json",
+               "ci_suite": "unit", "ci_duration_baseline": BASELINE}
+    registered = []
+    config = SimpleNamespace(getoption=options.__getitem__, pluginmanager=SimpleNamespace(
+        register=lambda plugin, name: registered.append(plugin)))
+    if shard in {"0/4", "5/4", "1/3", "1/8"}:
+        with pytest.raises(pytest.UsageError, match="INDEX/TOTAL"):
+            configure_shard(config)
+    else:
+        configure_shard(config)
+        assert registered[0].report["index"] == int(shard.split("/")[0])
+        assert registered[0].report["total"] == int(shard.split("/")[1])
 
 
 def test_every_parameter_case_executes_once_and_all_phases_feed_timings():
@@ -175,6 +219,17 @@ def test_incomplete_hosted_jobs_retain_diagnostics_without_claiming_a_complete_m
         assert result["jobs"][0]["queue_seconds"] is None
 
 
+def test_four_runner_metrics_require_every_shard_and_count_all_runner_minutes():
+    jobs = hosted_jobs(4)
+    result = measure(jobs, "abc", shards=4)
+    assert result["complete"]
+    assert result["test_runner_minutes"] == 24
+    assert len(result["jobs"]) == 8
+    assert not measure([job for job in jobs if job["name"] != "browser (4/4)"], "abc", shards=4)["complete"]
+    jobs[3]["conclusion"] = "cancelled"
+    assert not measure(jobs, "abc", shards=4)["complete"]
+
+
 @pytest.mark.parametrize("event,head,accepted", [
     ("pull_request", "branch-sha", True),
     ("workflow_dispatch", "branch-sha", False),
@@ -226,6 +281,21 @@ def test_repeated_same_revision_comparison_reports_variance_setup_and_fixture_co
     assert result["measurements"]["1"]["elapsed_range_seconds"] == [400, 440]
     assert result["measurements"]["2"]["median_setup_seconds"] == 240
     assert result["measurements"]["2"]["median_phase_seconds"]["setup"] == pytest.approx(.6)
+
+
+@pytest.mark.parametrize("baseline", [1, 2])
+def test_four_shards_can_be_compared_with_repeated_serial_or_two_shard_controls(baseline):
+    rows = measurements()
+    for row in rows:
+        total = baseline if row["shards"] == 1 else 4
+        row["shards"] = total
+        for report in row["suites"].values():
+            report["shards"] = total
+    result = compare(rows)
+    assert result["baseline_shards"] == baseline
+    assert result["candidate_shards"] == 4
+    assert set(result["measurements"]) == {str(baseline), "4"}
+    assert result["runner_minute_change"] == 3
 
 
 @pytest.mark.parametrize("fault", ["single-run", "revision", "duplicate", "cases", "failed", "missing-suite", "stale-timings"])

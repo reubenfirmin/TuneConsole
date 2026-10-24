@@ -1,5 +1,6 @@
 """Prepared offers remain disposable; exposure and current eligibility remain authoritative."""
 from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
 from copy import deepcopy
 import logging
 import threading
@@ -294,12 +295,51 @@ def test_hidden_presync_and_onboarding_menus_are_not_exposures(store, prepared):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     client = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000),
                         base_url="http://127.0.0.1")
-    assert client.get("/").status_code == 200
+    response = client.get("/")
+    assert response.status_code == 200
+    assert 'id="onboarding-feed"' in response.text
+    assert 'id="home-feed"' not in response.text
     assert store.modes.impression_counts() == {}
+    assert store.rec_ledger.scorecard_inputs(0, 2000)[0] == []
+    assert all(t["offered_count"] == 0 for t in store.discovery.get_discovered_tracks())
+    store.modes.replace_modes([], list(range(6)), 1000)
+    # A usable prepared offer opens Home even without modes. Genuine onboarding
+    # requires an unfinished import with no playable prepared mixes.
+    with store.conn:
+        store.conn.execute("DELETE FROM rec_proposals WHERE surface IN ('home_prepared', 'home_tuned')")
+    store.settings.set_setting("last_sync_at", "1000")
+    response = client.get("/")
+    assert response.status_code == 200
+    assert 'id="onboarding-feed"' in response.text
+    assert 'id="home-feed"' not in response.text
+    assert store.modes.impression_counts() == {}
+    assert store.rec_ledger.scorecard_inputs(0, 2000)[0] == []
+    assert all(t["offered_count"] == 0 for t in store.discovery.get_discovered_tracks())
+
+
+def test_visible_prepared_home_without_modes_records_exposures(store, prepared):
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     store.modes.replace_modes([], list(range(6)), 1000)
     store.settings.set_setting("last_sync_at", "1000")
-    assert client.get("/").status_code == 200
-    assert store.modes.impression_counts() == {}
+    client = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000),
+                        base_url="http://127.0.0.1")
+
+    response = client.get("/")
+    assert response.status_code == 200
+    assert 'id="home-feed"' in response.text
+    assert 'id="onboarding-feed"' not in response.text
+    shown = home_prepared.cards(store, prepared, 1000, service(store), record=False).protos
+    assert len(shown) == 4
+    expected = {(p["lane"], t["key"]) for p in shown for t in p["tracks"]}
+    assert all(f'data-key="{key}"' in response.text for _, key in expected)
+    assert store.modes.impression_counts() == Counter(p["mode_id"] for p in shown)
+    impressions = store.rec_ledger.scorecard_inputs(0, 2000)[0]
+    assert len(impressions) == len(expected)
+    assert {(r["lane"], r["identity_key"]) for r in impressions} == expected
+    offered = {t["identity_key"]: t["offered_count"] for t in store.discovery.get_discovered_tracks()}
+    fresh = {key for lane, key in expected if lane == "fresh"}
+    assert fresh
+    assert offered == {key: int(key in fresh) for key in offered}
 
 
 @pytest.mark.parametrize("bad", [None, {}, {"schema": 999}, "bad-json"])

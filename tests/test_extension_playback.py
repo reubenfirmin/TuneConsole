@@ -74,7 +74,7 @@ const chrome = {
     },
     sendMessage: async (id, msg) => {
       messages.push({id, ...msg});
-      if(msg.type==='sensor-ping')return {ok:true,receiverRevision:5,mainVersion:4,mainRevision:6,mainAgeMs:0};
+      if(msg.type==='sensor-ping')return {ok:true,receiverRevision:7,mainVersion:4,mainRevision:8,mainAgeMs:0};
       if(scenario==='rating_handoff' && msg.type==='rate')
         return {ok:msg.videoId===(id===2?'A':'B'),error:'The playing song changed'};
       return {ok: true};

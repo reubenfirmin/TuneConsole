@@ -118,8 +118,8 @@ if(scenario==='unconfirmed_click'){
 }
 if(scenario==='delayed_binding'){
   assert.equal(reply.retryable,true);assert.equal(clicks.length,0);
-  assert.equal(reply.diagnostics.receiverRevision,5);
-  assert.equal(reply.diagnostics.mainRevision,6);
+  assert.equal(reply.diagnostics.receiverRevision,7);
+  assert.equal(reply.diagnostics.mainRevision,8);
   assert.equal(reply.diagnostics.binding.renderer,true);
   assert.equal(reply.diagnostics.binding.targetIds.length,0);
   bindingReady=true;

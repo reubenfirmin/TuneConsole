@@ -34,7 +34,7 @@ def measure(jobs, revision, shards=2, suites=None):
         if role in {"plan", "coverage", "checks"}:
             orchestration.append(row)
             continue
-        if not re.fullmatch(r"(?:unit|browser) \([12]/[12]\)", role):
+        if not re.fullmatch(r"(?:unit|browser) \([1-9][0-9]*/[1-9][0-9]*\)", role):
             continue
         steps = job.get("steps", [])
         test = next((step for step in steps if step["name"].startswith("Run the ")), None)
@@ -44,7 +44,7 @@ def measure(jobs, revision, shards=2, suites=None):
     required = rows + orchestration
     expected = [f"{suite} ({index}/{shards})" for suite in ("unit", "browser") for index in range(1, shards + 1)]
     expected.extend(("plan", "coverage", "checks"))
-    complete = (shards in (1, 2) and Counter(row["role"] for row in required) == Counter(expected)
+    complete = (shards in (1, 2, 4) and Counter(row["role"] for row in required) == Counter(expected)
                 and all(row["conclusion"] == "success" and row["runner_seconds"] is not None
                         and row["queue_seconds"] is not None for row in required)
                 and all(row["test_seconds"] is not None and row["setup_seconds"] is not None for row in rows))
@@ -62,9 +62,10 @@ def measure(jobs, revision, shards=2, suites=None):
 
 def compare(measurements):
     """Refuse single-run claims, different revisions, omitted cases and duplicate inputs."""
-    groups = {total: [row for row in measurements if row["shards"] == total] for total in (1, 2)}
-    if (any(len(group) < 2 for group in groups.values())
-            or not all(row["complete"] and row["shards"] in (1, 2) and row["elapsed_seconds"] > 0 for row in measurements)):
+    counts = sorted({row["shards"] for row in measurements})
+    groups = {total: [row for row in measurements if row["shards"] == total] for total in counts}
+    if (len(groups) != 2 or any(len(group) < 2 for group in groups.values())
+            or not all(row["complete"] and row["shards"] in (1, 2, 4) and row["elapsed_seconds"] > 0 for row in measurements)):
         raise ValueError("Compare at least two passing baseline runs and two passing sharded runs")
     revisions = {row["revision"] for row in measurements}
     identities = {(row["run_id"], row["run_attempt"]) for row in measurements}
@@ -97,8 +98,9 @@ def compare(measurements):
             "skipped_cases": [{"run": row["url"], **{suite: row["suites"][suite]["skipped"]
                                                        for suite in ("unit", "browser")}} for row in rows],
         }
-    baseline, sharded = summaries["1"], summaries["2"]
+    baseline, sharded = (summaries[str(total)] for total in counts)
     return {"revision": next(iter(revisions)), "measurements": summaries,
+            "baseline_shards": counts[0], "candidate_shards": counts[1],
             "wall_time_reduction_percent": 100 * (1 - sharded["median_elapsed_seconds"] / baseline["median_elapsed_seconds"]),
             "runner_minute_change": sharded["median_runner_minutes"] - baseline["median_runner_minutes"],
             "scope": SCOPE}
@@ -133,7 +135,7 @@ if __name__ == "__main__":
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY"))
     parser.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID"))
     parser.add_argument("--attempt", default=os.environ.get("GITHUB_RUN_ATTEMPT"))
-    parser.add_argument("--shards", type=int, choices=(1, 2), default=int(os.environ.get("SHARD_TOTAL", "2")))
+    parser.add_argument("--shards", type=int, choices=(1, 2, 4), default=int(os.environ.get("SHARD_TOTAL", "4")))
     parser.add_argument("--timings", type=Path, default=Path("evidence"))
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()

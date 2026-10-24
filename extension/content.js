@@ -6,8 +6,8 @@
 
 (() => {
   const SENSOR_VERSION = 4;
-  const SENSOR_REVISION = 6;
-  const RECEIVER_REVISION = 5;
+  const SENSOR_REVISION = 8;
+  const RECEIVER_REVISION = 7;
   const previous = window.__tcBridgeLoaded;
   if (previous?.revision === RECEIVER_REVISION && !previous.stopped) return;
   // A legacy boolean guard owns anonymous listeners that cannot be removed safely. Let the
@@ -583,8 +583,9 @@
         artist: b ? b.textContent.trim().split("•")[0].trim() : "",
         thumbnail: img ? img.src : "",
         videoId, playlist, likeStatus: videoId ? readLikeStatus() : "", albumBrowseId,
-        position: videoId ? v?.currentTime : null,
-        duration: videoId ? v?.duration : null,
+        // Only MAIN can read the per-song player clock. A media stream may span songs.
+        position: null,
+        duration: null,
         brandKnown: lastAccount !== null,
         brandId: lastAccount ? lastAccount.brandId : "",
         paused: !v || v.paused,

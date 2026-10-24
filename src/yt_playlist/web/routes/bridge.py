@@ -32,10 +32,12 @@ def _now_playing_snapshot(msg, previous=None):
                 # exact tri-state available for diagnostics without treating it as a play.
                 "metadata_verified": msg.get("metadataVerified")
                 if type(msg.get("metadataVerified")) is bool else None}
-    for key in ('position', 'duration'):
-        value = msg.get(key)
-        snapshot[key] = value if (type(value) in (int, float) and math.isfinite(value)
-                                  and (value >= 0 if key == 'position' else value > 0)) else None
+    position = msg.get('position')
+    snapshot['position'] = position if (type(position) in (int, float) and math.isfinite(position)
+                                        and position >= 0) else None
+    # Older sensors report a growing buffered endpoint as duration. Resolve the full
+    # exact-upload length from the catalog when serving status, never from this frame.
+    snapshot['duration'] = None
     # Old sensors omit context on heartbeats. Preserve it only for the same video.
     for field, key in (("playlist", "playlist_ytm_id"), ("albumBrowseId", "album_browse_id")):
         if field in msg:
@@ -108,8 +110,12 @@ def build(ctx) -> APIRouter:
             bridge.now_playing = now_playing = None
             bridge.now_playing_seen_at = None
         if now_playing is not None:
+            now_playing = {**now_playing, "duration": None}
             store = getattr(ctx, "store", None)
             if getattr(store, "tracks", None) is not None:
+                duration = store.tracks.duration_for_video(now_playing.get("video_id"))
+                if type(duration) in (int, float) and math.isfinite(duration) and duration > 0:
+                    now_playing["duration"] = duration
                 rating = ratings.main_rating(store, now_playing.get("video_id"))
                 if rating:
                     now_playing = {**now_playing, "likeStatus": rating["status"]}
