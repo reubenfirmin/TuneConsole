@@ -13,6 +13,15 @@ import uuid
 
 APP = "com.tuneconsole.TuneConsole"
 
+IDENTITY_PROBE = """
+import importlib.metadata as m, json, os
+from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
+from yt_playlist.core import updatecheck
+assert os.environ.get('FLATPAK_ID') == 'com.tuneconsole.TuneConsole'
+assert updatecheck.is_dev_install() or updatecheck.install_kind() == 'flatpak'
+print(json.dumps({'version':m.version('yt-playlist'),'origin':EXTENSION_ORIGIN}))
+"""
+
 
 def check(version, launch, *, installed=True):
     with socket.socket() as listener:
@@ -20,16 +29,15 @@ def check(version, launch, *, installed=True):
         port = listener.getsockname()[1]
 
     def inside(code):
-        return subprocess.run(launch("python3") + ["-c", code],
-                              check=True, capture_output=True, text=True, timeout=120).stdout.strip()
+        try:
+            return subprocess.run(launch("python3") + ["-c", code],
+                                  check=True, capture_output=True, text=True, timeout=120).stdout.strip()
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"Flatpak probe failed ({exc.returncode}): {exc.cmd!r}\n{exc.stdout}\n{exc.stderr}"
+            ) from exc
 
-    info = json.loads(inside("""
-import importlib.metadata as m, json
-from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
-from yt_playlist.core import updatecheck
-assert updatecheck.install_kind() == 'flatpak'
-print(json.dumps({'version':m.version('yt-playlist'),'origin':EXTENSION_ORIGIN}))
-"""))
+    info = json.loads(inside(IDENTITY_PROBE))
     assert info["version"] == version, info
     exported_version = inside("""
 import xml.etree.ElementTree as ET
