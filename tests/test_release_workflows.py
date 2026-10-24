@@ -125,6 +125,17 @@ def test_packaging_waits_for_all_source_checks_on_the_same_workflow_revision():
                     assert "ref" not in step.get("with", {})
 
 
+def test_release_preparation_survives_reused_suites_without_bypassing_failed_checks():
+    jobs = workflow("ci")["jobs"]
+    for name in ("prepared", "publisher-contract"):
+        # A plain condition implicitly adds success(), which propagates skipped
+        # unit/browser ancestors despite the checks gate successfully admitting reuse.
+        condition = jobs[name]["if"]
+        assert "!cancelled()" in condition
+        assert "needs.checks.result == 'success'" in condition
+    assert "needs.plan.result == 'success'" in jobs["prepared"]["if"]
+
+
 @pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
 def test_source_check_aggregate_rejects_every_non_success(result):
     script = workflow("ci")["jobs"]["checks"]["steps"][0]["run"]
