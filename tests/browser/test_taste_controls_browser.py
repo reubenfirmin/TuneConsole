@@ -551,10 +551,12 @@ def test_taste_recovery_restores_preexisting_settings_after_reload(live_app, sto
     assert store.rec_model.weight_records()["genre:rock"]["weight"] == 0
 
 
-def test_taste_loads_diagnostics_only_when_opened(live_app, page):
+@pytest.mark.parametrize("height", [720, 1200])
+def test_taste_loads_diagnostics_only_when_opened(live_app, page, height):
     paths = {"/taste/viz/engine", "/taste/viz/recent-sound", "/taste/viz/playlist-influence",
              "/taste/recall", "/taste/preview", "/taste/comparison"}
     requests = []
+    page.set_viewport_size({"width": 1280, "height": height})
     page.on("request", lambda request: requests.append(urlsplit(request.url).path)
             if urlsplit(request.url).path in paths else None)
     page.goto(live_app + "/taste")
@@ -562,7 +564,10 @@ def test_taste_loads_diagnostics_only_when_opened(live_app, page):
     assert requests == []
     page.get_by_role("tab", name="Model health", exact=True).click()
     expect(page.locator("#taste-health-panel").get_by_text("Learning method", exact=True)).to_be_visible()
-    page.locator("#model-health-checks").scroll_into_view_if_needed()
+    # The intersect response replaces this wrapper. Scroll in one browser task so
+    # Playwright cannot wait for layout stability on a node the response just removed.
+    page.locator("#model-health-checks").evaluate(
+        "el => el.scrollIntoView({block: 'center', behavior: 'instant'})")
     expect(page.locator("#model-status")).to_contain_text("Future listening")
     assert requests == ["/taste/recall"]
     page.get_by_role("tab", name="Overview", exact=True).click()
