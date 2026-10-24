@@ -115,6 +115,11 @@ class Session:
     def accept_tracks(self, tracks, now):
         """Apply a confirmed queue under the caller's state lock, preserving heard positions."""
         if [t['video_id'] for t in tracks] == [t['video_id'] for t in self.tracks]:
+            if list(tracks) != self.tracks:
+                self.tracks = list(tracks)
+                by_video = {t['video_id']: t for t in tracks}
+                self.selected = [by_video.get(t['video_id'], t) for t in self.selected]
+                self.metadata_revision += 1
             return
         self.edits.recent_states = [state for state in self.edits.recent_states if now - state['at'] < 60]
         self.edits.recent_states.append({'ids': [t['video_id'] for t in self.tracks], 'at': now})

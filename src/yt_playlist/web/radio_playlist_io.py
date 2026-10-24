@@ -1,5 +1,6 @@
 """Complete remote reads and atomic publication of confirmed playlist contents."""
 from dataclasses import dataclass
+import math
 from typing import Literal
 
 from yt_playlist.library.playlist_snapshot import validate_playlist
@@ -13,6 +14,32 @@ class PlaylistChanged(ValueError):
 
 class PlaylistPending(Exception):
     """A temporary readback condition, never a user-facing error."""
+
+
+def duration_seconds(value):
+    """Keep invalid provider durations out of the catalog and time display."""
+    if isinstance(value, bool):
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return int(seconds) if math.isfinite(seconds) and seconds >= 1 else None
+
+
+def readback_durations(tracks, remote, *, previous=()):
+    """Fill missing times from the exact confirmed upload, retaining known values."""
+    rows = {row['videoId']: row for row in remote}
+    known = {track['video_id']: track.get('duration') for track in previous}
+    result = []
+    for track in tracks:
+        row = rows.get(track['video_id'], {})
+        duration = (duration_seconds(track.get('duration'))
+                    or duration_seconds(known.get(track['video_id']))
+                    or duration_seconds(row.get('duration_seconds'))
+                    or duration_seconds(parse_duration(row.get('duration'))))
+        result.append({**track, 'duration': duration} if duration is not None or 'duration' in track else dict(track))
+    return tuple(result)
 
 
 @dataclass(frozen=True)

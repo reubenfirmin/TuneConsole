@@ -271,8 +271,10 @@ def test_feature_settings_select_features_and_preserve_saved_edits(live_app, sto
     expect(navigation.get_by_role("tab")).to_have_count(8)
     expect(features.locator("details")).to_have_count(0)
     expect(features.locator("#taste-feature-radio")).to_have_count(0)
-    # Track length is now a Home control too; keep it available alongside refresh/variety/comfort.
-    expect(features.get_by_role("slider")).to_have_count(15)
+    # Home keeps track length and the active setup threshold; the two inactive
+    # coverage/library thresholds have been retired.
+    expect(features.get_by_role("slider")).to_have_count(13)
+    expect(features.locator("#param-onboard_coverage_min, #param-onboard_library_min")).to_have_count(0)
     expect(features.locator("#param-max_track_minutes")).to_be_visible()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 

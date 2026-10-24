@@ -229,8 +229,17 @@ def _header_metadata(response):
 
 
 def complete_playlist(client, playlist_id):
-    reader = _PlaylistRead(client)
+    liked_music = playlist_id in ('LM', 'VLLM')
+    reader = _PlaylistRead(client, collect_identities=liked_music)
     detail = _complete_playlist(reader, playlist_id)
+    if liked_music:
+        from yt_playlist.core.liked_music_snapshot import reconcile_liked_music
+
+        def read_music():
+            latest = _PlaylistRead(client, collect_identities=True)
+            return _complete_playlist(latest, playlist_id), latest.identity_rows
+
+        return reconcile_liked_music(client, detail, reader.identity_rows, read_music)
     from yt_playlist.core.playlist_reconciliation import reconcile_playlist
     return reconcile_playlist(client, playlist_id, detail,
                               lambda: _complete_playlist(_PlaylistRead(client), playlist_id))

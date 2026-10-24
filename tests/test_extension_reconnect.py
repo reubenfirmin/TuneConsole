@@ -54,6 +54,8 @@ assert(queued.some(msg => msg.__tcSensorProbe), 'reconnect must request a fresh 
 flush();
 const latest = sent.filter(msg => ['play','now-heartbeat'].includes(msg.type)).at(-1);
 assert.equal(latest.videoId,'current', 'MAIN player identity must win over the old player bar');
+assert.equal(latest.position,20, 'reconnect carries a fresh interpolation anchor');
+assert.equal(latest.duration,200);
 if (['transition','conflicting_bar'].includes(scenario)) {
   assert.equal(latest.type,'now-heartbeat');
   assert.equal(latest.metadataVerified,false);
@@ -74,6 +76,20 @@ if (['transition','conflicting_bar'].includes(scenario)) {
   assert.equal(latest.paused,scenario==='paused');
   assert.equal(sent.filter(msg => msg.type==='play').length,scenario==='paused' ? 0 : 1);
 }
+// Subsequent heartbeats carry seeks, pause and unknown timing through the real sensor/receiver.
+video.currentTime=0;
+video.paused=true;
+intervals[1](); flush();
+let heartbeat=sent.at(-1);
+assert.equal(heartbeat.type,'now-heartbeat');
+assert.equal(heartbeat.position,0);
+assert.equal(heartbeat.duration,200);
+assert.equal(heartbeat.paused,true);
+video.currentTime=NaN; video.duration=Infinity;
+intervals[1](); flush();
+heartbeat=sent.at(-1);
+assert.equal(heartbeat.position,null);
+assert.equal(heartbeat.duration,null);
 """
     result = subprocess.run([node, "-e", script, scenario], cwd=Path(__file__).resolve().parents[1],
                             capture_output=True, text=True, timeout=10)

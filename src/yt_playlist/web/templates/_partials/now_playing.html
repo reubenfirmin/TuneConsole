@@ -22,16 +22,6 @@
           <span class="hs-now-title" x-text="nowPlaying.title || ''" :title="nowPlaying.title || ''"></span>
           <span class="hs-now-artist" x-show="nowPlaying.artist" x-text="nowPlaying.artist || ''" :title="nowPlaying.artist || ''"></span>
         </span>
-        <div class="hs-progress" role="group" aria-label="Track timing">
-          <progress x-show="timing.position !== null && timing.duration !== null"
-                    :value="timing.position ?? 0" :max="timing.duration || 1" aria-label="Track progress"
-                    :aria-valuetext="timeLabel(timing.position) + ' of ' + timeLabel(timing.duration)"></progress>
-          <span class="hs-times">
-            <span aria-label="Elapsed time" x-text="timeLabel(timing.position)"></span>
-            <span :aria-label="timing.duration === null ? 'Total duration unavailable' : 'Total duration'"
-                  x-text="timeLabel(timing.duration)"></span>
-          </span>
-        </div>
         <template x-if="sourceLinkVisible()">
           <a class="hs-source" :href="nowPlaying.source.url"
              :title="'Back to ' + sourceName() + ': ' + nowPlaying.source.title"
@@ -43,6 +33,12 @@
           </a>
         </template>
         <span class="hs-rate-group" role="group" aria-label="Playback and ratings">
+          <span class="hs-progress" x-show="timing.position !== null && timing.duration !== null" x-cloak
+                :style="'--played: ' + Math.min(100, Math.max(0, (timing.position ?? 0) / (timing.duration || 1) * 100)) + '%'">
+            <progress :value="timing.position ?? 0" :max="timing.duration || 1" aria-label="Track progress"
+                      :title="timeLabel(timing.position) + ' of ' + timeLabel(timing.duration)"
+                      :aria-valuetext="timeLabel(timing.position) + ' of ' + timeLabel(timing.duration)"></progress>
+          </span>
           <button type="button" class="hs-playpause btn-primary" @click="toggle()"
                   :title="nowPlaying.paused ? 'Play (Space)' : 'Pause (Space)'"
                   :aria-label="nowPlaying.paused ? 'Play' : 'Pause'">

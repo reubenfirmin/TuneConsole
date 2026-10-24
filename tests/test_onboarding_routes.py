@@ -130,8 +130,10 @@ def test_first_mix_is_available_while_album_sync_is_blocked(store):
 
 def test_import_details_remain_available_after_restart(store):
     import json
+    from tests.conftest import seed_catalog_track
 
     _, c = _client(store)
+    seed_catalog_track(store, "ready|artist", "Ready", "Artist", video_id="ready")
     assert c.get("/sync/recent").json() == {"events": [], "outcome": None}
     store.settings.set_setting("library_sync_state", json.dumps({
         "status": "partial", "accounts": {"1": {"label": "Main", "resources": {
@@ -149,9 +151,34 @@ def test_import_details_remain_available_after_restart(store):
         if stamp:
             store.settings.set_setting("last_sync_at", stamp)
         html = c.get("/").text
-        assert ('aria-labelledby="setup-details-title"' in html
-                or 'id="library-import-details"' in html)
-        assert 'x-show="running || lines.length"' not in html
+        assert 'aria-labelledby="setup-details-title"' in html
+        assert 'id="library-import-details"' not in html
+
+
+@pytest.mark.parametrize("outcome", ["partial", "skipped", "failed"])
+def test_established_home_keeps_retry_diagnostics_out_of_the_dashboard(store, outcome):
+    from tests.onboarding_support import publish_personal_mix
+
+    _, client = _client(store)
+    publish_personal_mix(store)
+    store.settings.set_setting("last_sync_at", "1000")
+    store.settings.set_setting("last_sync_outcome", outcome)
+    html = client.get("/").text
+    assert 'id="home-feed"' in html
+    assert 'class="setup-banner"' not in html
+    assert 'id="library-import-details"' not in html
+    assert "Some items need a retry" not in html
+    assert "Reconnect or sign in, then sync again" not in html
+
+    # A confirmed account problem still has a specific action in Needs attention.
+    identity = store.identities.get_identities()[0]
+    client.app.state.ctx.flag_auth_expired(identity.id, "Main")
+    html = client.get("/").text
+    notices = html.split('<section class="dash-panel dash-notices"', 1)[1]
+    assert 'class="alert-card card card--featured alert-high"' in notices
+    assert "Sign in to YouTube Music (Main)" in notices
+    assert 'href="https://music.youtube.com"' in notices
+    assert "Open YouTube Music" in notices
 
 
 def test_setup_banner_tracks_import_then_models_across_pages(store):
@@ -180,6 +207,30 @@ def test_setup_banner_tracks_import_then_models_across_pages(store):
     from tests.onboarding_support import publish_personal_mix
     publish_personal_mix(store)
     assert client.get("/home/onboard/status").json()["setup"]["complete"]
+    assert 'class="setup-banner"' not in client.get("/playlists").text
+
+
+def test_prepared_offer_readiness_agrees_between_home_and_setup_without_modes(store):
+    from tests.onboarding_support import publish_personal_mix
+    from yt_playlist.rec import onboarding
+
+    _, client = _client(store)
+    store.settings.set_setting("last_sync_at", "1000")
+    publish_personal_mix(store)
+    assert store.modes.list_modes(active_only=True) == []
+
+    # A sparse account already has a usable personal mix on a direct Home visit.
+    html = client.get("/").text
+    assert 'id="home-feed"' in html
+    assert 'id="onboarding-feed"' not in html
+    assert 'class="setup-banner"' not in html
+    assert not onboarding.initial_setup_pending(store, 1000)
+    assert not onboarding.onboarding_active(store, 1000)
+    setup = client.get("/home/onboard/status").json()["setup"]
+    assert setup["modes"] == 0
+    assert setup["mixes_ready"]
+    assert setup["complete"]
+    assert setup["phase"] == "ready"
     assert 'class="setup-banner"' not in client.get("/playlists").text
 
 
@@ -215,19 +266,25 @@ def test_imported_likes_and_dismissal_cannot_open_an_empty_home(store):
         assert "arrival-feature" not in html
 
 
-def test_unusable_prepared_offers_do_not_end_setup(store):
+@pytest.mark.parametrize("with_mode", [False, True])
+def test_unusable_prepared_offers_do_not_end_setup(store, with_mode):
     import numpy as np
     from tests.onboarding_support import publish_personal_mix
     from yt_playlist.rec import onboarding
 
     _, client = _client(store)
     store.settings.set_setting("last_sync_at", "1000")
-    store.modes.replace_modes([{"mode_id": 1, "label": "House", "families": [],
-        "centroid": np.array([1.0]), "size": 5, "rep_keys": []}], [], 1000)
+    if with_mode:
+        store.modes.replace_modes([{"mode_id": 1, "label": "House", "families": [],
+            "centroid": np.array([1.0]), "size": 5, "rep_keys": []}], [], 1000)
     tracks = publish_personal_mix(store)
     assert onboarding.prepared_mixes_ready(store, 1000)
     store.rec_model.record_dislike(tracks[0]["key"], until=None, now=1000)
     assert not onboarding.prepared_mixes_ready(store, 1000)
+    assert onboarding.initial_setup_pending(store, 1000)
+    assert not client.get("/home/onboard/status").json()["setup"]["complete"]
     assert 'id="onboarding-feed"' in client.get("/").text
     store.rec_proposals.put_proposals("home_tuned", {"menus": [{"protos": [None]}]}, 1000)
     assert not onboarding.prepared_mixes_ready(store, 1000)
+    assert onboarding.initial_setup_pending(store, 1000)
+    assert not client.get("/home/onboard/status").json()["setup"]["complete"]

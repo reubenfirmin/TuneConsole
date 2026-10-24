@@ -19,6 +19,7 @@ def live_initial_sync(monkeypatch, request):
 
 
 def test_successful_initial_sync_preserves_document_player_and_details(live_initial_sync, store, page):
+    from tests.conftest import seed_catalog_track
     from tests.onboarding_support import publish_personal_mix
 
     base, job = live_initial_sync
@@ -36,7 +37,7 @@ def test_successful_initial_sync_preserves_document_player_and_details(live_init
     expect(player).to_be_visible()
     page.wait_for_function("""() => {
         const home = Alpine.$data(document.querySelector('#home'));
-        return home.running && home.currentStep === 'Reading your playlists';
+        return home.running && home._job !== null;
     }""")
     page.locator(".setup-banner").get_by_role("button", name="Details").click()
     details = page.get_by_role("dialog")
@@ -52,17 +53,20 @@ def test_successful_initial_sync_preserves_document_player_and_details(live_init
     }""")
 
     # Finish the real, already-attached SSE job while the user reads its details.
+    seed_catalog_track(store, "listening|artist", "Still playing", "Artist",
+                       video_id="listening", genre="house")
     store.settings.set_setting("last_sync_at", "1")
     job.events.append({"type": "done", "text": "Your playlists are ready"})
     job.outcome = "complete"
     job.done = True
     page.wait_for_function("""() => {
         const home = Alpine.$data(document.querySelector('#home'));
-        return !home.running && !home.failed && home.lines.some(line => line.text === 'Library updated.');
+        return !home.running && !home.failed;
     }""")
     # Stay on this screen beyond the old 900 ms document-reload timer.
     page.wait_for_timeout(1200)
     expect(details.get_by_text("Your playlists are ready", exact=True)).to_be_visible(timeout=6500)
+    expect(page.locator(".setup-evidence")).to_contain_text("1 song ready", timeout=6500)
     assert page.evaluate("""() => importState.document === document
         && importState.home === document.querySelector('#home')
         && importState.player === document.querySelector('.global-now-playing')
@@ -71,10 +75,21 @@ def test_successful_initial_sync_preserves_document_player_and_details(live_init
         && importState.dialog.open""")
     expect(page.locator("#onboarding-feed")).to_be_visible()
 
-    # Only a prepared offer graduates Home; it still preserves the outer document.
+    # A sparse account's usable offer graduates Home before any mode can be fitted.
+    assert store.modes.list_modes(active_only=True) == []
     publish_personal_mix(store, now=1)
+    assert store.modes.list_modes(active_only=True) == []
+    status = page.request.get(f"{base}/home/onboard/status")
+    assert status.ok
+    arrival = status.json()
+    assert arrival["songs"] == 5, arrival
+    assert arrival["setup"]["modes"] == 0, arrival
+    assert arrival["setup"]["mixes_ready"], arrival
+    assert arrival["setup"]["complete"], arrival
     expect(page.locator("#home-feed")).to_be_attached(timeout=6500)
     expect(page.locator("#onboarding-feed")).to_have_count(0)
+    expect(page.locator(".setup-banner")).to_be_hidden()
+    expect(page.locator(".setup-evidence")).to_contain_text("Ready")
     expect(details).to_be_visible()
     expect(player).to_contain_text("Still playing")
     assert page.evaluate("""() => importState.document === document
@@ -235,7 +250,7 @@ def test_extension_setup_and_live_import_details(live_app, page):
     status["setup"]["running"] = False
     status["outcome"] = "partial"
     log["events"].append({"type": "err", "text": "Library partially updated."})
-    expect(page.locator(".setup-banner-step")).to_have_text("Some music will need another try", timeout=6500)
+    expect(page.locator(".setup-banner-step")).to_have_text("Keep YouTube Music open", timeout=6500)
     expect(details.get_by_text("Library partially updated.", exact=True)).to_be_visible()
 
 

@@ -1,8 +1,22 @@
 # Focused test ownership
 
-Keep checks serial and use the shared pytest lock described in the repository's
-`AGENTS.md`. A busy lock belongs to the reported process; use a bounded wait or
-continue editing. Do not launch browser and unit checks concurrently.
+Full local runs use up to four pytest-xdist worker processes by default, bounded
+by available CPUs. `uv run pytest` runs the full unit suite; `uv run pytest -m ''`
+includes browser tests, and `uv run pytest -m browser` runs the full browser suite.
+Files stay together on one worker to preserve module fixtures. Workers each use
+one native numerical thread to avoid multiplying BLAS/OpenMP pools.
+
+Use `uv run pytest -n 0` for a serial full run, or `-n N` to choose the worker count.
+Focused paths, `-k`/other marker selections, last-failed checks, collection,
+debugging, live/package acceptance and CI shards stay serial. CI keeps its isolated
+runner sharding. `pytest-xdist` starts separate worker processes; a fork per test
+would add process startup cost without providing this parallel execution.
+
+Use the shared pytest lock described in the repository's `AGENTS.md`. A busy lock
+belongs to the reported session; use a bounded wait or continue editing. Workers
+join their coordinator's ownership, and keep a lifetime lock until they finish,
+including after coordinator failure. Do not launch separate browser and unit
+sessions concurrently.
 
 The former large feature modules retain their main topic. Related behavior now
 has explicit owners, so selecting only the old file no longer selects every
@@ -34,8 +48,21 @@ Shared setup is explicit:
 - `web_support.py`, `setup_support.py` and `taste_support.py` contain only their
   small client/runtime collaborators. They introduce no autouse fixtures.
 
-Root and browser `conftest.py` fixture visibility remains unchanged. CI discovers
-test files automatically; its deterministic file sharding includes these owners
+`tests/conftest.py` owns Playwright's driver and dependent browser fixtures for
+both `tests/browser/` and packaged browser cases elsewhere in `tests/`. Dedicated
+`-m browser` runs reuse the session driver; mixed runs close it after each module
+so later unit tests can use `asyncio.run()`. Keep this focused lifecycle regression
+in this order: an opt-in Flatpak skip, a live browser, then an asyncio unit test.
+It requires no Flatpak build:
+
+```sh
+uv run pytest --test-lock-wait=60 -m '' \
+  tests/test_flatpak_packaged.py::test_signed_packaged_update_restarts_same_tab_and_preserves_library \
+  tests/browser/test_home_vibe_browser.py::test_open_vibe_tab_resets_when_tuning_expires \
+  tests/test_job_retention.py::test_sse_reconnect_replays_only_unseen_events_and_signals_expiry
+```
+
+CI discovers test files automatically; its deterministic file sharding includes these owners
 without a hard-coded module list. The six-module split preserved 287 test
 functions at the Python AST level and all 420 collected cases, including their
 parametrization. A subsequent onboarding integration adjustment explicitly marks

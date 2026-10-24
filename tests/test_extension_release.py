@@ -46,7 +46,7 @@ const chrome = {
     onUpdated: event(), onRemoved: event(),
     sendMessage: async (id, msg) => {
       sends.push({id, type: msg.type, playlist: msg.playlist});
-      if (msg.type === 'sensor-ping') return {ok: true, receiverRevision: 3, mainVersion: 4, mainRevision: 4, mainAgeMs: 0};
+      if (msg.type === 'sensor-ping') return {ok: true, receiverRevision: 5, mainVersion: 4, mainRevision: 6, mainAgeMs: 0};
       if (['fetch', 'playpause', 'rate', 'next'].includes(msg.type)) {
         attempts += 1;
         if (['missing_receiver', 'failed_injection', 'lost_retry_reply', 'next_missing_receiver'].includes(scenario)
@@ -191,7 +191,7 @@ const chrome = {
       messages.push(msg.type);
       if (msg.type === 'sensor-ping') {
         if (!sensorReady) throw Error('Could not establish connection. Receiving end does not exist.');
-        return {ok: true, receiverRevision: 3, mainVersion: 4, mainRevision: 4, mainAgeMs: 0};
+        return {ok: true, receiverRevision: 5, mainVersion: 4, mainRevision: 6, mainAgeMs: 0};
       }
       assert.equal(msg.type, 'fetch');
       assert.equal(tabs[0].status, 'complete');

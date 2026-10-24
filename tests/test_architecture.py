@@ -30,7 +30,7 @@ def _imports(tree, module=None):
 def _flat_repository_references(tree, methods):
     # Known fixture/context names remain useful, but constructor assignments and
     # aliases must also work for reader/writer/repaired and fixture dictionaries.
-    stores = {"store", "s", "db", "reopened", "store2", "ctx.store", "self.store", "self.ctx.store"}
+    stores = {"store", "db", "reopened", "store2", "ctx.store", "self.store", "self.ctx.store"}
     constructors = {"Store", "yt_playlist.core.store.Store"}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "yt_playlist.core.store":
@@ -84,6 +84,14 @@ reader.rec_model.content_generation()
         "reader.content_generation", "writer.content_generation", "repaired.queue_remaining",
         "songs['store'].get_playlist", "patch repository directly",
     }
+
+
+def test_repository_guard_distinguishes_short_store_aliases_from_domain_state():
+    for source in ('s = Store(":memory:")', 's = store'):
+        tree = ast.parse(source + '\ns.pending()')
+        assert list(_flat_repository_references(tree, {"pending"})) == [(2, "s.pending")]
+    tree = ast.parse('s = Session()\nqueue = s.pending')
+    assert not list(_flat_repository_references(tree, {"pending"}))
 
 
 def test_application_import_graph_is_acyclic_including_local_imports():

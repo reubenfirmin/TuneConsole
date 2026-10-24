@@ -5,20 +5,6 @@ import random
 from yt_playlist.rec import rec_params
 
 
-def _genre_coverage(store) -> float:
-    cov = store.enrichment_reports.coverage_stats()
-    processed = cov.get("processed", 0)
-    return (cov.get("genre", 0) / processed) if processed else 0.0
-
-
-def warmup_progress(store) -> int:
-    """A 0-100 'warming up' indicator for the onboarding explainer: how far enrichment coverage has
-    come toward the readiness target (onboard_coverage_min). Rough and capped at 100 - not the literal
-    graduation gate (that is modes-exist), just an honest sense of progress as enrichment fills in."""
-    target = rec_params.get_param(store, "onboard_coverage_min") or 1.0
-    return int(round(min(1.0, _genre_coverage(store) / target) * 100))
-
-
 def feedback_count(store) -> int:
     """Likes + dislikes recorded so far (the explicit taste signal onboarding collects)."""
     return len(store.rec_model.recent_liked_keys()) + len(store.rec_model.list_dislikes())
@@ -26,6 +12,12 @@ def feedback_count(store) -> int:
 
 def library_size(store) -> int:
     return store.rec_query.tracks_total()
+
+
+def _setup_complete(*, imported, has_library, mixes_ready) -> bool:
+    # Sparse accounts can receive useful prepared offers before modes can be fit.
+    # An empty imported account has no library preparation left to wait for.
+    return imported and (mixes_ready or not has_library)
 
 
 def arrival_status(store, now=None) -> dict:
@@ -45,7 +37,8 @@ def arrival_status(store, now=None) -> dict:
         discoveries = reader.conn.execute("SELECT COUNT(*) FROM rec_discovered_content_vectors").fetchone()[0]
         imported = reader.settings.get_setting("last_sync_at") is not None
         mixes_ready = prepared_mixes_ready(reader, now)
-        complete = imported and ((modes > 0 and mixes_ready) or coverage["total"] == 0)
+        complete = _setup_complete(imported=imported, has_library=coverage["total"] > 0,
+                                   mixes_ready=mixes_ready)
         phase = "ready" if complete else "import" if not imported else "learn"
         return {"songs": songs, "playlists": len(reader.playlists.get_playlists()),
                 "albums": len(reader.collection.get_saved_albums()),
@@ -81,11 +74,10 @@ def prepared_mixes_ready(store, now=None) -> bool:
 
 
 def initial_setup_pending(store, now=None) -> bool:
-    """Dismissing the introduction does not finish initial model setup."""
-    if store.settings.get_setting("last_sync_at") is None:
-        return True
-    return library_size(store) > 0 and (not _taste_ready(store)
-                                      or not prepared_mixes_ready(store, now))
+    """Keep setup until import and usable offers arrive, independently of modes."""
+    return not _setup_complete(
+        imported=store.settings.get_setting("last_sync_at") is not None,
+        has_library=library_size(store) > 0, mixes_ready=prepared_mixes_ready(store, now))
 
 
 def cleanup_count(store) -> int:
@@ -116,7 +108,7 @@ def onboarding_active(store, now) -> bool:
         return False
     if not _has_synced(store):
         return False
-    if _taste_ready(store):
+    if _taste_ready(store) or prepared_mixes_ready(store, now):
         return False
     if feedback_count(store) >= rec_params.get_param(store, "onboard_feedback_min"):
         return False

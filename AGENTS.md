@@ -15,9 +15,17 @@
   current owner, use `uv run pytest --test-lock-wait=60 <paths>` with a bounded
   wait. A busy run exits immediately by default, so workers can hand their test
   requests to the owner instead of accumulating waiting processes.
-- Keep tests serial. Do not use pytest workers or run unit, browser, benchmark,
-  or other resource-heavy validation concurrently. Coordinate checks outside
-  pytest with the same test owner.
-- The OS releases the lock when pytest exits, including after a crash. The lock
-  file remains in `/tmp/tuneconsole-tests-<uid>.lock`; its contents describe the
-  most recent owner and are only current while the OS lock is held.
+- Full local pytest runs use up to four local worker processes by default, with
+  whole files kept together. Use `-n 0` for a serial full run or `-n N` to choose
+  the count. Focused checks, CI shards, collection, debugging and live/package
+  acceptance checks stay serial.
+- One coordinator still owns the machine lock for the entire run. Its workers
+  share a separate lifetime lock so a killed coordinator cannot admit a new
+  session while its workers are finishing. Do not launch separate unit, browser,
+  benchmark or other resource-heavy sessions concurrently. Coordinate checks
+  outside pytest with the same test owner.
+- The OS releases locks when their owning processes exit, including after a
+  crash. Lock files remain at `/tmp/tuneconsole-tests-<uid>.lock` and
+  `/tmp/tuneconsole-tests-<uid>-workers.lock`; never delete either file. Owner
+  details describe the most recent coordinator and are only current while either
+  lock is held.

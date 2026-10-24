@@ -4,11 +4,13 @@ from concurrent.futures import ThreadPoolExecutor
 from playwright.sync_api import expect
 
 from tests.radio_session_support import poc, play
+from tests.onboarding_support import publish_personal_mix
 
 
 def test_restart_with_old_radio_keeps_the_seed_grid_visible(poc, store, page, live_app):
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
+    publish_personal_mix(store, now=1)
     c, _, frames, *_ = poc
     c.start()
     # Playwright owns an event loop on this thread. The synchronous controller

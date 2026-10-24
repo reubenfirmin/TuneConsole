@@ -13,7 +13,7 @@ from yt_playlist.library import playlist_generated
 from yt_playlist.library.playlist_metadata import versioned_title
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.web.radio_persistence import PREPARATION_TIMEOUT, restore
-from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending
+from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending, readback_durations
 from yt_playlist.web.radio_projection import saved_view
 from yt_playlist.web.radio_state import Phase, Session
 
@@ -128,12 +128,13 @@ class RadioLaunch:
             raise PlaylistChanged("Radio playlist preparation timed out.")
         expected = [t["video_id"] for t in seeds]
         try:
-            received = [t["videoId"] for t in self.playlists.read(s.client, s.playlist, expected=expected)]
+            remote = self.playlists.read(s.client, s.playlist, expected=expected)
+            received = [t["videoId"] for t in remote]
         except Exception:
             s.preparation_snapshot = None
             raise
         if received == expected:
-            return PreparedStart(tuple(seeds))
+            return PreparedStart(readback_durations(seeds, remote))
         report = ("preparing", tuple(received))
         if report != s.observer_report:
             logger.info("Radio playlist preparation pending: playlist=%s expected=%s received=%s",
@@ -149,7 +150,7 @@ class RadioLaunch:
             raise PlaylistPending()
         if not received:
             raise PlaylistChanged("YouTube Music did not save any playable songs. Choose another song.")
-        return PreparedStart(tuple(t for t in seeds if t["video_id"] in accepted),
+        return PreparedStart(readback_durations([t for t in seeds if t["video_id"] in accepted], remote),
                              tuple(t for t in seeds if t["video_id"] not in accepted))
 
     def resume(self, playing, clients, candidates_factory):
@@ -175,7 +176,7 @@ class RadioLaunch:
             for track in prepared.omitted:
                 s.rejected = set(self.policy.reject(s.candidate_view(), track))
                 s.directions.blocked.add(track['video_id'])
-        if [t['video_id'] for t in seeds] != [t['video_id'] for t in s.tracks]:
+        if seeds != s.tracks:
             self.playlists.publish(s.local_id, s.title, s.tracks, seeds, self.now_fn())
             s.accept_tracks(seeds, self.now_fn())
         s.initial_tracks = []

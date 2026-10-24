@@ -101,7 +101,14 @@ def _lockup_video(view, playlist_id):
             or not isinstance(endpoint, dict) or endpoint.get('videoId') != video_id
             or endpoint.get('playlistId') != playlist_id):
         raise ValueError
-    return {'videoId': video_id}
+    result = {'videoId': video_id}
+    try:
+        title = nav(view, ['metadata', 'lockupMetadataViewModel', 'title', 'content'], True)
+    except TypeError:
+        title = None  # Optional display metadata must not invalidate verified membership.
+    if isinstance(title, str):
+        result['title'] = {'simpleText': title}
+    return result
 
 
 def _continuation_items(response):

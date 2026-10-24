@@ -128,6 +128,39 @@ def test_repeated_manual_request_reconciles_lost_reply_without_deleting_again(de
     assert len(store.actions.get_actions()) == 1 and client.deleted == ["SOURCE"]
 
 
+def test_collection_sees_intent_created_mid_sweep_without_loading_history(deletion, monkeypatch):
+    store, _, identity, source, keeper, client = deletion
+    for ytm in ("SOURCE", "KEEP"):
+        store.playlists.set_playlist_group(ytm, "Generated")
+        store.playlists.set_playlist_provenance(ytm, origin="tuneconsole", adopted=False)
+    original = client.delete_playlist
+
+    def delete(ytm):
+        result = original(ytm)
+        if ytm == "KEEP":
+            raise TimeoutError("Deletion reply lost")
+        # A different request starts deleting the next playlist during this sweep.
+        with pytest.raises(TimeoutError, match="reply lost"):
+            executor.delete_playlist(store, keeper, client, 2)
+        return result
+
+    def no_history():
+        pytest.fail("Deletion admission must not load the full action log")
+
+    monkeypatch.setattr(client, "delete_playlist", delete)
+    monkeypatch.setattr(store.actions, "get_actions", no_history)
+
+    collected = playlist_generated.gc_generated_playlists(
+        store, {identity: client}, 10 * 86400, grace_days=1)
+
+    assert {item["ytm"] for item in collected} == {"SOURCE", "KEEP"}
+    assert all(Path(item["backup"]).is_file() for item in collected)
+    assert client.deleted == ["SOURCE", "KEEP"]
+    assert store.playlists.get_playlist(source) is None
+    assert store.playlists.get_playlist(keeper) is None
+    assert store.actions.get_pending_deletion(identity, "KEEP") is None
+
+
 def test_unreadable_outcome_blocks_undo_then_preserves_surviving_original(deletion, monkeypatch):
     store, _, identity, source, _, client = deletion
 

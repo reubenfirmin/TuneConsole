@@ -7,28 +7,6 @@
 .sync-nudge { color: var(--accent-2); font-size: var(--type-ui); font-weight: 600; }
 .home-control.sync-stale { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft); }
 
-/* Live sync console: streams the library sync's results as they happen (background or manual). */
-.sync-console { margin-bottom: 1.6rem; padding: .875rem .9375rem .75rem; border: 1px solid var(--border-2);
-  border-radius: 12px; background: var(--surface-inset); overflow: hidden; }
-.sc-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.55rem; }
-.sc-eye { font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.14em; text-transform: uppercase;
-  color: var(--accent-2); }
-.sc-state { font-family: var(--font-mono); font-size: var(--type-xs); color: var(--faint); }
-.sc-state.is-run { color: var(--ok); }
-.sc-state.is-err { color: var(--danger); }
-.sc-bar { height: 2px; border-radius: 2px; background: color-mix(in srgb, var(--accent) 16%, transparent); overflow: hidden; margin-bottom: 0.6rem; }
-.sc-bar i { display: block; height: 100%; width: 38%; border-radius: 2px; background: var(--control-primary);
-  animation: sc-bar 1.1s ease-in-out infinite; }
-@keyframes sc-bar { 0% { transform: translateX(-110%); } 100% { transform: translateX(330%); } }
-.sync-log { font-family: var(--font-mono); font-size: var(--type-sm); line-height: 1.55; max-height: 15rem;
-  overflow-y: auto; color: var(--dim); }
-.sc-line { display: flex; gap: 0.55rem; white-space: pre-wrap; word-break: break-word; }
-.sc-line.done { color: var(--ok-2); }
-.sc-line.err { color: var(--danger-3); }
-.sc-pip { flex: none; width: 1ch; color: var(--faint); }
-.sc-line.done .sc-pip { color: var(--ok); }
-.sc-line.err .sc-pip { color: var(--danger); }
-
 /* Not-connected card: left-aligned, sits above whatever feed the user already has, but with the
    animated equalizer + display headline so it greets a first-run user with some life (not a bare strip). */
 .onboard-card { position: relative; overflow: hidden; display: flex; align-items: center; gap: 1.7rem;
@@ -92,7 +70,7 @@
 .update-status { margin: .5rem 0 0; font-size: var(--type-ui); }
 .update-progress { display: block; width: 100%; margin-top: .5rem; }
 /* Home's operational surfaces should read as instrument strips, not soft floating cards. */
-.page-home :where(.sync-console, .onboard-card) {
+.page-home .onboard-card {
   border-radius: 4px;
 }
 .page-home .home-status {
@@ -134,12 +112,6 @@
 }
 .page-home .home-status:has(.hs-now) .hs-now-artist::before {
   content: none;
-}
-.page-home .sync-console {
-  padding: .7rem 0 .65rem;
-  background: transparent;
-  border-inline: 0;
-  border-block-color: var(--border-strong);
 }
 .page-home .home-mixes {
   margin-block-end: var(--sp-5);

@@ -1,4 +1,4 @@
-"""Duration-balanced, whole-file CI shards; local pytest remains serial and unsharded."""
+"""Duration-balanced, whole-file CI shards, each using one serial pytest process."""
 import argparse
 from collections import Counter, defaultdict
 from datetime import datetime, timezone

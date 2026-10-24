@@ -348,5 +348,5 @@ def test_enrichment_requests_repair_when_saved_clusters_have_lost_their_model(st
     store.settings.delete_setting("rec_content_model")
     monkeypatch.setattr(worker, "_schedule", lambda **kw: calls.append(kw))
     worker.trigger_content_update(["techno 0|artist"])
-    assert calls == [{"full": True}]
+    assert calls == [{"full": True, "prepare": True}]
     assert store.rec_refresh.revision() is not None

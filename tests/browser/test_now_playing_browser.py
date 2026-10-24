@@ -37,12 +37,13 @@ def test_space_controls_playback_without_intercepting_search_or_focused_buttons(
 
 
 @pytest.mark.parametrize('path,width', [('/',1280),('/artists',1280),('/',390),('/artists',390),('/artists',800)])
-def test_progress_is_readable_in_home_and_dock_and_reduced_motion(live_app, page, path, width, tmp_path):
+def test_progress_uses_control_divider_without_time_row_in_home_and_dock(live_app, page, path, width, tmp_path):
     status = {'connected':True,'now_playing':{'video_id':'progress','title':'Song','artist':'Artist',
         'position':45,'duration':200,'paused':True}}
     page.route('**/bridge/status',lambda route: route.fulfill(json=status))
     page.set_viewport_size({'width':width,'height':900})
     page.emulate_media(reduced_motion='reduce')
+    page.clock.install()
     page.goto(live_app+path)
     player = page.locator('.global-now-playing')
     progress = player.get_by_role('progressbar',name='Track progress')
@@ -50,20 +51,38 @@ def test_progress_is_readable_in_home_and_dock_and_reduced_motion(live_app, page
     expect(progress).to_have_attribute('value','45')
     expect(progress).to_have_attribute('max','200')
     expect(progress).to_have_attribute('aria-valuetext','0:45 of 3:20')
-    expect(player.locator('.hs-times')).to_have_text('0:45 3:20',use_inner_text=True)
+    expect(progress).to_have_attribute('title','0:45 of 3:20')
+    expect(player.locator('.hs-times')).to_have_count(0)
+    line = progress.locator('..')
+    assert line.get_attribute('class') == 'hs-progress'
+    assert line.locator('..').get_attribute('class') == 'hs-rate-group'
+    assert line.evaluate("el => getComputedStyle(el, '::after').boxShadow") != 'none'
+    assert line.evaluate("el => getComputedStyle(el).getPropertyValue('--played')").strip() == '22.5%'
     box, card = progress.bounding_box(), player.bounding_box()
+    assert box['height'] <= 2
     assert box['x']>=card['x'] and box['x']+box['width']<=card['x']+card['width']
+    if width != 800:
+        controls = player.locator('.hs-rate-group').bounding_box()
+        assert abs(box['y'] - controls['y']) <= 1
     page.screenshot(path=tmp_path/f'progress-{path.strip("/") or "home"}-{width}.png')
     status['now_playing'].update(position=3,duration=None)
     page.evaluate('window.playbackStatus.refresh()')
     expect(progress).to_be_hidden()
-    expect(player.get_by_label('Elapsed time',exact=True)).to_have_text('0:03')
-    expect(player.get_by_label('Total duration unavailable',exact=True)).to_have_text('--:--')
+    expect(player).not_to_contain_text('--:--')
     page.emulate_media(forced_colors='active')
     status['now_playing'].update(duration=200)
     page.evaluate('window.playbackStatus.refresh()')
     expect(progress).to_be_visible()
     assert progress.evaluate('el => getComputedStyle(el).forcedColorAdjust')=='none'
+    # Reduced motion still displays locally estimated progress between heartbeats.
+    status['now_playing'].update(position=3,paused=False)
+    page.evaluate('window.playbackStatus.refresh()')
+    page.clock.run_for(500)
+    assert 3.3 < float(progress.get_attribute('value')) <= 3.5
+    status['now_playing'].update(position=4,paused=True)
+    page.evaluate('window.playbackStatus.refresh()')
+    page.clock.run_for(500)
+    expect(progress).to_have_attribute('value','4')
 
 
 @pytest.mark.parametrize("kind", ["playlist", "album"])

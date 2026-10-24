@@ -268,6 +268,13 @@ def test_account_data_requires_selection_preview_and_confirmation_before_writes(
     assert "Review what was added, skipped, and unmatched" in dashboard.text
     assert 'href="/import/spotify-library/report"' in dashboard.text
     assert "Created in YouTube Music" not in dashboard.text
+    # Setup keeps the completed report visible without opening the mature dashboard.
+    assert 'id="onboarding-feed"' in dashboard.text
+    assert 'class="dash-nav"' not in dashboard.text
+    from tests.onboarding_support import publish_personal_mix
+    publish_personal_mix(store, now=1000)
+    dashboard = web.get("/")
+    assert "Spotify import complete" in dashboard.text
     assert "panel: location.hash.slice(1) || 'notices'" in dashboard.text
 
     report = web.get("/import/spotify-library/report")

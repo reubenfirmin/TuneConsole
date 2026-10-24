@@ -18,8 +18,7 @@
 {% endif %}{% endblock %}
 {% block body %}
 {% if flash %}
-{# Setup flash: dismissible, and auto-retires the moment a sync is kicked off (see homeStatus.refresh). #}
-<div class="notice ok banner" x-data="{ show: true }" x-show="show" x-cloak @sync-started.window="show = false">
+<div class="notice ok banner" x-data="{ show: true }" x-show="show" x-cloak>
   <span class="banner-body">{{ flash }}</span>
   <button type="button" class="banner-x" @click="show = false" title="Dismiss" aria-label="Dismiss">×</button>
 </div>
@@ -152,9 +151,6 @@
   </div>
   {% endif %}
 
-  {% if sync.last_synced_ago and (not onboarding or not onboard_library) %}
-    {% include "_partials/import_details.html" %}
-  {% endif %}
 </div>
 {# hx-vals js: runs in global scope, so the "Save & play" button reaches its card's surviving rows
    by id - pruned (feedback-dismissed) rows are gone from the DOM, so they're naturally excluded. #}

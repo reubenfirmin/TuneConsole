@@ -74,7 +74,7 @@ const chrome = {
     },
     sendMessage: async (id, msg) => {
       messages.push({id, ...msg});
-      if(msg.type==='sensor-ping')return {ok:true,receiverRevision:3,mainVersion:4,mainRevision:4,mainAgeMs:0};
+      if(msg.type==='sensor-ping')return {ok:true,receiverRevision:5,mainVersion:4,mainRevision:6,mainAgeMs:0};
       if(scenario==='rating_handoff' && msg.type==='rate')
         return {ok:msg.videoId===(id===2?'A':'B'),error:'The playing song changed'};
       return {ok: true};
@@ -119,15 +119,20 @@ const next = 'https://music.youtube.com/watch?list=PL_new';
     return;
   }
   if (tabs.some(tab => tab.id === 2)) {
-    await report(2, {type: 'play', title: 'Song', paused: false, timeZone: 'Pacific/Kiritimati'});
+    await report(2, {type: 'play', title: 'Song', paused: false, position:12, duration:200,
+      timeZone: 'Pacific/Kiritimati'});
     if (scenario === 'leaving') {
       assert.equal(frames.length, 0, 'ignore playback from a tab navigating away from YouTube Music');
     } else {
       assert.equal(frames.at(-1).timeZone, 'Pacific/Kiritimati', 'preserve the content sensor timezone');
+      assert.equal(frames.at(-1).position,12);
+      assert.equal(frames.at(-1).duration,200);
     }
   }
   if (scenario === 'heartbeat') {
-    await report(2, {type: 'now-heartbeat', title: 'Autoplay', paused: false});
+    await report(2, {type: 'now-heartbeat', title: 'Autoplay', paused: false, position:35, duration:200});
+    assert.equal(frames.at(-1).position,35, 'the wire heartbeat retains its progress anchor');
+    assert.equal(frames.at(-1).duration,200);
     const count = frames.length;
     await report(3, {type: 'now-heartbeat', title: 'Old playlist', paused: true});
     await report(3, {type: 'pevent', kind: 'bye'});

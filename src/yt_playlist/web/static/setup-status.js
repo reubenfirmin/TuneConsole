@@ -37,7 +37,6 @@ function initialSetup() {
         if (this.running && this.activity && this.current && this.target) {
           return 'Reading ' + (this.activity === 'albums' ? 'album ' : 'playlist ') + this.current + ' of ' + this.target;
         }
-        if (['partial', 'failed', 'skipped'].includes(this.outcome)) return 'Some music will need another try';
         if (this.songs || this.running) return 'Bringing in your music';
         return this.connected ? 'Keep YouTube Music open' : 'Connect the extension to get started';
       }

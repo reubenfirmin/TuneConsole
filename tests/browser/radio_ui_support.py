@@ -4,12 +4,14 @@ from types import SimpleNamespace
 import pytest
 from fastapi.templating import Jinja2Templates
 from playwright.sync_api import expect
+from tests.onboarding_support import publish_personal_mix
 
 
 @pytest.fixture
 def radio_ui(live_app, store, page):
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
+    publish_personal_mix(store, now=1)
     tracks = [{"video_id": f"radio{i}", "title": f"Night frequency {i + 1}",
                "artist": f"Artist {i + 1}", "thumbnail": f"{live_app}/radio-art/{i}.svg"}
               for i in range(16)]

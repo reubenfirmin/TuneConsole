@@ -1,5 +1,31 @@
+import importlib.util
+import inspect
+
 import pytest
 from yt_playlist.core.store import Store
+
+
+# A sync Playwright driver owns a running asyncio loop until its fixture ends.
+# Apply the same lifetime to every browser test, including packaged tests outside
+# tests/browser/, so mixed runs can return to asyncio.run() in later modules.
+def browser_fixture_scope(*, fixture_name, config):
+    return "session" if config.getoption("markexpr") == "browser" else "module"
+
+
+if importlib.util.find_spec("pytest_playwright") is not None:
+    from pytest_playwright import pytest_playwright as browser_fixtures
+
+    playwright = pytest.fixture(scope=browser_fixture_scope)(inspect.unwrap(browser_fixtures.playwright))
+    browser_type = pytest.fixture(scope=browser_fixture_scope)(inspect.unwrap(browser_fixtures.browser_type))
+    launch_browser = pytest.fixture(scope=browser_fixture_scope)(inspect.unwrap(browser_fixtures.launch_browser))
+    browser = pytest.fixture(scope=browser_fixture_scope)(inspect.unwrap(browser_fixtures.browser))
+    browser_context_args = pytest.fixture(scope=browser_fixture_scope)(inspect.unwrap(browser_fixtures.browser_context_args))
+
+
+@pytest.fixture(autouse=True)
+def isolated_app_home(tmp_path, monkeypatch):
+    """Backups, action locks and settings must never touch the user's app data."""
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path / "app-home"))
 
 
 @pytest.fixture(autouse=True)

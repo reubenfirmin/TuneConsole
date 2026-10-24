@@ -6,8 +6,8 @@
 
 (() => {
   const SENSOR_VERSION = 4;
-  const SENSOR_REVISION = 4;
-  const RECEIVER_REVISION = 3;
+  const SENSOR_REVISION = 6;
+  const RECEIVER_REVISION = 5;
   const previous = window.__tcBridgeLoaded;
   if (previous?.revision === RECEIVER_REVISION && !previous.stopped) return;
   // A legacy boolean guard owns anonymous listeners that cannot be removed safely. Let the
@@ -450,6 +450,8 @@
     if (!np || !np.title) return;
     const vid = np.videoId || "";
     const lst = np.playlist || "";
+    const position = Number.isFinite(np.position) && np.position >= 0 ? np.position : null;
+    const duration = Number.isFinite(np.duration) && np.duration > 0 ? np.duration : null;
     // MAIN captures these fields together with the bar's identity. DOM fallback must prove its
     // identity too; a bar still showing the preceding song cannot rate the new playing video.
     const bar = np.playerBar || domNowPlaying();
@@ -471,7 +473,7 @@
       try { chrome.runtime.sendMessage({
         type: "now-heartbeat", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
         metadataVerified: np.metadataVerified === true,
-        likeStatus, videoId: vid, playlist: lst, albumBrowseId, paused: !!np.paused,
+        likeStatus, videoId: vid, playlist: lst, albumBrowseId, position, duration, paused: !!np.paused,
         muted: !!np.muted, brandKnown: !!np.brandKnown, brandId: np.brandId || "",
       }); } catch (e) {}
       return;
@@ -481,7 +483,7 @@
     chrome.runtime.sendMessage({
       type: "play", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
       metadataVerified: np.metadataVerified === true,
-      likeStatus, videoId: vid, playlist: lst, albumBrowseId, brandId: np.brandId || "",
+      likeStatus, videoId: vid, playlist: lst, albumBrowseId, position, duration, brandId: np.brandId || "",
       paused: !!np.paused, muted: !!np.muted, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     });
   };
@@ -581,6 +583,8 @@
         artist: b ? b.textContent.trim().split("•")[0].trim() : "",
         thumbnail: img ? img.src : "",
         videoId, playlist, likeStatus: videoId ? readLikeStatus() : "", albumBrowseId,
+        position: videoId ? v?.currentTime : null,
+        duration: videoId ? v?.duration : null,
         brandKnown: lastAccount !== null,
         brandId: lastAccount ? lastAccount.brandId : "",
         paused: !v || v.paused,

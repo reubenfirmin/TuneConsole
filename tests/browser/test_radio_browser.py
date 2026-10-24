@@ -406,10 +406,14 @@ def test_playlist_radio_button_starts_through_transition_without_relaunching_on_
     api.state = {**api.ready, "starting": True}
     api.starts.pop().fulfill(json={"ok": True, **api.state})
     expect(launch).to_contain_text("connecting to youtube music")
-    api.state = api.ready
-    expect(page.locator(".radio-session")).to_be_visible(timeout=6000)
+    with page.expect_response(lambda response: response.url.endswith('/radio/status')
+                              and response.json().get('starting') is False, timeout=6000):
+        api.state = api.ready
+    # Reveal can wait for the existing eight-second artwork fallback after playback
+    # is confirmed. The launch contract does not require artwork to load in six seconds.
+    expect(page.locator(".radio-session")).to_be_visible(timeout=11000)
     page.reload()
-    expect(page.locator(".radio-session")).to_be_visible(timeout=6000)
+    expect(page.locator(".radio-session")).to_be_visible(timeout=11000)
     assert api.starts == []
 
 

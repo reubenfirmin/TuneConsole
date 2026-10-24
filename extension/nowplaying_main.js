@@ -5,7 +5,7 @@
 // classifies skips/completions/sessions from the raw stream.
 (function () {
   var SENSOR_VERSION = 4;
-  var SENSOR_REVISION = 4; // Implementation changes can replace a compatible, healthy sensor.
+  var SENSOR_REVISION = 6; // Implementation changes can replace a compatible, healthy sensor.
   var previous = window.__tcNowPoller;
   if (previous && previous.version === SENSOR_VERSION && previous.revision === SENSOR_REVISION && !previous.stopped &&
       previous.lastSampleAt != null && Date.now() - previous.lastSampleAt < 10000) return;
@@ -15,6 +15,26 @@
   var last = { videoId: "", playlist: "", position: 0, duration: 0 };
   var lastTickAt = 0;
   var bindings = [];
+  var progressClock = null;
+
+  function progressTiming(info, v) {
+    var unknown = {position: null, duration: null};
+    if (!info.videoId || !v) return unknown;
+    var position = Number.isFinite(v.currentTime) && v.currentTime >= 0 ? v.currentTime : null;
+    var duration = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : null;
+    var source = v.currentSrc || "";
+    var previous = progressClock;
+    var changed = previous && previous.videoId !== info.videoId;
+    var replaced = previous && (previous.video !== v || (source && source !== previous.source));
+    // Music can publish the next ID while the same media element still holds the old song's
+    // almost-finished clock. Wait for a source/metadata change or a reset before trusting it.
+    var baseline = changed ? previous.position : previous && previous.baseline;
+    var reset = position !== null && (position <= 2 || (baseline !== null && position < baseline - 2));
+    var waiting = !!(previous && !replaced && !reset && (changed || previous.waiting));
+    progressClock = {videoId: info.videoId, video: v, source: source,
+      position: position, baseline: baseline, waiting: waiting};
+    return waiting ? {position: 0, duration: null} : {position: position, duration: duration};
+  }
 
   function playerInfo() {
     // The URL describes the page being browsed, which can differ from the playing song/queue.
@@ -243,6 +263,13 @@
     listen("pause", "state", function () { return { state: "paused" }; });
     listen("play", "state", function () { return { state: "playing" }; });
     listen("volumechange", "volume", function () { return { volume: v.muted ? 0 : v.volume }; });
+    var onMetadata = function () {
+      if (v !== document.querySelector("video")) return;
+      progressClock = null;
+      sample();
+    };
+    v.addEventListener("loadedmetadata", onMetadata);
+    bindings.push({video: v, event: "loadedmetadata", handler: onMetadata});
   }
 
   function sample(probeId) {
@@ -250,6 +277,7 @@
       var v = document.querySelector("video");
       bindVideo(v);
       var info = observe(v);
+      var timing = progressTiming(info, v);
       var now = Date.now();
       if (info.videoId && v && !v.paused && now - lastTickAt >= TICK_MS) {
         lastTickAt = now;
@@ -264,6 +292,8 @@
                            __tcNow: { title: meta.title, artist: meta.artist, thumbnail: meta.thumbnail,
                                       metadataVerified: meta.verified,
                                       videoId: info.videoId, playlist: info.playlist,
+                                      // Each presence heartbeat anchors the app's local progress clock.
+                                      position: timing.position, duration: timing.duration,
                                       playerBar: bar,
                                       brandId: identity.brandId, brandKnown: identity.brandKnown,
                                       paused: !v || v.paused,

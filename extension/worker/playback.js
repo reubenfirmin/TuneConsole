@@ -228,6 +228,7 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
         metadataVerified: msg.metadataVerified !== false,
         thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
         playlist: msg.playlist || "", albumBrowseId: msg.albumBrowseId || "",
+        position: msg.position, duration: msg.duration,
         brandId: msg.brandId || "", paused: !!msg.paused, muted: !!msg.muted,
         tabMuted: !!msg.tabMuted, timeZone: msg.timeZone});
       if (delivered) pendingPlays.delete(srcTabId);
@@ -236,6 +237,7 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
         metadataVerified: msg.metadataVerified !== false,
         thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
         playlist: msg.playlist || "", albumBrowseId: msg.albumBrowseId || "", paused: !!msg.paused,
+        position: msg.position, duration: msg.duration,
         muted: !!msg.muted, tabMuted: !!msg.tabMuted});
     } else if (msg.type === "pevent") send(msg);
   }

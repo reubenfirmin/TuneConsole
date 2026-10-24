@@ -36,14 +36,7 @@ def _prune(store, action, entry):
 
 def pending_deletion(store, playlist):
     """Find an interrupted attempt before a repeated UI request or GC can start a new one."""
-    for action in store.actions.get_actions():
-        if action.status != "delete_pending":
-            continue
-        undo = json.loads(action.undo_json)
-        if any(entry["identity"] == playlist.identity_id and entry["ytm"] == playlist.ytm_playlist_id
-               for entry in undo.get("deletions", [])):
-            return action
-    return None
+    return store.actions.get_pending_deletion(playlist.identity_id, playlist.ytm_playlist_id)
 
 
 def reconcile_deletion(store, action_id, clients, now, *, locked=False):

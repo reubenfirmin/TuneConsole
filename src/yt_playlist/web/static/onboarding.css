@@ -33,12 +33,6 @@
   body:not(:has(.page-clusters)) main.page-setup { width: calc(100% - 13.5rem); max-width: none;
     margin-inline: 13.5rem 0; padding: clamp(1.5rem, 3vw, 3.5rem); padding-bottom: 5rem; }
 }
-.page-home .import-details { margin: 0 0 1.5rem; border-top: 0; }
-.import-details > summary.sc-head { min-height: 2.6rem; flex-wrap: wrap; margin: 0; }
-.import-details .sc-eye { font-family: var(--font-sans); font-size: var(--type-xs); letter-spacing: 0; text-transform: none; color: var(--dim); }
-.import-details .sc-state { margin-left: auto; }
-.import-details .sync-log { margin: .5rem 0 .75rem; padding: .75rem; background: var(--surface-inset); }
-.import-waiting { color: var(--dim); margin: 0; font-family: var(--font-sans); }
 .starter-mix { min-width: 0;
   animation: starter-arrive .65s cubic-bezier(.2,.75,.25,1) both; }
 .starter-mix > .gen-card-body { display: grid; grid-template-columns: minmax(12rem, .7fr) minmax(0, 2fr); gap: 2.5rem; }
@@ -86,12 +80,6 @@
 @media (prefers-reduced-motion: reduce) {
   .arrival-copy, .starter-mix, .page-home .starter-track, .arrival.is-importing .arrival-illustration { animation: none; }
 }
-
-.sync-console > summary.sc-head { cursor: pointer; list-style: none; }
-.sync-console > summary.sc-head::-webkit-details-marker { display: none; }
-.sync-console > summary.sc-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
-.sc-toggle { display: inline-flex; color: var(--accent-2); transform: rotate(-90deg); }
-.sync-console[open] .sc-toggle { transform: none; }
 
 /* Home nudge banner: icon, text, and dismiss as three columns so the copy never wraps under the
    icon. Violet-tinted to match the recommendation theme. */

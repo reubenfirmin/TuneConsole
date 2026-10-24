@@ -61,6 +61,15 @@ shares request-cached prepared reads and fragment presentation across those grou
 including response headers and audit points. Recommendation policy stays outside HTTP.
 Existing rankers, recipes and recommendation surfaces remain the policy engines.
 
+Initial setup offers verified library songs as soon as they arrive. Leaving setup
+requires a completed import and usable prepared mixes; sparse accounts can receive
+these offers before any taste modes are fitted. Empty imported accounts have no
+library preparation to wait for. Metadata coverage is reported as counts rather
+than a readiness percentage. The obsolete
+`onboard_coverage_min` and `onboard_library_min` controls and their saved overrides
+are retired. `onboard_feedback_min` still controls when the optional getting-started
+suggestions end; it does not bypass prepared-offer readiness.
+
 Road-trip work has three owners:
 
 - `road_trip_candidates` acquires provider rows and metadata, reads eligible
