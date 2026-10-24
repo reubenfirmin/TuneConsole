@@ -100,7 +100,7 @@ def test_projection_outputs_and_settings_are_committed_before_checkpoint(databas
                 return 'serving lock held'
             try:
                 with database.read_snapshot() as snapshot:
-                    return (snapshot.store.rec_surface.get_proposals(surface),
+                    return (snapshot.store.rec_proposals.get_proposals(surface),
                             snapshot.store.settings.get_setting('projection-version'))
             finally:
                 database._lock.release()
@@ -115,8 +115,9 @@ def test_projection_outputs_and_settings_are_committed_before_checkpoint(databas
                 database.trends.publish_rollup(
                     [('track', 'song', 0, 0., 'play_event')], '{"generation":2}', 2., None, None)
             else:
-                database.rec_surface.publish_prepared_bundles(
-                    '{"generation":2}', '[]', [('projection-policy', '{}', 2.)], 2.)
+                database.rec_ledger.publish_prepared_policies([('projection-policy', '{}', 2.)])
+                database.rec_proposals.publish_prepared_bundles(
+                    '{"generation":2}', '[]', 2.)
             database.settings.publish_values({'projection-version': '2'})
         assert snapshot.publish(publish)
     assert observed == [({'generation': 2}, '2')]

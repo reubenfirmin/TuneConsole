@@ -10,14 +10,14 @@ def _store():
 
 def test_prune_before_drops_old_events_only():
     s = _store()
-    s.rec_surface.record_mood(["a|x"], +1, 100 * DAY)
-    s.rec_surface.record_mood(["b|y"], -1, 130 * DAY, prune_before=101 * DAY)
-    events = s.rec_surface.recent_mood_events()
+    s.rec_signals.record_mood(["a|x"], +1, 100 * DAY)
+    s.rec_signals.record_mood(["b|y"], -1, 130 * DAY, prune_before=101 * DAY)
+    events = s.rec_signals.recent_mood_events()
     assert len(events) == 1 and events[0][2] == ["b|y"]
 
 
 def test_no_prune_when_unset():
     s = _store()
-    s.rec_surface.record_mood(["a|x"], +1, 100 * DAY)
-    s.rec_surface.record_mood(["b|y"], -1, 130 * DAY)
-    assert len(s.rec_surface.recent_mood_events()) == 2
+    s.rec_signals.record_mood(["a|x"], +1, 100 * DAY)
+    s.rec_signals.record_mood(["b|y"], -1, 130 * DAY)
+    assert len(s.rec_signals.recent_mood_events()) == 2

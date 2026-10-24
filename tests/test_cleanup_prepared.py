@@ -140,4 +140,4 @@ def test_page_and_home_summary_share_one_analysis(store, monkeypatch):
     response = client.get('/cleanup')
     assert response.status_code == 200
     assert calls == 1
-    assert store.rec_surface.get_proposals('cleanup')['count'] == 10
+    assert store.rec_proposals.get_proposals('cleanup')['count'] == 10

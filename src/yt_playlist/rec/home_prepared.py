@@ -36,7 +36,7 @@ class _NoJobs:
 def tuning_key(store, now=None):
     from yt_playlist.rec import candidate_refresh
     now = time.time() if now is None else now
-    genres = store.rec_surface.get_proposals("home_genre_request") or {}
+    genres = store.rec_proposals.get_proposals("home_genre_request") or {}
     if genres.get("epoch") != home_cards._epoch(store, "cards"):
         genres = {}
     return _digest({"leans": store.rec_model.get_leans(),
@@ -69,12 +69,12 @@ def _prepare(store, now):
     with store.read_snapshot() as snapshot:
         reader = snapshot.store
         target = "home_tuned" if mix_tuning.remaining(reader, now) > 0 else SURFACE
-        previous = reader.rec_surface.get_proposals(target)
+        previous = reader.rec_proposals.get_proposals(target)
         if not _valid(previous):
             previous = {}
-        bundles = reader.rec_surface.get_proposals('mode_bundles') or {}
+        bundles = reader.rec_proposals.get_proposals('mode_bundles') or {}
         if (not bundles
-                and not reader.rec_surface.get_proposals('fresh_pool')
+                and not reader.rec_proposals.get_proposals('fresh_pool')
                 and reader.rec_query.library_keys()):
             store.maintenance_diagnostics.record('deferred', reasons=('candidate_pools',),
                                                  phase='rec: Home collections')
@@ -82,7 +82,7 @@ def _prepare(store, now):
         tuning = tuning_key(reader, now)
         # Fresh can publish before there is enough library evidence for modes. Its
         # candidates must retire old menus even when mode_bundles is still empty.
-        generation = _digest([reader.rec_surface._proposal_json(surface)
+        generation = _digest([reader.rec_proposals._proposal_json(surface)
                               for surface in ('mode_bundles', 'fresh_pool')])
         reusable = (previous.get('generation') == generation and previous.get('tuning') == tuning
                     and now - previous.get('built_at', 0) < MAX_AGE_S)
@@ -146,7 +146,7 @@ def _prepare(store, now):
         if len(encoded.encode()) > MAX_BYTES:
             raise ValueError("Prepared Home collections exceeded their size budget")
         check_cancellable_work()
-        if not snapshot.publish(lambda: store.rec_surface.publish_prepared_home(encoded, now, surface=target),
+        if not snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(encoded, now, surface=target),
                                 allow_stale_tables=mode_surfaces.RANKING_CHURN_TABLES):
             return None
         return payload
@@ -158,7 +158,7 @@ def load(store, now, schedule=lambda: None):
     key = tuning_key(store, now)
     for surface in ("home_tuned", SURFACE):
         try:
-            payload = store.rec_surface.get_proposals(surface)
+            payload = store.rec_proposals.get_proposals(surface)
             if not _valid(payload):
                 continue
             if surface == "home_tuned" and payload.get("tuning") != key:
@@ -288,7 +288,7 @@ def remember(store, payload, result, now):
                     "breadth": {"families": {}, "breadth": 0}, "eras": [], "transient": {}})}
     for field in ('rediscover', 'rediscover_albums', 'discovery_albums', 'discovery_artists', 'discovery_tracks'):
         tailored.setdefault(field, [])
-    store.rec_surface.remember_home(json.dumps(tailored, separators=(",", ":")), now)
+    store.rec_proposals.remember_home(json.dumps(tailored, separators=(",", ":")), now)
 
 
 def _eligible_protos(store, protos, now):
@@ -334,7 +334,7 @@ def cards(store, payload, now, service, schedule=lambda: None, *, record=True):
     """Choose an experiment from prepared alternatives using current mode evidence."""
     epoch = home_cards._epoch(store, "cards")
     tuning = tuning_key(store, now)
-    genres = store.rec_surface.get_proposals("home_genre_request") or {}
+    genres = store.rec_proposals.get_proposals("home_genre_request") or {}
     constrained = genres.get("epoch") == epoch and (genres.get("include_genres") or genres.get("avoid_genres"))
     if not payload or (constrained and payload.get("tuning") != tuning):
         schedule()
@@ -346,7 +346,7 @@ def cards(store, payload, now, service, schedule=lambda: None, *, record=True):
     # Each menu was already diversified and ordered. This draw is bounded by the
     # batch size, and can react to feedback without recomputing a single track score.
     try:
-        held = store.rec_surface.get_proposals("home_choice") or {}
+        held = store.rec_proposals.get_proposals("home_choice") or {}
         if not isinstance(held, dict) or not isinstance(held.get("experiments"), list):
             held = {}
     except (TypeError, ValueError):
@@ -394,7 +394,7 @@ def cards(store, payload, now, service, schedule=lambda: None, *, record=True):
         chosen["requested_genres"], epoch, home_vibe.current(store, now))
     if record and protos:
         if held.get("epoch") != epoch or held.get("tuning") != tuning:
-            store.rec_surface.put_proposals("home_choice", {"epoch": epoch, "tuning": tuning,
+            store.rec_proposals.put_proposals("home_choice", {"epoch": epoch, "tuning": tuning,
                 "experiments": [p["experiment_id"] for p in protos]}, now)
         service.record_modes(protos, epoch, now)
         service.record_offer(protos, now, epoch=epoch)

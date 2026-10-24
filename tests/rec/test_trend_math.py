@@ -1,5 +1,6 @@
 import pytest
-from yt_playlist.rec import trend_rollups as tr
+from yt_playlist.rec import trend_statistics as tr
+from yt_playlist.rec.trend_insights import discovery_spike
 from yt_playlist.util import genre_map
 
 
@@ -53,13 +54,13 @@ def test_current_streak():
 
 def test_discovery_spike():
     # prev8 = [1,1,2,1,1,2,1,1] -> median 1.0 ; latest 6 >= 2*1.0 and >= 5 -> spike
-    assert tr.discovery_spike([1, 1, 2, 1, 1, 2, 1, 1, 6]) is True
+    assert discovery_spike([1, 1, 2, 1, 1, 2, 1, 1, 6]) is True
     # prev8 median 3 -> 2*3=6 ; latest 5 < 6 -> no spike (bigger, but not 2x)
-    assert tr.discovery_spike([3, 3, 3, 3, 3, 3, 3, 3, 5]) is False
+    assert discovery_spike([3, 3, 3, 3, 3, 3, 3, 3, 5]) is False
     # burst from silence: median 0 -> ratio trivially met, absolute floor 5 gates it -> spike
-    assert tr.discovery_spike([0, 0, 0, 0, 0, 0, 0, 0, 5]) is True
+    assert discovery_spike([0, 0, 0, 0, 0, 0, 0, 0, 5]) is True
     # below the absolute floor never trips
-    assert tr.discovery_spike([0, 0, 0, 0, 0, 0, 0, 0, 4]) is False
+    assert discovery_spike([0, 0, 0, 0, 0, 0, 0, 0, 4]) is False
 
 
 def test_compute_weeks_new_artist_and_diversity():

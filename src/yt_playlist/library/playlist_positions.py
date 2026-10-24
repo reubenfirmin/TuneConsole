@@ -65,18 +65,36 @@ def retry_insertions(store, playlist_id, client, now, *, attempts=3):
         return 0
     remaining = 0
     for action, plan in pending_insertions(store, playlist_id):
+        current = store.actions.get_action(action.id)
+        if current is None or current.status != "pending":
+            continue
+
+        def move_if_pending():
+            current = store.actions.get_action(action.id)
+            if current is not None and current.status == "pending":
+                _move(client, pl.ytm_playlist_id, plan)
+
         try:
-            with_retry(lambda: _move(client, pl.ytm_playlist_id, plan), attempts=attempts,
+            with_retry(move_if_pending, attempts=attempts,
                        base_delay=0.1, operation=f"place alternate versions in {pl.title!r}")
         except Exception:  # noqa: BLE001 - the add succeeded; retain the unfinished placement
-            remaining += 1
-            logger.warning("alternate placement remains pending for playlist %s (action %s)",
-                           playlist_id, action.id, exc_info=True)
+            with store._lock:
+                current = store.actions.get_action(action.id)
+                if current is None or current.status != "pending":
+                    continue
+                remaining += 1
+                logger.warning("alternate placement remains pending for playlist %s (action %s)",
+                               playlist_id, action.id, exc_info=True)
+                _retain_local_order(store, playlist_id, plan, now)
         else:
-            store.actions.update_action(action.id, "executed", now)
-        # Sync can read an old append order, or omit the new items entirely. Preserve the intended
-        # local order while showing it as pending, and after a successful remote move as well.
-        _retain_local_order(store, playlist_id, plan, now)
+            with store._lock:
+                current = store.actions.get_action(action.id)
+                if current is None or current.status != "pending":
+                    continue
+                store.actions.update_action(action.id, "executed", now)
+                # Sync can omit newly added items during indexing lag. Only an intent
+                # still owned by this retry may restore those items to the local cache.
+                _retain_local_order(store, playlist_id, plan, now)
     return remaining
 
 

@@ -1,6 +1,6 @@
 """Unit tests for search_versions, the alternate-version search engine behind the playlist
 'find alternate versions' modal (#26: added alternates must carry their track time)."""
-from yt_playlist.library.executor import search_versions
+from yt_playlist.library.playlist_catalog import search_versions
 
 
 class _FilterAwareClient:

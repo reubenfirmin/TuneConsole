@@ -1,31 +1,14 @@
-<div id="onboarding-feed" class="home-feed">
-  <section class="card onboard-explainer">
-    <h2>We're learning your taste</h2>
-    <p>TuneConsole is adding track information in the background; this can take a day. Play a mix in
-      YouTube Music and use Like or Dislike as you listen. Your choices improve future recommendations.</p>
-    <div class="onboard-progress" role="progressbar" aria-valuenow="{{ onboard_progress }}"
-         aria-valuemin="0" aria-valuemax="100" title="Progress toward personalized recommendations">
-      <div class="onboard-progress-bar" style="width: {{ onboard_progress }}%"></div>
-      <span class="onboard-progress-label">Preparing recommendations: {{ onboard_progress }}%</span>
-    </div>
-  </section>
-  {% if cleanup_count %}
-  <section class="card onboard-cleanup">
-    <p>You have {{ cleanup_count }} cleanup item{{ 's' if cleanup_count != 1 }} (duplicates / overlaps).
-      <a href="/cleanup">Review duplicates {{ arrow_icon('right') }}</a></p>
-  </section>
-  {% endif %}
-  <div class="gen-lanes" x-data="{ focus: null }" :class="{ 'has-focus': focus }">
-    <div hx-get="/home/onboard/radio" hx-trigger="load" hx-swap="outerHTML">
-      <div class="spinner" aria-label="Loading radio"></div>
-    </div>
+<div id="onboarding-feed" class="setup-home" x-data="onboardingArrival()">
+  {% include "_partials/onboarding_arrival.html" %}
+  <div class="setup-listening" x-show="connected" x-cloak>
     {% if onboard_library %}
-    <div hx-get="/home/onboard/library" hx-trigger="load" hx-swap="outerHTML">
-      <div class="spinner" aria-label="Loading your library"></div>
+    <div hx-get="/home/onboard/start" hx-trigger="load" hx-swap="outerHTML">
+      <span class="sr-only">Finding something to listen to</span>
+    </div>
+    {% else %}
+    <div hx-get="/home/onboard/radio" hx-trigger="load" hx-swap="outerHTML">
+      <span class="sr-only">Finding something to listen to</span>
     </div>
     {% endif %}
   </div>
-  <form hx-post="/onboard/done" hx-swap="none" class="onboard-done">
-    <button type="submit" class="cta-secondary">I'm set up - show my full Home</button>
-  </form>
 </div>

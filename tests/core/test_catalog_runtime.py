@@ -21,13 +21,13 @@ def test_runtime_operations_do_not_import_historical_catalog_helpers(store, monk
     assert store.tracks.upsert_track(None, 'Song', 'Artist', 'Album', 200) == missing
     first = store.tracks.upsert_track('a', 'Song', 'Artist', 'Album', 200)
     old = store.tracks.catalog_subject(first)['identity_key']
-    store.rec_surface.set_cluster_canvas('saved',json.dumps({'nodes': [{'key': old}], 'label': old}))
+    store.playlist_recipes.set_cluster_canvas('saved',json.dumps({'nodes': [{'key': old}], 'label': old}))
     second = store.tracks.upsert_track('b', 'Song', 'Artist', 'Other', 200)
     store.tracks.set_track_audio(first, bpm=120)
     store.tracks.associate_youtube_item('b', store.tracks.catalog_subject(first)['recording_id'],
                                 source='verified', evidence={'review': 'same recording'}, now=2)
     assert store.tracks.get_track_audio(second)[0] == 120
-    saved = json.loads(store.rec_surface.get_cluster_canvas('saved'))
+    saved = json.loads(store.playlist_recipes.get_cluster_canvas('saved'))
     assert saved['nodes'][0]['key'] == store.tracks.catalog_subject(first)['identity_key']
     assert saved['label'] == old
     assert saved['catalog_state_version'] == 1
@@ -59,9 +59,9 @@ def test_unknown_runtime_state_format_is_preserved_on_live_rekey(store):
     first = store.tracks.upsert_track('a', 'Song', 'Artist', None, 200)
     old = store.tracks.catalog_subject(first)['identity_key']
     future = json.dumps({'catalog_state_version': 999, 'nodes': [{'key': old}]})
-    store.rec_surface.set_cluster_canvas('future',future)
+    store.playlist_recipes.set_cluster_canvas('future',future)
     store.tracks.upsert_track('b', 'Song', 'Artist', None, 200)
-    assert store.rec_surface.get_cluster_canvas('future') == future
+    assert store.playlist_recipes.get_cluster_canvas('future') == future
     with pytest.raises(ValueError, match='Unsupported'):
         catalog_state.rekey_state(json.loads(future), {old: 'new'})
 

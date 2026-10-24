@@ -6,7 +6,7 @@ Which group a playlist is in lives in the local database, so it doesn't exist on
 as ordinary library playlists, and start reading its suggestions back as your taste. The YouTube
 account is the one thing every install shares, so the marker lives there and sync reconciles from it.
 """
-from yt_playlist.library import executor, sync, playlist_metadata
+from yt_playlist.library import playlist_generated, sync, playlist_metadata
 from yt_playlist.core.store import Store
 from yt_playlist.repos.base import GENERATED_GROUP
 from tests.conftest import FakeClient, _track
@@ -99,7 +99,7 @@ def test_creating_a_generated_playlist_writes_the_marker():
     iid = s.identities.upsert_identity("main", "cred", None, True)
     client = FakeClient()
 
-    executor.create_generated_playlist(
+    playlist_generated.create_generated_playlist(
         s, "Road Trip: Beach Run",
         [{"video_id": "v1", "title": "A", "artist": "X", "album": "", "thumbnail": None,
           "duration": 200}], client, 1000.0, iid)

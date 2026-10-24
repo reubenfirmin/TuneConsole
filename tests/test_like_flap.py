@@ -49,7 +49,7 @@ def test_flap_graduates_at_most_once_across_three_runs(store):
         sync.sync_identity(store, iid, _client(order), now=1000.0 + i)
     # the graduation ledger was fed exactly once, at the low sync-like weight; before the fix each
     # run cleared and re-recorded the like, feeding the ledger daily until the axis hit the cap
-    assert store.rec_surface.get_theme("artist:Band") == rec_params.SOURCE_W_LIKE_SYNCED
+    assert store.rec_signals.get_theme("artist:Band") == rec_params.SOURCE_W_LIKE_SYNCED
     assert store.rec_model.recent_liked_keys() == [KEY]
 
 
@@ -106,11 +106,11 @@ def test_missing_rating_context_preserves_feedback_until_complete_sync(store, mo
     assert store.playlists.get_playlist_tracks_with_meta(cached.id) == cached_tracks
 
     # A later successful read restores authority, without re-graduating the rating.
-    theme = store.rec_surface.get_theme("artist:Band")
+    theme = store.rec_signals.get_theme("artist:Band")
     monkeypatch.setattr(client, "get_playlist", fetch)
     sync.sync_identity(store, iid, client, now=3000.0)
     assert _item_rating(store, iid) == (status, 3000.0)
-    assert store.rec_surface.get_theme("artist:Band") == theme
+    assert store.rec_signals.get_theme("artist:Band") == theme
     client._tracks["A"] = [_t("INDIFFERENT")]
     sync.sync_identity(store, iid, client, now=4000.0)
     assert _item_rating(store, iid) == ("INDIFFERENT", 4000.0)
@@ -179,11 +179,11 @@ def test_unread_pages_preserve_ratings_until_complete_recovery(store, monkeypatc
     assert (KEY in store.rec_model.recent_liked_keys()) == (status == "LIKE")
     assert (KEY in store.rec_model.disliked_identity_keys()) == (status == "DISLIKE")
 
-    theme = store.rec_surface.get_theme("artist:Band")
+    theme = store.rec_signals.get_theme("artist:Band")
     monkeypatch.setattr(client, "get_playlist", fetch)
     sync.sync_identity(store, iid, client, now=3000.0)
     assert _item_rating(store, iid) == (status, 3000.0)
-    assert store.rec_surface.get_theme("artist:Band") == theme
+    assert store.rec_signals.get_theme("artist:Band") == theme
     client._tracks["A"] = [_t("INDIFFERENT")]
     sync.sync_identity(store, iid, client, now=4000.0)
     assert _item_rating(store, iid) == ("INDIFFERENT", 4000.0)
@@ -249,22 +249,22 @@ def _genre_track(store):
 def test_like_clear_rerecord_does_not_regraduate(store):
     axis = _genre_track(store)
     graduation.apply_dislikes(store, {KEY: "LIKE"}, 1000.0, provenance="action")
-    assert store.rec_surface.get_theme(axis) == rec_params.SOURCE_W_LIKE           # graduated once
+    assert store.rec_signals.get_theme(axis) == rec_params.SOURCE_W_LIKE           # graduated once
     graduation.apply_dislikes(store, {KEY: "INDIFFERENT"}, 2000.0)      # genuine un-like: row gone
     assert KEY not in store.rec_model.recent_liked_keys()
     graduation.apply_dislikes(store, {KEY: "LIKE"}, 3000.0, provenance="action")   # re-liked
     assert KEY in store.rec_model.recent_liked_keys()                            # the like itself is back
-    assert store.rec_surface.get_theme(axis) == rec_params.SOURCE_W_LIKE           # but NO second graduation
+    assert store.rec_signals.get_theme(axis) == rec_params.SOURCE_W_LIKE           # but NO second graduation
 
 
 def test_dislike_clear_rerecord_does_not_regraduate(store):
     axis = _genre_track(store)
     graduation.apply_dislikes(store, {KEY: "DISLIKE"}, 1000.0)
-    assert store.rec_surface.get_theme(axis) is None
+    assert store.rec_signals.get_theme(axis) is None
     # a like supersedes (clears the dislike row), then the user dislikes again
     graduation.apply_dislikes(store, {KEY: "LIKE"}, 2000.0)
     assert KEY not in store.rec_model.disliked_identity_keys()
-    theme_after_like = store.rec_surface.get_theme(axis)
+    theme_after_like = store.rec_signals.get_theme(axis)
     graduation.apply_dislikes(store, {KEY: "DISLIKE"}, 3000.0)
     assert KEY in store.rec_model.disliked_identity_keys()                       # suppression is back
-    assert store.rec_surface.get_theme(axis) == theme_after_like                   # no second negative feed
+    assert store.rec_signals.get_theme(axis) == theme_after_like                   # no second negative feed

@@ -22,6 +22,7 @@ SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "yt_playlist"
 # quarantine is the bug this test exists to catch.
 TASTE_SIGNAL_MODULES = [
     "rec/trend_rollups.py",
+    "rec/trend_payload.py",
 ]
 
 # Reads of raw play data that bypass the quarantine unless the module also applies an exclusion.
@@ -44,18 +45,6 @@ def test_taste_signal_modules_exclude_generated(rel):
         f"engine feeds on its own suggestions.\n"
         f"If this module computes MODE-level signal only, remove it from TASTE_SIGNAL_MODULES and say "
         f"why in a comment.")
-
-
-def test_trend_rollups_repetition_series_carries_the_exclusion():
-    """The module-level guard above is satisfied by the mere PRESENCE of `day_counts_source(`, so it
-    cannot see that detect_insights has a SECOND, separate play read feeding the repetition detector.
-    That read (play_events_since) leaked generated-playlist plays for its whole life. Pin the specific
-    call site: an unguarded `play_events_since(0)` must never come back."""
-    src = (SRC / "rec" / "trend_rollups.py").read_text()
-    assert "play_events_since(0)" not in src, (
-        "detect_insights reads play_events_since(0) with no exclusion, so generated-playlist plays feed "
-        "the repetition detector (the day_counts quarantine does NOT cover this separate read).\n"
-        "Pass exclude_list_ids=store.trends.generated_ytm_ids().")
 
 
 def test_mode_level_signal_documents_why_it_is_exempt():

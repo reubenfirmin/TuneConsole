@@ -30,7 +30,7 @@ def _imports(tree, module=None):
 def _flat_repository_references(tree, methods):
     # Known fixture/context names remain useful, but constructor assignments and
     # aliases must also work for reader/writer/repaired and fixture dictionaries.
-    stores = {"store", "s", "db", "reopened", "store2", "ctx.store", "self.store", "self.ctx.store"}
+    stores = {"store", "db", "reopened", "store2", "ctx.store", "self.store", "self.ctx.store"}
     constructors = {"Store", "yt_playlist.core.store.Store"}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "yt_playlist.core.store":
@@ -84,6 +84,14 @@ reader.rec_model.content_generation()
         "reader.content_generation", "writer.content_generation", "repaired.queue_remaining",
         "songs['store'].get_playlist", "patch repository directly",
     }
+
+
+def test_repository_guard_distinguishes_short_store_aliases_from_domain_state():
+    for source in ('s = Store(":memory:")', 's = store'):
+        tree = ast.parse(source + '\ns.pending()')
+        assert list(_flat_repository_references(tree, {"pending"})) == [(2, "s.pending")]
+    tree = ast.parse('s = Session()\nqueue = s.pending')
+    assert not list(_flat_repository_references(tree, {"pending"}))
 
 
 def test_application_import_graph_is_acyclic_including_local_imports():
@@ -192,6 +200,29 @@ def test_prepared_recommendation_policy_contains_no_connection_access_or_sql():
                 assert node.attr not in {"conn", "execute", "executemany", "executescript", "commit", "rollback"}, name
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 assert not re.match(r"\s*(SELECT |INSERT |UPDATE |DELETE |REPLACE )", node.value), name
+
+
+def test_embedding_calculations_stay_detached_from_storage_and_serving():
+    modules = _modules()
+    forbidden = {"yt_playlist.rec.embedding_vectors", "yt_playlist.rec.model_refresh",
+                 "yt_playlist.rec.rec_worker", "yt_playlist.rec.embed"}
+    for owner in ("embedding_training", "content_model", "vector_math"):
+        name = f"yt_playlist.rec.{owner}"
+        tree = modules[name]
+        imports = set(_imports(tree, name))
+        assert not imports & forbidden, name
+        assert not any(dependency.startswith(("yt_playlist.repos", "yt_playlist.web",
+                                              "yt_playlist.core.store")) for dependency in imports), name
+        for node in ast.walk(tree):
+            if isinstance(node, ast.arg):
+                assert node.arg not in {"store", "reader", "session"}, name
+    graph = modules["yt_playlist.rec.embed"]
+    assert not set(_imports(graph)) & {"yt_playlist.rec.embedding_training",
+                                      "yt_playlist.rec.content_model"}
+    expansion = next(node for node in graph.body
+                     if isinstance(node, ast.FunctionDef) and node.name == "expand_spaces")
+    assert not any(isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                   and node.value.id in {"vectors", "rec_params"} for node in ast.walk(expansion))
 
 
 def test_refresh_notifications_do_not_write_model_or_serving_state():

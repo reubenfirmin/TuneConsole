@@ -4,7 +4,6 @@ import pytest
 from yt_playlist.core.migrations import migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
-from yt_playlist.rec.trend_rollups import _build_first_play_index
 
 DAY = 86400
 
@@ -14,7 +13,7 @@ def _history(store, key, day):
 
 
 def _assert_first(store, key, artist, day):
-    _build_first_play_index(store)
+    store.trends.refresh_first_play()
     assert store.trends.first_play_map("track")[key] == day
     assert store.trends.first_play_map("artist")[artist] == day
     assert store.settings.get_setting('trend_first_play_watermark') is None
@@ -77,7 +76,7 @@ def test_verified_reassociation_preserves_earliest_history(store):
     target = store.tracks.upsert_track("b", "Correct Song", "Artist B", None, 200)
     old, key = store.tracks.identity_key_for_video("a"), store.tracks.identity_key_for_video("b")
     _history(store, old, 10); _history(store, key, 20)
-    _build_first_play_index(store)
+    store.trends.refresh_first_play()
     store.tracks.associate_youtube_item("a", store.tracks.catalog_subject(target)["recording_id"],
         source="verified", evidence={"review": "same recording"}, now=100)
     _assert_first(store, key, "Artist B", 10)
@@ -101,7 +100,7 @@ def test_interruption_rolls_back_index_and_checkpoint(store, monkeypatch):
         raise RuntimeError("interrupted after index writes")
     monkeypatch.setattr(store.trends, "_rebuild_artist_first_play", interrupted)
     with pytest.raises(RuntimeError, match="interrupted"):
-        _build_first_play_index(store)
+        store.trends.refresh_first_play()
     assert list(map(tuple, store.conn.execute("SELECT * FROM trend_first_play"))) == before
     assert store.settings.get_setting("trend_first_play_watermark") == watermark
     monkeypatch.setattr(store.trends, "_rebuild_artist_first_play", original)

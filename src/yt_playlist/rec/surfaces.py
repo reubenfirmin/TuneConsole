@@ -11,7 +11,7 @@ from yt_playlist.library import analysis
 from yt_playlist.util import genre_map
 from yt_playlist.util.duration import ago as _ago
 from yt_playlist.util.matching import normalize
-from yt_playlist.rec import embed, rec_params
+from yt_playlist.rec import embedding_vectors as vectors, rec_params, vector_math
 from yt_playlist.rec.discover import ContentProjection
 from yt_playlist.rec.scoring import (_apply_axis_weights, _apply_mood, axis_adjusted_scores,
                                      center_known_weights, content_taste, discovery_facet_weight, playlist_taste,
@@ -123,7 +123,7 @@ def for_you(store, now, limit=24, include_traces=False) -> list[ForYouItem]:
     sims, traces, pt, V, idx = None, None, None, None, None
     if store.rec_model.rec_vectors_count():
         pt = playlist_taste(store)
-        keys, V, idx = embed.load_vectors(store)
+        keys, V, idx = vectors.load_vectors(store)
         if pt and V is not None:
             scored = _score_candidates(store, pt, keys, V, idx, now, include_traces=include_traces)
             sims, traces = scored if include_traces else (scored, None)
@@ -138,9 +138,9 @@ def for_you(store, now, limit=24, include_traces=False) -> list[ForYouItem]:
         sources.append((nbrs, lambda r: "In your taste neighbourhood", "neighbourhood"))
     else:
         # Until the embedding model is built, fall back to plain rotation co-occurrence.
-        sources.append((store.rec_query.more_like_rotation(limit=pool),
+        sources.append((store.rec_candidates.more_like_rotation(limit=pool),
                         lambda r: _rotation_reason(r["shared_playlists"]), "rotation"))
-    sources.append((store.rec_query.deep_cuts(limit=pool),
+    sources.append((store.rec_candidates.deep_cuts(limit=pool),
                     lambda r: f"A deep cut from {r['artist']}, who you play a lot", "deep_cut"))
 
     # Re-rank every lane's candidates by the same taste×transient score.
@@ -152,7 +152,7 @@ def for_you(store, now, limit=24, include_traces=False) -> list[ForYouItem]:
     # Never show these: dismissed/snoozed/muted, and anything already bundled into a generated
     # playlist (don't re-offer what you just saved). Anti-staleness is per-card rotation, not here.
     dao = store.rec_query
-    hard = store.rec_model.suppressed_keys("for_you", now) | dao.generated_track_keys()
+    hard = store.rec_model.suppressed_keys("for_you", now) | store.rec_eligibility.generated_track_keys()
     muted = store.rec_model.muted_artists()
     # weighted fair queuing: each lane gets turns ∝ its learned weight (default 1.0 => round-robin)
     queues = [[deque(rows), reason, lane, weights.get(f"lane:{lane}", 1.0), 0]
@@ -175,17 +175,17 @@ def comfort_listening(store, now, limit=24) -> list[ForYouItem]:
     """High-rotation favorites you haven't reached for lately, your comfort listening.
 
     Ranks your most-played tracks, demoted the more recently you've heard them (see
-    store.comfort_candidates), so the card surfaces reliable favorites that have gone quiet rather
+    rec_candidates.comfort_candidates), so the card surfaces reliable favorites that have gone quiet rather
     than whatever's already in heavy rotation. Single-source, so no lane fair-queuing; it still
     honours the for_you suppression set (dismissed/snoozed/muted) and never re-offers a track
     already bundled into a generated playlist. No erosion: the recency demotion is its own freshness.
     """
     gp = rec_params.get_param
     pool = limit * gp(store, "candidate_pool_factor")
-    rows = store.rec_query.comfort_candidates(now, min_plays=gp(store, "comfort_min_plays"),
+    rows = store.rec_candidates.comfort_candidates(now, min_plays=gp(store, "comfort_min_plays"),
                                     recency_full_days=gp(store, "comfort_recency_full_days"), limit=pool)
     dao = store.rec_query
-    suppressed = store.rec_model.suppressed_keys("for_you", now) | dao.generated_track_keys()
+    suppressed = store.rec_model.suppressed_keys("for_you", now) | store.rec_eligibility.generated_track_keys()
     muted = store.rec_model.muted_artists()
     out: list[ForYouItem] = []
     for r in rows:
@@ -273,7 +273,7 @@ def taste_comparison(store, now, keys=None, limit=24) -> list[dict]:
     before/after explanation without treating random live-sample turnover as model movement.
     """
     pt = playlist_taste(store)
-    model_keys, V, idx = embed.load_vectors(store)
+    model_keys, V, idx = vectors.load_vectors(store)
     if not pt or V is None:
         return []
     scores, traces = score_with_traces(store, pt, model_keys, V, idx, now)
@@ -282,7 +282,7 @@ def taste_comparison(store, now, keys=None, limit=24) -> list[dict]:
     wanted = list(dict.fromkeys([*(keys or []), *current]))
     meta = store.rec_query.tracks_by_keys([key for key in wanted if key in traces])
     suppressed = store.rec_model.suppressed_keys("for_you", now)
-    generated = store.rec_query.generated_track_keys()
+    generated = store.rec_eligibility.generated_track_keys()
     muted = store.rec_model.muted_artists()
     weights = store.rec_model.get_weights(
         now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
@@ -376,14 +376,14 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
         # Library plays/mood must remain visible even though none of those keys is a candidate.
         # Keep projected discoveries too, so explicit feedback on a cold track still contributes.
         evidence_V, evidence_idx = V, idx
-        _, warm_V, warm_idx = embed.load_vectors(store)
+        _, warm_V, warm_idx = vectors.load_vectors(store)
         if warm_V is not None:
             evidence_V = np.vstack((warm_V, V))
             evidence_idx = {k: len(warm_V) + i for k, i in idx.items()}
             evidence_idx.update(warm_idx)  # prefer the actual library vector for overlapping keys
         content_snapshot = store.rec_model.content_generation()
         values = _apply_mood(pt.score_all(V), store, now, V, idx,
-                             content_vecs=embed.load_discovered_content_vectors(store, snapshot=content_snapshot),
+                             content_vecs=vectors.load_discovered_content_vectors(store, snapshot=content_snapshot),
                              content_snapshot=content_snapshot,
                              evidence_vecs=(evidence_V, evidence_idx))
         scores = {k: float(values[i]) for i, k in enumerate(keys)}
@@ -473,7 +473,7 @@ def _catalog_scores(fit, plays, all_keys=None) -> dict:
     """#86 Catalog kernel: novelty(1/(1+plays)) x a rank base over the taste-fit scores. Keys in
     `all_keys` but absent from `fit` (no scoreable vector) get a below-worst floor so they still
     rank by novelty among themselves instead of zeroing out."""
-    base = embed.percentile_scores(fit)
+    base = vector_math.percentile_scores(fit)
     floor = 0.5 / max(len(fit), 1)
     keys = all_keys if all_keys is not None else fit.keys()
     return {k: (1.0 / (1.0 + plays.get(k, 0))) * base.get(k, floor) for k in keys}
@@ -488,10 +488,10 @@ def _content_only_scores(store, plays, now) -> dict:
     ct = content_taste(store, snapshot=snapshot)
     if not ct:
         return {}
-    ckeys, CV, _cidx = embed.load_content_vectors(store, snapshot=snapshot)
+    ckeys, CV, _cidx = vectors.load_content_vectors(store, snapshot=snapshot)
     if CV is None:
         return {}
-    _keys, _V, idx = embed.load_vectors(store)
+    _keys, _V, idx = vectors.load_vectors(store)
     owned = set(store.rec_query.library_keys())
     cands = [(i, k) for i, k in enumerate(ckeys) if k in owned and k not in idx]   # owned, content-only
     if not cands:
@@ -515,7 +515,7 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
     """
     plays = store.rec_query.play_counts()                                  # {key: count}; absent = never played
     pt = playlist_taste(store)
-    keys, V, idx = embed.load_vectors(store)
+    keys, V, idx = vectors.load_vectors(store)
     # Catalog score = novelty(lack of plays, PRIMARY) × taste-fit rank base (a percentile in (0, 1],
     # so it only ever scales, never zeroes: "weighted, not filtered").
     collab = {}
@@ -537,7 +537,7 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
     # may have neither vector type; they can still make a catalog mix before the next rebuild.
     missing = dao.library_keys() - collab.keys() - content.keys()
     order.extend(sorted(missing, key=lambda k: (plays.get(k, 0), k)))
-    suppressed = store.rec_model.suppressed_keys("for_you", now) | dao.generated_track_keys()
+    suppressed = store.rec_model.suppressed_keys("for_you", now) | store.rec_eligibility.generated_track_keys()
     muted = store.rec_model.muted_artists()
     weights = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     genres = dao.track_genres(order)
@@ -584,10 +584,11 @@ def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem
     if not seed_artists or not families:
         return []
 
-    related = {store.artists.key(a):score for a,score in artist_model.related_artists(
-        store, seed_artists, topn=limit * 8, exclude_owned=False)}
+    related = artist_model.related_artist_scores(
+        store, seed_artists, topn=limit * 8, exclude_owned=False)
     candidates = artist_model.artist_track_candidates(
-        store, seed_artists, topn=limit * 8, include_out_of_corpus=True)
+        store, seed_artists, topn=limit * 8, include_out_of_corpus=True,
+        scores=related, artist_refs=artist_refs)
     # Same-artist catalog tracks are relevant without asking the model to rediscover the seed itself.
     for c in dao.tracks_by_artists(seed_artists):
         c["artist_score"] = 1.0
@@ -606,7 +607,7 @@ def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem
         seen.add(key)
         sub = genre_map.subgenre(genre)
         exact = int(bool(sub and sub in subgenres))
-        score = float(c.get("artist_score", max((related.get(a,0.0) for a in artist_refs.get(key,())),default=0.0)))
+        score = float(c["artist_score"])
         ranked.append((exact, score, key, artist, family, c,
                        bool(set(artist_refs.get(key,())) & seed_artists)))
 

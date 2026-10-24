@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import FakeClient, _track
-from yt_playlist.library import executor, playlist_undo
+from yt_playlist.library import executor, playlist_undo, playlist_backups, playlist_generated
 from yt_playlist.repos.base import GENERATED_GROUP
 
 
@@ -13,6 +13,7 @@ from yt_playlist.repos.base import GENERATED_GROUP
 def source(store, tmp_path, monkeypatch):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     monkeypatch.setattr(executor, "with_retry", lambda read: read())
+    monkeypatch.setattr(playlist_backups, "with_retry", lambda read: read())
     iid = store.identities.upsert_identity("Main", "bridge", None, True)
     pid = store.playlists.upsert_playlist(iid, "SOURCE", "Cached title", 1, "", 1)
     tid = store.tracks.upsert_track("one", "Cached song", "Artist", None, 200)
@@ -32,7 +33,7 @@ def test_every_deletion_path_backs_up_current_order_and_occurrences(store, sourc
     elif operation == "gc":
         store.playlists.set_playlist_group("SOURCE", GENERATED_GROUP)
         store.playlists.mark_generated_playlist('SOURCE')
-        assert executor.gc_generated_playlists(store, {iid: client}, 1000000, grace_days=1)
+        assert playlist_generated.gc_generated_playlists(store, {iid: client}, 1000000, grace_days=1)
     elif operation == "move":
         # A move knows the two songs locally, but its cached order lacks the remote repeat.
         new = store.tracks.upsert_track("new", "Added remotely", "Artist", None, 200)
@@ -93,7 +94,7 @@ def test_incomplete_remote_read_preserves_playlist_and_publishes_nothing(
 def test_failed_backup_does_not_delete_or_overwrite_prior_recovery(
         store, source, tmp_path, monkeypatch, failure):
     _, pid, client, _ = source
-    prior = Path(executor.backup_playlist(store, pid, 2, client))
+    prior = Path(playlist_backups.backup_playlist(store, pid, 2, client))
     saved = prior.read_bytes()
 
     def fail(*args, **kwargs):
@@ -102,11 +103,11 @@ def test_failed_backup_does_not_delete_or_overwrite_prior_recovery(
     if failure == "fetch":
         monkeypatch.setattr(client, "get_playlist", fail)
     elif failure == "write":
-        monkeypatch.setattr(executor.json, "dump", fail)
+        monkeypatch.setattr(playlist_backups.json, "dump", fail)
     elif failure == "publish":
-        monkeypatch.setattr(executor.os, "replace", fail)
+        monkeypatch.setattr(playlist_backups.os, "replace", fail)
     else:
-        monkeypatch.setattr(executor.os, "fsync", fail)
+        monkeypatch.setattr(playlist_backups.os, "fsync", fail)
     with pytest.raises(OSError, match="Backup unavailable"):
         executor.delete_playlist(store, pid, client, 2)
     assert prior.read_bytes() == saved
@@ -123,6 +124,8 @@ def test_merge_gate_and_backup_use_the_same_source_snapshot(store, source, monke
     get = client.get_playlist
 
     def read(playlist, limit=None):
+        if playlist in client.deleted:
+            return get(playlist, limit)  # deletion confirmation is a separate absence read
         if playlist == "SOURCE":
             reads.append(playlist)
             if len(reads) > 1:

@@ -2,7 +2,7 @@
 from collections import Counter, deque
 from yt_playlist.core.accounts import catalog_client
 
-from yt_playlist.rec import embed, home_themes, home_vibe, measurement, mode_surfaces, rec_params, road_trip_candidates, surfaces
+from yt_playlist.rec import embedding_vectors as vectors, home_themes, home_vibe, measurement, mode_surfaces, rec_params, road_trip_candidates, surfaces
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
 
@@ -49,7 +49,7 @@ def populate(ctx, include_genres=(), avoid_genres=(), on_progress=lambda message
                 have.add(key)
                 added += 1
         on_progress(f"Found {added} new songs. Preparing your mix…")
-    embed.build_discovered_content_vectors(store)
+    vectors.build_discovered_content_vectors(store)
     return added
 
 
@@ -66,8 +66,8 @@ def pick(store, now, include_genres=(), avoid_genres=(), size=12, *, minimum=4):
     Reading a page or choosing genres must never fit a projection or score the discovery pool.
     Individual discovery tiles can use a smaller minimum than a saveable mix.
     """
-    bundles = store.rec_surface.get_proposals("mode_bundles") or {}
-    candidates = list(store.rec_surface.get_proposals("fresh_pool") or [])
+    bundles = store.rec_proposals.get_proposals("mode_bundles") or {}
+    candidates = list(store.rec_proposals.get_proposals("fresh_pool") or [])
     candidates.extend(bundles.get("all", {}).get("fresh", []))
     for mid, bucket in bundles.items():
         if mid != "all" and not mid.startswith("_"):
@@ -76,7 +76,7 @@ def pick(store, now, include_genres=(), avoid_genres=(), size=12, *, minimum=4):
         return []
     dao = store.rec_query
     keys = [t['key'] for t in candidates if t.get('key')]
-    blocked = set(dao.tracks_by_keys(keys)) | dao.suppressed_candidate_keys(keys, now)
+    blocked = set(dao.tracks_by_keys(keys)) | store.rec_eligibility.suppressed_candidate_keys(keys, now)
     muted = store.rec_model.muted_artists()
     weights = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     unique = {}

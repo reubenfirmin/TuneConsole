@@ -5,7 +5,7 @@ Building a recipe produces an on-screen DRAFT, not a YouTube playlist: the expen
 runs once (/build), and every control after it - the mine/theirs mix, the familiarity lean, the
 per-party genre and era sliders, crossing a slot out - re-picks from the stored pool with no network
 (rec/road_trip.py). Only "Save to YouTube" materializes it, the same way every other generated
-playlist is made (Generated group, GC, taste-model quarantine) via executor.create_generated_playlist.
+playlist is made (Generated group, GC, taste-model quarantine) via playlist_generated.create_generated_playlist.
 
 Editor endpoints re-render the whole page body (draft + recipe list) into #road-trip-body. The
 two are coupled - saving a draft updates its recipe's "last generated" link, deleting a recipe drops
@@ -20,10 +20,11 @@ import threading
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
-from yt_playlist.library import executor
+from yt_playlist.library import playlist_generated, playlist_navigation
 from yt_playlist.library.playlist_writes import PlaylistAddUncertain
 from yt_playlist.rec import measurement, road_trip as road_trip_rec
 from yt_playlist.rec import road_trip_candidates as candidates
+from yt_playlist.rec.road_trip_axes import canonical_genre
 from yt_playlist.util.matching import identity_key
 from yt_playlist.core.activity import activity_for
 from yt_playlist.core.accounts import client_for
@@ -144,11 +145,11 @@ def build(ctx) -> APIRouter:
         artists, genres = _clean_list(form.get("artists")), _clean_list(form.get("genres"))
         previous = store.road_trip.get_road_trip_recipe(recipe_id) if recipe_id is not None else None
         previous_artists = {a.casefold() for a in (previous or {}).get("artists", [])}
-        known_genres = {road_trip_rec._canon_genre(g) for g in genres}
+        known_genres = {canonical_genre(g) for g in genres}
         for artist in artists:
             if artist.casefold() in previous_artists:
                 continue
-            genre = candidates._canon_genre(candidates.artist_genre(store, artist))
+            genre = canonical_genre(candidates.artist_genre(store, artist))
             if genre and genre not in known_genres:
                 genres.append(genre)
                 known_genres.add(genre)
@@ -292,7 +293,7 @@ def build(ctx) -> APIRouter:
             return response("Couldn't save it - connect the main account and keep at least one track.")
         stats = state["stats"]
         try:
-            saved = executor.create_generated_playlist(store, result["name"], tracks,
+            saved = playlist_generated.create_generated_playlist(store, result["name"], tracks,
                 client, now_fn(), identity_id,
                 recipe={"model": "road_trip", "road_trip_recipe_id": recipe_id, "journey": "road_trip",
                         "own_pct": state["own_pct"], "familiarity_pct": state["familiarity_pct"],
@@ -307,7 +308,7 @@ def build(ctx) -> APIRouter:
             bridge = getattr(ctx, "bridge", None)
             if bridge is not None and getattr(bridge, "connected", False):
                 watch_url = f"https://music.youtube.com/watch?list={saved['new_ytm']}"
-                activity_for(ctx).start_thread(executor.navigate_when_ready,
+                activity_for(ctx).start_thread(playlist_navigation.navigate_when_ready,
                                  args=(client, bridge, saved["new_ytm"], watch_url))
         except PlaylistAddUncertain as exc:
             result["partial_ytm"] = exc.playlist_id

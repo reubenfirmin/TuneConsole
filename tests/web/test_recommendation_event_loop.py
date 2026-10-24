@@ -22,6 +22,7 @@ from yt_playlist.web.app import create_app
     ('/home/fingerprint/remove', {'axis': 'genre:house'}),
     ('/home/generate', {'tracks': '[]'}),
     ('/clusters/save', {'keep_keys': '[]'}),
+    ('/overlaps/suppress-many', {'pairs': '[["PLA","PLB"]]'}),
     ('/taste/weight', {'axis': 'genre:house', 'weight': '0.5'}),
     ('/taste/param', {'name': 'modes_k', 'value': '3'}),
     ('/taste/reset-param', {'name': 'modes_k'}),

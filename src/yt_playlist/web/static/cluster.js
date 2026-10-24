@@ -18,19 +18,10 @@ function clusterCanvas() {
   // old value) stranded it ~5000px from its own cluster, forcing zoom-to-fit to zoom way out (tiny cards).
   const WORLD = 8000, CENTER = 0;
   const LINK_D = 215, NODE_R = 128;          // spoke length; collision radius
-  const CARD_W = 190, CARD_H = 50, CEN_W = 232, THUMB = 38;   // node card geometry (graph units)
-  // Resolved from tokens.css (see theme.js) so the canvas can never drift from the stylesheet.
-  // Lazy + memoised: the first read happens at first paint, after the token sheet has applied.
-  let _C = null;
-  const C = new Proxy({}, { get: (_, k) => (_C || (_C = window.themePalette({
-    bg: '--bg', surface: '--graph-node', border: '--border-2', text: '--text', dim: '--dim',
-    accent: '--accent', trunk: '--trunk', danger: '--danger', boost: '--boost',
-    chip: '--graph-chip', nodeHi: '--graph-node-hi', node2: '--graph-node-2',
-    link: '--graph-link', grid: '--graph-grid', glow: '--graph-glow',
-    dotOn: '--graph-dot-on', dotOff: '--graph-dot-off',
-    fire0: '--fire-0', fire1: '--fire-1', fire2: '--fire-2', fire3: '--fire-3',
-    fire4: '--fire-4', fire5: '--fire-5', fireGlow: '--boost',
-  })))[k] });
+  const {CARD_W, CARD_H, CEN_W} = ClusterGeometry;
+  let repaint = () => {};
+  const renderer = createClusterRenderer(() => repaint());
+  const canvasStorage = ClusterCanvases.open(localStorage);
   return {
     WORLD,
     nodes: [], nextId: 1, rootId: null,
@@ -51,54 +42,22 @@ function clusterCanvas() {
     _byId: null, _topo: null, _raw: null, _rawById: null,
 
     init() {
-      const d3 = window.d3, el = this.$refs.graph;
-      const fg = window.ForceGraph()(el);
-      this._fg = fg;
-      this._imgs = new Map();                  // thumbnail cache (url -> HTMLImageElement)
-      fg.nodeId('id')
-        .backgroundColor('transparent')      // let the CSS nebula on .cluster-canvas show through
-        .nodeCanvasObject((n, ctx, gs) => this._drawNode(n, ctx, gs))
-        .nodePointerAreaPaint((n, color, ctx) => this._nodeHit(n, color, ctx))
-        .nodeCanvasObjectMode(() => 'replace')
-        // Links use force-graph's built-in line drawing (NO custom link canvas/pointer paint): giving
-        // links a pointer-pick area silently kills node hit-testing (node hover/click stop firing). The
-        // clickable mid-edge "info" dots are drawn by us in onRenderFramePost and clicked via background
-        // proximity (see _bgClick→_dotAt), so node interaction is never touched.
-        .linkColor(l => this._isTrunkLink(l) ? C.trunk : C.link)
-        .linkWidth(l => this._isTrunkLink(l) ? 3 : 1)
-        .minZoom(0.15).maxZoom(2.5)
-        .enableNodeDrag(true)
-        .cooldownTime(2500).d3AlphaDecay(0.1).d3VelocityDecay(0.4)
-        .onNodeHover(n => this._onHover(n))
-        .onNodeClick((n, e) => this._click(n, e))   // near a mid-edge dot → explain; else open the action menu
-        .onNodeDragEnd(n => { n.fx = n.x; n.fy = n.y; n._userPinned = true; this._canvasRevision++; this.persist(); })
-        .onBackgroundClick(e => this._click(null, e))   // dot → explain; else dismiss
-        .onRenderFramePre((ctx, gs) => this._drawGridBG(ctx, gs))
-        .onRenderFramePost((ctx, gs) => { this._drawDots(ctx, gs); this._positionOverlays(); })
-        .onZoomEnd(() => this.persist())
-        .onEngineTick(() => {
-          // force-graph applies its own default zoom when graphData is ingested. Restore our saved
-          // view on the first tick, after that update, so it cannot overwrite the saved camera.
+      const el = this.$refs.graph;
+      repaint = () => this._kick();
+      const fg = renderer.mount(el, () => this._renderView(), {
+        hover: n => this._onHover(n), click: (n, e) => this._click(n, e),
+        dragEnd: n => { n.fx = n.x; n.fy = n.y; n._userPinned = true; this._canvasRevision++; this.persist(); },
+        frame: () => this._positionOverlays(), zoomEnd: () => this.persist(),
+        tick: graph => {
+          // Restore the saved camera after force-graph's initial graphData zoom.
           const v = this._pendingView; if (!v) return;
           this._pendingView = null;
-          if (v.cx != null) fg.centerAt(v.cx, v.cy, 0);
-          if (v.z) fg.zoom(v.z, 0);
-        })
-        .onEngineStop(() => { this._revivePointer(); if (this._autofit) { this._autofit = false; this.resetView(); } });  // re-arm hit-testing + frame after a settle
-      // custom forces, run inside force-graph's d3 simulation.
-      // Standard charge to space nodes apart. force-graph's own center force already holds the cloud at the
-      // origin, where the central node is pinned (CENTER=0), so NO extra centering force is needed. The only
-      // real layout bug was the central node's start coordinate; an added centering force just fights the
-      // 'separate' force below and crushes branches back together so their leaves overlap.
-      fg.d3Force('charge', d3.forceManyBody().strength(-420).distanceMax(1600));
-      // pruned (removed) cards shrink to a minimal pill, so they also claim a far smaller collision
-      // radius — they pack in tight and stop hogging space, cutting visual noise.
-      fg.d3Force('collide', d3.forceCollide(n => n.state === 'pruned' ? 44 :
-        n.kind === 'central' ? Math.max(NODE_R, this._centerHeight / 2 + 24) : NODE_R).strength(0.95).iterations(2));
-      // centroid separation: pushes whole cluster branches apart so their leaves don't intermingle.
-      fg.d3Force('separate', this._clusterForce());
-      const lf = fg.d3Force('link');
-      if (lf) lf.distance(l => LINK_D + Math.min(120, this.descCount(l.target.id) * 12)).strength(0.7);
+          if (v.cx != null) graph.centerAt(v.cx, v.cy, 0);
+          if (v.z) graph.zoom(v.z, 0);
+        },
+        stop: () => { this._revivePointer(); if (this._autofit) { this._autofit = false; this.resetView(); } },
+      });
+      this._fg = fg;
 
       this._resize(); window.addEventListener('resize', () => this._resize());
       this._layoutObserver = new ResizeObserver(() => {
@@ -129,7 +88,7 @@ function clusterCanvas() {
 
       const params = new URLSearchParams(location.search);
       const from = params.get('from'), seed = params.get('seed');
-      this._migrateLegacy();                 // fold any single legacy canvas into the multi-canvas set
+      canvasStorage.migrate();              // fold any single legacy canvas into the multi-canvas set
       this._refreshSwitcher();
       if (from) {
         history.replaceState(null, '', location.pathname);
@@ -253,115 +212,10 @@ function clusterCanvas() {
       this._boostRAF = requestAnimationFrame(loop);
     },
 
-    // --- node + grid drawing (canvas) -------------------------------------------------------------
-    _img(url) {
-      if (!url) return null;
-      let im = this._imgs.get(url);
-      if (im) return im.ok ? im.el : null;
-      const el = new Image(); im = { el, ok: false }; this._imgs.set(url, im);
-      // NO crossOrigin: thumbnail hosts (i.ytimg.com / googleusercontent) don't all send CORS headers,
-      // and 'anonymous' makes those fail to load. We only drawImage them (never read pixels from the
-      // visible canvas), and force-graph's hit-test canvas only has solid rects, so tainting is harmless.
-      el.onload = () => { im.ok = true; this._kick(); };
-      el.onerror = () => { im.ok = false; };
-      el.src = url;
-      return null;
-    },
-    _roundRect(ctx, x, y, w, h, r) {
-      ctx.beginPath(); ctx.moveTo(x + r, y);
-      ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
-      ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
-    },
-    // Drawn geometry of a node (graph units). Pruned cards shrink to a minimal struck-through pill so
-    // removed picks fade into the background. Cached on the node (_dw/_dh) for hit-test + overlay placing.
-    _nodeSize(n, ctx) {
-      if (n.state === 'pruned') { ctx.font = '500 9px Hanken Grotesk, sans-serif'; const tw = Math.min(150, ctx.measureText(n.label || '').width); return { w: Math.max(46, tw + 16), h: 18 }; }
-      return n.kind === 'central' ? { w: CEN_W, h: this._centerHeight } : { w: CARD_W, h: CARD_H };
-    },
-    _drawNode(n, ctx, gs) {
-      const central = n.kind === 'central';
-      const sz = this._nodeSize(n, ctx), w = sz.w, h = sz.h;
-      n._dw = w; n._dh = h;                   // cache for _nodeHit + _positionOverlays
-      const x = n.x - w / 2, y = n.y - h / 2;
-      if (n.state === 'pruned') {             // minimal struck pill (small = quiet)
-        ctx.globalAlpha = 0.9;
-        this._roundRect(ctx, x, y, w, h, 5); ctx.fillStyle = C.chip; ctx.fill();
-        ctx.strokeStyle = C.danger; ctx.lineWidth = 1; ctx.stroke();
-        ctx.fillStyle = C.dim; ctx.font = '500 9px Hanken Grotesk, sans-serif'; ctx.textBaseline = 'middle';
-        const lbl = n.label || ''; this._clipText(ctx, lbl, x + 8, n.y, w - 16);
-        const sw = Math.min(w - 16, ctx.measureText(lbl).width);
-        ctx.strokeStyle = C.danger; ctx.beginPath(); ctx.moveTo(x + 8, n.y); ctx.lineTo(x + 8 + sw, n.y); ctx.stroke();
-        ctx.globalAlpha = 1; ctx.textBaseline = 'top'; return;
-      }
-      const hue = this.subHues[n.parentId];
-      let border = central ? C.accent : (hue != null ? `hsl(${hue} 70% 62%)` : C.border);
-      const isTrunk = this.trunk.includes(n.id) && !central;
-      if (isTrunk) border = C.trunk;
-      ctx.globalAlpha = 1;
-      // card body
-      this._roundRect(ctx, x, y, w, h, 7);
-      ctx.fillStyle = central ? C.nodeHi : C.surface; ctx.fill();
-      ctx.lineWidth = isTrunk || central ? 2.2 : 1.4;
-      ctx.strokeStyle = border; ctx.stroke();
-      if (this.boosted.includes(n.key)) {      // 🔥 cosmic-fire emphasis border (animated; see _animBoost)
-        const ang = (performance.now() / 900) % (Math.PI * 2);
-        ctx.save(); ctx.globalAlpha = 1;
-        let cg = null; try { cg = ctx.createConicGradient(ang, n.x, n.y); } catch (e) {}
-        if (cg) {
-          cg.addColorStop(0, C.fire0); cg.addColorStop(0.15, C.fire1); cg.addColorStop(0.32, C.fire2);
-          cg.addColorStop(0.5, C.fire3); cg.addColorStop(0.62, C.fire4); cg.addColorStop(0.78, C.fire2);
-          cg.addColorStop(0.88, C.fire5); cg.addColorStop(1, C.fire0);
-          ctx.strokeStyle = cg;
-        } else { ctx.strokeStyle = C.boost; }
-        ctx.shadowColor = C.fireGlow; ctx.shadowBlur = 10;
-        this._roundRect(ctx, x - 4, y - 4, w + 8, h + 8, 10); ctx.lineWidth = 3; ctx.stroke();
-        ctx.restore();
-      }
-      if (central) {
-        return;   // accessible HTML overlay owns the wrapped seed labels and edit button
-      }
-      // thumbnail
-      const tx = x + 6, ty = y + (h - THUMB) / 2, img = this._img(n.thumbnail);
-      ctx.save(); this._roundRect(ctx, tx, ty, THUMB, THUMB, 4); ctx.clip();
-      if (img) ctx.drawImage(img, tx, ty, THUMB, THUMB);
-      else { ctx.fillStyle = C.node2; ctx.fillRect(tx, ty, THUMB, THUMB); }
-      ctx.restore();
-      // title + artist
-      const txx = tx + THUMB + 8, tw = w - (THUMB + 22);
-      ctx.textBaseline = 'top';
-      ctx.fillStyle = C.text; ctx.font = '600 12px Hanken Grotesk, sans-serif';
-      this._clipText(ctx, n.label || '', txx, y + 8, tw);
-      ctx.fillStyle = C.dim; ctx.font = '400 10.5px Hanken Grotesk, sans-serif';
-      this._clipText(ctx, n.sub || '', txx, y + 24, tw);
-      if (n.newMusic) { ctx.fillStyle = C.boost; ctx.font = '10px sans-serif'; ctx.fillText('✨', x + w - 14, y + 5); }
-      ctx.globalAlpha = 1;
-    },
-    _clipText(ctx, s, x, y, max) {
-      if (!s) return;
-      if (ctx.measureText(s).width <= max) { ctx.fillText(s, x, y); return; }
-      let lo = 0, hi = s.length;
-      while (lo < hi) { const m = (lo + hi + 1) >> 1; if (ctx.measureText(s.slice(0, m) + '…').width <= max) lo = m; else hi = m - 1; }
-      ctx.fillText(s.slice(0, lo) + '…', x, y);
-    },
-    _nodeHit(n, color, ctx) {
-      const sz = this._nodeSize(n, ctx);
-      ctx.fillStyle = color; ctx.fillRect(n.x - sz.w / 2, n.y - sz.h / 2, sz.w, sz.h);
-    },
-    _isTrunkLink(l) { const id = l.target && l.target.id != null ? l.target.id : l.target; return this.trunk.includes(id); },
-    // The "mid-vertex info nodes": a clickable dot at each edge's midpoint (the old edge-dot). Drawn on
-    // the canvas over the links (onRenderFramePost, graph coords), brighter for the open edge. Clicking is
-    // handled in _dotAt/_click by proximity — NOT via a link pointer-area, which would break node hit-testing.
-    _drawDots(ctx, gs) {
-      const byId = this._rawById; if (!byId) return;
-      for (const n of (this._raw || [])) {
-        if (n.parentId == null) continue;
-        const p = byId.get(n.parentId); if (!p) continue;
-        const mx = (n.x + p.x) / 2, my = (n.y + p.y) / 2;
-        const on = this.explain && this.explain.childId === n.id;
-        ctx.beginPath(); ctx.arc(mx, my, on ? 7 : 4.5, 0, 7);
-        ctx.fillStyle = on ? C.dotOn : C.dotOff; ctx.fill();
-        ctx.lineWidth = 1.5 / gs; ctx.strokeStyle = C.bg; ctx.stroke();
-      }
+    _renderView() {
+      return {nodes: this._raw || [], byId: this._rawById, topology: this._topo,
+        centerHeight: this._centerHeight, subHues: this.subHues, trunk: this.trunk,
+        boosted: this.boosted, rootId: this.rootId, hovered: this.hovered, explainChild: this.explain?.childId};
     },
     // The mid-edge info dot nearest a click, or null. Checked on BOTH node and background clicks so the
     // dot wins even when it sits over a card (canvas picks the node, but force-graph hands us the event,
@@ -372,14 +226,7 @@ function clusterCanvas() {
       // event wrapping). The force-graph canvas fills #cluster-canvas, so its rect is the canvas origin.
       const r = document.getElementById('cluster-canvas').getBoundingClientRect();
       let gp = null; try { gp = fg.screen2GraphCoords(e.clientX - r.left, e.clientY - r.top); } catch (_) { return null; }
-      let best = null, bestD = 16 / (fg.zoom() || 1);
-      for (const n of (this._raw || [])) {
-        if (n.parentId == null) continue;
-        const p = byId.get(n.parentId); if (!p) continue;
-        const d = Math.hypot(gp.x - (n.x + p.x) / 2, gp.y - (n.y + p.y) / 2);
-        if (d < bestD) { bestD = d; best = n.id; }
-      }
-      return best;
+      return renderer.nearestDot(this._renderView(), gp, 16 / (fg.zoom() || 1));
     },
     _click(node, e) {
       const dot = this._dotAt(e);
@@ -387,55 +234,6 @@ function clusterCanvas() {
       if (node) { this.hovered = node.id; this._positionOverlays(); }   // clicked a card → action menu
       else { this.explain = null; this.hovered = null; }                // clicked empty space → dismiss
     },
-    // Warped "gravity" grid, drawn in GRAPH coordinates inside force-graph's pre-render hook (the ctx is
-    // already pan/zoom-transformed). Only runs while the engine is rendering (interaction/settle), so it
-    // costs nothing at rest. Wells = the centre + every grown node.
-    _drawGridBG(ctx, gs) {
-      const fg = this._fg, raw = this._raw; if (!fg || !raw || !raw.length) return;
-      const w = fg.width(), h = fg.height();
-      let tl, br; try { tl = fg.screen2GraphCoords(0, 0); br = fg.screen2GraphCoords(w, h); } catch (e) { return; }
-      const GRID = 88, R0 = 320, R0SQ = R0 * R0, PULL = 60, mg = GRID * 2;
-      let X0 = Math.floor((tl.x - mg) / GRID) * GRID, X1 = Math.ceil((br.x + mg) / GRID) * GRID;
-      let Y0 = Math.floor((tl.y - mg) / GRID) * GRID, Y1 = Math.ceil((br.y + mg) / GRID) * GRID;
-      const STEP = Math.max(GRID / 5, (X1 - X0 + Y1 - Y0) / 2 / 240);   // coarsen when zoomed way out
-      let wells = [];
-      for (const n of raw) if (n.kind === 'central' || this.childCount(n.id))
-        wells.push([n.x, n.y, PULL * ((n.kind === 'central' ? 2.4 : 0.7) + this.descCount(n.id) * 0.3) * R0SQ]);
-      if (wells.length > 16) wells = wells.sort((a, b) => b[2] - a[2]).slice(0, 16);
-      const wn = wells.length;
-      const rad = R0 * 0.85, spr = this._wellSprite(Math.round(rad));
-      ctx.save();
-      for (let i = 0; i < wn; i++) ctx.drawImage(spr, wells[i][0] - rad, wells[i][1] - rad, rad * 2, rad * 2);
-      ctx.lineWidth = 1 / gs; ctx.strokeStyle = C.grid;
-      for (let gx = X0; gx <= X1; gx += GRID) {
-        ctx.beginPath();
-        for (let py = Y0, f = true; py <= Y1; py += STEP) {
-          let dx = 0, dy = 0;
-          for (let i = 0; i < wn; i++) { const ex = wells[i][0] - gx, ey = wells[i][1] - py, dd = ex * ex + ey * ey, d = Math.sqrt(dd) || 1, ff = wells[i][2] / (dd + R0SQ) / d; dx += ex * ff; dy += ey * ff; }
-          if (f) { ctx.moveTo(gx + dx, py + dy); f = false; } else ctx.lineTo(gx + dx, py + dy);
-        }
-        ctx.stroke();
-      }
-      for (let gy = Y0; gy <= Y1; gy += GRID) {
-        ctx.beginPath();
-        for (let px = X0, f = true; px <= X1; px += STEP) {
-          let dx = 0, dy = 0;
-          for (let i = 0; i < wn; i++) { const ex = wells[i][0] - px, ey = wells[i][1] - gy, dd = ex * ex + ey * ey, d = Math.sqrt(dd) || 1, ff = wells[i][2] / (dd + R0SQ) / d; dx += ex * ff; dy += ey * ff; }
-          if (f) { ctx.moveTo(px + dx, gy + dy); f = false; } else ctx.lineTo(px + dx, gy + dy);
-        }
-        ctx.stroke();
-      }
-      ctx.restore();
-    },
-    _wellSprite(rad) {
-      if (this._wellSpr && this._wellSprR === rad) return this._wellSpr;
-      const c = document.createElement('canvas'); c.width = c.height = rad * 2;
-      const g2 = c.getContext('2d'), g = g2.createRadialGradient(rad, rad, rad * 0.06, rad, rad, rad);
-      g.addColorStop(0, C.glow); g.addColorStop(1, 'transparent');
-      g2.fillStyle = g; g2.beginPath(); g2.arc(rad, rad, rad, 0, 7); g2.fill();
-      this._wellSpr = c; this._wellSprR = rad; return c;
-    },
-
     // --- HTML overlays (action menu + explain popover) tracking graph coords ----------------------
     _onHover(n) {
       clearTimeout(this._hoverT);
@@ -444,31 +242,9 @@ function clusterCanvas() {
     },
     _positionOverlays() {
       const fg = this._fg; if (!fg) return;
-      const root = this._rawById && this._rawById.get(this.rootId);
-      if (root && this.$refs.center) {
-        const p = fg.graph2ScreenCoords(root.x, root.y), z = fg.zoom();
-        this.$refs.center.style.transform = `translate(${p.x}px,${p.y}px) translate(-50%, -50%) scale(${z})`;
-      }
-      if (this.hovered != null && this.$refs.actions) {
-        const n = this._rawById && this._rawById.get(this.hovered);
-        if (n) {
-          // Anchor to the card's BOTTOM edge in screen space (card height scales with zoom, the menu is
-          // fixed px), then place the menu's own bottom just inside it — so the buttons sit inside the
-          // card across zoom levels instead of drifting off with a fixed offset.
-          const p = fg.graph2ScreenCoords(n.x, n.y);
-          const z = fg.zoom();
-          const cw = n._dw || (n.kind === 'central' ? CEN_W : CARD_W);   // actual drawn size (pruned cards are small)
-          const ch = n._dh || CARD_H;
-          // pin the menu's TOP just below the card's bottom edge (centered), so it hangs off the bottom
-          // and never covers the card's thumbnail/text. Tracks the card+zoom via the drawn size.
-          this.$refs.actions.style.transform = `translate(${p.x}px,${p.y + (ch / 2) * z + 3}px) translate(-50%, 0)`;
-          // span the card width so the flex:1 buttons stretch into big, easy hit targets
-          this.$refs.actions.style.width = Math.max(120, cw * z) + 'px';
-        }
-      }
-      if (this.explain && this.$refs.explainEl) {
-        const a = this._explainGraphPt();
-        if (a) { const p = fg.graph2ScreenCoords(a.x, a.y); this.$refs.explainEl.style.left = p.x + 'px'; this.$refs.explainEl.style.top = p.y + 'px'; }
+      const positions = renderer.overlays(this._renderView(), (x, y) => fg.graph2ScreenCoords(x, y), fg.zoom());
+      for (const [name, style] of Object.entries(positions)) {
+        if (this.$refs[name]) Object.assign(this.$refs[name].style, style);
       }
     },
     hoveredNode() { return this.hovered != null ? this.nodeById(this.hovered) : null; },
@@ -476,42 +252,32 @@ function clusterCanvas() {
     // --- persistence ------------------------------------------------------------------------------
     persist() { clearTimeout(this._persistT); this._persistT = setTimeout(() => { this._persistT = 0; this._writeState(); }, 400); },
     _stateBlob() {
-      return { v: 1, nodes: this.nodes, nextId: this.nextId, rootId: this.rootId, trunk: this.trunk,
-        subHues: this.subHues, subHueN: this._subHueN, allowedFamilies: this.allowedFamilies, boosted: this.boosted,
+      return ClusterCanvases.snapshot(
+        {nodes: this.nodes, nextId: this.nextId, rootId: this.rootId, trunk: this.trunk,
+         subHues: this.subHues, subHueN: this._subHueN},
+        {allowedFamilies: this.allowedFamilies, boosted: this.boosted,
         playlistName: this.playlistName, saveMode: this.saveMode, journey: this.journey, journeyName: this.journeyName,
-        randomSeed: this.randomSeed,
-        view: this._fg ? { z: this._fg.zoom(), cx: (this._fg.centerAt() || {}).x, cy: (this._fg.centerAt() || {}).y } : null };
+         randomSeed: this.randomSeed},
+        this._fg ? {z: this._fg.zoom(), cx: (this._fg.centerAt() || {}).x, cy: (this._fg.centerAt() || {}).y} : null);
     },
     clusterStateJSON() { return this.nodes.length ? JSON.stringify(this._stateBlob()) : ''; },
     _writeState() {
-      if (!this.nodes.length) {              // active canvas went empty -> drop it from the set
-        if (this.activeId) {
-          this._saveList(this._loadList().filter(c => c.id !== this.activeId));
-          try { localStorage.removeItem(this._canvasKey(this.activeId)); } catch (e) {}
-          this._setActive(null);
-        }
-        this._refreshSwitcher();
-        return;
-      }
-      const id = this._ensureActive();
-      try { localStorage.setItem(this._canvasKey(id), JSON.stringify(this._stateBlob())); } catch (e) {}
-      const list = this._loadList(), label = this._label(), i = list.findIndex(c => c.id === id);
-      if (i >= 0) list[i].label = label; else list.push({ id, label });
-      this._saveList(list);
+      this.activeId = canvasStorage.write(this._stateBlob(), this.activeId);
       this._refreshSwitcher();
     },
     _flushState() { if (this._persistT) { clearTimeout(this._persistT); this._persistT = 0; this._writeState(); } },
     _applyState(s) {
-      if (!s || s.v !== 1 || !Array.isArray(s.nodes) || !s.nodes.length) return false;
+      s = ClusterCanvases.decode(s, () => Math.floor(Math.random() * 0x100000000));
+      if (!s) return false;
       this._canvasRevision++;
-      this.nodes = s.nodes; this.nextId = s.nextId; this.rootId = s.rootId; this.trunk = s.trunk || [];
-      this.subHues = s.subHues || {}; this._subHueN = s.subHueN || 0;
-      this.allowedFamilies = s.allowedFamilies || []; this.boosted = s.boosted || [];
-      this.playlistName = s.playlistName || ''; this.saveMode = s.saveMode || 'all';
+      this.nodes = s.nodes; this.nextId = s.nextId; this.rootId = s.rootId; this.trunk = s.trunk;
+      this.subHues = s.subHues; this._subHueN = s.subHueN;
+      this.allowedFamilies = s.allowedFamilies; this.boosted = s.boosted;
+      this.playlistName = s.playlistName; this.saveMode = s.saveMode;
       // Older canvases used only the first seed for their automatic name.
       this._syncSeedName((this.centralSeeds()[0]?.label || '') + ' cluster');
-      this.journey = s.journey || 'auto'; this.journeyName = s.journeyName || 'Pick for me';
-      this.randomSeed = s.randomSeed ?? Math.floor(Math.random() * 0x100000000);
+      this.journey = s.journey; this.journeyName = s.journeyName;
+      this.randomSeed = s.randomSeed;
       this._autofit = false;
       this._pendingView = s.view || null;
       // restore positions without re-layout: pin every node, feed, release tracks after it settles (instant)
@@ -530,43 +296,9 @@ function clusterCanvas() {
     },
     // --- multi-canvas storage (bottom-right switcher) ---------------------------------------------
     // localStorage layout: tc:canvases -> [{id,label}], tc:active -> id, tc:canvas:<id> -> state blob.
-    _canvasKey(id) { return 'tc:canvas:' + id; },
-    _genId() { return 'c' + Date.now().toString(36) + Math.floor(Math.random() * 46656).toString(36); },
-    _loadList() { try { return JSON.parse(localStorage.getItem('tc:canvases')) || []; } catch (e) { return []; } },
-    _saveList(list) { try { localStorage.setItem('tc:canvases', JSON.stringify(list)); } catch (e) {} },
-    _setActive(id) { this.activeId = id; try { id ? localStorage.setItem('tc:active', id) : localStorage.removeItem('tc:active'); } catch (e) {} },
-    _refreshSwitcher() { this.canvases = this._loadList(); this.activeId = (localStorage.getItem('tc:active') || null); },
-    _ensureActive() {
-      if (this.activeId) return this.activeId;
-      const id = this._genId(); this._setActive(id); return id;
-    },
-    _label() {
-      const root = this.rootId != null ? this.nodeById(this.rootId) : null;
-      const seed = root && root.seeds && root.seeds[0] ? root.seeds[0].label : '';
-      return (this.playlistName || seed || 'Untitled').slice(0, 28);
-    },
-    // The display label for a saved canvas, read from its stored blob (its name, else its seed).
-    _labelFromBlob(s) {
-      try {
-        const root = (s.nodes || []).find(n => n.id === s.rootId);
-        const seed = root && root.seeds && root.seeds[0] ? root.seeds[0].label : '';
-        return (s.playlistName || seed || 'Untitled').slice(0, 28);
-      } catch (e) { return 'Untitled'; }
-    },
-    _migrateLegacy() {
-      try {
-        if (localStorage.getItem('tc:canvases')) { localStorage.removeItem('tc:cluster'); return; }
-        const old = localStorage.getItem('tc:cluster');
-        const blob = old ? JSON.parse(old) : null;
-        if (blob && (blob.nodes || []).length) {
-          const id = this._genId();
-          localStorage.setItem(this._canvasKey(id), old);
-          this._saveList([{ id, label: this._labelFromBlob(blob) }]);
-          this._setActive(id);
-        }
-        localStorage.removeItem('tc:cluster');
-      } catch (e) {}
-    },
+    _canvasKey(id) { return ClusterCanvases.key(id); },
+    _setActive(id) { this.activeId = id; canvasStorage.setActive(id); },
+    _refreshSwitcher() { this.canvases = canvasStorage.list(); this.activeId = canvasStorage.active(); },
     _resetMem() {
       this._canvasRevision++;
       this.nodes = []; this.nextId = 1; this.rootId = null; this.trunk = [];
@@ -583,13 +315,12 @@ function clusterCanvas() {
       this._feed();
     },
     restore() {
-      const id = this.activeId;
-      if (id) { let s; try { s = JSON.parse(localStorage.getItem(this._canvasKey(id))); } catch (e) { s = null; } if (s) return this._applyState(s); }
+      if (this.activeId) { const s = canvasStorage.read(this.activeId); if (s) return this._applyState(s); }
       return false;
     },
     _loadActive(id) {
       this._setActive(id); this._resetMem();
-      let s; try { s = JSON.parse(localStorage.getItem(this._canvasKey(id))); } catch (e) { s = null; }
+      const s = canvasStorage.read(id);
       if (s) this._applyState(s); else this._afterInit(false);
       this._refreshSwitcher();
     },
@@ -600,15 +331,13 @@ function clusterCanvas() {
     },
     newCanvas() {
       this._flushState();                    // persist the current canvas; new one is added on first write
-      this._setActive(this._genId()); this._resetMem(); this._refreshSwitcher();
+      this._setActive(ClusterCanvases.newId()); this._resetMem(); this._refreshSwitcher();
       this._afterInit(false);
     },
     reset() {
       // "reset" clears the CURRENT canvas, then jumps to another saved one if there is one.
       const cur = this.activeId;
-      const list = this._loadList().filter(c => c.id !== cur);
-      if (cur) { try { localStorage.removeItem(this._canvasKey(cur)); } catch (e) {} }
-      this._saveList(list); this._setActive(null);
+      const list = canvasStorage.remove(cur); this.activeId = null;
       if (list.length) { this._loadActive(list[list.length - 1].id); return; }
       this._resetMem(); this._refreshSwitcher();
       this._afterInit(false);
@@ -656,7 +385,9 @@ function clusterCanvas() {
     _curationSignature() {
       // Simulation positions and camera movement can change while requests are in flight.
       // A user's edits to the graph must never be overwritten by an older refinement.
-      return JSON.stringify([this.activeId, this.nodes.map(n =>
+      // The first autosave assigns a storage ID without changing the canvas. Replacement,
+      // reset and switching advance _canvasRevision, including a switch back to the same ID.
+      return JSON.stringify([this.nodes.map(n =>
         [n.id, n.parentId, n.state, n._userPinned ? [n.fx, n.fy] : null, n.seeds]), this.trunk, this.boosted,
         this.allowedFamilies, this.playlistName, this.randomSeed]);
     },
@@ -823,31 +554,18 @@ function clusterCanvas() {
     addChildren(parent, ring) {
       if (!ring.length) return;
       this._canvasRevision++;
-      if (!(parent.id in this.subHues)) this.subHues[parent.id] = Math.round((this._subHueN++ * 137.508) % 360);
-      const gp = parent.parentId != null ? this.nodeById(parent.parentId) : null;
-      const outward = gp ? Math.atan2(parent.y - gp.y, parent.x - gp.x) : 0;
-      const n = ring.length, spread = gp ? Math.min(Math.PI, n * 0.5) : 2 * Math.PI;
-      ring.forEach((t, i) => {
-        const frac = n > 1 ? i / (gp ? n - 1 : n) : 0.5, angle = outward + (frac - 0.5) * spread;
-        this.nodes.push({ id: this.nextId++, parentId: parent.id, kind: 'track', key: t.key,
-          label: t.title, sub: t.artist, thumbnail: t.thumbnail, vid: t.video_id,
-          genre: t.genre || '', family: t.family || '', newMusic: !!t.out_of_corpus,
-          state: 'neutral', depth: parent.depth + 1,
-          x: parent.x + Math.cos(angle) * LINK_D, y: parent.y + Math.sin(angle) * LINK_D });
-      });
+      const next = ClusterGraph.addChildren({nodes: this.nodes, nextId: this.nextId,
+        subHues: this.subHues, subHueN: this._subHueN}, parent, ring, LINK_D);
+      this.nodes = next.nodes; this.nextId = next.nextId;
+      this.subHues = next.subHues; this._subHueN = next.subHueN;
       this._reheat();
     },
     prune(id) {
-      const n = this.nodeById(id); if (!n || n.kind === 'central') return;
+      const next = ClusterGraph.prune(this.nodes, this.trunk, id); if (!next) return;
       this._canvasRevision++;
-      if (n.state === 'pruned') { n.state = 'neutral'; n.gpruned = false; this._kick(); this.persist(); return; }
-      n.state = 'pruned'; n.gpruned = false;
-      this.trunk = this.trunk.filter(t => t !== id);
-      const kill = this.descendants(id);
-      if (!kill.size) { this._kick(); this.persist(); return; }
-      if (this.explain && kill.has(this.explain.childId)) this.explain = null;
-      this.nodes = this.nodes.filter(x => !kill.has(x.id));
-      this.trunk = this.trunk.filter(t => !kill.has(t));
+      this._publishNodes(next.nodes); this.trunk = next.trunk;
+      if (this.explain && next.removed.has(this.explain.childId)) this.explain = null;
+      if (!next.removed.size) { this._recomputeTopology(); this._kick(); this.persist(); return; }
       this._syncSim();
     },
     pruneLoose() {
@@ -894,83 +612,33 @@ function clusterCanvas() {
     removeFamily(fam) { this.allowedFamilies = this.allowedFamilies.filter(f => f !== fam); this._genreChanged(); },
     popFamily() { if (this.allowedFamilies.length) this.allowedFamilies = this.allowedFamilies.slice(0, -1); this._genreChanged(); },
     clearFamilies() { this.allowedFamilies = []; this._genreChanged(); },
-    genreMatches(n) {
-      if (!this.allowedFamilies.length || n.kind !== 'track') return true;
-      const toks = this.allowedFamilies.map(t => t.toLowerCase());
-      return toks.includes((n.genre || '').toLowerCase()) || toks.includes((n.family || '').toLowerCase());
-    },
     applyGenrePrune() {
-      for (const n of this.nodes) {
-        if (n.kind !== 'track' || this.trunk.includes(n.id) || this.children(n.id).length) continue;
-        const match = this.genreMatches(n);
-        if (!match && n.state === 'neutral') { n.state = 'pruned'; n.gpruned = true; }
-        else if (match && n.state === 'pruned' && n.gpruned) { n.state = 'neutral'; n.gpruned = false; }
-      }
+      this._publishNodes(ClusterGraph.genrePrune(this.nodes, this.trunk, this.allowedFamilies));
+      this._recomputeTopology();
     },
 
     // --- topology / derived keys ------------------------------------------------------------------
     nodeById(id) { return (this._byId && this._byId.get(id)) || this.nodes.find(n => n.id === id); },
+    _publishNodes(nodes) {
+      // Keep surviving simulation objects when committing detached transformations.
+      const current = new Map(this.nodes.map(n => [n.id, n]));
+      this.nodes = nodes.map(n => { const old = current.get(n.id); return old ? Object.assign(old, n) : n; });
+    },
     _recomputeTopology() {
-      const byId = rawColl(new Map()), childArr = rawColl(new Map());
-      for (const n of this.nodes) byId.set(n.id, n);
-      this._byId = byId;
+      const topology = ClusterGraph.topology(this.nodes, this.rootId);
+      this._byId = rawColl(topology.byId);
       const A = window.Alpine, raw = rawColl([]), rawById = rawColl(new Map());
-      for (const n of this.nodes) { const r = A ? A.raw(n) : n; raw.push(r); rawById.set(r.id, r); }
+      for (const n of this.nodes) {
+        const r = A ? A.raw(n) : n;
+        r._b = topology.branch.get(n.id); raw.push(r); rawById.set(r.id, r);
+      }
       this._raw = raw; this._rawById = rawById;
-      for (const n of this.nodes) { if (n.parentId == null) continue; let a = childArr.get(n.parentId); if (!a) { a = []; childArr.set(n.parentId, a); } a.push(n); }
-      const desc = rawColl(new Map());
-      const count = (id) => { if (desc.has(id)) return desc.get(id); desc.set(id, 0); const cs = childArr.get(id); let t = cs ? cs.length : 0; if (cs) for (const c of cs) t += count(c.id); desc.set(id, t); return t; };
-      const branch = rawColl(new Map());
-      for (const n of this.nodes) { count(n.id); const b = n.kind === 'central' ? null : this.branchId(n); branch.set(n.id, b); const r = rawById.get(n.id); if (r) r._b = b; }
-      this._topo = rawColl({ child: childArr, desc, branch });
+      this._topo = rawColl({child: rawColl(topology.child), desc: rawColl(topology.desc), branch: rawColl(topology.branch)});
     },
     childCount(id) { const a = this._topo && this._topo.child.get(id); return a ? a.length : 0; },
     descCount(id) { return (this._topo && this._topo.desc.get(id)) || 0; },
     children(id) { return this.nodes.filter(n => n.parentId === id); },
-    branchId(n) { let cur = n; while (cur && cur.parentId != null && cur.parentId !== this.rootId) cur = this.nodeById(cur.parentId); return cur ? cur.id : null; },
     isTrunkNode(id) { return this.trunk.includes(id); },
-    // Cross-branch separation force, at the CENTROID level (not node-pairs): each top-level branch (a
-    // first-ring child of the centre and everything under it, keyed by n._b) is treated as ONE blob. We
-    // compute each branch's centroid + an approximate radius (∝ √node-count), and when two centroids are
-    // closer than the sum of their radii we push the WHOLE branches apart along the centroid-to-centroid
-    // axis. Moving branches as units keeps distinct clusters in their own regions instead of letting their
-    // cards interleave; per-card overlap is still handled separately by forceCollide. O(n + branches²).
-    _clusterForce() {
-      const self = this; let nodes = [];
-      function force(alpha) {
-        if (!self._topo) return;
-        const k = alpha * 0.9;
-        const sx = new Map(), sy = new Map(), cnt = new Map();   // per-branch position sums + counts
-        for (const n of nodes) {
-          const b = n._b; if (b == null) continue;               // skip the pinned centre
-          sx.set(b, (sx.get(b) || 0) + n.x); sy.set(b, (sy.get(b) || 0) + n.y); cnt.set(b, (cnt.get(b) || 0) + 1);
-        }
-        const bs = [...cnt.keys()]; if (bs.length < 2) return;
-        const cx = new Map(), cy = new Map(), rad = new Map();
-        for (const b of bs) { const c = cnt.get(b); cx.set(b, sx.get(b) / c); cy.set(b, sy.get(b) / c); rad.set(b, 150 + Math.sqrt(c) * 115); }
-        const dx = new Map(), dy = new Map();                    // accumulated push per branch
-        for (let i = 0; i < bs.length; i++) {
-          const bi = bs[i], xi = cx.get(bi), yi = cy.get(bi);
-          for (let j = i + 1; j < bs.length; j++) {
-            const bj = bs[j];
-            let ex = xi - cx.get(bj), ey = yi - cy.get(bj), d = Math.hypot(ex, ey) || 1;
-            const want = rad.get(bi) + rad.get(bj);              // desired clearance between the two blobs
-            if (d < want) {
-              if (d < 1) { ex = (i - j) || 1; ey = ((i + 1) * (j + 2)) % 3 - 1 || 1; d = Math.hypot(ex, ey); }
-              // push the two blobs apart along their centroid axis; (want-d)→0 as they reach clearance,
-              // so it converges. Strong enough (k=alpha·0.9) to fully de-intermingle within the settle.
-              const push = (want - d) / d * k * 0.5;
-              dx.set(bi, (dx.get(bi) || 0) + ex * push); dy.set(bi, (dy.get(bi) || 0) + ey * push);
-              dx.set(bj, (dx.get(bj) || 0) - ex * push); dy.set(bj, (dy.get(bj) || 0) - ey * push);
-            }
-          }
-        }
-        for (const n of nodes) { const b = n._b; if (b == null) continue; const px = dx.get(b); if (px) { n.vx += px; n.vy += dy.get(b); } }
-      }
-      force.initialize = (n) => { nodes = n; };
-      return force;
-    },
-
     // --- explain popover --------------------------------------------------------------------------
     async openExplain(childId) {
       const child = this.nodeById(childId); if (!child) return;
@@ -987,12 +655,6 @@ function clusterCanvas() {
       } catch (e) { if (this.explain === pending) this.explain = null; }
     },
     closeExplain() { this.explain = null; },
-    _explainGraphPt() {
-      if (!this.explain) return null;
-      const n = this._rawById && this._rawById.get(this.explain.childId); if (!n) return null;
-      const p = this._rawById.get(n.parentId); if (!p) return { x: n.x, y: n.y };
-      return { x: (p.x + n.x) / 2, y: (p.y + n.y) / 2 };
-    },
 
     // --- save keys --------------------------------------------------------------------------------
     centralKeys() { const r = this.rootId != null ? this.nodeById(this.rootId) : null; return r ? r.keys : []; },
@@ -1009,7 +671,6 @@ function clusterCanvas() {
     allKeys() { const s = new Set(this.centralKeys()); this.nodes.forEach(n => { if (n.key) s.add(n.key); }); return [...s]; },
     canvasKeys() { return this.nodes.filter(n => n.key).map(n => n.key); },
     posKeys(node) { const keys = new Set(this.centralKeys()); for (let cur = node; cur && cur.kind === 'track'; cur = this.nodeById(cur.parentId)) keys.add(cur.key); return [...keys]; },
-    descendants(id) { const out = new Set(), stack = [id]; while (stack.length) { const p = stack.pop(); this.nodes.filter(n => n.parentId === p).forEach(c => { out.add(c.id); stack.push(c.id); }); } return out; },
 
     // --- view (zoombar) ---------------------------------------------------------------------------
     zoomBy(f) { if (this._fg) this._fg.zoom(Math.min(2.5, Math.max(0.15, this._fg.zoom() * f)), 250); },

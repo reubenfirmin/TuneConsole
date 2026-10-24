@@ -19,7 +19,7 @@ const messages = [];
 const listeners = {};
 const intervals = [];
 let now = 0;
-const video = { paused: true };
+const video = { paused: true, currentTime: 12, duration: 200 };
 let thumbnail = "https://i.ytimg.com/vi/v1/hqdefault.jpg";
 let likeStatus = "";
 const probes = [], timeouts = new Map();
@@ -66,8 +66,9 @@ messages.length = 0;
 video.paused = true;
 const main = (paused, playlist = "PL1") => listeners.message({
   source: window,
-  data: { __tcSensorVersion: 4, __tcSensorRevision: 4,
+  data: { __tcSensorVersion: 4, __tcSensorRevision: 8,
     __tcNow: { title: "Exoskeleton", artist: "GAUPA", videoId: "v1", playlist, paused,
+      position: video.currentTime, duration: video.duration,
       brandKnown: true, brandId: "brand-A", metadataVerified: true } },
 });
 main(true);
@@ -76,10 +77,16 @@ intervals[0]();  // DOM fallback after the main sensor was throttled
 main(true);
 assert.deepEqual(messages.map(m => m.type), ["now-heartbeat", "now-heartbeat", "now-heartbeat"]);
 assert(messages.every(m => m.paused));
+assert.equal(messages[0].position, 12);
+assert.equal(messages[2].duration, 200);
+assert.equal(messages[1].position, null, 'DOM fallback cannot use the media stream clock');
+assert.equal(messages[1].duration, null);
 assert(messages.every(m => m.playlist === "PL1" && m.albumBrowseId === "MPRE_album"));
 video.paused = false;
 main(false);
 assert.equal(messages.at(-1).timeZone, "America/Costa_Rica");
+assert.equal(messages.at(-1).position, 12);
+assert.equal(messages.at(-1).duration, 200);
 now = 12000;
 intervals[0]();  // different DOM title for the same playing video
 assert.deepEqual(messages.map(m => m.type), [
@@ -96,14 +103,14 @@ main(true, "");
 assert.equal(messages.at(-1).playlist, "");
 // An explicit context clear must not resurrect a playlist from the old page URL.
 context.location.href = "https://music.youtube.com/watch?v=v1&list=PL_old";
-listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorRevision: 4, __tcNow: {
+listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorRevision: 8, __tcNow: {
   title: "Exoskeleton", artist: "GAUPA", videoId: "v1", playlist: "", paused: false,
   metadataVerified: true,
   brandKnown: true, brandId: "brand-A",
 }}});
 assert.equal(messages.at(-1).playlist, "");
 // Reports without context cannot borrow the queue of a different video.
-listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorRevision: 4, __tcNow: {
+listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorRevision: 8, __tcNow: {
   title: "Autoplay", artist: "Artist", videoId: "v2", paused: false,
   metadataVerified: true,
   brandKnown: true, brandId: "brand-A",
@@ -142,7 +149,7 @@ assert.equal(messages.at(-1).brandId, "brand-A");
 for (const id of ["v4", "v5"]) {
   thumbnail = `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
   now += 2000;
-  listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorRevision: 4, __tcNow: {
+  listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorRevision: 8, __tcNow: {
     title: "Stale MediaSession title", videoId: "", brandKnown: true, brandId: "brand-A",
   }}});
   intervals[0]();
@@ -154,7 +161,7 @@ for (const id of ["v4", "v5"]) {
   assert.equal(presence.brandId, "brand-A");
 }
 const accountReport = (brandKnown, brandId) => listeners.message({source: window,
-  data: {__tcSensorVersion: 4, __tcSensorRevision: 4, __tcNow: {title: "", videoId: "", brandKnown, brandId}}});
+  data: {__tcSensorVersion: 4, __tcSensorRevision: 8, __tcNow: {title: "", videoId: "", brandKnown, brandId}}});
 // Explicit account uncertainty invalidates the cache and cannot advance play deduplication.
 accountReport(false, "");
 assert.equal(messages.at(-1).type, "now-heartbeat");
@@ -168,7 +175,7 @@ assert.equal(messages.length, beforeUnknownEvent);
 accountReport(true, "brand-B");
 assert.equal(messages.at(-1).type, "now-heartbeat");
 const verifiedAccountPlay = brandId => listeners.message({source: window, data: {
-  __tcSensorVersion: 4, __tcSensorRevision: 4, __tcNow: {title:"Song", artist:"Artist", videoId:"v6",
+  __tcSensorVersion: 4, __tcSensorRevision: 8, __tcNow: {title:"Song", artist:"Artist", videoId:"v6",
     brandKnown:true, brandId, metadataVerified:true, paused:false}}});
 verifiedAccountPlay("brand-B");
 assert.equal(messages.at(-1).type, "play");
@@ -187,7 +194,7 @@ assert.equal(messages.at(-1).muted, true);
 video.muted = false;
 likeStatus = "LIKE";
 const snapshot = (videoId, playerBar, metadataVerified = true) => listeners.message({source: window,
-  data: {__tcSensorVersion: 4, __tcSensorRevision: 4, __tcNow: {
+  data: {__tcSensorVersion: 4, __tcSensorRevision: 8, __tcNow: {
     title: "Next song", artist: metadataVerified ? "Artist" : "Uploader channel",
     videoId, playerBar, metadataVerified,
     paused: false, brandKnown: true, brandId: "brand-A",
@@ -226,14 +233,14 @@ listeners.message({source: window, data: {__tcSensorVersion: 3, __tcSensorProbeI
   __tcNow: {title: "Legacy", videoId: "old"}}});
 assert.equal(health, undefined);
 listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorProbeId: probeId,
-  __tcSensorRevision: 3, __tcNow: {title: "Outdated implementation", videoId: "old"}}});
+  __tcSensorRevision: 7, __tcNow: {title: "Outdated implementation", videoId: "old"}}});
 assert.equal(health, undefined, 'same protocol with an obsolete revision cannot satisfy a probe');
-listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorProbeId: probeId, __tcSensorRevision: 4,
+listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorProbeId: probeId, __tcSensorRevision: 8,
   __tcNow: {title: "", videoId: "", brandKnown: false}}});
 assert.equal(health.ok, true);
 assert.equal(health.mainVersion, 4);
-assert.equal(health.mainRevision, 4);
-assert.equal(health.receiverRevision, 3);
+assert.equal(health.mainRevision, 8);
+assert.equal(health.receiverRevision, 7);
 assert.equal(health.mainAgeMs, 0);
 assert.equal(health.capture.hasVideo, false);
 assert.equal(health.capture.accountKnown, false);
@@ -242,7 +249,7 @@ assert.equal(timeouts.size, 0);
 // without exposing credit/account values or converting its heartbeat into an exact play.
 health = undefined;
 listeners.runtime({type: "sensor-ping", main: true}, {}, r => { health = r; });
-listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorRevision: 4,
+listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorRevision: 8,
   __tcSensorProbeId: probes.at(-1).__tcSensorProbe.id, __tcNow: {
     title: "Private song", artist: "Private artist", videoId: "private-video", brandId: "private-account",
     brandKnown: true, metadataVerified: false, paused: false, muted: false,
@@ -305,6 +312,7 @@ const video = {
   removeEventListener(type, fn) { if (handlers.get(type) === fn) handlers.delete(type); },
 };
 const player = {getVideoData: () => data, getPlaylistId: () => playlist,
+  getCurrentTime: () => video.currentTime, getDuration: () => video.duration,
   getPlayerResponse: () => playerResponse};
 const window = {__tcNowPoller: true, postMessage: msg => messages.push(msg),
   addEventListener: (type, fn) => windowHandlers.set(type, fn),
@@ -345,6 +353,8 @@ const exits = () => messages.filter(m => m.__tcPlayer?.kind === 'track_exit');
 tick();
 assert.equal(latest().videoId, 'playing');
 assert.equal(latest().playlist, 'PL_playing');
+assert.equal(latest().position, 12);
+assert.equal(latest().duration, undefined, 'song length belongs to the app catalog');
 location.href = 'https://music.youtube.com/browse/VLPL_other';
 video.currentTime = 30;
 now += 2000;
@@ -352,6 +362,7 @@ tick();
 assert.equal(exits().length, 0, 'browsing must not synthesize a track exit');
 assert.equal(latest().videoId, 'playing');
 assert.equal(latest().playlist, 'PL_playing');
+assert.equal(latest().position, 30, 'each heartbeat samples the player clock');
 video.currentTime = 42;
 handlers.get('pause')();
 assert.equal(messages.at(-1).__tcPlayer.position, 42, 'events sample position between polls');
@@ -369,6 +380,7 @@ assert.equal(exits()[0].__tcPlayer.playlist, 'PL_playing');
 assert.equal(exits()[0].__tcPlayer.position, 200);
 assert.equal(latest().videoId, 'next');
 assert.equal(latest().playlist, 'PL_next');
+assert.equal(latest().position, 3, 'new tracks do not inherit the last exit position');
 assert.equal(latest().title, 'Next', 'new video must not inherit the old MediaSession title');
 assert.equal(latest().artist, 'Artist');
 assert.equal(latest().thumbnail, '');
@@ -455,6 +467,36 @@ video.volume = 0;
 tick();
 assert.equal(latest().muted, true);
 assert(messages.every(m => m.__tcSensorVersion === 4));
+// A continuous media stream cannot stand in for unavailable or changing per-song timing.
+const originalPosition = player.getCurrentTime, originalDuration = player.getDuration;
+video.currentTime = 650; video.duration = 720;
+player.getCurrentTime = () => 17;
+player.getDuration = () => 240;
+tick();
+assert.equal(latest().position, 17);
+assert.equal(latest().duration, undefined);
+player.getDuration = () => { throw new Error('Buffered duration is unavailable'); };
+tick();
+assert.equal(latest().position, 17, 'elapsed time never depends on a buffered duration getter');
+player.getCurrentTime = () => {
+  data = {...data, video_id: 'clock-changed'};
+  return 18;
+};
+tick();
+assert.equal(latest().position, null, 'a clock sampled across a song change is unknown');
+assert.equal(latest().duration, undefined);
+player.getCurrentTime = undefined;
+tick();
+assert.equal(latest().videoId, 'clock-changed');
+assert.equal(latest().position, null, 'a missing player API must not borrow the media clock');
+assert.equal(latest().duration, undefined);
+player.getCurrentTime = () => { throw new Error('Player is changing'); };
+tick();
+assert.equal(latest().videoId, 'clock-changed', 'a timing error must preserve song identity');
+assert.equal(latest().position, null);
+assert.equal(latest().duration, undefined);
+player.getCurrentTime = originalPosition;
+player.getDuration = originalDuration;
 now += 60000; // A background timer may have been throttled; an explicit probe samples immediately.
 windowHandlers.get('message')({source: window,
   data: {__tcSensorProbe: {version: 4, id: 7}}});

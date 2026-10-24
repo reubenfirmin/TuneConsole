@@ -74,7 +74,7 @@ def test_removal_clears_models_forecasts_and_rollbacks_but_keeps_user_choices(st
     store.tracks.upsert_track('yt','Song','Artist',None,180)
     key = store.tracks.identity_key_for_video('yt')
     store.history.import_listening_events(iid,[(key,None,1700000000)],source='spotify_export')
-    store.rec_surface.put_proposals('trend_rollups',{'private_model':'old'},100)
+    store.rec_proposals.put_proposals('trend_rollups',{'private_model':'old'},100)
     store.rec_model.record_like(key,100,provenance='action')
     store.settings.set_setting('user-setting','keep')
     store.settings.set_setting('spotify_imported_at','100')
@@ -90,7 +90,7 @@ def test_removal_clears_models_forecasts_and_rollbacks_but_keeps_user_choices(st
     assert store.rec_refresh.has_pending_changes()
     for name in ('rec_fit_inputs', 'rec_artist_fit_inputs', 'rec_mode_fit_inputs', 'rec_refresh_version'):
         assert store.settings.get_setting(name) is None
-    assert store.rec_surface.get_proposals('trend_rollups') is None
+    assert store.rec_proposals.get_proposals('trend_rollups') is None
     assert not store.model_selection.selection_runs()
     assert not store.model_selection.restore_model_selection(run,200)
     assert key in store.rec_model.recent_liked_keys()
@@ -114,14 +114,14 @@ def test_imported_listening_learns_saved_preferences_without_double_counting_sha
     graduation.graduate_play_exposure(store,now)
     weights = store.rec_model.get_weights(now=now)
     assert weights and all(weight > 1.0 for weight in weights.values())
-    themes = {axis:store.rec_surface.get_theme(axis) for axis in leans}
+    themes = {axis:store.rec_signals.get_theme(axis) for axis in leans}
     # Another import of the same occurrence must not amplify its evidence or learning.
     store.history.import_listening_events(iid,[(key,None,now)],source='takeout' if source != 'takeout' else 'spotify_export')
     assert store.history.recent_plays_with_ts() == [(key,float(now))]
     assert transient.play_facet_leans(store,now) == leans
     graduation.graduate_play_exposure(store,now)
     assert store.rec_model.get_weights(now=now) == weights
-    assert {axis:store.rec_surface.get_theme(axis) for axis in leans} == themes
+    assert {axis:store.rec_signals.get_theme(axis) for axis in leans} == themes
 
 
 def test_removing_spotify_stops_further_learning_and_keeps_saved_preferences(store):
@@ -135,14 +135,14 @@ def test_removing_spotify_stops_further_learning_and_keeps_saved_preferences(sto
     store.history.import_listening_events(iid,[(key,None,now)],source='spotify_export')
     graduation.graduate_play_exposure(store,now)
     weights = store.rec_model.weight_records()
-    themes = [tuple(row) for row in store.rec_surface.theme_rows()]
+    themes = [tuple(row) for row in store.rec_signals.theme_rows()]
     assert weights
 
     store.history.remove_spotify_history()
     assert transient.play_facet_leans(store,now) == {}
     graduation.graduate_play_exposure(store,now + 86400)
     assert store.rec_model.weight_records() == weights
-    assert [tuple(row) for row in store.rec_surface.theme_rows()] == themes
+    assert [tuple(row) for row in store.rec_signals.theme_rows()] == themes
 
 
 def test_artist_identity_reconciliation_preserves_removable_import_origin(store):
@@ -166,12 +166,12 @@ def test_failed_removal_rolls_back_evidence_and_artist_changes(store):
     store.discovery.seed_spotify_artists(iid,{'Keep on failure':3},10)
     with store.conn:
         store.conn.execute("CREATE TRIGGER fail_removal BEFORE DELETE ON rec_proposals BEGIN SELECT RAISE(ABORT,'injected failure'); END")
-    store.rec_surface.put_proposals('trend_rollups',{'old':True},10)
+    store.rec_proposals.put_proposals('trend_rollups',{'old':True},10)
     with pytest.raises(sqlite3.IntegrityError,match='injected failure'):
         store.history.remove_spotify_history()
     assert store.history.spotify_history_stats()['events'] == 1
     assert store.history.spotify_history_stats()['artists'] == 1
-    assert store.rec_surface.get_proposals('trend_rollups') == {'old':True}
+    assert store.rec_proposals.get_proposals('trend_rollups') == {'old':True}
 
 
 def test_later_takeout_interest_keeps_an_artist_after_spotify_is_removed(store):

@@ -55,7 +55,7 @@ def test_first_in_order_fills_and_disagreement_is_recorded(store):
     # first provider in order wins the canonical fill
     assert store.tracks.get_track_enrichment(t["id"]) == ("Electronic", "1995")
     # genre disagreement recorded (year agrees -> no year conflict)
-    rows = store.enrichment.unresolved_conflicts_for_playlist  # exists
+    rows = store.enrichment_reports.unresolved_conflicts_for_playlist  # exists
     c = store.conn.execute("SELECT field, candidates FROM enrichment_conflict WHERE track_id=?",
                            (t["id"],)).fetchall()
     assert len(c) == 1 and c[0]["field"] == "genre"
@@ -185,6 +185,6 @@ def test_real_provider_request_outcome_controls_completion_and_retains_audit(sto
                               registry={"musicbrainz": musicbrainz})
     assert bool(completed) == checked
     assert requests
-    attempts = store.enrichment.enrichment_attempts(identity_key("Hyperballad", "Bjork"))
+    attempts = store.enrichment_state.enrichment_attempts(identity_key("Hyperballad", "Bjork"))
     assert attempts["musicbrainz"]["status"] == ("no_match" if checked else "retry")
     assert attempts["musicbrainz"]["fields"] == {}

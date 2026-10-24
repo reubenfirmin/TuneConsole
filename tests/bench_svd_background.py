@@ -29,7 +29,7 @@ from yt_playlist.core import db_diagnostics, db_snapshot
 from yt_playlist.core.db_snapshot import ReadSnapshot
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.store import Store
-from yt_playlist.rec import embed, mode_surfaces, model_refresh, trend_rollups
+from yt_playlist.rec import embedding_training as training, mode_surfaces, model_refresh, trend_rollups
 from yt_playlist.repos.rec_model import RecModelRepo
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
@@ -97,8 +97,8 @@ def measure(path, *, full_generation=False, refresh=None, projection=None, inlin
         return run
 
     # Wrap the production operations without replacing their inputs or math.
-    embed._cooc_matrix = timed("cooccurrence", embed._cooc_matrix)
-    embed._positive_pmi = timed("ppmi", embed._positive_pmi)
+    training.cooc_matrix = timed("cooccurrence", training.cooc_matrix)
+    training.positive_pmi = timed("ppmi", training.positive_pmi)
     np.linalg.qr = timed("qr", np.linalg.qr)
     np.linalg.svd = timed("svd", np.linalg.svd)
     db_diagnostics.DiagnosticConnection.commit = timed('commit', db_diagnostics.DiagnosticConnection.commit)
@@ -149,15 +149,15 @@ def measure(path, *, full_generation=False, refresh=None, projection=None, inlin
             return
         with store.read_snapshot() as snapshot:
             reader = snapshot.store
-            dim = int(reader.settings.get_setting("rec_dim") or embed.DIM)
-            baskets = timed("basket_loading", reader.rec_query.rec_baskets)()
-            weights = (embed._cooc_weights(reader)
+            dim = int(reader.settings.get_setting("rec_dim") or training.DIM)
+            baskets = timed("basket_loading", reader.rec_evidence.rec_baskets)()
+            weights = (training.cooc_weights(reader.rec_query.play_counts())
                        if reader.settings.get_setting("rec_cooc_weighting") == "1" else None)
             metadata.update(dim=dim, baskets=len(baskets),
                             memberships=sum(map(len, baskets)),
                             largest_basket=max(map(len, baskets), default=0), weighted=weights is not None,
                             configured_method=reader.settings.get_setting("rec_embed_method") or "svd")
-            keys, vectors = timed("full_fit", embed.build_vectors_from_baskets)(
+            keys, vectors = timed("full_fit", training.build_vectors_from_baskets)(
                 baskets, dim=dim, method="svd", weights=weights)
             metadata["tracks"] = len(keys)
             rows = timed("serialization", lambda: [

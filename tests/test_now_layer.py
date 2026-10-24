@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from yt_playlist.core.store import Store
-from yt_playlist.rec import embed, layers
+from yt_playlist.rec import embedding_vectors as embed, layers
 
 
 @pytest.fixture

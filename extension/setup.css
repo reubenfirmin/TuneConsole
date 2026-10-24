@@ -1,0 +1,9 @@
+body { width: 300px; margin: 0; padding: 20px; font: 14px/1.5 system-ui, sans-serif;
+  background: #16221c; color: #f6f8fa; color-scheme: dark; }
+h1 { margin: 0 0 8px; font-size: 22px; }
+p { margin: 10px 0; }
+small { display: block; color: #c6d2cc; }
+a { display: inline-block; padding: 8px 12px; border-radius: 4px; font-weight: 650;
+  background: #8be0b3; color: #10231a; text-decoration: none; }
+a:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
+[hidden] { display: none !important; }

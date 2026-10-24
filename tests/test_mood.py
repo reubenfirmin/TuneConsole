@@ -24,7 +24,7 @@ def test_mood_demotes_but_does_not_banish_cluster_in_for_you(store):
     assert neutral_a_top > 0, "A cluster should appear near the top before any mood"
 
     # a strong negative mood on A-cluster tracks
-    store.rec_surface.record_mood(["a0|ab", "a1|ab", "a2|ab", "a3|ab"], -2, now)
+    store.rec_signals.record_mood(["a0|ab", "a1|ab", "a2|ab", "a3|ab"], -2, now)
     mood = neighbourhood(surfaces.for_you(store, now=now))
 
     # DEMOTION: A is pushed out of the lane's top relative to the neutral baseline

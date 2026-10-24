@@ -5,11 +5,13 @@ import time
 from dataclasses import dataclass
 from typing import Literal
 
+from yt_playlist.library.playlist_catalog import fetch_song_duration
 from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.matching import track_album, track_artist
 from yt_playlist.web.radio_edits import AppendOperation, PlaylistOperation, RadioEdits
 from yt_playlist.web.radio_playlist_io import (
     PendingWrite, PlaylistChanged, PlaylistEdit, PlaylistPending, append_receipt, matches_substitution,
+    duration_seconds, readback_durations,
 )
 from yt_playlist.web.radio_playlist_tail import RadioPlaylistTail, Substitution, TailView
 
@@ -93,9 +95,18 @@ class RadioMutations:
         log.info('Radio accepted upload substitution: requested=%s actual=%s', requested['video_id'], video)
         return UploadSubstitution(requested, accepted)
 
-    def _publish(self, target, view, tracks):
+    def _publish(self, target, view, tracks, remote):
+        tracks = readback_durations(tracks, remote, previous=view.tracks)
+        previous = {track['video_id'] for track in view.tracks}
+        # One best-effort lookup when a new song is confirmed, never on status
+        # polls or repeatedly for unknown durations already in the playlist.
+        for track in tracks:
+            if (not track.get('duration') and track['video_id'] not in previous
+                    and hasattr(target.client, 'get_song') and not target.stop.is_set()):
+                track['duration'] = duration_seconds(fetch_song_duration(target.client, track['video_id']))
         if list(tracks) != list(view.tracks):
             self.playlists.publish(target.local_id, target.title, list(view.tracks), list(tracks), self.now_fn())
+        return tracks
 
     @staticmethod
     def append_substitution(operation: AppendOperation, tracks, remote):
@@ -127,7 +138,7 @@ class RadioMutations:
             desired = expected + [accepted['video_id']]
         if actual == desired:
             tracks = (*view.tracks, accepted)
-            self._publish(target, view, tracks)
+            tracks = self._publish(target, view, tracks, remote)
             return MutationResult('confirmed', tracks, tuple(remote), substitutions=substitutions)
         if actual == expected:
             edits.conflict = None
@@ -171,6 +182,32 @@ class RadioMutations:
         accepted, substitutions, _ = self._accept_tail(target, tail, view, remote)
         return MutationResult('confirmed' if accepted else 'waiting', substitutions=substitutions)
 
+    def recover(self, target: PlaylistTarget, edits: RadioEdits, view: TailView) -> MutationResult:
+        """Recognize an owned readback without accepting or overwriting an unrelated edit."""
+        remote = self.playlists.read(target.client, target.playlist)
+        actual = tuple(t['videoId'] for t in remote)
+        expected = tuple(t['video_id'] for t in view.tracks)
+        allowed, substitutions = {expected}, ()
+        if edits.append:
+            allowed.add((*expected, edits.append.track['video_id']))
+            receipt = (edits.append.write.receipt if edits.append.write else None) or {}
+            if receipt.get('videoId'):
+                allowed.add((*expected, receipt['videoId']))
+        if edits.replacement:
+            try:
+                result = self.recover_tail(target, edits.replacement, view, remote)
+            except PlaylistChanged:
+                return MutationResult()
+            substitutions = result.substitutions
+            if result.status != 'confirmed':
+                return result
+            allowed.update(edits.replacement.allowed)
+        if actual not in allowed and not (edits.append and self.append_substitution(edits.append, view.tracks, remote)):
+            return MutationResult(substitutions=substitutions)
+        edits.conflict = None
+        log.info('Radio saved-playlist readback recovered: playlist=%s', target.playlist)
+        return MutationResult('confirmed', substitutions=substitutions)
+
     def inspect_tail(self, target: PlaylistTarget, tail: RadioPlaylistTail, view: TailView, remote) -> MutationResult:
         accepted, substitutions, known = self._accept_tail(target, tail, view, remote)
         if not accepted:
@@ -185,7 +222,7 @@ class RadioMutations:
                 return MutationResult('rejected', rejected=pending.rejected, substitutions=substitutions)
             return MutationResult(substitutions=substitutions)
         tracks = tuple(known[video] for video in ids)
-        self._publish(target, view, tracks)
+        tracks = self._publish(target, view, tracks, remote)
         return MutationResult('confirmed', tracks, tuple(remote), substitutions=substitutions)
 
     def read_tail(self, target: PlaylistTarget, tail: RadioPlaylistTail, view: TailView) -> MutationResult:

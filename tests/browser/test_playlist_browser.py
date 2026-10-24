@@ -303,8 +303,8 @@ def test_enrich_updates_cells_live(live_playlist_app, page, monkeypatch):
     import yt_playlist.providers.musicbrainz as mb
     from tests.conftest import only_provider
     monkeypatch.setattr(mb, "enrich_full",
-                        lambda title, artist, **kwargs: ("Electronic", "1998", None, []) if title == "Song B"
-                        else (None, None, None, []))
+                        lambda title, artist: ("Electronic", "1998", None, [], []) if title == "Song B"
+                        else (None, None, None, [], []))
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
     only_provider(live_playlist_app["store"], "musicbrainz")
     page.goto(f"{base}/playlist/{pid}")
@@ -338,7 +338,7 @@ def test_generated_feedback_updates_after_background_enrichment(live_playlist_ap
         page.get_by_role('button', name='More techno', exact=True).click()
     assert mood.value.ok
     expect(page.get_by_role('button', name='More techno', exact=True)).to_have_attribute('aria-pressed', 'true')
-    assert set(store.rec_surface.recent_mood_events()[0][2]) == {t['identity_key'] for t in tracks}
+    assert set(store.rec_signals.recent_mood_events()[0][2]) == {t['identity_key'] for t in tracks}
 
 
 def test_generated_feedback_updates_after_enrich_and_metadata_edit(live_playlist_app, page, monkeypatch):
@@ -352,7 +352,7 @@ def test_generated_feedback_updates_after_enrich_and_metadata_edit(live_playlist
     store.playlists.set_playlist_group('PL1', 'Generated')
     store.playlists.mark_generated_playlist('PL1')
     only_provider(store, 'musicbrainz')
-    monkeypatch.setattr(mb, 'enrich_full', lambda *args, **kwargs: ('Techno', '1995', None, []))
+    monkeypatch.setattr(mb, 'enrich_full', lambda *args: ('Techno', '1995', None, [], []))
     page.goto(f"{live_playlist_app['base']}/playlist/{pid}")
     page.get_by_role('button', name='Detailed feedback', exact=True).click()
     expect(page.get_by_text('These tracks need genre and release-year information.')).to_be_visible()
@@ -380,4 +380,4 @@ def test_generated_feedback_updates_after_enrich_and_metadata_edit(live_playlist
     assert mood.value.ok
     expect(page.get_by_role('button', name='More ambient', exact=True)).to_have_attribute('aria-pressed', 'true')
     key = track['identity_key']
-    assert store.rec_surface.recent_mood_events()[0][2] == [key]
+    assert store.rec_signals.recent_mood_events()[0][2] == [key]

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.test_radio_session import poc, play
+from tests.radio_session_support import poc, play
 from yt_playlist.web.radio_persistence import migrate
 from yt_playlist.web.radio_edits import AppendOperation
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending, RadioPlaylistIO
@@ -58,7 +58,7 @@ def test_restart_checks_an_uncertain_write_before_sending_another(poc, version, 
         # v3's first observation already appended v4. Consume it to need v5.
         video = remote.ids[-1]
         c.ctx.bridge.now_playing["video_id"] = video
-        c._browser(c.session)
+        c.listening.observe(c.session)
     else:
         branch = c.status()["directions"][1]
         c.select(branch["id"], c.status()["menu_id"])
@@ -79,7 +79,7 @@ def test_restart_checks_an_uncertain_write_before_sending_another(poc, version, 
     restored.join()
     assert restored.session.phase == phase
     assert len(remote.adds) == before + 1
-    restored._browser(restored.session)
+    restored.listening.observe(restored.session)
     restored.advance(restored.session)
     assert restored.session.phase == Phase.PLAYING
     assert len(remote.adds) == before + 1

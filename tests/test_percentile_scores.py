@@ -1,5 +1,5 @@
 """#86 rank/percentile normalizer: the pool-independent base that replaced shift-by-min."""
-from yt_playlist.rec.embed import percentile_scores
+from yt_playlist.rec.vector_math import percentile_scores
 
 
 def test_maps_to_average_ranks():

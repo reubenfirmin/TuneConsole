@@ -1,0 +1,98 @@
+name: Flatpak candidate
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      wheel-artifact:
+        required: true
+        type: string
+      release-candidate:
+        default: false
+        type: boolean
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x86_64, runner: ubuntu-latest}
+          - {arch: aarch64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    env:
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.wheel-artifact }}
+          path: dist
+      - name: Install Flatpak tools
+        timeout-minutes: 3
+        run: |
+          sudo timeout 120 apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
+          sudo timeout 120 apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2 install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/flatpak
+            packaging/flatpak/.flatpak-builder/downloads
+          key: flatpak-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packaging/platforms.toml', 'packaging/flatpak/python3-requirements.json', 'packaging/flatpak/com.tuneconsole.TuneConsole.yaml') }}
+      - name: Download trusted runtime and locked sources separately from building
+        timeout-minutes: 9
+        run: |
+          python3 packaging/ci_stage.py --timeout 120 --attempts 2 flatpak-runtime -- flatpak install --user --noninteractive flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08
+          cd packaging/flatpak
+          python3 ../ci_stage.py --timeout 120 --attempts 2 --timings ../../ci-source-timings.json flatpak-sources -- flatpak-builder --download-only --force-clean --disable-rofiles-fuse build-dir com.tuneconsole.TuneConsole.yaml
+      - name: Build candidate and check packaged startup and bridge
+        timeout-minutes: 8
+        env:
+          FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
+          RELEASE_CANDIDATE: ${{ inputs.release-candidate }}
+          VERSION: ${{ inputs.version }}
+          ARCH: ${{ matrix.arch }}
+        working-directory: packaging/flatpak
+        run: |
+          signing=()
+          if [[ "$RELEASE_CANDIDATE" == true ]]; then
+            test -n "$FLATPAK_GPG_KEY"
+            printf '%s' "$FLATPAK_GPG_KEY" | gpg --batch --import
+            fpr=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')
+            signing=(--gpg-sign="$fpr")
+          fi
+          flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse \
+            --repo=repo "${signing[@]}" --force-clean build-dir com.tuneconsole.TuneConsole.yaml
+          flatpak build-update-repo repo --no-summary-index "${signing[@]}"
+          if [[ "$RELEASE_CANDIDATE" == true ]]; then
+            gpg --batch --export "$fpr" > repo-key.gpg
+            python3 bundle.py repo "TuneConsole-$ARCH.flatpak" repo-key.gpg
+            flatpak install --user --noninteractive "TuneConsole-$ARCH.flatpak"
+          else
+            flatpak build-bundle --repo-url="file://$PWD/repo" \
+              --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo \
+              repo "TuneConsole-$ARCH.flatpak" com.tuneconsole.TuneConsole
+            flatpak install --user --noninteractive "TuneConsole-$ARCH.flatpak"
+          fi
+          python3 smoke.py "$VERSION"
+          tar -cf "flatpak-repo-$ARCH.tar" repo
+          if [[ "$ARCH" == x86_64 ]]; then cp "TuneConsole-$ARCH.flatpak" TuneConsole.flatpak; fi
+      - name: Retain setup timing and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-timings-${{ matrix.arch }}-${{ github.run_attempt }}
+          path: ci-*-timings.json
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: inputs.release-candidate
+        with:
+          name: release-flatpak-${{ matrix.arch }}
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            packaging/flatpak/TuneConsole*.flatpak
+            packaging/flatpak/flatpak-repo-*.tar

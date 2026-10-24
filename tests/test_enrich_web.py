@@ -16,7 +16,7 @@ def _seed(store):
     t1 = store.tracks.upsert_track("v1", "A", "X", None, 200)
     t2 = store.tracks.upsert_track("v2", "B", "Y", None, 200)
     store.tracks.set_track_enrichment(t1, "Rock", "1999")
-    store.enrichment.mark_enriched([t1], now=5.0)                 # 1 of 2 processed, has genre+year
+    store.enrichment_queue.mark_enriched([t1], now=5.0)                 # 1 of 2 processed, has genre+year
     return t1, t2
 
 
@@ -47,10 +47,10 @@ def test_queue_distinguishes_first_passes_from_refreshes_without_double_counting
                                            None, None, "radio:seed", 10.0)
     configuration = {name: {"fingerprint": "old", "status": "available"}
                      for name in ("musicbrainz", "lastfm")}
-    store.enrichment.reconcile_provider_configuration(configuration)
-    store.enrichment.reconcile_provider_configuration({
+    store.enrichment_state.reconcile_provider_configuration(configuration)
+    store.enrichment_state.reconcile_provider_configuration({
         name: {**value, "fingerprint": "new"} for name, value in configuration.items()})
-    assert store.enrichment.queue_stats() == {"total": 2, "first_pass": 1, "refresh": 1}
+    assert store.enrichment_reports.queue_stats() == {"total": 2, "first_pass": 1, "refresh": 1}
     c = _client(store)
     for path in ("/enrich", "/enrich/stats"):
         html = c.get(path).text
@@ -58,15 +58,15 @@ def test_queue_distinguishes_first_passes_from_refreshes_without_double_counting
         assert "1 queued for re-enrichment" in html
     detail = c.get("/enrich/queue").text
     assert ">First enrichment</td>" in detail and ">Re-enrichment</td>" in detail
-    store.enrichment.reconcile_provider_configuration({
+    store.enrichment_state.reconcile_provider_configuration({
         name: {**value, "status": "disabled"} for name, value in configuration.items()})
-    assert store.enrichment.queue_stats() == {"total": 1, "first_pass": 1, "refresh": 0}
+    assert store.enrichment_reports.queue_stats() == {"total": 1, "first_pass": 1, "refresh": 0}
 
 
 def test_saved_retry_status_is_visible_without_a_running_worker(store):
     tid = store.tracks.upsert_track("retry", "Retry", "Artist", None, 200)
     track = store.tracks.catalog_subject(tid)
-    store.enrichment.record_enrichment_attempt(track["identity_key"], "musicbrainz", {}, retry=True,
+    store.enrichment_state.record_enrichment_attempt(track["identity_key"], "musicbrainz", {}, retry=True,
         now=990, error="bad <response>", retry_after=1090)
     html = _client(store).get("/enrich/stats").text
     assert 'state-retry' in html
@@ -78,8 +78,8 @@ def test_saved_retry_status_is_visible_without_a_running_worker(store):
 def test_optional_artwork_retry_is_visible_without_reopening_metadata_queue(store):
     from yt_playlist.providers.coverart import CoverResult
     tid = store.tracks.upsert_track("art", "Art", "Artist", None, 200)
-    store.enrichment.mark_enriched([tid], now=900)
-    store.enrichment.record_artwork_result(tid, ["release"], CoverResult("retry", retry_in=90), 990)
+    store.enrichment_queue.mark_enriched([tid], now=900)
+    store.enrichment_state.record_artwork_result(tid, ["release"], CoverResult("retry", retry_in=90), 990)
     html = _client(store).get("/enrich/stats").text
     assert "Artwork retries: 1" in html
     assert "Next attempt in 80 seconds" in html
@@ -154,7 +154,7 @@ def test_no_providers_explains_why_queue_cannot_run(store):
     html = c.get("/enrich/stats").text
     assert "Needs setup" in html and "No enrichment providers are available" in html
     assert 'href="/setup?tab=enrichment"' in html
-    assert store.enrichment.queue_remaining() == 1
+    assert store.enrichment_reports.queue_remaining() == 1
 
 
 @pytest.mark.parametrize("view", ["queue", "processed", "conflicts"])
@@ -169,7 +169,7 @@ def test_queue_and_processed_details_are_separate_and_paginated(store):
     ids = [store.tracks.upsert_track(f"vid{i}", f"Queue song {i:02}", "Artist", None, 200,
                               created_at=1.0) for i in range(41)]
     done = store.tracks.upsert_track("done", "Completed song", "Artist", None, 200)
-    store.enrichment.mark_enriched([done], 995.0)
+    store.enrichment_queue.mark_enriched([done], 995.0)
     c = _client(store)
     first = c.get("/enrich/queue").text
     second = c.get("/enrich/queue?page=2").text
@@ -179,7 +179,7 @@ def test_queue_and_processed_details_are_separate_and_paginated(store):
     processed = c.get("/enrich/processed").text
     assert "Completed song" in processed and "Queue song" not in processed
     assert "No core fields found" in processed and "5s ago" in processed
-    assert [t["id"] for t in store.enrichment.next_enrich_batch(1, 40)] == [ids[-1]]
+    assert [t["id"] for t in store.enrichment_queue.next_enrich_batch(1, 40)] == [ids[-1]]
 
 
 def test_conflicts_show_current_and_provider_values_and_resolve_explicit_choice(store):
@@ -204,7 +204,7 @@ def test_conflicts_show_current_and_provider_values_and_resolve_explicit_choice(
     result = c.post(f"/enrich/conflicts/{tid}/genre", data={"value": "Pop"})
     assert result.status_code == 200 and "No open conflicts" in result.text
     assert store.tracks.get_track_enrichment(tid)[0] == "Pop"
-    assert store.enrichment.queue_remaining() == 1  # reviewing conflicts never stalls or requeues work
+    assert store.enrichment_reports.queue_remaining() == 1  # reviewing conflicts never stalls or requeues work
 
 
 def test_click_save_returns_confirmation_and_allows_another_choice(store):
@@ -221,11 +221,11 @@ def test_click_save_returns_confirmation_and_allows_another_choice(store):
         assert "Your choice" in response.text
         assert "<html" not in response.text
         assert store.tracks.get_track_enrichment(tid)[0] == choice
-        assert store.enrichment.outstanding_conflicts() == 0
+        assert store.enrichment_reports.outstanding_conflicts() == 0
 
 
 def _keep_current_value(store, tid, *, user_choice):
-    assert store.enrichment.metadata_provenance(tid)['fields']['genre'] == {
+    assert store.enrichment_reports.metadata_provenance(tid)['fields']['genre'] == {
         'value':'My own genre','override':user_choice,
         'source':'user' if user_choice else 'legacy_unknown'}
     store.enrichment.upsert_conflict(tid, "genre", [{"provider": "musicbrainz", "value": "Rock"},
@@ -239,9 +239,9 @@ def _keep_current_value(store, tid, *, user_choice):
     assert response.status_code == 200 and "Saved" in response.text
     assert "Your choice" in response.text
     assert store.tracks.get_track_enrichment(tid)[0] == "My own genre"
-    assert store.enrichment.metadata_provenance(tid)['fields']['genre'] == {
+    assert store.enrichment_reports.metadata_provenance(tid)['fields']['genre'] == {
         'value':'My own genre','override':True,'source':'conflict_resolution'}
-    assert store.enrichment.outstanding_conflicts() == 0
+    assert store.enrichment_reports.outstanding_conflicts() == 0
 
 
 def test_current_value_outside_provider_candidates_can_be_kept(store):

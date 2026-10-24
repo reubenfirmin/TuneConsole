@@ -1,0 +1,233 @@
+/* Taste profile: an open editorial spread, with a steady reading order at every size. */
+.taste-profile { padding: 1rem 0 3rem; }
+.taste-profile-lead { display: grid; grid-template-columns: 1fr 1fr; gap: 3rem;
+  align-items: end; padding: .5rem 0 1rem; }
+.taste-profile-lead h2 { font-family: var(--font-brand); font-size: clamp(1.8rem, 3vw, 2.3rem);
+  line-height: 1.15; letter-spacing: -.035em; margin: 0 0 .75rem; }
+.taste-profile-deck { color: var(--dim); font-size: var(--type-body); line-height: 1.7;
+  margin: 0; }
+.taste-profile-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem; margin: 0; padding: .5rem 0; }
+.taste-profile-facts dt { color: var(--dim); font-size: var(--type-xs); line-height: 1.4; }
+.taste-profile-facts dd { font-family: var(--font-brand); font-size: clamp(1.8rem, 3vw, 2.5rem);
+  line-height: 1.2; letter-spacing: -.04em; margin: .45rem 0 0; }
+.taste-profile-facts .taste-profile-word { font-size: clamp(1.25rem, 2vw, 1.75rem); letter-spacing: -.025em; }
+.taste-profile-section { border-top: 1px solid var(--border-strong); margin-top: 3rem; padding-top: 1.75rem; }
+.taste-profile-section > .card {
+  padding: 0; border: 0; border-radius: 0; background: transparent; margin: 0; }
+.page-taste .taste-profile h2.section { font-size: clamp(1.6rem, 2.7vw, 2rem);
+  line-height: 1.25; letter-spacing: -.025em; margin: 0 0 1.5rem; flex-wrap: wrap; align-items: center; }
+.page-taste .taste-profile h2.section::after { display: none; }
+.taste-profile .viz-quad { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1.5rem; }
+.taste-profile .rose-svg { align-self: center; }
+.taste-profile .vb-legend { line-height: 1.7; margin-top: 1.25rem; }
+.taste-facet-key { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .6rem 2rem;
+  list-style: none; margin: 1.5rem 0 0; padding: 1rem 0 0; border-top: 1px solid var(--border); }
+.taste-facet-key li { display: flex; align-items: baseline; gap: .55rem; font-size: var(--type-ui); min-width: 0; }
+.taste-facet-key li > span:not(.taste-facet-swatch) { overflow-wrap: anywhere; }
+.taste-facet-key strong { font-family: var(--font-mono); font-size: var(--type-xs);
+  font-weight: 500; color: var(--dim); margin-left: auto; }
+.taste-facet-swatch { width: .55rem; height: .55rem; flex: none; border-radius: 50%; background: var(--petal-c); }
+.taste-profile-section > .taste-modes { margin-top: 2.5rem; }
+.taste-style-tracks-title { font-size: var(--type-lg); margin: 0; }
+.taste-profile .modes-list { list-style: none; margin: 1.25rem 0 0; padding: 0; display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2rem; }
+.taste-profile .mode-row { min-width: 0; padding-top: 1rem; border-top: 1px solid var(--border); }
+.taste-profile .mode-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: .5rem .75rem; }
+.taste-profile .mode-label { font-size: var(--type-body); margin: 0; overflow-wrap: anywhere; }
+.taste-profile .mode-size { font-family: var(--font-mono); font-size: var(--type-xs); color: var(--dim); }
+.taste-profile .mode-new { font-size: var(--type-xs); color: var(--teal); }
+.taste-profile .mode-tracks { list-style: none; padding: 0; margin: 1rem 0 0;
+  display: grid; gap: .8rem; font-size: var(--type-ui); line-height: 1.5; }
+.taste-profile .mode-tracks li { display: grid; grid-template-columns: 3rem minmax(0, 1fr);
+  align-items: center; gap: .75rem; overflow-wrap: anywhere; }
+.taste-profile .mode-track-art { display: block; width: 3rem; height: 3rem;
+  background: var(--placeholder); overflow: hidden; }
+.taste-profile .mode-track-art img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.taste-profile .mode-track-copy { display: flex; flex-direction: column; min-width: 0; gap: .1rem; }
+.taste-profile .mode-tracks .t-artist { color: var(--dim); font-size: var(--type-sm); }
+.taste-profile .chain-bars { gap: .75rem; }
+.taste-profile .chain-row { grid-template-columns: minmax(9rem, 1.2fr) repeat(4, minmax(0, 1fr)); }
+.taste-profile .chain-row .vb-name { width: auto; }
+
+/* Playlist shares pair a whole-blend view with the listening evidence behind each source. */
+.playlist-influence-intro { max-width: 70ch; line-height: 1.75; }
+.playlist-influence-notice { padding: .8rem 1rem; border-inline-start: 2px solid var(--amber);
+  background: color-mix(in srgb, var(--amber) 5%, transparent); color: var(--dim);
+  font-size: var(--type-ui); line-height: 1.65; margin: 1.25rem 0; }
+.playlist-influence-layout { display: grid; grid-template-columns: minmax(14rem, .8fr) minmax(0, 2fr);
+  align-items: start; gap: 2rem 4rem; margin-top: 2rem; }
+.playlist-blend { position: sticky; top: 5rem; margin: 0; min-width: 0; text-align: center; }
+.playlist-blend-chart { position: relative; width: min(100%, 18rem); margin: .25rem auto 1.25rem; }
+.playlist-blend-ring { display: block; width: 100%; height: auto; overflow: visible; }
+.playlist-blend-guide { fill: none; stroke: var(--border); stroke-width: .8; stroke-dasharray: 1 3; }
+.playlist-blend-track { fill: none; stroke: var(--surface); stroke-width: 28; }
+.playlist-blend-segment { fill: none; stroke: var(--playlist-c); stroke-width: 28;
+  transform: rotate(-90deg); transition: opacity .18s ease; }
+.playlist-blend-segment.is-muted { opacity: .18; }
+.playlist-blend-inner { fill: none; stroke: var(--border); stroke-width: .6; }
+.playlist-blend-center { position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: .3rem; pointer-events: none; }
+.playlist-blend-center strong { font-family: var(--font-brand); font-size: clamp(2.3rem, 3vw, 3.25rem);
+  font-weight: 550; letter-spacing: -.055em; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.playlist-blend-center > span { color: var(--dim); font-size: var(--type-xs); }
+.playlist-blend-caption { min-height: 7.5rem; max-width: 28rem; margin: 0 auto; }
+.playlist-blend-caption h3 { font-size: var(--type-body); line-height: 1.5; margin: 0; overflow-wrap: anywhere; }
+.playlist-blend-caption p { color: var(--dim); font-size: var(--type-ui); line-height: 1.65; margin: .5rem 0; }
+.playlist-blend-caption p strong { color: var(--text); font-weight: 600; }
+.playlist-blend-hint { display: block; color: var(--dim); font-size: var(--type-xs); margin-top: .75rem; }
+.playlist-blend-link { display: inline-block; color: var(--accent-2); font-size: var(--type-ui); padding: .4rem; }
+.playlist-influence-ranking { min-width: 0; }
+.playlist-influence-columns { display: grid; grid-template-columns: minmax(0, 1fr) 7rem 6rem;
+  gap: 1rem; color: var(--dim); font-size: var(--type-xs); padding: 0 .75rem .75rem; }
+.playlist-influence-columns > :not(:first-child) { text-align: right; }
+.playlist-influence-list { list-style: none; padding: 0; margin: 0; }
+.playlist-influence-list > li { border-top: 1px solid var(--border); }
+.playlist-influence-row { display: grid; grid-template-columns: minmax(0, 1fr) 7rem 6rem; gap: .85rem 1rem;
+  width: 100%; padding: 1rem .75rem; margin: 0; border: 0; border-radius: 0; box-shadow: none;
+  background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.playlist-influence-row:hover, .playlist-influence-row.is-active {
+  background: color-mix(in srgb, var(--playlist-c) 7%, transparent); box-shadow: none; }
+.playlist-influence-row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.playlist-influence-identity { display: flex; align-items: baseline; gap: .65rem; min-width: 0; }
+.playlist-influence-swatch { display: inline-block; width: .55rem; height: .55rem; flex: none;
+  border-radius: 50%; background: var(--playlist-c); }
+.playlist-influence-identity > span:last-child { min-width: 0; }
+.playlist-influence-title { display: block; font-size: var(--type-body); font-weight: 550;
+  line-height: 1.5; overflow-wrap: anywhere; }
+.playlist-influence-genres { display: block; color: var(--dim); font-size: var(--type-xs);
+  margin-top: .25rem; line-height: 1.5; }
+.playlist-influence-plays { color: var(--dim); font-family: var(--font-mono); font-size: var(--type-sm);
+  line-height: 1.8; text-align: right; font-variant-numeric: tabular-nums; }
+.playlist-influence-share { font-family: var(--font-brand); font-size: 1.4rem; line-height: 1.25;
+  font-weight: 550; text-align: right; font-variant-numeric: tabular-nums; letter-spacing: -.035em; }
+.playlist-influence-mobile-label { display: none; }
+.playlist-influence-bar { grid-column: 1 / -1; display: block; height: .4rem;
+  background: repeating-linear-gradient(to right, var(--border) 0 1px, transparent 1px 25%), var(--surface);
+  border-radius: 1px; overflow: hidden; }
+.playlist-influence-bar i { display: block; height: 100%; background: var(--playlist-c); min-width: 1px; }
+.playlist-influence-scale { display: flex; justify-content: space-between; padding: .6rem .75rem 0;
+  color: var(--dim); font-family: var(--font-mono); font-size: var(--type-xs); }
+.playlist-influence-footnote { border-top: 1px solid var(--border); margin-top: 1.75rem; padding-top: 1rem;
+  font-size: var(--type-xs); line-height: 1.8; }
+.playlist-influence-empty > p:last-child { color: var(--dim); font-size: var(--type-ui); line-height: 1.7; }
+@media (max-width: 1100px) {
+  .playlist-influence-layout { grid-template-columns: minmax(12rem, .7fr) minmax(0, 1.5fr); gap: 2rem; }
+  .playlist-influence-columns, .playlist-influence-row { grid-template-columns: minmax(0, 1fr) 5.5rem 4.5rem; gap: .75rem; }
+}
+@media (max-width: 900px) {
+  .playlist-influence-layout { grid-template-columns: minmax(0, 1fr); }
+  .playlist-blend { position: static; display: grid; grid-template-columns: minmax(0, 14rem) minmax(0, 1fr);
+    gap: 1.5rem; align-items: center; text-align: left; }
+  .playlist-blend-chart { margin: 0; }
+  .playlist-blend-caption { margin: 0; min-height: 0; }
+}
+@media (max-width: 560px) {
+  .playlist-influence-layout { gap: 1.5rem; margin-top: 1.5rem; }
+  .playlist-blend { display: block; text-align: center; }
+  .playlist-blend-chart { max-width: 15rem; margin: 0 auto 1rem; }
+  .playlist-blend-caption { min-height: 6rem; }
+  .playlist-influence-columns { display: none; }
+  .playlist-influence-row { grid-template-columns: minmax(0, 1fr) auto; gap: .6rem; padding: .9rem .5rem; }
+  .playlist-influence-identity { grid-column: 1 / -1; }
+  .playlist-influence-plays { text-align: left; padding-left: 1.2rem; font-family: var(--font-sans); font-size: var(--type-xs); }
+  .playlist-influence-share { font-size: var(--type-body); letter-spacing: 0; }
+  .playlist-influence-mobile-label { display: inline; color: var(--dim); font-family: var(--font-sans);
+    font-size: var(--type-xs); font-weight: 400; }
+  .playlist-influence-share .playlist-influence-mobile-label { margin-left: .25em; }
+  .playlist-influence-scale { padding-inline: .5rem; font-size: .65rem; }
+}
+.taste-control-guide { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2rem; margin: 1.5rem 0; }
+.taste-control-guide dt { font-size: var(--type-ui); font-weight: 650; margin-bottom: .6rem; }
+.taste-control-guide dd { margin: 0; color: var(--dim); font-size: var(--type-sm); line-height: 1.7; }
+.taste-control-guide strong { color: var(--text); font-weight: 500; }
+.taste-genre-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 3rem; margin-top: 1rem; }
+.taste-genre-controls .knob { padding: 1.25rem 0; border-bottom: 1px solid var(--border); }
+.page-taste .knob-head .knob-sub { display: block; margin-top: .25rem; }
+.taste-genre-controls .knob-head label { min-width: 0; flex: 1; text-transform: capitalize; }
+.taste-genre-controls .knob-sub { display: block; text-transform: none; margin-top: .15rem; }
+.taste-genre-controls .knob-reset { margin-left: 0; }
+.knob-origin { color: var(--dim); font-family: var(--font-mono); font-size: var(--type-xs); margin: .6rem 0 0; }
+.knob-scale { display: flex; justify-content: space-between; gap: .5rem; color: var(--dim);
+  font-size: var(--type-xs); margin-top: .25rem; }
+.knob-percentage-scale { position: relative; }
+.knob-default-marker { position: absolute; bottom: calc(100% + .45rem);
+  height: .45rem; border-left: 2px solid var(--text); pointer-events: none; }
+@media (max-width: 1100px) {
+  .taste-profile .modes-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 900px) {
+  .taste-profile-lead { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; }
+}
+@media (max-width: 720px) {
+  .taste-profile .viz-quad { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .taste-control-guide { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+  .taste-facet-key { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem 1rem; }
+  .taste-genre-controls { column-gap: 1.5rem; }
+}
+@media (max-width: 480px) {
+  .taste-profile-section { margin-top: 2.25rem; padding-top: 1.5rem; }
+  .taste-genre-controls { grid-template-columns: minmax(0, 1fr); }
+  .taste-profile .modes-list { grid-template-columns: minmax(0, 1fr); }
+  .taste-profile .chain-row { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .5rem; padding: .5rem 0; }
+  .taste-profile .chain-row .vb-name { grid-column: 1 / -1; }
+  .taste-profile .chain-head > :first-child { display: none; }
+  .taste-profile .chain-head { font-size: .6rem; letter-spacing: 0; }
+}
+
+/* Taste breadth - the genre mix as a colored ribbon (palette matches the rose). The shape IS the
+   breadth: a few wide bands = focused, many even bands = eclectic. */
+.breadth-head { display: flex; align-items: baseline; justify-content: space-between; margin: 0.2rem 0 0.55rem; }
+.breadth-word { font-family: var(--font-sans); font-size: 1.55rem; line-height: 1; text-transform: capitalize; }
+.breadth-idx { font-size: var(--type-ui); color: var(--dim); }
+.breadth-idx small { color: var(--faint); }
+.breadth-ribbon { display: flex; height: 20px; border-radius: 6px; overflow: hidden;
+  background: var(--bg); box-shadow: inset 0 0 0 1px var(--border); }
+.breadth-ribbon .seg { display: block; height: 100%; min-width: 2px; background: var(--petal-c, var(--accent));
+  box-shadow: inset -1px 0 0 color-mix(in srgb, var(--bg) 55%, transparent); transition: filter 0.12s; }
+.breadth-ribbon .seg:hover { filter: brightness(1.2); }
+.breadth-ribbon .seg.other { background: var(--border); }
+
+/* #88 The layered taste model. `.layer-name` / `.layer-scale` are shared by the key card and the
+   modes card so a layer always looks the same wherever it is named. */
+.layer-name { font-family: var(--font-sans); font-size: var(--type-ui); letter-spacing: 0.03em; }
+.layer-scale { font-size: 0.7rem; }
+
+/* The key: one row per layer, naming its timescale, what it is, and which cards draw it. */
+.layer-key-list { list-style: none; margin: 0.7rem 0 .9375rem; padding: 0; }
+.layer-key-list li { display: grid; grid-template-columns: 7rem 8rem 1fr; gap: 0.2rem .9375rem;
+  align-items: baseline; padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
+.layer-key-list li:last-child { border-bottom: none; }
+.layer-what { font-size: var(--type-xs); color: var(--dim); line-height: 1.45; }
+.layer-what em { color: var(--faint); font-style: normal; }
+@media (max-width: 720px) {
+  .layer-key-list li { grid-template-columns: 1fr; gap: 0.15rem; }
+}
+
+/* The modes card: NOW / SESSION / PERMANENT as ribbons over the same modes. Reuses
+   .breadth-ribbon/.seg; this is just the row layout - name + timescale left, the reading right. */
+.mode-layers .layer-row { display: grid; grid-template-columns: 9rem 1fr; gap: 0.2rem 1.1rem;
+  align-items: center; padding: 0.65rem 0; border-bottom: 1px solid var(--border); }
+.mode-layers .layer-row:last-child { border-bottom: none; }
+.mode-layers .layer-meta { display: flex; flex-direction: column; gap: 0.15rem; }
+.mode-layers .layer-reading { min-width: 0; }
+.mode-layers .layer-ribbon { height: 16px; }
+@media (max-width: 640px) {
+  .mode-layers .layer-row { grid-template-columns: 1fr; gap: 0.35rem; }
+}
+
+/* Mood freshness - a liveness/signal indicator (deliberately unlike the breadth spectrum). */
+.freshness { display: flex; align-items: center; gap: 0.55rem; }
+.fr-dot { flex: none; width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--teal);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--teal) 18%, transparent); }
+.freshness.fading .fr-dot { background: var(--ov-3); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ov-3) 18%, transparent); }
+.fr-status { flex: none; font-weight: 650; font-size: var(--type-ui); color: var(--teal); }
+.freshness.fading .fr-status { color: var(--ov-3); }
+.fr-meter { flex: 1; max-width: 11rem; height: 0.45rem; background: var(--surface); border-radius: 3px; overflow: hidden; }
+.fr-meter i { display: block; height: 100%; background: var(--teal); border-radius: 3px; }
+.freshness.fading .fr-meter i { background: var(--ov-3); }
+.fr-val { flex: none; font-size: var(--type-xs); color: var(--dim); }
+
+.source-note { margin: .2rem 0 .8rem; }

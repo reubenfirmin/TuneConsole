@@ -1,6 +1,6 @@
 """Album song titles are display-only; play controls route through /play to the deck tab.
 
-Needs a real browser: the behavior under test is app.js's capture-phase click interceptor, which
+Needs a real browser: the behavior under test is playback-controls.js's capture-phase click interceptor, which
 TestClient cannot run.
 """
 import socket

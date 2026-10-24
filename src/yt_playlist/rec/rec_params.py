@@ -72,10 +72,6 @@ PARAMS = [
               "If you have not added it by then, it is removed. A track held in a generated "
               "playlist stays until that playlist is cleaned up.",
               1, 365, 1, 30, integer=True),
-    ParamSpec("palette_absence_penalty", "Favor familiar genres", "discovery",
-              "Higher gives music in unfamiliar genres less priority, keeping suggestions closer to "
-              "genres in your library. Too high can limit discovery of something different.",
-              0.0, 2.0, 0.05, 0.5),
     ParamSpec("candidate_pool_factor", "Suggestions prepared per slot", "discovery",
               "Tracks prepared for each displayed recommendation. Higher gives rotating suggestions "
               "more variety and requires more processing.",
@@ -267,16 +263,10 @@ PARAMS = [
               "Minimum forgotten favorites needed to show Comfort Listening. "
               "Until then, Throwback, Time Flies, or Recent Picks fills the fourth card.",
               0, 500, 4, 36, integer=True, advanced=True),
-    ParamSpec("onboard_coverage_min", "Getting started: genre coverage needed", "discovery",
-              "Share of tracks needing genre tags before the full Home view appears. "
-              "At least one listening style must also be found.",
-              0.0, 1.0, 0.05, 0.60, advanced=True),
     ParamSpec("onboard_feedback_min", "Getting started: feedback needed", "discovery",
-              "Number of likes and dislikes that unlock the full Home view before enrichment finishes.",
+              "Number of likes and dislikes that ends the getting-started suggestions. "
+              "Personal mixes appear once they are ready.",
               1, 200, 1, 10, integer=True, advanced=True),
-    ParamSpec("onboard_library_min", "Getting started: library tracks needed", "discovery",
-              "Minimum library tracks needed to show a 'from your library' playlist during setup.",
-              0, 500, 5, 30, integer=True, advanced=True),
     # --- Per-mode Personalized PageRank ranker (#57). Experimental A/B: PPR walk vs the current
     # in-mode ordering. All advanced (a tuner sweeps them; hand-setting only degrades quality). ---
     ParamSpec("ppr_alpha", "Experimental ranking: exploration distance", "discovery",

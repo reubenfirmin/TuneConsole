@@ -1,5 +1,6 @@
 """Prepared offers remain disposable; exposure and current eligibility remain authoritative."""
 from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
 from copy import deepcopy
 import logging
 import threading
@@ -41,7 +42,7 @@ def seed(store):
             bundles[str(mid)][lane] = items
             bundles["all"].setdefault(lane, []).extend(items)
     store.modes.replace_modes(modes, [], 1)
-    store.rec_surface.put_proposals("mode_bundles", bundles, 1)
+    store.rec_proposals.put_proposals("mode_bundles", bundles, 1)
     return bundles
 
 
@@ -92,7 +93,7 @@ def test_missing_candidate_dependencies_keep_last_usable_home(store, prepared):
     with store.conn:
         store.conn.execute("DELETE FROM rec_proposals WHERE surface IN ('mode_bundles','fresh_pool')")
     assert home_prepared.prepare(store, 1001) is None
-    assert store.rec_surface.get_proposals(home_prepared.SURFACE) == prepared
+    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
     assert home_prepared.cards(store, prepared, 1001, service(store), record=False).protos
 
 
@@ -166,7 +167,7 @@ def test_ordinary_home_reads_use_prepared_results_without_selection_or_analytics
     for menu in prepared['menus']:
         for proto in menu['protos']:
             proto['tracks'][0]['genre'] = ''
-    store.rec_surface.put_proposals(home_prepared.SURFACE, prepared, 1000)
+    store.rec_proposals.put_proposals(home_prepared.SURFACE, prepared, 1000)
     def forbidden(*a, **kw):
         raise AssertionError("Heavy Home work must stay in background preparation")
     for target, name in ((mode_surfaces, "assemble_cards"), (home_themes, "genre_options"),
@@ -213,7 +214,7 @@ def test_corrupt_prepared_payload_never_breaks_home_routes(store, prepared, dama
         payload['menus'][0]['protos'][0].pop('experiment_id')
     else:
         payload['rediscover'] = None
-    store.rec_surface.put_proposals(home_prepared.SURFACE, payload, 1000)
+    store.rec_proposals.put_proposals(home_prepared.SURFACE, payload, 1000)
     iid = store.identities.upsert_identity('main', 'cred', None, True)
     store.settings.set_setting('last_sync_at', '1000')
     store.settings.set_setting('onboard_dismissed', '1')
@@ -294,17 +295,56 @@ def test_hidden_presync_and_onboarding_menus_are_not_exposures(store, prepared):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     client = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000),
                         base_url="http://127.0.0.1")
-    assert client.get("/").status_code == 200
+    response = client.get("/")
+    assert response.status_code == 200
+    assert 'id="onboarding-feed"' in response.text
+    assert 'id="home-feed"' not in response.text
     assert store.modes.impression_counts() == {}
+    assert store.rec_ledger.scorecard_inputs(0, 2000)[0] == []
+    assert all(t["offered_count"] == 0 for t in store.discovery.get_discovered_tracks())
+    store.modes.replace_modes([], list(range(6)), 1000)
+    # A usable prepared offer opens Home even without modes. Genuine onboarding
+    # requires an unfinished import with no playable prepared mixes.
+    with store.conn:
+        store.conn.execute("DELETE FROM rec_proposals WHERE surface IN ('home_prepared', 'home_tuned')")
+    store.settings.set_setting("last_sync_at", "1000")
+    response = client.get("/")
+    assert response.status_code == 200
+    assert 'id="onboarding-feed"' in response.text
+    assert 'id="home-feed"' not in response.text
+    assert store.modes.impression_counts() == {}
+    assert store.rec_ledger.scorecard_inputs(0, 2000)[0] == []
+    assert all(t["offered_count"] == 0 for t in store.discovery.get_discovered_tracks())
+
+
+def test_visible_prepared_home_without_modes_records_exposures(store, prepared):
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     store.modes.replace_modes([], list(range(6)), 1000)
     store.settings.set_setting("last_sync_at", "1000")
-    assert client.get("/").status_code == 200
-    assert store.modes.impression_counts() == {}
+    client = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000),
+                        base_url="http://127.0.0.1")
+
+    response = client.get("/")
+    assert response.status_code == 200
+    assert 'id="home-feed"' in response.text
+    assert 'id="onboarding-feed"' not in response.text
+    shown = home_prepared.cards(store, prepared, 1000, service(store), record=False).protos
+    assert len(shown) == 4
+    expected = {(p["lane"], t["key"]) for p in shown for t in p["tracks"]}
+    assert all(f'data-key="{key}"' in response.text for _, key in expected)
+    assert store.modes.impression_counts() == Counter(p["mode_id"] for p in shown)
+    impressions = store.rec_ledger.scorecard_inputs(0, 2000)[0]
+    assert len(impressions) == len(expected)
+    assert {(r["lane"], r["identity_key"]) for r in impressions} == expected
+    offered = {t["identity_key"]: t["offered_count"] for t in store.discovery.get_discovered_tracks()}
+    fresh = {key for lane, key in expected if lane == "fresh"}
+    assert fresh
+    assert offered == {key: int(key in fresh) for key in offered}
 
 
 @pytest.mark.parametrize("bad", [None, {}, {"schema": 999}, "bad-json"])
 def test_missing_or_corrupt_cache_queues_preparation_without_ranking(store, monkeypatch, bad):
-    monkeypatch.setattr(store.rec_surface, "get_proposals", lambda key: bad if key == home_prepared.SURFACE else None)
+    monkeypatch.setattr(store.rec_proposals, "get_proposals", lambda key: bad if key == home_prepared.SURFACE else None)
     calls = []
     assert home_prepared.load(store, 1000, lambda: calls.append(True)) is None
     result = home_prepared.cards(store, None, 1000, service(store), lambda: calls.append(True))
@@ -316,12 +356,12 @@ def test_malformed_menu_is_discarded_and_damaged_tuned_cache_keeps_baseline(stor
     corrupt = deepcopy(prepared)
     corrupt["menus"][0]["protos"] = [None]
     assert not home_prepared._valid(corrupt)
-    original = store.rec_surface.get_proposals
+    original = store.rec_proposals.get_proposals
     def get(surface):
         if surface == "home_tuned":
             raise ValueError("corrupt JSON")
         return original(surface)
-    monkeypatch.setattr(store.rec_surface, "get_proposals", get)
+    monkeypatch.setattr(store.rec_proposals, "get_proposals", get)
     assert home_prepared.load(store, 1001) == prepared
 
 
@@ -405,7 +445,7 @@ def test_generation_race_retains_previous_cache(store, prepared, monkeypatch):
         return result
     monkeypatch.setattr(home_themes, "genre_options", changed)
     assert home_prepared.prepare(store, 1002) is None
-    assert store.rec_surface.get_proposals(home_prepared.SURFACE) == prepared
+    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
 
 
 def test_setup_sql_obeys_total_budget_and_preserves_previous_cache(store, prepared, monkeypatch):
@@ -418,7 +458,7 @@ def test_setup_sql_obeys_total_budget_and_preserves_previous_cache(store, prepar
     started = time.monotonic()
     assert home_prepared.prepare(store, 1002) is None
     assert time.monotonic() - started < 1.5
-    assert store.rec_surface.get_proposals(home_prepared.SURFACE) == prepared
+    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
 
 
 def test_small_preparation_batches_accumulate_alternatives_across_attempts(store, prepared, monkeypatch):
@@ -430,7 +470,7 @@ def test_small_preparation_batches_accumulate_alternatives_across_attempts(store
         clock[0] += 6
         return result
 
-    store.rec_surface.put_proposals(home_prepared.SURFACE, None, 1000)
+    store.rec_proposals.put_proposals(home_prepared.SURFACE, None, 1000)
     monkeypatch.setattr(home_prepared.time, 'monotonic', lambda: clock[0])
     monkeypatch.setattr(home_prepared, 'PREPARE_BUDGET_S', 10)
     monkeypatch.setattr(home_cards.HomeCards, 'cards', one_menu)

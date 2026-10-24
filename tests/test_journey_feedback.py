@@ -16,7 +16,7 @@ def test_recs_journey_nudges_journey_weight(store):
     pid = store.playlists.upsert_playlist(iid, "PLG", "Comfort - June 22 2026", 1, "h", 1.0)
     store.playlists.set_playlist_group("PLG", "Generated")
     store.playlists.mark_generated_playlist('PLG')
-    store.rec_surface.set_recipe("PLG", {"journey": "energy_arc", "facets": {}, "dj": {"seed": 1}}, 1.0)
+    store.playlist_recipes.set_recipe("PLG", {"journey": "energy_arc", "facets": {}, "dj": {"seed": 1}}, 1.0)
 
     for _ in range(int(rec_params.THEME_THRESHOLD) + 1):
         r = c.post("/recs/journey", data={"pid": pid, "dir": 1})
@@ -38,7 +38,7 @@ def test_playlist_detail_renders_flow_label(store):
     store.playlists.set_playlist_tracks(pid, [t])
     store.playlists.set_playlist_group("PLG", "Generated")
     store.playlists.mark_generated_playlist('PLG')
-    store.rec_surface.set_recipe("PLG", {"journey": "energy_arc", "facets": {}, "dj": {"seed": 1}}, 1.0)
+    store.playlist_recipes.set_recipe("PLG", {"journey": "energy_arc", "facets": {}, "dj": {"seed": 1}}, 1.0)
 
     html = c.get(f"/playlist/{pid}").text
     assert "Energy arc" in html and "/recs/journey" in html      # Flow label + feedback control

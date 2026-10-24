@@ -3,7 +3,7 @@ import json
 import numpy as np
 import pytest
 
-from yt_playlist.rec import embed, mode_profiles, taste_viz
+from yt_playlist.rec import embedding_vectors as embed, mode_profiles, taste_viz
 
 
 def _groups(store):

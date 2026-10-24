@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from yt_playlist.rec import embed, radio_tuning, rec_params
+from yt_playlist.rec import embedding_vectors as embed, radio_tuning, rec_params
 from yt_playlist.rec.radio_candidates import RadioCandidates, CLUSTER_POOL_LIMIT
 from yt_playlist.rec.radio_directions import RadioDirections
 
@@ -27,7 +27,7 @@ def prepared(store):
             tracks.append(track)
         bundles[str(mid)] = dict(wheelhouse=familiar, fresh=fresh)
     store.modes.replace_modes(modes, retired_ids=[], now=1)
-    store.rec_surface.put_proposals("mode_bundles", bundles)
+    store.rec_proposals.put_proposals("mode_bundles", bundles)
     return tracks
 
 
@@ -83,7 +83,7 @@ def test_enrichment_updates_visible_metadata_and_rejects_known_energy_mismatch(s
 def test_cold_start_keeps_library_and_discovery_bounded(store):
     for i in range(110):
         store.tracks.upsert_track(f"v{i}", f"Song {i}", f"Artist {i}", "", 200)
-    store.rec_surface.put_proposals("fresh_pool", [dict(key=f"fresh{i}", video_id=f"f{i}") for i in range(110)])
+    store.rec_proposals.put_proposals("fresh_pool", [dict(key=f"fresh{i}", video_id=f"f{i}") for i in range(110)])
     c = candidate(store, comfort=0)
     assert len(c.pools["local"]) == CLUSTER_POOL_LIMIT
     assert any(not t.get("_radio_fresh") for t in c.pools["local"])

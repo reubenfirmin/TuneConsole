@@ -5,7 +5,7 @@ function createSensors({version, revision, receiverRevision, warn, send, suppres
 
   async function inject(tabId) {
     try {
-      await chrome.scripting.executeScript({target: {tabId}, files: ["content.js"]});
+      await chrome.scripting.executeScript({target: {tabId}, files: ["content.js", "music_setup.js"]});
       await chrome.scripting.executeScript({target: {tabId}, world: "MAIN", files: ["nowplaying_main.js"]});
       await chrome.scripting.executeScript({target: {tabId}, world: "MAIN", files: ["observer_main.js"]});
       return {ok: true, error: ""};

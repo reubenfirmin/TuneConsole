@@ -17,7 +17,7 @@ import numpy as np
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key, normalize, track_artist
 from yt_playlist.util.thumbnails import best_thumb
-from yt_playlist.rec import artist_model, embed, rec_params, discovery_pool
+from yt_playlist.rec import artist_model, content_model, embed, embedding_vectors as vectors, rec_params, discovery_pool
 from yt_playlist.rec.scoring import playlist_taste, discovery_facet_weight
 from yt_playlist.providers import lastfm
 
@@ -61,7 +61,7 @@ class ContentProjection:
     candidate get a predicted taste vector to score against the per-playlist model, an alternative to
     the heuristic bridge proxy, kept only if it beats it on recall@k (eval_recs.projection_recall).
 
-    §2: the feature basis is the SHARED audio-aware content space from embed.build_content_model
+    §2: the feature basis is the SHARED audio-aware content space from content_model.build_content_model
     (genre family + subgenre + decade + musical key/scale, plus z-scored audio: bpm / energy /
     danceability / moods / loudness / dynamic-complexity), not genre+year alone. Audio is the dominant
     organizing axis in electronic music, so it separates tracks a coarse genre tag cannot (a 172-BPM
@@ -88,7 +88,7 @@ class ContentProjection:
         """Augmented feature row: the content vector (genre/subgenre/decade + audio) concatenated with
         the track artist's collaborative vector (#28 §2c). The artist block lets tracks missing audio
         (or even genre) still ground on the artist-relationship signal; a missing block is zeros."""
-        xc = embed.encode_content(self.model, genre, year, audio)
+        xc = content_model.encode_content(self.model, genre, year, audio)
         xc = np.zeros(self.content_dim) if xc is None else xc
         av = np.zeros(self.adim)
         if artist and self.AV is not None:
@@ -112,7 +112,7 @@ class ContentProjection:
         Evaluation disables the precomputed artist block because its fitting history is shared
         with the reference embedding. Production keeps that relational feature.
         """
-        keys, V, idx = embed.load_vectors(store)
+        keys, V, idx = vectors.load_vectors(store)
         if V is None:
             return None
         dao = store.rec_query
@@ -122,7 +122,7 @@ class ContentProjection:
             idx = {key: row for key, row in idx.items() if key in allowed}
             content = {key: value for key, value in content.items() if key in idx}
             audio = {key: value for key, value in audio.items() if key in idx}
-        model = embed.build_content_model(content, audio)
+        model = content_model.build_content_model(content, audio)
         artists, AV, aidx = (artist_model.load_artist_vectors(store) if include_artist
                              else ([], None, {}))
         refs = store.artists.track_keys(library=True)
@@ -245,7 +245,7 @@ def new_artists(ctx, limit=15, max_anchors=30):
     pt = playlist_taste(store)
     if not pt:
         return []
-    keys, V, idx = embed.load_vectors(store)
+    keys, V, idx = vectors.load_vectors(store)
     anchors = _anchors(store, V, idx, top_n=max_anchors)
     if not anchors:
         return []
@@ -262,10 +262,10 @@ def new_artists(ctx, limit=15, max_anchors=30):
         ref = store.artists.get_artist(name)
         api_name = ref['name'] if ref else name
         nkey = name
-        cached = store.rec_surface.cached_similar(nkey, now)
+        cached = store.artist_similarity.cached_similar(nkey, now)
         if cached is None:
             cached = [[n, m] for n, m in lastfm.similar_artists(api_name, key)]
-            store.rec_surface.cache_similar(nkey, cached, now)
+            store.artist_similarity.cache_similar(nkey, cached, now)
         for n, _ in cached:
             display.setdefault(normalize(n), n)
 
@@ -330,7 +330,7 @@ def run_discovery(ctx, now, budget=25) -> dict:
         store.discovery.upsert_discovered_artist(a["artist"], a["score"], a.get("because"), a.get("fits"),
                                        a.get("thumbnail"), now, genre=a.get("genre"),artist_id=a.get('artist_id'),source=source)
     store.discovery.prune_discovered(owned_albums, saved, dao.library_artists())
-    store.discovery.prune_discovered_tracks(dao.library_keys(), held_keys=store.rec_query.generated_track_keys())
+    store.discovery.prune_discovered_tracks(dao.library_keys(), held_keys=store.rec_eligibility.generated_track_keys())
     cleanup_discovery_pool(store, rng)                     # #52: bound the pool + prune orphaned tracks
     populate_discovered_tracks(ctx, now)                   # #13 P2: out-of-corpus candidate tracks
     try:
@@ -387,7 +387,7 @@ def cleanup_discovery_pool(store, rng=None) -> dict:
     per = rec_params.get_param(store, "discovery_albums_per_artist")
     keep_artists = {a["artist_id"] for a in store.discovery.interested_artists(limit=limit)}
     albums_removed = enforce_album_bounds(store, keep_artists, per, rng)
-    tracks_removed = store.discovery.prune_orphan_discovered_tracks(held_keys=store.rec_query.generated_track_keys())
+    tracks_removed = store.discovery.prune_orphan_discovered_tracks(held_keys=store.rec_eligibility.generated_track_keys())
     return {"albums_removed": albums_removed, "tracks_removed": tracks_removed}
 
 
@@ -397,7 +397,7 @@ def gc_discovery(ctx, now) -> dict:
     cleaned up or promoted. Best-effort; returns the per-pool delete counts {albums, artists, tracks}."""
     store = ctx.store
     gc_days = rec_params.get_param(store, "discovery_gc_days")
-    held = store.rec_query.generated_track_keys()
+    held = store.rec_eligibility.generated_track_keys()
     return store.discovery.gc_discovery_pool(now, gc_days, held)
 
 
@@ -483,7 +483,7 @@ def populate_discovered_tracks(ctx, now, budget=4) -> int:
         if (data or {}).get("tracks"):
             store.settings.set_setting("discovery_tracks_fetched:" + alb["browse_id"], "1")
     if n:
-        embed.build_discovered_content_vectors(store)
+        vectors.build_discovered_content_vectors(store)
     return n
 
 

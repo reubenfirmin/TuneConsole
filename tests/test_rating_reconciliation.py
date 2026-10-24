@@ -44,7 +44,7 @@ def test_neutral_sibling_is_not_an_unlike_of_the_rated_upload(store, status, rev
     _assert_feedback(store, key, status)
     assert store.tracks.item_rating(owner, 'a')['status'] == status
     assert store.tracks.item_rating(owner, 'b')['status'] == 'INDIFFERENT'
-    theme = store.rec_surface.get_theme('artist:Artist')
+    theme = store.rec_signals.get_theme('artist:Artist')
     if status == 'LIKE':
         assert theme == rec_params.SOURCE_W_LIKE_SYNCED
     else:
@@ -54,7 +54,7 @@ def test_neutral_sibling_is_not_an_unlike_of_the_rated_upload(store, status, rev
             "SELECT item_key,created_at FROM rec_feedback WHERE kind='like'")]
     sync.sync_identity(store, owner, _client(list(reversed(items))), now=20)
     _assert_feedback(store, key, status)
-    assert store.rec_surface.get_theme('artist:Artist') == theme
+    assert store.rec_signals.get_theme('artist:Artist') == theme
     assert (store.rec_model.disliked_with_ts() if status == 'DISLIKE' else [
         tuple(row) for row in store.conn.execute(
             "SELECT item_key,created_at FROM rec_feedback WHERE kind='like'")]) == first_feedback
@@ -76,11 +76,11 @@ def test_neutral_account_is_not_an_unlike_from_another_account(store, status, re
         sync.sync_identity(store, owner, _client([('a', value)]), now=10)
     key = store.tracks.identity_key_for_video('a')
     _assert_feedback(store, key, status)
-    theme = store.rec_surface.get_theme('artist:Artist')
+    theme = store.rec_signals.get_theme('artist:Artist')
     for owner, value in reversed(observations):
         sync.sync_identity(store, owner, _client([('a', value)]), now=20)
     _assert_feedback(store, key, status)
-    assert store.rec_surface.get_theme('artist:Artist') == theme
+    assert store.rec_signals.get_theme('artist:Artist') == theme
     assert store.tracks.item_rating(first, 'a')['status'] == status
     assert store.tracks.item_rating(second, 'a')['status'] == 'INDIFFERENT'
     sync.sync_identity(store, first, _client([('a', 'INDIFFERENT')]), now=30)
@@ -108,13 +108,13 @@ def test_explicit_conflicts_use_dislike_then_like_until_all_contributions_are_cl
     disliked_owner, disliked_video, _ = next(c for c in contributions if c[2] == 'DISLIKE')
     sync.sync_identity(store, disliked_owner, _client([(disliked_video, 'INDIFFERENT')]), now=30)
     _assert_feedback(store, key, 'LIKE')
-    assert store.rec_surface.get_theme('artist:Artist') == rec_params.SOURCE_W_LIKE_SYNCED
+    assert store.rec_signals.get_theme('artist:Artist') == rec_params.SOURCE_W_LIKE_SYNCED
     liked_owner, liked_video, _ = next(c for c in contributions if c[2] == 'LIKE')
     sync.sync_identity(store, liked_owner, _client([(liked_video, 'INDIFFERENT')]), now=40)
     _assert_feedback(store, key, 'INDIFFERENT')
     # Reliking still cannot replay a previously graduated recording.
     sync.sync_identity(store, liked_owner, _client([(liked_video, 'LIKE')]), now=50)
-    assert store.rec_surface.get_theme('artist:Artist') == rec_params.SOURCE_W_LIKE_SYNCED
+    assert store.rec_signals.get_theme('artist:Artist') == rec_params.SOURCE_W_LIKE_SYNCED
 
 
 @pytest.mark.parametrize('status', ['LIKE', 'DISLIKE'])
@@ -217,7 +217,7 @@ def test_reassociation_moves_only_the_rated_uploads_feedback_without_replaying_l
     target_key = store.tracks.identity_key_for_video('c')
     ratings.record_confirmed(store, owner, 'a', status, 10)
     ratings.record_confirmed(store, owner, 'b', 'INDIFFERENT', 11)
-    original_theme = store.rec_surface.get_theme('artist:Artist')
+    original_theme = store.rec_signals.get_theme('artist:Artist')
     raw = store.tracks.item_rating(owner, 'a')
     store.tracks.associate_youtube_item('a', target_recording, source='corrected',
                                        evidence={'review': 'different recording'}, now=20)
@@ -227,16 +227,16 @@ def test_reassociation_moves_only_the_rated_uploads_feedback_without_replaying_l
         store.tracks.associate_youtube_item('b', target_recording, source='verified',
                                            evidence={'review': 'same recording'}, now=21)
     assert store.tracks.item_rating(owner, 'a') == raw
-    assert store.rec_surface.get_theme('artist:Artist') == original_theme
-    assert store.rec_surface.get_theme('artist:Other artist') is None
+    assert store.rec_signals.get_theme('artist:Artist') == original_theme
+    assert store.rec_signals.get_theme('artist:Other artist') is None
     sync.sync_identity(store, owner, _client([('a', status), ('b', 'INDIFFERENT')]), now=30)
     _assert_feedback(store, target_key, status)
-    assert store.rec_surface.get_theme('artist:Other artist') is None
+    assert store.rec_signals.get_theme('artist:Other artist') is None
     ratings.record_confirmed(store, owner, 'a', 'INDIFFERENT', 40)
     _assert_feedback(store, target_key, 'INDIFFERENT')
     ratings.record_confirmed(store, owner, 'a', status, 50)
     # Correcting identity is not a second positive action to graduate on the new recording.
-    assert store.rec_surface.get_theme('artist:Other artist') is None
+    assert store.rec_signals.get_theme('artist:Other artist') is None
 
 
 def test_sync_confirmation_keeps_pending_live_action_timestamp_and_provenance(store):
@@ -246,7 +246,7 @@ def test_sync_confirmation_keeps_pending_live_action_timestamp_and_provenance(st
     sync.sync_identity(store, owner, _client([('a', 'LIKE')]), now=20)
     key = store.tracks.identity_key_for_video('a')
     assert store.rec_model.recent_liked_with_ts() == [(key, 10)]
-    assert store.rec_surface.get_theme('artist:Artist') == rec_params.SOURCE_W_LIKE
+    assert store.rec_signals.get_theme('artist:Artist') == rec_params.SOURCE_W_LIKE
     assert store.tracks.item_rating(owner, 'a') == {
         'status': 'LIKE', 'source': 'api', 'observed_at': 10}
 
@@ -270,7 +270,7 @@ def test_partial_reassociation_reveals_retained_like_and_moves_dislike(store, re
     _assert_feedback(store, target_key, 'DISLIKE')
     assert store.tracks.item_rating(owner, 'a')['status'] == 'DISLIKE'
     assert store.tracks.item_rating(owner, 'b')['status'] == 'LIKE'
-    assert store.rec_surface.get_theme('artist:Other artist') is None
+    assert store.rec_signals.get_theme('artist:Other artist') is None
     assert store.tracks.pending_action_ratings(owner) == []
 
 
@@ -289,6 +289,36 @@ def _learning_state(store):
     # attribute repeated learning to either artist, so destination-only checks miss it.
     return {table: [tuple(row) for row in store.conn.execute(f'SELECT * FROM {table} ORDER BY 1')]
             for table in ('rec_theme', 'rec_weights', 'rec_grad_log')}
+
+
+@pytest.mark.parametrize('source', ['api', 'sync'])
+def test_clearing_feedback_cannot_relearn_retained_likes(store, source):
+    owner = store.identities.upsert_identity('Main', 'bridge', None, True)
+    store.tracks.upsert_track('rated', 'Song', 'Artist', 'Album', 200)
+    key = store.tracks.identity_key_for_video('rated')
+    rec_params.set_param(store, 'theme_threshold', 0.2)
+    ratings.record_observations(store, owner, {'rated': 'LIKE'}, source=source, now=10)
+    store.rec_model.mark_graduated_once('old dislike|artist', 'dislike_grad', 5)
+    learning = _learning_state(store)
+    assert learning['rec_theme'] and learning['rec_weights'] and learning['rec_grad_log']
+    guards = [tuple(row) for row in store.conn.execute(
+        "SELECT item_key,kind,created_at FROM rec_feedback WHERE kind IN ('like_grad','dislike_grad') "
+        "ORDER BY item_key")]
+
+    for now in (20, 30, 40):
+        retained = store.tracks.item_rating(owner, 'rated')
+        store.rec_model.record_feedback('for_you', 'dismissed|artist', 'dismiss', now=now)
+        store.rec_model.clear_feedback()
+        assert store.tracks.item_rating(owner, 'rated') == retained
+        assert store.rec_model.recent_liked_keys() == []
+        assert store.rec_model.suppressed_keys('for_you', now) == set()
+        assert [tuple(row) for row in store.conn.execute(
+            'SELECT item_key,kind,created_at FROM rec_feedback ORDER BY item_key')] == guards
+        ratings.reconcile_pending(store, owner, None)
+        sync.sync_identity(store, owner, _client([('rated', 'LIKE')]), now=now)
+        _assert_feedback(store, key, 'LIKE')
+        assert store.rec_model.like_provenance(key) == ('action' if source == 'api' else 'sync')
+        assert _learning_state(store) == learning
 
 
 @pytest.mark.parametrize('status', ['LIKE', 'DISLIKE'])

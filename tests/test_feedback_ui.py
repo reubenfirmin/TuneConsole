@@ -33,7 +33,7 @@ def test_home_proto_curation_not_pre_listen_taste_chips(store):
         payload["1"][surf] = [{"key": f"{surf}{i}", "video_id": f"{surf}{i}", "title": f"Song {surf} {i}",
                                "artist": f"Art {i}", "album": "", "thumbnail": None,
                                "plays": 0, "reason": "", "lane": "", "genre": ""} for i in range(4)]
-    store.rec_surface.put_proposals("mode_bundles", payload, 1000.0)
+    store.rec_proposals.put_proposals("mode_bundles", payload, 1000.0)
     prepare_home(store)
     html = c.get("/home/cards").text
     assert "gen-rm" in html and "Remove from this playlist" in html
@@ -76,7 +76,7 @@ def test_feedback_axis_routes_through_graduation_and_eventually_moves_weight(sto
     # event moves the ledger but leaves the permanent weight neutral (it is below THEME_THRESHOLD).
     c.post("/recs/feedback", data={"item": "a|b", "kind": "less", "axis": "era:1990"})
     assert store.rec_model.get_weights(now=1.0).get("era:1990", 1.0) == 1.0     # one event: ledger only, weight untouched
-    assert (store.rec_surface.get_theme("era:1990") or 0) < 0
+    assert (store.rec_signals.get_theme("era:1990") or 0) < 0
 
     # Sustained feedback crosses the threshold and graduates the weight.
     for _ in range(3):

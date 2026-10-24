@@ -52,7 +52,7 @@ def test_cold_jobs_coalesce_with_learning_and_publish_recap_route_and_cleanup(st
     assert worker.jobs.has('trends') and worker.jobs.has('cleanup')
     worker._run_pending()
     assert rebuilds == [True]
-    assert store.rec_surface.get_proposals('trend_rollups')['story']['month'] == '2026-09'
+    assert store.rec_proposals.get_proposals('trend_rollups')['story']['month'] == '2026-09'
     card = next(c for c in actions.take_action(store, now[0], {}) if c.kind == 'cleanup')
     assert card.badge == '1'
     app = create_app(store, lambda: {}, now_fn=lambda: now[0])
@@ -85,13 +85,13 @@ def test_source_changes_refresh_only_relevant_jobs_and_month_rollover(store, mon
     worker.projections.retry_at.clear()
     store.playlists.upsert_playlist(iid, 'new-empty', 'Synced empty playlist', 0, '', now[0])
     tick(worker)
-    assert store.rec_surface.get_proposals('cleanup')['count'] == 1
+    assert store.rec_proposals.get_proposals('cleanup')['count'] == 1
     worker.projections.retry_at.clear()
     now[0] = timestamp('2026-11')
     worker.projections.poll()
     assert worker.jobs.has('trends') and not worker.jobs.has('cleanup')
     worker._run_pending()
-    assert store.rec_surface.get_proposals('trend_rollups')['story']['month'] == '2026-10'
+    assert store.rec_proposals.get_proposals('trend_rollups')['story']['month'] == '2026-10'
 
 
 @pytest.mark.parametrize('kind', ['trends', 'cleanup'])
@@ -101,7 +101,7 @@ def test_conflicting_publication_retries_with_backoff_and_keeps_last_good(store,
     worker = worker_for(store, monkeypatch, now)
     tick(worker)
     surface = maintenance.SURFACES[kind]
-    saved = store.rec_surface.get_proposals(surface)
+    saved = store.rec_proposals.get_proposals(surface)
     worker.projections.completed.pop(kind)
     worker.projections.retry_at.clear()
     owner, name = (trend_rollups, '_calculate') if kind == 'trends' else (analysis, 'cleanup_summary')
@@ -115,7 +115,7 @@ def test_conflicting_publication_retries_with_backoff_and_keeps_last_good(store,
 
     monkeypatch.setattr(owner, name, conflict)
     tick(worker)
-    assert store.rec_surface.get_proposals(surface) == saved
+    assert store.rec_proposals.get_proposals(surface) == saved
     assert worker.projections.failures[kind] == 1
     assert worker.projections.retry_at[kind] > maintenance.time.monotonic()
     worker.projections.poll()
@@ -124,7 +124,7 @@ def test_conflicting_publication_retries_with_backoff_and_keeps_last_good(store,
     worker.projections.retry_at.clear()
     tick(worker)
     assert worker.projections.failures[kind] == 0
-    assert store.rec_surface.get_proposals('cleanup')['count'] == 1
+    assert store.rec_proposals.get_proposals('cleanup')['count'] == 1
 
 
 def test_restart_and_external_import_are_not_lost_and_shutdown_stops_admission(tmp_path, monkeypatch):
@@ -148,7 +148,7 @@ def test_restart_and_external_import_are_not_lost_and_shutdown_stops_admission(t
         store.playlists.upsert_playlist(iid, 'offline-empty', 'Offline change', 0, '', now[0])
         worker = worker_for(store, monkeypatch, now)
         tick(worker)
-        assert store.rec_surface.get_proposals('cleanup')['count'] == 1
+        assert store.rec_proposals.get_proposals('cleanup')['count'] == 1
         worker.shutdown()
         worker.projections.completed.clear()
         worker.projections.poll()
@@ -170,6 +170,44 @@ def test_full_rebuild_failure_does_not_swallow_summary_jobs(store, monkeypatch):
     monkeypatch.setattr(worker._stop, 'wait', lambda timeout: next(waits))
     worker.trigger()
     tick(worker)
-    assert store.rec_surface.get_proposals('trend_rollups')['story']
-    assert store.rec_surface.get_proposals('cleanup') == {'count': 0, 'thumbnails': []}
+    assert store.rec_proposals.get_proposals('trend_rollups')['story']
+    assert store.rec_proposals.get_proposals('cleanup') == {'count': 0, 'thumbnails': []}
     assert not worker.projections.active
+
+
+def test_poll_shares_one_scoped_capture_despite_unrelated_key_churn(store, monkeypatch):
+    seed(store)
+    worker = worker_for(store, monkeypatch, [timestamp('2026-10')])
+    captures = []
+    original = store._snapshot_revisions.capture
+
+    def capture(*args, **kwargs):
+        result = original(*args, **kwargs)
+        captures.append(result)
+        return result
+
+    monkeypatch.setattr(store._snapshot_revisions, 'capture', capture)
+    worker.projections.poll()
+    assert len(captures) == 1
+    baseline = captures.pop()
+    assert baseline
+    assert all(not key or (table, key) == ('settings', 'key:takeout_imported_at')
+               for table, key in baseline)
+    with store.conn:
+        store.conn.executemany('INSERT INTO settings VALUES (?,?)',
+                               [(f'unrelated-{i}', 'value') for i in range(4000)])
+        store.conn.execute("DELETE FROM settings WHERE key LIKE 'unrelated-%'")
+    assert len(original()) > 4000
+    worker.projections.poll()  # Coalesced jobs are still active on this idle tick.
+    assert captures == [baseline]
+    assert worker.projections.active == {'trends', 'cleanup'}
+
+
+def test_local_import_setting_invalidates_only_trends_inputs(store):
+    now = timestamp('2026-10')
+    before = {kind: maintenance.inputs(store, kind, now) for kind in maintenance.SURFACES}
+    store.settings.set_setting('unrelated', 'new')
+    assert {kind: maintenance.inputs(store, kind, now) for kind in maintenance.SURFACES} == before
+    store.settings.set_setting('takeout_imported_at', '123')
+    assert maintenance.inputs(store, 'trends', now) != before['trends']
+    assert maintenance.inputs(store, 'cleanup', now) == before['cleanup']

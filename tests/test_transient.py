@@ -14,7 +14,7 @@ def _jazz_track(store, vid, title, artist="A", year="1960"):
 
 def test_mood_event_moves_facet_lean(store):
     k = _jazz_track(store, "v1", "S")
-    store.rec_surface.record_mood([k], -1, now=10.0)                       # "less" this jazz vibe
+    store.rec_signals.record_mood([k], -1, now=10.0)                       # "less" this jazz vibe
     leans = transient.facet_leans(store, now=10.0)
     assert any(f.startswith("genre:") and v < 0 for f, v in leans.items())
     assert leans.get("artist:A", 0.0) < 0
@@ -61,8 +61,8 @@ def test_facet_multiplier_uses_params(store):
 
 def test_centroid_tilt_newest_dominates_and_persists(store):
     V, idx = np.array([[1.0, 0.0]]), {"a|x": 0}
-    store.rec_surface.record_mood(["a|x"], 1, now=1000.0)
-    store.rec_surface.record_mood(["a|x"], -1, now=1001.0)                 # newest: away
+    store.rec_signals.record_mood(["a|x"], 1, now=1000.0)
+    store.rec_signals.record_mood(["a|x"], -1, now=1001.0)                 # newest: away
     assert transient.centroid_tilt(store, 1001.0, V, idx)[0] < 0
     # #85: this used to assert no wall-clock decay; now a single event fades on the clock (mood_halflife_d)
     # Its fading magnitude stays defined 30d out, rather than being normalized back to full strength.

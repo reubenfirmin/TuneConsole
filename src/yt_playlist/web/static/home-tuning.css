@@ -1,0 +1,463 @@
+/* --- Home: taste fingerprint + steering --- */
+.fingerprint { display: grid; gap: .8125rem; margin-bottom: 1.375rem; }
+/* Collapse bar: the always-visible toggle row; the rest of the panel (.fp-collapsible) folds away. */
+.fp-bar { display: flex; align-items: center; gap: .8125rem; }
+.fp-collapse { background: none; border: none; cursor: pointer; padding: 0; color: var(--text);
+  font-weight: 700; font-size: var(--type-body); letter-spacing: 0.01em; display: inline-flex; align-items: center; gap: 0.45rem; }
+/* Plain header controls: a subtle colour shift, not a filled button treatment. */
+.fp-collapse:hover { color: var(--accent-2); background-image: none; box-shadow: none; }
+.fp-caret { display: inline-flex; color: var(--dim); width: 1.125rem; }
+.fp-reset { margin-left: auto; background: none; border: 1px solid var(--border-2); color: var(--dim);
+  font-size: var(--type-xs); padding: 0.2rem 0.6rem; border-radius: 999px; cursor: pointer; white-space: nowrap; }
+.fp-reset:hover { border-color: var(--danger); color: var(--danger); background-image: none; box-shadow: none; }
+.fp-footer { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem;
+  border-top: 1px solid var(--border-2); padding-top: .8125rem; }
+.fp-footer p { flex: 1 1 15rem; margin: 0; }
+.fp-collapsible { display: grid; gap: .8125rem; margin-top: .8125rem; }
+.fp-head { display: flex; align-items: center; gap: .9375rem; flex-wrap: wrap; }
+/* Row tools live OVER THE LABEL, not the slider: pinned to the label's right edge and revealed only
+   when you hover the label (never the slider, which stays fully usable). Self-contained chips so they
+   read over the label text. They consume no column width (absolute), so columns don't gain a gap. */
+.fp-name-wrap { position: relative; flex: none; display: inline-flex; align-items: center; }
+.fp-row-tools { position: absolute; right: 0; top: 50%; transform: translateY(-50%);
+  display: inline-flex; align-items: center; gap: 0.15rem; opacity: 0; pointer-events: none;
+  transition: opacity 0.12s ease; }
+.fp-name-wrap:hover .fp-row-tools, .fp-name-wrap:focus-within .fp-row-tools,
+.fp-row-tools:hover { opacity: 1; pointer-events: auto; }
+.fp-icon-btn { background: var(--surface-2); border: 1px solid var(--border); cursor: pointer;
+  color: var(--dim); line-height: 1; font-size: var(--type-xs); padding: 0.12rem 0.32rem; border-radius: 5px; }
+.fp-expand-btn:hover { color: var(--light-source); border-color: var(--control-selected-border); background: var(--control-selected-hover); }
+.fp-expand-btn { display: inline-flex; align-items: center; justify-content: center;
+  min-width: 1.75rem; min-height: 1.75rem; padding: .2rem; }
+.fp-remove-btn { font-size: var(--type-ui); }
+.fp-remove-btn:hover { color: var(--light-source); border-color: var(--danger); background: var(--danger); }
+.fp-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1.2rem; }
+.fp-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.12em; color: var(--faint); }
+.fp-hint { margin: 0; }
+.fp-row { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.35rem; }
+/* Fixed width + ellipsis so a long name (e.g. "progressive trance") can't push the slider right; the
+   full name is in the title tooltip. Fixed width also keeps the over-label tools at a consistent x. */
+.fp-name { width: 6.5rem; flex: none; font-size: var(--type-ui); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+/* Drill-down subgenres: a quiet group; the NAME is indented (within its fixed width) so the slider
+   stays aligned with the family sliders, important so the neutral guide line below lines up too. */
+.fp-expand-btn .ui-arrow { transform: rotate(-90deg); }
+.fp-expand-btn.on { color: var(--accent-2); }
+.fp-expand-btn.on .ui-arrow { transform: none; }
+.fp-subgenres { margin: 0.1rem 0 0.35rem; }
+.fp-subname { padding-left: .9375rem; font-size: var(--type-sm); color: var(--dim); }
+/* Neutral (1.0) guide: a faint dashed line down the midpoint of a bar set, so you can see where a
+   slider sits at neutral (centre) vs nudged. The track runs from the label span (6.5rem name + 0.6rem
+   gap = 7.1rem) to the column's right edge, so its centre is 50% + half that span (3.55rem). */
+.fp-barset { position: relative; }
+.fp-barset::before { content: ""; position: absolute; top: 0.15rem; bottom: 0.15rem;
+  left: calc(50% + 3.55rem); border-left: 1px dashed var(--border-2); pointer-events: none; }
+.fp-slider { flex: 1; cursor: grab; }
+.fp-slider:active { cursor: grabbing; }
+.fp-slider-wrap { position: relative; flex: 1; display: inline-flex; align-items: center; }
+.fp-slider-wrap .fp-slider { flex: 1; }
+/* Breadth master dial (#7): a compact inline control in the header: [Breadth] Focused (-•-) Eclectic
+   "naturally balanced". Its own line on narrow screens (the header wraps). */
+.fp-breadth { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }
+/* flex-basis (not width) fixes the size: the global input[type=range]{width:100%} outranks a plain
+   .class width, but a flex item sizes from its basis: same trick the genre .fp-slider uses. */
+.fp-breadth-slider { cursor: grab; }
+.fp-breadth-slider:active { cursor: grabbing; }
+/* Center-anchored fill (#2): paint the track from neutral (centre, 50%) out to the thumb (--p) so you
+   can see how far a bar is nudged and in which direction. --p is the thumb position as a %, set inline
+   per-render and updated live on drag (delegated handler in app.js). The selector includes the element
+   so it outranks the base input[type=range]{background:...}. */
+input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
+  background: linear-gradient(90deg,
+    var(--border) min(var(--p, 50%), 50%),
+    var(--accent-2) min(var(--p, 50%), 50%), var(--accent-2) max(var(--p, 50%), 50%),
+    var(--border) max(var(--p, 50%), 50%));
+}
+/* Breadth tick (#1): a marker at the transient model's CURRENT measured breadth (0=focused..1=eclectic),
+   so you see where you naturally sit vs where the thumb (your bias steer) is. */
+.fp-breadth-track { position: relative; display: inline-flex; align-items: center; flex: 0 0 8.5rem; }
+.fp-breadth-track .fp-breadth-slider { flex: 1; }
+.fp-breadth-tick { position: absolute; top: 50%; transform: translate(-50%, -50%);
+  width: 2px; height: 13px; background: var(--text); border-radius: 1px; pointer-events: none; }
+.fp-breadth-end { font-size: var(--type-xs); color: var(--faint); }
+.fp-breadth-note { font-size: var(--type-xs); color: var(--dim); font-style: italic; }
+/* Home genre picker (autosuggest combo, reuses the Clusters .cg-box widget). The wrapper is the
+   positioning context for the absolute .cg-suggest dropdown; small gap below the genre sliders. */
+.fp-genre-pick { position: relative; margin-top: 0.5rem; }
+/* Shrink the borrowed Clusters .cg-box pill to row scale here: its default (2.65rem tall, 1.3rem
+   radius) reads as jumbo next to the slim slider rows. */
+.fp-genre-pick .cg-box { min-height: 0; padding: 0.28rem 0.5rem; border-radius: 8px; border-width: 1px; }
+.fp-genre-pick .cg-box input { font-size: var(--type-sm); padding: 0; min-width: 6rem; }
+.fp-genre-pick .cg-icon { font-size: var(--type-sm); }
+.fp-genre-empty { margin: 0.4rem 0 0; }
+.steer-toast { background: var(--accent-soft); border: 1px solid var(--border-2); border-radius: 8px;
+  padding: 0.5rem .8125rem; color: var(--accent-2); margin-bottom: .8125rem; }
+[x-cloak] { display: none !important; }
+
+.page-home .fingerprint {
+  margin-block-start: .9rem;
+  padding: .75rem .9rem;
+  background: var(--surface-subtle);
+  border: 0;
+  border-inline-start: 3px solid var(--accent-2);
+}
+.page-home .fp-tabs {
+  display: flex;
+  gap: .25rem;
+  border-bottom: 1px solid var(--border-strong);
+}
+.page-home .fp-tabs [role="tab"] {
+  padding: .5rem .75rem;
+  color: var(--dim);
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  box-shadow: none;
+}
+.page-home .fp-tabs [aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent-2); }
+.page-home .fp-tab-panel { display: grid; gap: 1rem; padding-top: .25rem; }
+.page-home .fp-tab-panel > p { margin: 0; }
+.page-home .fp-mix-form { display: grid; gap: 1.25rem; margin: 0; }
+.page-home .fp-mix-fields { display: grid; gap: .8rem; min-width: 0; margin: 0; padding: 0; border: 0; }
+.page-home .fp-mix-fields legend { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.page-home .fingerprint [hidden] { display: none; }
+.page-home .fp-genre-search {
+  appearance: none;
+  width: 100%;
+  min-height: 2.75rem;
+  padding: .65rem .8rem;
+  font-family: var(--font-sans);
+  font-size: var(--type-ui);
+  color: var(--text);
+  caret-color: var(--text);
+  background: var(--surface-sunk);
+  border: 1px solid var(--border-strong);
+  border-radius: .45rem;
+  box-shadow: none;
+}
+.page-home .fp-genre-search:focus, .page-home .fp-genre-search:focus-visible {
+  outline: none;
+  border-color: var(--accent-2);
+  box-shadow: none;
+}
+.page-home .fp-genre-pick .cg-box { flex-wrap: nowrap; min-height: 2.75rem; padding: .35rem .65rem; background: var(--surface-sunk); border-color: var(--border-strong); border-radius: .45rem; box-shadow: none; }
+.page-home .fp-genre-pick .cg-box:focus-within { border-color: var(--accent-2); box-shadow: none; }
+.page-home .fp-genre-pick .cg-box input, .page-home .fp-genre-pick .cg-box input:focus-visible {
+  width: 0;
+  min-width: 0;
+  color: var(--text);
+  caret-color: var(--text);
+  background: transparent;
+  border: 0;
+  outline: none;
+  box-shadow: none;
+}
+.page-home .fp-genre-pick .cg-suggest { position: static; margin-top: .35rem; max-height: 12rem; background: var(--surface-sunk); border-color: var(--border-strong); box-shadow: none; }
+.page-home .fp-genre-options { display: flex; flex-wrap: wrap; align-content: start; gap: .5rem; max-height: 12rem; overflow-y: auto; padding: .2rem; }
+.page-home .fp-genre-choice { position: relative; margin: 0; cursor: pointer; }
+.page-home .fp-genre-choice input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.page-home .fp-genre-choice span {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  min-height: 2.75rem;
+  padding: .55rem .85rem;
+  color: var(--text);
+  background: var(--surface-sunk);
+  border: 1px solid var(--border-strong);
+  border-radius: .45rem;
+  font-size: var(--type-ui);
+  font-weight: 550;
+  text-transform: capitalize;
+}
+.page-home .fp-genre-choice:hover span { border-color: var(--genre-tint); }
+.page-home .fp-genre-choice input:checked + span { border-color: var(--genre-tint); background: color-mix(in srgb, var(--genre-tint) 18%, var(--surface-sunk)); }
+.page-home .fp-genre-choice input:focus-visible + span { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.page-home .fp-mix-fields:disabled { opacity: .55; }
+.page-home .fingerprint #home-make-mixes {
+  justify-self: end;
+  min-width: 9rem;
+  min-height: 2.75rem;
+  padding: .6rem 1rem;
+  border: 1px solid var(--accent-2);
+  border-radius: .45rem;
+  color: var(--surface-sunk);
+  background: var(--accent-2);
+  box-shadow: none;
+  font-size: var(--type-ui);
+  font-weight: 650;
+}
+.page-home .fingerprint #home-make-mixes:disabled { opacity: .45; cursor: default; }
+.page-home .fp-submit-loading { display: none; }
+.page-home .fp-mix-form.htmx-request .fp-submit-label { display: none; }
+.page-home .fp-mix-form.htmx-request .fp-submit-loading { display: inline; }
+.page-home .fp-theme-status { font-size: var(--type-xs); color: var(--dim); }
+.page-home .fp-theme-status:empty { display: none; }
+.page-home .fp-mood-mark { display: grid; place-items: center; width: 1.7rem; height: 1.7rem; color: var(--surface-sunk); background: var(--accent-2); font-size: 1.05rem; }
+.page-home .fingerprint .fp-reset { margin-left: 0; }
+.page-home .fingerprint .fp-close {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  margin-inline-start: .25rem;
+  padding: 0;
+  color: var(--dim);
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  font-size: 1.45rem;
+  line-height: 1;
+}
+.page-home .fingerprint .fp-close:hover { color: var(--text); background: var(--surface-subtle); box-shadow: none; }
+
+/* The launcher stays on the board. A native modal makes the rest of the page inert. */
+.page-home .dash-directions { position: relative; }
+.page-home .dash-directions .fingerprint {
+  position: absolute;
+  z-index: 8;
+  top: calc(min(44rem, calc(100dvh - 9rem)) / 2);
+  left: 50%;
+  margin: 0;
+  transform: translate(-50%, -50%);
+  width: 4rem;
+  height: 4rem;
+  padding: .35rem;
+  overflow: visible;
+  border: 3px solid var(--surface-sunk);
+  border-radius: 50%;
+  background: var(--accent-2);
+  box-shadow: 0 .5rem 2rem color-mix(in srgb, var(--shadow-ink) 65%, transparent);
+  transition: background .25s ease, border-color .25s ease, box-shadow .3s ease;
+}
+.page-home .dash-directions .fingerprint:has(> .fp-collapse:is(:hover, :focus-visible)) {
+  background: var(--mix-tune-hover);
+  border-color: var(--mix-tune-hover-ink);
+  box-shadow: 0 0 0 2px var(--mix-tune-hover-ink),
+              0 0 1.4rem color-mix(in srgb, var(--mix-tune-hover) 45%, transparent),
+              0 0 2.5rem color-mix(in srgb, var(--mix-tune-hover-ink) 35%, transparent);
+}
+.page-home .dash-directions .fingerprint .fp-collapse {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  color: var(--surface-sunk);
+  background: transparent;
+  border-radius: 50%;
+  transition: color .25s ease;
+}
+.page-home .dash-directions .fingerprint .fp-collapse:is(:hover, :focus-visible) {
+  color: var(--mix-tune-hover-ink);
+}
+.page-home .dash-directions .fingerprint .fp-mood-mark {
+  width: 1.75rem;
+  height: 1.75rem;
+  color: inherit;
+  background: transparent;
+  transition: transform .3s cubic-bezier(.2, .85, .2, 1);
+}
+.page-home .dash-directions .fingerprint .fp-collapse:is(:hover, :focus-visible) .fp-mood-mark {
+  transform: rotate(-12deg) scale(1.12);
+}
+.page-home .dash-directions .fp-tuning-dot {
+  position: absolute;
+  top: -.15rem;
+  right: -.15rem;
+  width: .7rem;
+  height: .7rem;
+  border: 2px solid var(--surface-sunk);
+  border-radius: 50%;
+  background: var(--warn);
+}
+.page-home .fp-dialog {
+  position: fixed;
+  inset: 0;
+  width: min(42rem, calc(100% - 2rem));
+  max-width: none;
+  max-height: calc(100dvh - 3rem);
+  margin: auto;
+  padding: 1.25rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: .75rem;
+  box-shadow: 0 1.5rem 5rem color-mix(in srgb, var(--shadow-ink) 65%, transparent);
+}
+.page-home .fp-dialog::backdrop { background: color-mix(in srgb, var(--surface-sunk) 75%, transparent); backdrop-filter: blur(3px); }
+.page-home .fp-dialog-head { justify-content: space-between; margin-bottom: 1rem; }
+/* A small listening desk: clear choices, tactile cards, and room to play. */
+.page-home .fp-dialog {
+  width: min(44rem, calc(100% - 1.5rem));
+  max-height: calc(100dvh - 2rem);
+  padding: 1.4rem;
+  border-radius: 1.25rem;
+  overflow: hidden;
+  background: radial-gradient(ellipse at 0 0, color-mix(in srgb, var(--accent-2) 9%, transparent), transparent 65%), var(--surface-raised);
+}
+.page-home .fp-dialog[open] { display: flex; flex-direction: column; }
+.page-home .fp-dialog-head { flex: none; margin-bottom: 1.15rem; }
+.page-home .fp-title-group { display: flex; align-items: center; gap: .85rem; min-width: 0; }
+.page-home #fp-title { display: block; font-size: 1.35rem; line-height: 1.3; letter-spacing: -.035em; }
+.page-home .fp-record { display: grid; place-items: center; flex: none; width: 3rem; height: 3rem; border-radius: 50%;
+  background: repeating-radial-gradient(circle, var(--surface-sunk) 0 3px, color-mix(in srgb, var(--mix-tune-hover-ink) 55%, var(--surface-sunk)) 4px, var(--surface-sunk) 5px 7px);
+  box-shadow: 0 0 0 1px var(--mix-tune-hover-ink), 0 3px 8px color-mix(in srgb, var(--mix-tune-hover-ink) 25%, transparent); transform: rotate(-20deg); }
+.page-home .fp-record i { width: 1.15rem; height: 1.15rem; border: .4rem solid var(--mix-tune-hover); border-radius: 50%; background: var(--mix-tune-hover-ink); }
+.page-home .fp-collapsible { display: flex; flex-direction: column; overflow: hidden; min-height: 0; gap: 1rem; margin: 0; }
+.page-home .fp-tabs { flex: none; gap: .25rem; padding: .25rem; border: 1px solid var(--border); border-radius: .8rem; background: var(--surface-sunk); }
+.page-home .fp-tabs [role="tab"] { display: flex; justify-content: center; align-items: center; gap: .4rem;
+  flex: 1; min-width: 0; min-height: 2.6rem; padding: .5rem .4rem; border: 1px solid transparent; border-radius: .6rem; font-size: var(--type-ui); }
+.page-home .fp-tabs [aria-selected="true"] { border-color: var(--border-strong); background: var(--surface-raised); color: var(--text); }
+.page-home .fp-tabs [role="tab"]:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 1px; }
+.page-home .fp-tab-dot { width: .4rem; height: .4rem; border-radius: 50%; background: var(--accent-2); }
+.page-home .fp-tab-panel { overflow-y: auto; min-height: 0; padding: .2rem .5rem .5rem .2rem; gap: 1rem; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.page-home .fp-dialog :is(.fp-tab-panel, .fp-genre-options, .cg-suggest) {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--accent-2) 38%, var(--surface-raised)) transparent;
+}
+@supports selector(::-webkit-scrollbar) {
+  .page-home .fp-dialog :is(.fp-tab-panel, .fp-genre-options, .cg-suggest) { scrollbar-width: auto; scrollbar-color: auto; }
+  .page-home .fp-dialog :is(.fp-tab-panel, .fp-genre-options, .cg-suggest)::-webkit-scrollbar { width: 8px; height: 8px; }
+  .page-home .fp-dialog :is(.fp-tab-panel, .fp-genre-options, .cg-suggest)::-webkit-scrollbar-track { background: transparent; }
+  .page-home .fp-dialog :is(.fp-tab-panel, .fp-genre-options, .cg-suggest)::-webkit-scrollbar-thumb {
+    border: 2px solid transparent; border-radius: 999px; background-clip: padding-box;
+    background-color: color-mix(in srgb, var(--accent-2) 38%, var(--surface-raised));
+  }
+  .page-home .fp-dialog :is(.fp-tab-panel, .fp-genre-options, .cg-suggest)::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in srgb, var(--accent-2) 65%, var(--surface-raised));
+  }
+  .page-home .fp-dialog :is(.fp-tab-panel, .fp-genre-options, .cg-suggest)::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+  .page-home .fp-dialog :is(.fp-tab-panel, .fp-genre-options, .cg-suggest)::-webkit-scrollbar-corner { background: transparent; }
+}
+.page-home .fp-intro h2 { margin: 0 0 .35rem; font-size: 1.7rem; font-weight: 650; line-height: 1.2; letter-spacing: -.035em; }
+.page-home .fp-intro p { margin: 0; color: var(--dim); font-size: var(--type-ui); line-height: 1.5; }
+.page-home .fp-mix-form { gap: 1rem; }
+.page-home .fp-genre-options { max-height: 15rem; gap: .6rem; }
+.page-home .fp-genre-choice span { border-radius: 2rem; padding-inline: .85rem; line-height: 1.25; transition: background .15s, border-color .15s; }
+.page-home .fp-genre-choice svg { display: block; flex: 0 0 1.15rem; width: 1.15rem; height: 1.15rem; padding: .15rem; border-radius: 50%;
+  fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+  color: var(--genre-tint); background: color-mix(in srgb, var(--genre-tint) 12%, transparent); }
+.page-home .fp-genre-check, .page-home .fp-genre-choice input:checked + span .fp-genre-add { display: none; }
+.page-home .fp-genre-choice input:checked + span .fp-genre-check { display: block; }
+.page-home .fp-genre-choice input:checked + span svg { background: var(--genre-tint); color: var(--surface-sunk); }
+.page-home .fp-mix-action { display: flex; justify-content: space-between; align-items: center; gap: .8rem; }
+.page-home .fp-selection-note { color: var(--dim); font-size: var(--type-xs); }
+.page-home .fingerprint #home-make-mixes { border-radius: 2rem; flex: none; }
+.page-home .fp-footer { flex: none; align-items: center; gap: .6rem; padding-top: .8rem; }
+.page-home .fp-footer p { flex: 1 1 8.5rem; font-size: .7rem; line-height: 1.5; }
+.page-home .fp-session-label { display: block; color: var(--text); font-size: .72rem; font-weight: 650; }
+.page-home .fp-reset { min-height: 2.3rem; padding: .45rem .7rem; border-radius: 2rem; font-size: .7rem; }
+.page-home #home-vibe-form { margin: 0; }
+.page-home .fp-vibe-fields { display: grid; gap: .8rem; min-width: 0; margin: 0; padding: 0; border: 0; }
+.page-home .fp-vibe-fields legend { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.page-home .fp-vibe-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .65rem; }
+.page-home .fp-vibe-card { --vibe-color: var(--accent-2); position: relative; margin: 0; cursor: pointer; }
+.page-home .fp-vibe-card[data-color="natural"] { --vibe-color: var(--mix-tune-hover); }
+.page-home .fp-vibe-card[data-color="mint"] { --vibe-color: var(--teal-muted); }
+.page-home .fp-vibe-card[data-color="gold"] { --vibe-color: var(--amber); }
+.page-home .fp-vibe-card[data-color="blue"] { --vibe-color: var(--accent-2); }
+.page-home .fp-vibe-card[data-color="rose"] { --vibe-color: var(--rose-5); }
+.page-home .fp-vibe-card[data-color="lilac"] { --vibe-color: var(--immersive-accent-2); }
+.page-home .fp-vibe-card[data-color="orange"] { --vibe-color: var(--fire-orange); }
+.page-home .fp-vibe-card input { position: absolute; inset: 0; z-index: 1; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+.page-home .fp-vibe-content { position: relative; display: flex; flex-direction: column; align-items: start; gap: .4rem; height: 100%; min-height: 9rem;
+  padding: .95rem .85rem; border: 1px solid color-mix(in srgb, var(--vibe-color) 35%, var(--border)); border-radius: .9rem;
+  background: color-mix(in srgb, var(--vibe-color) 6%, var(--surface-sunk)); transition: background .15s, border-color .15s; }
+.page-home .fp-vibe-icon { width: 2rem; height: 2rem; color: var(--vibe-color); margin-bottom: .25rem; }
+.page-home .fp-vibe-content strong { color: var(--text); font-size: var(--type-ui); font-weight: 650; line-height: 1.25; }
+.page-home .fp-vibe-description { color: var(--dim); font-size: var(--type-xs); line-height: 1.45; }
+.page-home .fp-vibe-card-natural { grid-column: 1 / -1; }
+.page-home .fp-vibe-card-natural .fp-vibe-content { display: grid; grid-template-columns: 2rem 1fr; column-gap: .8rem; row-gap: .2rem; min-height: 0; padding-right: 2.2rem; }
+.page-home .fp-vibe-card-natural .fp-vibe-icon { grid-row: span 2; align-self: center; margin: 0; }
+.page-home .fp-vibe-card-natural .fp-vibe-description { grid-column: 2; }
+.page-home .fp-vibe-check { position: absolute; top: .7rem; right: .7rem; opacity: 0; color: var(--text); font-size: 1rem; font-weight: 700; }
+.page-home .fp-vibe-card:hover .fp-vibe-content { border-color: var(--vibe-color); background: color-mix(in srgb, var(--vibe-color) 12%, var(--surface-sunk)); }
+.page-home .fp-vibe-card input:checked + .fp-vibe-content { border-color: var(--vibe-color); background: color-mix(in srgb, var(--vibe-color) 18%, var(--surface-sunk)); box-shadow: inset 0 0 0 1px var(--vibe-color); }
+.page-home .fp-vibe-card input:checked + .fp-vibe-content .fp-vibe-check { opacity: 1; }
+.page-home .fp-vibe-card input:focus-visible + .fp-vibe-content { outline: 2px solid var(--accent-2); outline-offset: 3px; }
+.page-home .fp-vibe-fields:disabled { opacity: .6; }
+.page-home .fp-feedback { margin: 0; font-size: var(--type-xs); color: var(--dim); min-height: 1.25rem; }
+.page-home .fp-vibe-explainer { font-size: var(--type-xs); color: var(--dim); }
+.page-home .fp-vibe-explainer summary { display: flex; align-items: center; gap: .25rem; cursor: pointer; padding-block: .3rem; list-style: none; }
+.page-home .fp-vibe-explainer summary::-webkit-details-marker { display: none; }
+.page-home .fp-vibe-explainer summary .ui-arrow { width: 1rem; height: 1rem; transform: rotate(-90deg); }
+.page-home .fp-vibe-explainer[open] summary .ui-arrow { transform: none; }
+.page-home .fp-vibe-explainer p { line-height: 1.6; margin: .5rem 0; }
+.page-home .fp-vibe-explainer ul { padding-left: 1.2rem; line-height: 1.8; }
+.page-home .fp-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: .65rem; }
+.page-home .fp-preference-card { padding: .9rem 1rem; border: 1px solid var(--border); border-radius: .85rem; background: var(--surface-sunk); }
+.page-home .fp-preference-heading { display: flex; justify-content: space-between; align-items: center; gap: .5rem; margin-bottom: .8rem; font-size: var(--type-ui); }
+.page-home .fp-preference-heading > span { color: var(--dim); font-size: var(--type-xs); }
+.page-home .fp-breadth { flex-wrap: nowrap; gap: .7rem; }
+.page-home .fp-breadth-track { flex: 1; min-width: 4rem; }
+.page-home .fp-preference-card summary { display: flex; justify-content: space-between; align-items: center; gap: .7rem; cursor: pointer; list-style: none; }
+.page-home .fp-preference-card summary::-webkit-details-marker { display: none; }
+.page-home .fp-preference-card summary strong { display: block; font-size: var(--type-ui); }
+.page-home .fp-preference-card summary small { display: block; color: var(--dim); margin-top: .2rem; font-size: var(--type-xs); }
+.page-home .fp-preference-card summary > .ui-arrow { width: 1.2rem; height: 1.2rem; flex: none; color: var(--dim); transform: rotate(-90deg); }
+.page-home .fp-preference-card[open] summary > .ui-arrow { transform: none; }
+.page-home .fp-preference-content { padding-top: .9rem; }
+.page-home .fp-scale-labels { display: flex; justify-content: space-between; gap: .5rem; margin-bottom: .5rem; color: var(--dim); font-size: .65rem; }
+.page-home .fp-row { min-height: 2.3rem; margin: 0; }
+.page-home .fp-slider-wrap { min-width: 0; }
+.page-home .fp-slider { min-width: 0; }
+.page-home .fp-name-wrap { width: 14rem; min-width: 0; padding-right: 1.5rem; }
+.page-home .fp-name { flex: 1 1 auto; min-width: 0; width: auto; max-width: 100%; }
+.page-home .fp-name-wrap > .fp-name { padding-left: 1.65rem; }
+.page-home .fp-row > .fp-name { flex: none; width: 14rem; }
+.page-home .fp-genre-toggle { display: flex; align-items: center; gap: .35rem; flex: 1; min-width: 0; min-height: 2.2rem;
+  margin: 0; padding: .35rem .3rem; border: 0; border-radius: .45rem; color: var(--text); background: transparent;
+  box-shadow: none; transform: none; text-align: left; line-height: 1.3; font-weight: 500; }
+.page-home .fp-genre-toggle:hover { color: var(--accent-2); background: color-mix(in srgb, var(--accent-2) 8%, transparent); }
+.page-home .fp-genre-toggle[aria-expanded="true"] { color: var(--accent-2); }
+.page-home .fp-genre-toggle:focus-visible, .page-home .fp-remove-btn:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.page-home .fp-genre-chevron { display: block; flex: 0 0 1rem; width: 1rem; height: 1rem; fill: none; stroke: currentColor;
+  stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; color: var(--dim); transform: rotate(-90deg); transition: transform .18s ease, color .18s ease; }
+.page-home .fp-genre-toggle[aria-expanded="true"] .fp-genre-chevron { color: var(--accent-2); transform: none; }
+.page-home .fp-subgenres { position: relative; margin: .15rem 0 .5rem; padding: .15rem 0 .3rem; border-radius: .45rem;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent-2) 4%, transparent), transparent 55%); }
+.page-home .fp-subgenres::before { content: ""; position: absolute; top: .25rem; bottom: .45rem; left: .75rem; border-left: 1px solid color-mix(in srgb, var(--accent-2) 28%, transparent); }
+.page-home .fp-subgenres .fp-row { min-height: 2.2rem; }
+.page-home .fp-subname { font-size: var(--type-xs); }
+.page-home .fp-row-tools { opacity: 1; pointer-events: auto; transform: translateY(-50%); }
+.page-home .fp-remove-btn { display: grid; place-items: center; width: 1.4rem; height: 1.7rem; min-width: 0; min-height: 0; padding: 0;
+  border: 0; border-radius: .35rem; color: var(--faint); background: transparent; box-shadow: none; transform: none; opacity: 0; pointer-events: none; }
+.page-home .fp-remove-btn:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.page-home .fp-name-wrap:is(:hover, :focus-within) .fp-remove-btn { opacity: 1; pointer-events: auto; }
+.page-home .fp-barset::before { left: calc(50% + 7.3rem); }
+@media (hover: none) {
+  .page-home .fp-remove-btn { opacity: .6; pointer-events: auto; }
+}
+@media (max-width: 540px) {
+  .page-home .fp-dialog { padding: 1rem; }
+  .page-home .fp-vibe-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .page-home .fp-vibe-content { min-height: 8.4rem; padding: .8rem; }
+  .page-home .fp-intro h2 { font-size: 1.5rem; }
+  .page-home .fp-title-group { gap: .6rem; }
+  .page-home #fp-title { font-size: 1.15rem; }
+  .page-home .fp-record { width: 2.5rem; height: 2.5rem; }
+  .page-home .fp-preference-card { padding: .8rem; }
+  .page-home .fp-preference-heading { display: grid; gap: .2rem; }
+  .page-home .fp-name-wrap, .page-home .fp-row > .fp-name { width: 10.5rem; }
+  .page-home .fp-barset::before { left: calc(50% + 5.55rem); }
+  .page-home .fp-mix-action { flex-wrap: wrap; }
+  .page-home .fp-mix-action #home-make-mixes { margin-left: auto; }
+}
+body:has(.fp-dialog[open]) { overflow: hidden; }
+.page-home .dash-directions:has(.gen-lanes.has-focus) .fingerprint { opacity: 0; pointer-events: none; }
+@media (max-width: 60rem) {
+  .page-home .dash-directions .fingerprint,
+  .page-home .dash-directions .fingerprint.is-collapsed {
+    position: relative;
+    inset: auto;
+    transform: none;
+    margin: 1rem auto 0;
+  }
+}

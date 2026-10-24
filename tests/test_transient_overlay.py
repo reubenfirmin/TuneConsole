@@ -10,7 +10,7 @@ def test_axis_overlay_lowers_disfavored_facet(store):
     b = store.tracks.upsert_track("v2", "Jazz One", "Sax B", None, None, 1)
     store.tracks.set_track_genre(b, "jazz")
     ka, kb = identity_key("House One", "DJ A"), identity_key("Jazz One", "Sax B")
-    store.rec_surface.record_mood([ka], -2, now=10.0)                      # "less" house, a lot
+    store.rec_signals.record_mood([ka], -2, now=10.0)                      # "less" house, a lot
     mult = scoring._axis_weights_for(store, [ka, kb], now=10.0)
     assert mult is not None and mult[ka] < mult[kb]            # house ranked below jazz
 
@@ -31,6 +31,6 @@ def test_explore_lane_respects_transient_facet_lean(store):
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "P", "P", 12, "h", 0.0), house + jazz)
     model_support.build_track_model(store, dim=4)           # neither artist is "familiar" (no plays)
     for i in range(6):
-        store.rec_surface.record_mood([identity_key(f"H{i}", f"DJ{i}")], -2, now=10.0)   # "less house", a lot
+        store.rec_signals.record_mood([identity_key(f"H{i}", f"DJ{i}")], -2, now=10.0)   # "less house", a lot
     ex = surfaces.explore_for_you(store, now=10.0, limit=12)
     assert ex and ex[0].artist.startswith("Sx")            # jazz tops; house is disfavored right now

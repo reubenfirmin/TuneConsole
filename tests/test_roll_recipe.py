@@ -59,7 +59,7 @@ def test_roll_recipe_transient_suppresses_disfavored_genre(store):
     store.history.record_history_plays(iid, 1.0, house_keys + jazz_keys, source_timezone="UTC")
     # hammer "less house" so the transient lean is strongly negative
     for i in range(5):
-        store.rec_surface.record_mood([identity_key(f"H{i}", f"DJ{i}")], -2, now=10.0)
+        store.rec_signals.record_mood([identity_key(f"H{i}", f"DJ{i}")], -2, now=10.0)
     # roll many recipes; house should be picked far less than jazz
     house = sum(1 for s in range(200)
                 if "house" in str(recipes.roll_recipe(store, "wheelhouse", seed=s, now=10.0)["facets"].get("genres", [])).lower())

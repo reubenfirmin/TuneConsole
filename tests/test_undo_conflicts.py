@@ -4,7 +4,7 @@ import pytest
 
 from tests.conftest import FakeClient, _track
 from tests.test_undo_order import OccurrenceClient, isolated_data_dir
-from yt_playlist.library import executor, playlist_undo
+from yt_playlist.library import executor, playlist_undo, playlist_creation
 from yt_playlist.library.undo_conflicts import playlist_state
 from yt_playlist.util.action_kinds import APPLY_MERGE, COPY_PLAYLIST
 
@@ -80,7 +80,7 @@ def test_edited_copy_destination_is_never_deleted(store, monkeypatch, tmp_path, 
     if move:
         executor.copy_or_move_playlist(store, pid, iid, source_client, client, 1, delete_source=True)
     else:
-        executor.copy_playlist(store, [pid], "Copy", client, 1)
+        playlist_creation.copy_playlist(store, [pid], "Copy", client, 1)
     aid = store.actions.get_actions()[0].id
     created = json.loads(store.actions.get_action(aid).undo_json)["new_ytm"]
     if change == "add":

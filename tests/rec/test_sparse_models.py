@@ -8,7 +8,7 @@ import pytest
 from scipy.sparse import csc_array, csr_array, issparse
 
 from yt_playlist.core.activity import Activity, WorkClosing
-from yt_playlist.rec import embed, ppr
+from yt_playlist.rec import embedding_training as training, ppr
 from yt_playlist.rec.pair_stream import PairStream, _shuffled_indices
 
 
@@ -58,19 +58,19 @@ def test_sparse_cooccurrence_ppmi_cosines_and_neighbors_match_dense(weighted, co
     baskets *= 2
     weights = {key: 1 + i % 5 / 3 for i, key in enumerate(keys)} if weighted else None
     dense = dense_cooc(baskets, keys, weights)
-    sparse = embed._cooc_matrix(baskets, keys, weights)
+    sparse = training.cooc_matrix(baskets, keys, weights)
     assert issparse(sparse) and sparse.format == "csr"
     np.testing.assert_allclose(sparse.toarray(), dense, rtol=1e-13, atol=1e-13)
-    np.testing.assert_allclose(embed._positive_pmi(sparse).toarray(), dense_ppmi(dense),
+    np.testing.assert_allclose(training.positive_pmi(sparse).toarray(), dense_ppmi(dense),
                                rtol=1e-12, atol=1e-12)
-    actual_keys, actual = embed._svd(baskets, keys, 8, weights)
+    actual_keys, actual = training.svd(baskets, keys, 8, weights)
     expected = dense_vectors(baskets, keys, 8, weights)
     assert actual_keys == keys and actual.dtype == np.float32
     actual_cosine, expected_cosine = actual @ actual.T, expected @ expected.T
     np.testing.assert_allclose(actual_cosine, expected_cosine, atol=2e-6)
     np.testing.assert_array_equal(np.argsort(-actual_cosine, axis=1)[:, :6],
                                   np.argsort(-expected_cosine, axis=1)[:, :6])
-    np.testing.assert_array_equal(embed._svd(baskets, keys, 8, weights)[1], actual)
+    np.testing.assert_array_equal(training.svd(baskets, keys, 8, weights)[1], actual)
 
 
 @pytest.mark.parametrize("isolated", [False, True])
@@ -86,7 +86,7 @@ def test_sparse_ppr_matches_dense_scores_rankings_and_mass(isolated, tol):
     col[dangling] = 1
     dense = C / col
     dense[:, dangling] = 1 / len(keys)
-    store = SimpleNamespace(rec_query=SimpleNamespace(rec_baskets=lambda: baskets))
+    store = SimpleNamespace(rec_evidence=SimpleNamespace(rec_baskets=lambda: baskets))
     actual_keys, transition, index = ppr.build_transition(store)
     assert actual_keys == sorted(keys)
     # The fixture's isolated key sorts last, so both representations have identical row order.
@@ -119,9 +119,9 @@ def test_sparse_paths_do_not_allocate_or_convert_a_dense_square(monkeypatch):
     monkeypatch.setattr(csr_array, "toarray", forbidden)
     monkeypatch.setattr(csr_array, "todense", forbidden)
     monkeypatch.setattr(np, "outer", forbidden)
-    actual_keys, vectors = embed._svd(baskets, keys, 8)
+    actual_keys, vectors = training.svd(baskets, keys, 8)
     assert actual_keys == keys and vectors.shape == (n, 8)
-    store = SimpleNamespace(rec_query=SimpleNamespace(rec_baskets=lambda: baskets))
+    store = SimpleNamespace(rec_evidence=SimpleNamespace(rec_baskets=lambda: baskets))
     _, transition, _ = ppr.build_transition(store)
     assert ppr.ppr_rank(transition, [0], tol=1e-8).sum() == pytest.approx(1)
 
@@ -129,21 +129,21 @@ def test_sparse_paths_do_not_allocate_or_convert_a_dense_square(monkeypatch):
 def test_empty_singleton_duplicate_and_zero_weight_baskets():
     keys = ["a", "b", "isolated"]
     baskets = [[], ["isolated"], ["a", "a", "b"], ["b", "a"]]
-    C = embed._cooc_matrix(baskets, keys)
+    C = training.cooc_matrix(baskets, keys)
     np.testing.assert_array_equal(C.toarray(), [[0, 2, 0], [2, 0, 0], [0, 0, 0]])
-    assert np.isfinite(embed._positive_pmi(C).data).all()
-    assert embed._cooc_matrix([], []).shape == (0, 0)
-    assert embed._positive_pmi(csr_array((3, 3))).nnz == 0
-    result_keys, vectors = embed._svd(baskets, keys, 1, {"a": 0, "b": 0})
+    assert np.isfinite(training.positive_pmi(C).data).all()
+    assert training.cooc_matrix([], []).shape == (0, 0)
+    assert training.positive_pmi(csr_array((3, 3))).nnz == 0
+    result_keys, vectors = training.svd(baskets, keys, 1, {"a": 0, "b": 0})
     assert result_keys == [] and vectors.shape == (0, 1)
     for basket_set in ([], [[], ["singleton"]]):
-        result_keys, vectors = embed.build_vectors_from_baskets(basket_set, dim=4)
+        result_keys, vectors = training.build_vectors_from_baskets(basket_set, dim=4)
         assert result_keys == [] and vectors.shape == (0, 4)
 
 
 def test_small_library_still_builds_finite_vectors():
     keys = [str(i) for i in range(9)]
-    result_keys, vectors = embed.build_vectors_from_baskets([keys], dim=4)
+    result_keys, vectors = training.build_vectors_from_baskets([keys], dim=4)
     assert result_keys == keys and vectors.shape == (9, 4)
     assert np.isfinite(vectors).all()
     np.testing.assert_allclose(np.linalg.norm(vectors, axis=1), 1, atol=1e-6)
@@ -189,11 +189,11 @@ def test_huge_pair_universe_keeps_only_memberships_and_current_batch():
 
 def test_streamed_item2vec_is_seeded_finite_and_preserves_output_format():
     keys, baskets = fixture_baskets(32)
-    actual_keys, actual = embed._item2vec(baskets, keys, 8, epochs=2)
+    actual_keys, actual = training.item2vec(baskets, keys, 8, epochs=2)
     assert actual_keys == keys and actual.shape == (32, 8) and actual.dtype == np.float32
     assert np.isfinite(actual).all()
     np.testing.assert_allclose(np.linalg.norm(actual, axis=1), 1, atol=1e-6)
-    np.testing.assert_array_equal(actual, embed._item2vec(baskets, keys, 8, epochs=2)[1])
+    np.testing.assert_array_equal(actual, training.item2vec(baskets, keys, 8, epochs=2)[1])
 
 
 def test_streamed_item2vec_keeps_cluster_recall_against_former_full_shuffle(monkeypatch):
@@ -202,7 +202,7 @@ def test_streamed_item2vec_keeps_cluster_recall_against_former_full_shuffle(monk
     keys = [key for group in groups for key in group]
     baskets = [rng.choice(group, size=int(rng.integers(5, 10)), replace=False).tolist()
                for group in groups for _ in range(40)]
-    streamed = embed._item2vec(baskets, keys, 16)[1]
+    streamed = training.item2vec(baskets, keys, 16)[1]
 
     class FormerPairs:
         """The old materialized pair array and Fisher-Yates epoch order; same SGD below."""
@@ -219,8 +219,8 @@ def test_streamed_item2vec_keeps_cluster_recall_against_former_full_shuffle(monk
                 batch = self.pairs[order[start:start + batch_size]]
                 yield batch[:, 0], batch[:, 1]
 
-    monkeypatch.setattr(embed, "PairStream", FormerPairs)
-    former = embed._item2vec(baskets, keys, 16)[1]
+    monkeypatch.setattr(training, "PairStream", FormerPairs)
+    former = training.item2vec(baskets, keys, 16)[1]
 
     def cluster_recall(vectors):
         similarities = vectors @ vectors.T
@@ -248,7 +248,7 @@ def test_cooccurrence_stops_between_sparse_products(monkeypatch):
 
     monkeypatch.setattr(csc_array, "__matmul__", multiply)
     with pytest.raises(WorkClosing):
-        work.wrap("embedding", embed._cooc_matrix, baskets, keys)()
+        work.wrap("embedding", training.cooc_matrix, baskets, keys)()
     assert len(calls) == 1 and work.wait(0)
 
 

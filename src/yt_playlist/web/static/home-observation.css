@@ -1,0 +1,4 @@
+/* The featured subject is tinted in its genre colour (--subj, set inline). */
+.wiki-subject { font-family: var(--font-sans); font-weight: 600; font-size: 1.5rem;
+  color: var(--subj, var(--accent-2)); letter-spacing: 0.01em;
+  text-shadow: 0 0 18px color-mix(in srgb, var(--subj, var(--accent-2)) 55%, transparent); }

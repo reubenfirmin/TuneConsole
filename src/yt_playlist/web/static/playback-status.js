@@ -2,11 +2,69 @@
 // read the cached snapshot when they mount after the first response or an HTMX replacement.
 (function () {
   if (window.playbackStatus) return;
-  let timer = null, inFlight = null;
+  let timer = null, inFlight = null, frame = null, expiry = null, sample = null, lastFrame = 0;
+  const clock = () => window.performance?.now() ?? Date.now();
+  const number = value => typeof value === 'number' && Number.isFinite(value);
+
+  function progress() {
+    if (!sample) return null;
+    const age = sample.age + Math.max(0, clock() - sample.receivedAt) / 1000;
+    // Match the server's heartbeat expiry even if the next HTTP request hangs.
+    if (age >= 8) return null;
+    let position = sample.position;
+    if (position !== null && !sample.paused) position += age;
+    if (position !== null && sample.duration !== null) position = Math.min(position, sample.duration);
+    return {videoId: sample.videoId, position, duration: sample.duration};
+  }
+
+  function emitProgress() {
+    window.dispatchEvent(new CustomEvent('playback-progress', {detail: progress()}));
+  }
+
+  function animate() {
+    frame = null;
+    const current = progress();
+    if (clock() - lastFrame >= 100 || !current ||
+        (current.duration !== null && current.position >= current.duration)) {
+      lastFrame = clock();
+      emitProgress();
+    }
+    if (current && !sample.paused && current.position !== null &&
+        (current.duration === null || current.position < current.duration)) {
+      frame = requestAnimationFrame(animate);
+    }
+  }
 
   function publish(data) {
+    if (frame !== null) cancelAnimationFrame(frame);
+    if (expiry !== null) clearTimeout(expiry);
+    frame = null;
+    expiry = null;
+    const playing = data.connected && data.now_playing;
+    sample = playing?.video_id ? {
+      videoId: playing.video_id,
+      position: number(playing.position) && playing.position >= 0 ? playing.position : null,
+      duration: number(playing.duration) && playing.duration > 0 ? playing.duration : null,
+      paused: playing.paused !== false, receivedAt: clock(),
+      age: number(playing.snapshot_age) ? Math.max(0, playing.snapshot_age) : 0,
+    } : null;
     window.playbackStatus.snapshot = data;
+    lastFrame = clock();
+    emitProgress();
     window.dispatchEvent(new CustomEvent('bridge-status', {detail: data}));
+    // Paused/ended tracks do not animate. Still expire their displayed timing
+    // if the next status request hangs, without adding another polling loop.
+    if (sample && progress()) {
+      expiry = setTimeout(() => {
+        expiry = null;
+        if (frame !== null) cancelAnimationFrame(frame);
+        frame = null;
+        emitProgress();
+      }, Math.ceil((8 - sample.age) * 1000));
+    }
+    if (sample && !sample.paused && sample.position !== null && progress()) {
+      frame = requestAnimationFrame(animate);
+    }
   }
 
   function refresh() {
@@ -44,9 +102,14 @@
     const request = inFlight;
     inFlight = null;
     request?.controller.abort();
+    if (frame !== null) cancelAnimationFrame(frame);
+    if (expiry !== null) clearTimeout(expiry);
+    expiry = null;
+    frame = sample = null;
+    emitProgress();
   }
 
-  window.playbackStatus = {snapshot: null, start, refresh, stop};
+  window.playbackStatus = {snapshot: null, start, refresh, stop, progress};
   window.addEventListener('pagehide', stop);
   window.addEventListener('pageshow', start);
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, {once: true});

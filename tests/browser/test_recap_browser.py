@@ -108,7 +108,7 @@ def test_closing_one_ui_tab_preserves_the_other(packaged_recap, page):
 
 def test_detail_links_open_without_advancing_the_recap(live_app, store, page):
     story = _detailed_story()
-    store.rec_surface.put_proposals("trend_rollups", {"story": story}, 1)
+    store.rec_proposals.put_proposals("trend_rollups", {"story": story}, 1)
     page.goto(live_app + "/trends/story/2026-06")
     index = next(i for i, b in enumerate(story["beats"]) if b["kind"] == "new_this_month")
     page.get_by_role("button", name=f"Beat {index + 1}", exact=True).click()
@@ -130,7 +130,7 @@ def test_detail_links_open_without_advancing_the_recap(live_app, store, page):
 @pytest.mark.parametrize("viewport", [{"width": 390, "height": 844}, {"width": 844, "height": 390}])
 def test_optional_screens_fit_and_navigate_on_mobile(live_app, store, page, viewport, tmp_path):
     story = _detailed_story()
-    store.rec_surface.put_proposals("trend_rollups", {"story": story}, 1)
+    store.rec_proposals.put_proposals("trend_rollups", {"story": story}, 1)
     errors = []
     page.on("pageerror", lambda error: errors.append(error))
     page.set_viewport_size(viewport)

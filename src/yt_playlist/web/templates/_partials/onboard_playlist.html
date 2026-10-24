@@ -1,5 +1,4 @@
-{% if proto %}{% with p = proto %}{% include "_partials/generated_playlist.html" %}{% endwith %}
+{% if proto %}{% with subsequent_mix = true %}{% include "_partials/onboarding_start.html" %}{% endwith %}
 {% else %}
-<div class="card onboard-empty"><p class="muted">Connect and play a few things in YouTube Music to get
-  started - suggestions will fill in here.</p></div>
+{% include "_partials/onboarding_start.html" %}
 {% endif %}

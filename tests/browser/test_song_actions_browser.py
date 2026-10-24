@@ -280,7 +280,15 @@ def test_track_alignment_centers_single_lines_and_anchors_wrapped_lines(song_app
         page.locator(".track-table").screenshot(path=tmp_path / f"track-alignment-{surface}-{width}.png")
 
 
-def test_keyboard_reuses_one_menu_after_metadata_save(song_app, page):
+@pytest.mark.parametrize("popover_source", [True, False], ids=["source-option", "native-dismissal"])
+def test_keyboard_reuses_one_menu_after_metadata_save(song_app, page, popover_source):
+    if not popover_source:
+        # Browsers can ignore showPopover's source option. Exercise real pointer
+        # dismissal without relying on that option to associate the launcher.
+        page.add_init_script("""(() => {
+            const show = HTMLElement.prototype.showPopover;
+            HTMLElement.prototype.showPopover = function () { return show.call(this); };
+        })();""")
     store, source = song_app["store"], song_app["source"]
     second = store.tracks.upsert_track("second", "Second Song", "Someone", "", 200)
     store.playlists.set_playlist_tracks(source, store.playlists.get_playlist_track_ids(source) + [second])
@@ -444,7 +452,7 @@ def test_metadata_dialog_edits_all_fields_and_restores_originals(song_app, page,
     store.collection.add_saved_album({'browse': 'MPRE_owned', 'title': 'Album', 'artist': 'Artist & Friends',
                                       'year': '2000', 'thumbnail': ''})
     store.tracks.set_track_enrichment(tid, 'Electronic', '1995')
-    store.enrichment.log_enrichment(tid, 'run', 'discogs', 'genre', 'Art Pop', now=1)
+    store.enrichment_state.log_enrichment(tid, 'run', 'discogs', 'genre', 'Art Pop', now=1)
     path = f"/playlist/{song_app['source']}" if surface == 'playlist' else '/album?browse=MPRE_owned'
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
@@ -538,7 +546,7 @@ def test_metadata_save_failure_preserves_edits_for_retry(song_app, page):
 def test_genre_lookup_keeps_unsaved_metadata(song_app, page, monkeypatch):
     def lookup(store, tracks, _config, _progress):
         store.enrichment.apply_provider_fields(tracks[0]['id'], 'discogs', {'genre': 'Ambient', 'year': '2022'})
-        store.enrichment.log_enrichment(tracks[0]['id'], 'lookup', 'discogs', 'genre', 'Ambient', now=2)
+        store.enrichment_state.log_enrichment(tracks[0]['id'], 'lookup', 'discogs', 'genre', 'Ambient', now=2)
 
     monkeypatch.setattr('yt_playlist.web.routes.enrich.waterfall.run_waterfall', lookup)
     page.goto(f"{song_app['base']}/playlist/{song_app['source']}")

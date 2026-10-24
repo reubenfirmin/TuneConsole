@@ -40,7 +40,7 @@ def test_production_http_404_removes_only_the_empty_local_entry(missing, store, 
     assert http.post('/playlist/delete-empty', data={'playlist': pid}).status_code == 200
     assert store.playlists.get_playlist(pid) is None
     assert not client.deleted and not list(tmp_path.glob('backups/*'))
-    assert store.rec_surface.get_proposals(CLEANUP_SURFACE)['count'] == 0
+    assert store.rec_proposals.get_proposals(CLEANUP_SURFACE)['count'] == 0
     action, = store.actions.get_actions()
     assert action.kind == REMOVE_LOCAL_PLAYLIST and not is_undoable(action.kind)
     assert json.loads(action.params_json)['reason'] == 'remote_missing'
@@ -103,7 +103,19 @@ def test_disappearing_after_empty_read_keeps_the_verified_backup(missing, store,
         raise YTMusicServerError('Server returned HTTP 404: Not Found.')
 
     monkeypatch.setattr(client, 'delete_playlist', already_deleted)
-    assert http.post('/playlist/delete-empty', data={'playlist': pid}).status_code == 200
-    assert store.playlists.get_playlist(pid) is None
+    # A transport error retains durable intent until a complete read proves absence.
+    assert http.post('/playlist/delete-empty', data={'playlist': pid}).status_code == 422
+    assert store.playlists.get_playlist(pid) is not None
     backup, = tmp_path.glob('backups/*.json')
     assert json.loads(backup.read_text())['tracks'] == []
+    action, = store.actions.get_actions()
+    assert action.status == 'delete_pending'
+    monkeypatch.setattr(client, 'get_playlist', already_deleted)
+    # A repeated request reconciles the saved attempt without issuing another deletion.
+    def must_not_delete(*args, **kwargs):
+        pytest.fail('Reconciliation must not replay deletion')
+    monkeypatch.setattr(client, 'delete_playlist', must_not_delete)
+    assert http.post('/playlist/delete-empty', data={'playlist': pid}).status_code == 200
+    assert store.playlists.get_playlist(pid) is None
+    assert store.actions.get_action(action.id).status == 'executed'
+    assert list(tmp_path.glob('backups/*.json')) == [backup]

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from tests.test_home_other_genres import seed_genres
 from tests.test_mode_cards_route import _client
-from yt_playlist.rec import embed, fresh_pool, mode_surfaces, road_trip_candidates, surfaces
+from yt_playlist.rec import embedding_vectors as embed, fresh_pool, mode_surfaces, road_trip_candidates, surfaces
 from yt_playlist.util.matching import identity_key
 
 
@@ -92,21 +92,21 @@ def test_selected_fresh_mix_balances_all_three_genres_and_requires_missing_famil
     tracks = [surfaces.ForYouItem(f"Song {genre} {i}", f"Artist {genre} {i}", "", f"{genre}{i}",
                                 None, 0, "", key=f"{genre}{i}|artist{i}", genre=genre)
               for genre in ("House", "Drum & Bass", "Pop") for i in range(20)]
-    store.rec_surface.put_proposals("mode_bundles", {"all": {"fresh": [surfaces._item_to_fresh_dict(t) for t in tracks]}}, 1)
+    store.rec_proposals.put_proposals("mode_bundles", {"all": {"fresh": [surfaces._item_to_fresh_dict(t) for t in tracks]}}, 1)
     chosen = fresh_pool.pick(store, 1000, ["house", "dnb", "pop"])
     assert Counter(genre_map.family(t["genre"]) for t in chosen) == {"house": 4, "dnb": 4, "pop": 4}
     tracks[:] = [t for t in tracks if t.genre == "House"]
-    store.rec_surface.put_proposals("mode_bundles", {"all": {"fresh": [surfaces._item_to_fresh_dict(t) for t in tracks]}}, 2)
+    store.rec_proposals.put_proposals("mode_bundles", {"all": {"fresh": [surfaces._item_to_fresh_dict(t) for t in tracks]}}, 2)
     assert fresh_pool.pick(store, 1000, ["house", "dnb", "pop"]) == []
 
 
 def _without_fresh(store):
     seed_genres(store)
-    bundles = store.rec_surface.get_proposals("mode_bundles")
+    bundles = store.rec_proposals.get_proposals("mode_bundles")
     for bucket in bundles.values():
         if isinstance(bucket, dict):
             bucket.pop("fresh", None)
-    store.rec_surface.put_proposals("mode_bundles", bundles, 1)
+    store.rec_proposals.put_proposals("mode_bundles", bundles, 1)
 
 
 def _job_id(response):
@@ -155,7 +155,7 @@ def test_genre_selection_leaves_other_requests_responsive(store, monkeypatch):
 def test_prepared_fresh_tracks_honor_feedback_and_library_changes(store):
     tracks = [dict(key=identity_key(f"New {i}", f"Artist {i}"), title=f"New {i}", artist=f"Artist {i}",
                    video_id=f"v{i}", genre="House" if i < 12 else "Techno") for i in range(24)]
-    store.rec_surface.put_proposals("fresh_pool", tracks, 1)
+    store.rec_proposals.put_proposals("fresh_pool", tracks, 1)
     store.tracks.upsert_track("v0", "New 0", "Artist 0", None, None)
     store.rec_model.record_feedback("for_you", tracks[1]["key"], "dismiss", now=2)
     store.rec_model.set_weight("genre:techno", 0.0, lo=0, now=2)

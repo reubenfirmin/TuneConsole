@@ -16,6 +16,9 @@ from yt_playlist.repos.charts import ChartsRepo
 from yt_playlist.repos.collection import CollectionRepo
 from yt_playlist.repos.cluster_evidence import ClusterEvidenceRepo
 from yt_playlist.repos.enrichment import EnrichmentRepo
+from yt_playlist.repos.enrichment_queue import EnrichmentQueueRepo
+from yt_playlist.repos.enrichment_reports import EnrichmentReportsRepo
+from yt_playlist.repos.enrichment_state import EnrichmentStateRepo
 from yt_playlist.repos.genres import GenreRepo
 from yt_playlist.repos.history import HistoryRepo
 from yt_playlist.repos.identities import IdentityRepo
@@ -26,8 +29,16 @@ from yt_playlist.repos.playlists import PlaylistRepo
 from yt_playlist.repos.player_events import PlayerEventsRepo
 from yt_playlist.repos.rec_model import RecModelRepo
 from yt_playlist.repos.rec_query import RecQueryRepo
-from yt_playlist.repos.rec_surface import RecSurfaceRepo
+from yt_playlist.repos.rec_candidates import RecCandidatesRepo
+from yt_playlist.repos.rec_eligibility import RecEligibilityRepo
+from yt_playlist.repos.rec_evidence import RecEvidenceRepo
+from yt_playlist.repos.rec_ledger import RecLedgerRepo
+from yt_playlist.repos.rec_proposals import RecProposalsRepo
+from yt_playlist.repos.rec_signals import RecSignalsRepo
+from yt_playlist.repos.playlist_recipes import PlaylistRecipesRepo
+from yt_playlist.repos.artist_similarity import ArtistSimilarityRepo
 from yt_playlist.repos.rec_refresh import RecRefreshRepo
+from yt_playlist.repos.prepared_content import PreparedContentRepo
 from yt_playlist.repos.road_trip import RoadTripRepo
 from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.repos.search import SearchRepo
@@ -94,8 +105,16 @@ class Store:
         self.rec_model = RecModelRepo(self)
         self.model_selection = ModelSelectionRepo(self)
         self.rec_query = RecQueryRepo(self)
-        self.rec_surface = RecSurfaceRepo(self)
+        self.rec_candidates = RecCandidatesRepo(self)
+        self.rec_eligibility = RecEligibilityRepo(self)
+        self.rec_evidence = RecEvidenceRepo(self)
+        self.rec_ledger = RecLedgerRepo(self)
+        self.rec_proposals = RecProposalsRepo(self)
+        self.rec_signals = RecSignalsRepo(self)
+        self.playlist_recipes = PlaylistRecipesRepo(self)
+        self.artist_similarity = ArtistSimilarityRepo(self)
         self.rec_refresh = RecRefreshRepo(self)
+        self.prepared_content = PreparedContentRepo(self)
         self.charts = ChartsRepo(self)
         self.tracks = TrackRepo(self)
         self.playlists = PlaylistRepo(self)
@@ -103,6 +122,9 @@ class Store:
         self.discovery = DiscoveryRepo(self)
         self.search = SearchRepo(self)
         self.enrichment = EnrichmentRepo(self)
+        self.enrichment_queue = EnrichmentQueueRepo(self)
+        self.enrichment_reports = EnrichmentReportsRepo(self)
+        self.enrichment_state = EnrichmentStateRepo(self)
         self.wiki = WikiRepo(self)
         self.modes = ModesRepo(self)
         self.trends = TrendsRepo(self)

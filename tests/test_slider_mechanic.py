@@ -22,10 +22,10 @@ def test_exposure_graduates_once_per_held_day():
     # day 0: +1.0*0.5 = 0.5 ledger, below 1.2 threshold -> no permanent nudge yet
     graduation.graduate_slider_exposure(s, 0.0)
     assert axis not in s.rec_model.get_weights()
-    assert abs(s.rec_surface.get_theme(axis) - rec_params.SOURCE_W_SLIDER * 1.0) < 1e-9
+    assert abs(s.rec_signals.get_theme(axis) - rec_params.SOURCE_W_SLIDER * 1.0) < 1e-9
     # same day again: no double-count
     graduation.graduate_slider_exposure(s, 100.0)
-    assert abs(s.rec_surface.get_theme(axis) - rec_params.SOURCE_W_SLIDER * 1.0) < 1e-9
+    assert abs(s.rec_signals.get_theme(axis) - rec_params.SOURCE_W_SLIDER * 1.0) < 1e-9
 
 
 @pytest.mark.parametrize("legacy_pause", [False, True])
@@ -50,4 +50,4 @@ def test_neutral_lean_stops_accrual():
     s, axis = _store()
     s.rec_model.set_lean(axis, 1.0, 0.0)                       # neutral -> magnitude 0
     graduation.graduate_slider_exposure(s, 0.0)
-    assert s.rec_surface.get_theme(axis) in (None, 0.0)
+    assert s.rec_signals.get_theme(axis) in (None, 0.0)

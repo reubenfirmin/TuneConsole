@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from yt_playlist.core.store import Store
-from yt_playlist.library.executor import GENERATED_GROUP
+from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.rec import mode_surfaces as ms
 
 
@@ -38,7 +38,7 @@ def _bundle(store, keys):
              for i, k in enumerate(keys)]
     payload = {"1": {s: list(items) for s in ms.CARD_SURFACES}}
     payload["_meta"] = {"comfort_pool": 100, "year_cuts": None}
-    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_proposals.put_proposals("mode_bundles", payload, 1.0)
 
 
 def _generated_playlist(store, keys):
@@ -90,13 +90,13 @@ def test_cached_cards_honor_current_genre_mutes_without_rebuilding(store):
         tid = store.tracks.upsert_track(f"v{i}", title, artist, "", 200)
         store.tracks.set_track_genre(tid, "House" if i < 6 else "Techno")
     _bundle(store, keys)
-    cached = store.rec_surface.get_proposals("mode_bundles")
+    cached = store.rec_proposals.get_proposals("mode_bundles")
     assert _offered(ms.assemble_cards(store, now=10, epoch=0)) & set(keys[:6])
 
     store.rec_model.set_weight("genre:house", 0, lo=0, hi=2, now=10)
     offered = _offered(ms.assemble_cards(store, now=20, epoch=0))
     assert offered and offered <= set(keys[6:])
-    assert store.rec_surface.get_proposals("mode_bundles") == cached
+    assert store.rec_proposals.get_proposals("mode_bundles") == cached
 
     store.rec_model.set_weight("genre:house", 1, lo=0, hi=2, now=20)
     assert _offered(ms.assemble_cards(store, now=20, epoch=0)) & set(keys[:6])

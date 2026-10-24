@@ -4,6 +4,7 @@ import json
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import Response
 
+from yt_playlist.core.activity import activity_for
 from yt_playlist.library import analysis
 from yt_playlist.rec.actions import refresh_cleanup
 
@@ -84,18 +85,18 @@ def build(ctx) -> APIRouter:
         store.overlaps.suppress_overlap(a, b, now_fn())
         return _refresh()   # the pair moves to the "Hidden overlaps" section
 
+    def _suppress_many(raw):
+        try:
+            pairs = json.loads(raw)
+        except (ValueError, TypeError):
+            pairs = []
+        store.overlaps.suppress_overlaps(pairs, now_fn())
+
     @router.post("/overlaps/suppress-many")
     async def suppress_many(request: Request):
         # Bulk-hide the low-overlap "tail": the floating Dismiss-below control sends [[a,b],...].
         form = await request.form()
-        try:
-            pairs = json.loads(form.get("pairs", "[]"))
-        except (ValueError, TypeError):
-            pairs = []
-        now = now_fn()
-        for pair in pairs:
-            if isinstance(pair, (list, tuple)) and len(pair) == 2 and all(pair):
-                store.overlaps.suppress_overlap(pair[0], pair[1], now)
+        await activity_for(ctx).to_thread(_suppress_many, form.get("pairs", "[]"))
         return _refresh()
 
     @router.post("/overlaps/unsuppress")

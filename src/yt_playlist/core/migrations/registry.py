@@ -12,7 +12,8 @@ from . import (v001_baseline, v002_enrichment, v003_discovery_audit, v004_playli
                v033_capture_evidence,v034_progressive_learning,v035_progressive_source_members,
                v036_progressive_signals,v037_home_query_plans,v038_listening_day_counts,
                v039_background_refresh,v040_player_refresh_inputs,v041_scorecard_lookups,
-               v042_foreign_calendar_scopes)
+               v042_foreign_calendar_scopes,v043_retire_palette_penalty,v044_prepared_content,
+               v045_pending_deletions,v046_retire_onboarding_thresholds)
 
 MIGRATIONS = (
     Migration(1, 'legacy_baseline', v001_baseline.apply),
@@ -57,4 +58,8 @@ MIGRATIONS = (
     Migration(40, 'player_refresh_inputs', v040_player_refresh_inputs.apply, replaces_data=False),
     Migration(41, 'scorecard_attribution_lookups', v041_scorecard_lookups.apply, replaces_data=False),
     Migration(42, 'foreign_calendar_scopes', v042_foreign_calendar_scopes.apply, replaces_data=False),
+    Migration(43, 'retire_palette_penalty', v043_retire_palette_penalty.apply, replaces_data=False),
+    Migration(44, 'prepared_content_inputs', v044_prepared_content.apply, replaces_data=False),
+    Migration(45, 'pending_deletion_lookup', v045_pending_deletions.apply, replaces_data=False),
+    Migration(46, 'retire_onboarding_thresholds', v046_retire_onboarding_thresholds.apply, replaces_data=False),
 )

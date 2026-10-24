@@ -2,7 +2,7 @@ from yt_playlist.util import genre_map
 from yt_playlist.rec import taste_analysis
 
 
-def test_breadth_palette_are_play_weighted(store):
+def test_breadth_is_play_weighted(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     techno = [store.tracks.upsert_track(f"t{i}", f"T{i}", "A", None, None) for i in range(6)]
     folk = [store.tracks.upsert_track(f"f{i}", f"F{i}", "B", None, None) for i in range(6)]
@@ -19,8 +19,3 @@ def test_breadth_palette_are_play_weighted(store):
     # play-weighting: techno dominates even though track counts are equal (6 vs 6)
     assert bd["families"][techno_fam] > 0.8
     assert bd["families"][folk_fam] < 0.2
-
-    # palette: the heavily-played techno is "in palette" with no penalty; a far family is penalized
-    pal = taste_analysis.palette(store)
-    assert pal["fit"]("Techno") == 0.0
-    assert pal["fit"]("Opera") > 0.0

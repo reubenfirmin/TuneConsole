@@ -17,7 +17,7 @@ def test_drain_processes_discovered(store):
     def fake_waterfall(s, batch, cfg, on_progress, should_stop=None, sink_for=None, **kwargs):
         seen["keys"] = [t["identity_key"] for t in batch]
         for t in batch:                                  # simulate a provider writing genre via the sink
-            sink_for(t).set_enrichment("techno", "2020")
+            sink_for(t).apply_fields("musicbrainz", {"genre": "techno", "year": "2020"})
 
     ctx = SimpleNamespace(store=store, now_fn=lambda: 500.0,
                           logger=SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None))
@@ -43,8 +43,8 @@ def test_mixed_batch_follows_shared_order_and_refreshes_fresh(monkeypatch, store
     def waterfall(s, batch, cfg, on_progress, should_stop=None, sink_for=None, **kwargs):
         seen.append([track["title"] for track in batch])
         for track in batch:
-            sink_for(track).set_enrichment("techno", "2024")
-            sink_for(track).set_audio(bpm=128.0, energy=.8, danceability=.7)
+            sink_for(track).apply_fields("musicbrainz", {"genre": "techno", "year": "2024"})
+            sink_for(track).apply_fields("acousticbrainz", {"bpm": 128.0, "energy": .8, "danceability": .7})
 
     ctx = SimpleNamespace(store=store, now_fn=lambda: 500.0,
                           rec_worker=SimpleNamespace(trigger_content_update=update),
@@ -52,7 +52,7 @@ def test_mixed_batch_follows_shared_order_and_refreshes_fresh(monkeypatch, store
     worker = EnrichWorker(ctx, waterfall_fn=waterfall)
     assert worker.drain_once(limit=2) == 2
     assert seen == [["Newest library song", "New"]]
-    assert store.enrichment.queue_remaining() == 1
+    assert store.enrichment_reports.queue_remaining() == 1
     assert store.tracks.get_track_enrichment(newest) == ("techno", "2024")
     keys, now, discovery = prepared[0]
     assert keys == {"newest library song|artist", "new|artist"} and now == 500.0
@@ -61,12 +61,12 @@ def test_mixed_batch_follows_shared_order_and_refreshes_fresh(monkeypatch, store
     assert worker.drain_once(limit=1) == 1
     assert seen[-1] == ["Older library song"]
     assert prepared[1][0] == {"older library song|artist"}
-    assert store.enrichment.queue_remaining() == 0
+    assert store.enrichment_reports.queue_remaining() == 0
 
 
 @pytest.mark.parametrize("interrupt", [None, "pause", "error", "breaker"])
 def test_mixed_waterfall_commits_each_track_and_keeps_unfinished_work(store, monkeypatch, interrupt):
-    from yt_playlist.rec import embed, fresh_pool
+    from yt_playlist.rec import embedding_vectors as embed, fresh_pool
 
     monkeypatch.setattr(embed, "build_discovered_content_vectors", lambda s: None)
     monkeypatch.setattr(fresh_pool, "prepare", lambda s, now: None)
@@ -90,8 +90,8 @@ def test_mixed_waterfall_commits_each_track_and_keeps_unfinished_work(store, mon
                     self.dead = True
             else:
                 # The discovery completion must already be visible before the library lookup.
-                assert store.enrichment.queue_remaining() == 1
-                assert store.enrichment.enriched_tracks()[0]["title"] == "New"
+                assert store.enrichment_reports.queue_remaining() == 1
+                assert store.enrichment_reports.enriched_tracks()[0]["title"] == "New"
                 if interrupt == "error":
                     raise RuntimeError("provider unavailable")
             return EnrichmentResult(self.name, {"genre": "techno", "year": "2024", "bpm": 128.0})
@@ -102,9 +102,9 @@ def test_mixed_waterfall_commits_each_track_and_keeps_unfinished_work(store, mon
         assert "provider unavailable" in worker.activity["warning"]
     else:
         assert worker.drain_once() == (0 if interrupt == "breaker" else (1 if interrupt else 2))
-    assert store.enrichment.queue_remaining() == (2 if interrupt == "breaker" else (1 if interrupt else 0))
+    assert store.enrichment_reports.queue_remaining() == (2 if interrupt == "breaker" else (1 if interrupt else 0))
     assert store.discovery.discovered_tracks_by_keys(["new|artist"])["new|artist"]["genre"] == "techno"
-    pending = store.enrichment.next_enrich_batch(10)
+    pending = store.enrichment_queue.next_enrich_batch(10)
     if interrupt == "breaker":
         assert {track["title"] for track in pending} == {"New", "Library"}
     else:

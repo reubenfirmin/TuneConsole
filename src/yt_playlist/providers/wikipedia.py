@@ -5,7 +5,6 @@ the band, not the planet), then fetch the REST summary. Only a real article (typ
 non-empty extract) counts. Confirmed misses return None; request/parse failures raise
 LookupUnavailable so callers can retain stale content and retry shortly.
 """
-import json
 import re
 import unicodedata
 import urllib.parse
@@ -13,6 +12,7 @@ import urllib.request
 import urllib.error
 
 from yt_playlist.providers.base import LookupUnavailable, RateLimiter
+from yt_playlist.providers import transport
 from yt_playlist.util import genre_catalog, net
 
 name = "wikipedia"
@@ -38,17 +38,9 @@ _GENRE_SEARCH_NAMES = {"minimal": "minimal techno"}
 
 def _get_json(url):
     """One HTTP GET returning parsed JSON. The single network seam (tests monkeypatch this)."""
-    _pacer.wait()
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT,
                                                "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
-            data = json.load(resp)
-    except Exception as e:
-        _breaker.record(e)
-        raise
-    _breaker.record()
-    return data
+    return transport.request_json(req, timeout=_HTTP_TIMEOUT_S, pace=_pacer.wait, breaker=_breaker)
 
 
 def _tokens(text):

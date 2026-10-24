@@ -1,28 +1,28 @@
+"""Planned merge/copy execution and edits of existing playlists."""
 import json
 import logging
-import os
-import re
-from uuid import uuid4
+from contextlib import ExitStack
 from dataclasses import dataclass, asdict
-from yt_playlist.util.duration import parse_duration
-from yt_playlist.util.matching import fuzzy_ratio, normalize, track_artist, identity_key
+from yt_playlist.util.matching import fuzzy_ratio, normalize, track_artist
 from yt_playlist.util.retry import with_retry
-from yt_playlist.core import paths
+from yt_playlist.library.playlist_backups import backup_playlist
+from yt_playlist.library.playlist_catalog import fetch_song_duration
 from yt_playlist.library.playlist_positions import cancel_insertions, retry_insertions
-from yt_playlist.library.playlist_snapshot import http_status, playlist_if_present, validate_playlist
-from yt_playlist.library.undo_capture import capture_post as _capture_post
-from yt_playlist.library.undo_conflicts import playlist_state
-from yt_playlist.library.playlist_metadata import (
-    GENERATED_DESCRIPTION, is_generated_description, content_hash, versioned_title)
+from yt_playlist.library.playlist_mutation import (
+    apply_playlist_permutation, confirm_playlist_write, same_playlist_items)
+from yt_playlist.library.playlist_snapshot import playlist_if_present, validate_playlist
+from yt_playlist.library.playlist_deletion import (
+    delete_backed_up, deletion_status, resume_pending_deletion)
+from yt_playlist.library.action_claim import claim_action
+from yt_playlist.library.undo_capture import capture_copy, capture_post as _capture_post
+from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.library.playlist_writes import (
-    add_items as _add_items, add_items_resilient, account_additions, AdditionOutcome, PlaylistAddUncertain)
+    add_items as _add_items, add_items_resilient, account_additions, AdditionOutcome,
+    PlaylistAddUncertain, retain_addition_snapshot)
 from yt_playlist.util.action_kinds import (
-    PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY, DELETE_PLAYLIST, GC_GENERATED, COPY_PLAYLIST,
-    COPY_INTO, ADD_TRACKS, REMOVE_TRACK, RENAME_PLAYLIST, REMOVE_LOCAL_PLAYLIST)
+    PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY, DELETE_PLAYLIST,
+    ADD_TRACKS, REMOVE_TRACK, RENAME_PLAYLIST, REMOVE_LOCAL_PLAYLIST)
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
-from yt_playlist.repos.base import GENERATED_GROUP
-
-from yt_playlist.util.thumbnails import best_thumb
 
 logger = logging.getLogger(__name__)
 
@@ -103,52 +103,6 @@ def _remote_snapshot(client, ytm_playlist_id):
     return validate_playlist(with_retry(lambda: client.get_playlist(ytm_playlist_id, limit=None)))
 
 
-def _copy_undo(client, ytm_playlist_id, identity_id, expected_videos=None, *, title=None,
-               description=None, addition=None):
-    metadata = {k: v for k, v in {"title": title, "description": description}.items() if v is not None}
-    if addition is not None:
-        expected_videos = addition.confirmed
-    if addition is not None and addition.failure:
-        # Use the exact complete read that reconciled this write, never a later arbitrary state.
-        snapshot = addition.failure.snapshot
-        post = playlist_state(snapshot) if snapshot is not None else None
-        if post is not None and (post["videos"] != list(addition.confirmed) or any(
-                post.get(k) is not None and post[k] != v for k, v in metadata.items())):
-            post = None
-        return {"new_ytm": ytm_playlist_id, "target_identity": identity_id,
-                "post": post, "addition": addition.diagnostics()}
-    return {"new_ytm": ytm_playlist_id, "target_identity": identity_id,
-            "post": _capture_post(client, ytm_playlist_id, expected_videos=expected_videos,
-                                  expected_metadata=metadata)}
-
-
-def _retain_addition_snapshot(store, playlist_id, addition, now):
-    """Mirror a complete reconciliation read without another fetch or positional writes."""
-    if not addition.failure:
-        return
-    snapshot = addition.failure.snapshot
-    if snapshot is None:
-        # A prior batch may have been acknowledged even when the final read failed. Retain
-        # only those known additions; nothing in the uncertain/unattempted sets is inferred.
-        known = store.tracks.track_ids_for_videos(addition.confirmed)
-        ids = list(dict.fromkeys(store.playlists.get_playlist_track_ids(playlist_id) +
-                                [known[v] for v in addition.confirmed if v in known]))
-        store.playlists.set_playlist_tracks(playlist_id, ids)
-        store.playlists.set_playlist_track_count(playlist_id, len(ids), now)
-        return
-    track_ids = []
-    for t in snapshot["tracks"]:
-        album = t.get("album") or {}
-        track_ids.append(store.tracks.upsert_track(
-            t["videoId"], t.get("title") or "", track_artist(t),
-            album.get("name") if isinstance(album, dict) else album,
-            t.get("duration_seconds"), thumbnail=best_thumb(t.get("thumbnails"))))
-    track_ids = list(dict.fromkeys(track_ids))
-    store.playlists.set_playlist_tracks(playlist_id, track_ids)
-    store.playlists.set_playlist_track_count(playlist_id, len(track_ids), now)
-    store.playlists.ensure_playlist_thumbnail(playlist_id)
-
-
 def _remote_keys(client, ytm_playlist_id):
     """Exact remote upload IDs, or None if the complete contents cannot be established."""
     try:
@@ -163,7 +117,8 @@ def _remote_video_ids(client, ytm_playlist_id):
     return [t["videoId"] for t in detail["tracks"]]
 
 def _verify_and_delete(store, source_playlist_id, source_client, target_client, target_ytm, now,
-                       *, retained_video_ids=(), excluded_video_ids=(), backups=None) -> str:
+                       *, retained_video_ids=(), excluded_video_ids=(), backups=None,
+                       action_id, locked=False) -> str:
     """Shared copy-before-delete gate for merges, moves and duplicate removal.
 
     Compare exact uploads from fresh reads. Only an explicit merge selection may exclude known
@@ -191,13 +146,12 @@ def _verify_and_delete(store, source_playlist_id, source_client, target_client, 
     if backups is not None:
         backups.append(backup_path)  # retain undo evidence even if the delete response is lost
     logger.warning("deleting source playlist %s (backup at %s)", source.ytm_playlist_id, backup_path)
-    # Not wrapped in with_retry: delete_playlist is non-idempotent. The subset check above has
-    # already confirmed the merge succeeded remotely, so the delete should not be auto-replayed.
-    source_client.delete_playlist(source.ytm_playlist_id)
+    delete_backed_up(store, source, source_client, backup_path, now, kind=PLAN,
+                     action_id=action_id, locked=locked)
     return backup_path
 
 def _reconcile(client, ytm_playlist_id, desired_video_ids):
-    """Reconcile unique membership for a forward merge; this does not promise playback order.
+    """Reconcile unique membership, retaining the write-constrained append order.
 
     Returns counts, the complete pre-write baseline, rejected IDs and the sequence
     constrained by those writes. A separate complete read must verify that sequence
@@ -210,11 +164,18 @@ def _reconcile(client, ytm_playlist_id, desired_video_ids):
     desired_set = set(desired)
     current = set(prior)
     to_add = [v for v in desired if v not in current]
-    to_remove = [t for t in tracks if t.get("videoId") and t.get("videoId") not in desired_set]
+    to_remove, kept = [], set()
+    for track in tracks:
+        video = track["videoId"]
+        if video not in desired_set or video in kept:
+            if video in desired_set and video in kept and not track.get("setVideoId"):
+                raise ValueError("YouTube has not exposed the repeated item's removal handle.")
+            to_remove.append(track)
+        kept.add(video)
     added, skipped = _add_items(client, ytm_playlist_id, to_add, prior_tracks=tracks)
     if to_remove:
         client.remove_playlist_items(ytm_playlist_id, to_remove)
-    expected = [v for v in prior if v in desired_set] + [v for v in to_add if v not in skipped]
+    expected = list(dict.fromkeys(v for v in prior if v in desired_set)) + [v for v in to_add if v not in skipped]
     return added, len(to_remove), prior, skipped, expected
 
 def apply_result(store, clients, playlist_ids, result_video_ids, keep, now) -> dict:
@@ -257,20 +218,35 @@ def apply_result(store, clients, playlist_ids, result_video_ids, keep, now) -> d
                  "prev": _remote_video_ids(client_for(pl), pl.ytm_playlist_id),
                  "post_state": None} for pl in keepers]
     backups = []
+    action_id = None
+    deletion_locks = ExitStack()
 
     def _record(extra=None):
+        nonlocal action_id
         for entry in restored:
             post = entry["post_state"]
             entry["post"] = post["videos"] if post is not None else None
-        store.actions.record_action(APPLY_MERGE,
-                            json.dumps({"kept": summary["kept_title"], "deleted": summary["deleted"],
+        params = json.dumps({"kept": summary["kept_title"], "deleted": summary["deleted"],
                                         "added": summary["added"], "removed": summary["removed"],
                                         "skipped": summary["skipped"],
-                                        "members": [p.title for p in pls], **(extra or {})}),
-                            "{}", "executed", json.dumps({"restored": restored, "backups": backups}), now)
+                                        "members": [p.title for p in pls], **(extra or {})})
+        undo = {"restored": restored, "backups": backups}
+        if action_id is None:
+            action_id = store.actions.record_action(
+                APPLY_MERGE, params, "{}", "executed", json.dumps(undo), now)
+        else:
+            action = store.actions.get_action(action_id)
+            if action.status not in ("executed", "delete_pending", "delete_failed"):
+                return  # an earlier recovery must never be overwritten
+            undo.update({"deletions": json.loads(action.undo_json).get("deletions", [])})
+            store.actions.update_action(action_id, deletion_status(undo), now,
+                                        json.dumps(undo), params_json=params)
 
     try:
         for pl in keepers:
+            # This editor's membership and order replace any earlier alternate placement,
+            # including when the new remote mutation later needs recovery.
+            cancel_insertions(store, pl.id, now)
             try:
                 added, removed, prior, skipped, expected = _reconcile(
                     client_for(pl), pl.ytm_playlist_id, result_video_ids)
@@ -283,7 +259,7 @@ def apply_result(store, clients, playlist_ids, result_video_ids, keep, now) -> d
                 # valid mirror data, but cannot establish ownership for Undo.
                 entry["post_state"] = None
                 entry["addition"] = addition.diagnostics()
-                _retain_addition_snapshot(store, pl.id, addition, now)
+                retain_addition_snapshot(store, pl.id, addition, now)
                 raise
             summary["added"] += added
             summary["removed"] += removed
@@ -291,18 +267,42 @@ def apply_result(store, clients, playlist_ids, result_video_ids, keep, now) -> d
             entry = next(e for e in restored if e["ytm"] == pl.ytm_playlist_id)
             entry["prev"] = prior
             entry["post_state"] = _capture_post(client_for(pl), pl.ytm_playlist_id, expected_videos=expected)
+            if entry["post_state"] is None:
+                raise ValueError("Couldn't verify the merged playlist contents. Refusing to delete any source. "
+                                 "Re-sync and check again.")
+            desired = [v for v in result_video_ids if v not in skipped]
+            if expected != desired:
+                # Use the current occurrence handles from the verified membership read.
+                # Once positional writes start, that baseline is no longer Undo evidence.
+                state, entry["post_state"] = entry["post_state"], None
+                tracks = [{"videoId": video, "setVideoId": handle}
+                          for video, handle in zip(state["videos"], state["handles"])]
+                indices = {track["videoId"]: index for index, track in enumerate(tracks)}
+                apply_playlist_permutation(client_for(pl), pl.ytm_playlist_id, tracks,
+                                           [indices[video] for video in desired])
+                entry["post_state"] = _capture_post(client_for(pl), pl.ytm_playlist_id,
+                                                    expected_videos=desired)
+                if entry["post_state"] is None:
+                    raise ValueError("Couldn't verify the merged playlist order. Refusing to delete any source. "
+                                     "Re-sync and check again.")
+        if droppers:
+            _record()
+            deletion_locks.enter_context(claim_action(store, action_id, operation="Deletion"))
         for pl in droppers:
             # Exclusions only apply to uploads the editor could show, never unseen remote changes.
             excluded = {row[1] for row in _tracks_with_meta(store, pl.id) if row[1]} - retained
             _verify_and_delete(
                 store, pl.id, client_for(pl), client_for(keepers[0]), keepers[0].ytm_playlist_id, now,
-                retained_video_ids=retained, excluded_video_ids=excluded, backups=backups)
-            store.playlists.remove_playlist(pl.id)
+                retained_video_ids=retained, excluded_video_ids=excluded, backups=backups,
+                action_id=action_id, locked=True)
             summary["deleted"].append(pl.title)
     except Exception as e:
         _record({"partial": True, "error": str(e)})  # partial merges must remain undoable
         raise
-    _record()
+    else:
+        _record()
+    finally:
+        deletion_locks.close()
     return summary
 
 def copy_or_move_playlist(store, playlist_id, target_identity_id, source_client, target_client, now,
@@ -341,33 +341,44 @@ def copy_or_move_playlist(store, playlist_id, target_identity_id, source_client,
                                             content_hash(list(dict.fromkeys(keys))), now, created_at=now)
     store.playlists.set_playlist_tracks(db_pid, tids)
     store.playlists.ensure_playlist_thumbnail(db_pid)
-    _retain_addition_snapshot(store, db_pid, addition, now)
-    deleted, backup_path, delete_error = False, None, None
+    retain_addition_snapshot(store, db_pid, addition, now)
+    deleted, delete_error = False, None
     backups = []
+    undo = capture_copy(target_client, new_pid, target_identity_id,
+                      [v for v in video_ids if v not in skipped],
+                      title=src.title, description="Copied by TuneConsole", addition=addition)
+    action_id = None
+
+    def _record_move():
+        nonlocal action_id
+        params = json.dumps({"src_ytm": src.ytm_playlist_id, "title": src.title,
+                             "target_identity": target_identity_id, "new_ytm": new_pid,
+                             "deleted": deleted, "added": added, "skipped": len(skipped),
+                             "unresolved": unresolved, "addition": addition.diagnostics(),
+                             "partial": bool(addition.failure), "delete_error": delete_error,
+                             "source_backup": backups[0] if backups else None})
+        if action_id is None:
+            action_id = store.actions.record_action(
+                MOVE_IDENTITY, params, "{}", "executed", json.dumps(undo), now)
+        else:
+            action = store.actions.get_action(action_id)
+            if action.status in ("executed", "delete_pending", "delete_failed"):
+                store.actions.update_action(action_id, action.status, now, params_json=params)
+
     if delete_source and unresolved == 0 and not skipped and not addition.failure:
+        _record_move()  # preserve destination recovery before beginning source deletion
         try:
             # Not every playlist is deletable (auto-generated/system playlists 400 here). The copy
             # already succeeded, so a failed delete must not strip the copy. Keep both and report.
-            bpath = _verify_and_delete(store, playlist_id, source_client, target_client, new_pid, now,
-                                       retained_video_ids=video_ids, backups=backups)
-            store.playlists.remove_playlist(playlist_id)
-            deleted, backup_path = True, bpath
+            with claim_action(store, action_id, operation="Deletion"):
+                _verify_and_delete(store, playlist_id, source_client, target_client, new_pid, now,
+                                   retained_video_ids=video_ids, backups=backups,
+                                   action_id=action_id, locked=True)
+                deleted = True
         except Exception as e:  # noqa: BLE001
             logger.warning("move: keeping source %s: %s", src.ytm_playlist_id, e)
             delete_error = str(e) or type(e).__name__
-    store.actions.record_action(
-        MOVE_IDENTITY,
-        json.dumps({"src_ytm": src.ytm_playlist_id, "title": src.title,
-                    "target_identity": target_identity_id, "new_ytm": new_pid, "deleted": deleted,
-                    "added": added, "skipped": len(skipped), "unresolved": unresolved,
-                    "addition": addition.diagnostics(), "partial": bool(addition.failure),
-                    "delete_error": delete_error, "source_backup": backups[0] if backups else None}),
-        "{}", "executed",
-        json.dumps({"backup": backup_path or (backups[0] if backups else None),
-                    **_copy_undo(target_client, new_pid, target_identity_id,
-                                 [v for v in video_ids if v not in skipped],
-                                 title=src.title, description="Copied by TuneConsole",
-                                 addition=addition)}), now)
+    _record_move()
     addition.finish()
     return {"added": added, "skipped": len(skipped), "unresolved": unresolved, "deleted": deleted,
             "title": src.title, "delete_error": delete_error}
@@ -398,6 +409,9 @@ def delete_empty_playlist(store, playlist_id, client, now) -> str | None:
         raise ValueError("playlist no longer exists")
     if pl.ytm_playlist_id in SYSTEM_PLAYLIST_IDS:
         raise ValueError(f"“{pl.title}” is a system playlist and can't be deleted")
+    resumed = resume_pending_deletion(store, pl, client, now)
+    if resumed is not None:
+        return resumed
     try:
         snapshot = with_retry(lambda: playlist_if_present(client, pl.ytm_playlist_id))
     except Exception as exc:
@@ -410,15 +424,7 @@ def delete_empty_playlist(store, playlist_id, client, now) -> str | None:
         raise ValueError(f"“{pl.title}” isn't empty anymore ({len(snapshot['tracks'])} tracks). Re-sync first")
     backup_path = backup_playlist(store, playlist_id, now, client, snapshot=snapshot)
     logger.warning("deleting empty playlist %s (backup at %s)", pl.ytm_playlist_id, backup_path)
-    try:
-        client.delete_playlist(pl.ytm_playlist_id)
-    except Exception as exc:
-        if http_status(exc) != 404:
-            raise
-    store.playlists.remove_playlist(playlist_id)
-    store.actions.record_action(DELETE_EMPTY,
-                        json.dumps({"ytm": pl.ytm_playlist_id, "title": pl.title}),
-                        "{}", "executed", json.dumps({"backup": backup_path}), now)
+    delete_backed_up(store, pl, client, backup_path, now, kind=DELETE_EMPTY)
     return backup_path
 
 def delete_playlist(store, playlist_id, client, now) -> str:
@@ -430,435 +436,13 @@ def delete_playlist(store, playlist_id, client, now) -> str:
     pl = store.playlists.get_playlist(playlist_id)
     if pl is None:
         raise ValueError("playlist no longer exists")
+    resumed = resume_pending_deletion(store, pl, client, now)
+    if resumed is not None:
+        return resumed
     backup_path = backup_playlist(store, playlist_id, now, client)
     logger.warning("deleting playlist %s (backup at %s)", pl.ytm_playlist_id, backup_path)
-    client.delete_playlist(pl.ytm_playlist_id)
-    store.playlists.remove_playlist(playlist_id)
-    store.actions.record_action(DELETE_PLAYLIST,
-                        json.dumps({"ytm": pl.ytm_playlist_id, "title": pl.title}),
-                        "{}", "executed", json.dumps({"backup": backup_path}), now)
+    delete_backed_up(store, pl, client, backup_path, now, kind=DELETE_PLAYLIST)
     return backup_path
-
-# Keep a generated playlist if at least this fraction of its tracks were played since it was created,
-# evidence you actually played the playlist, not just stumbled across a song or two from it.
-GC_PLAYED_FRACTION = 0.5
-
-
-def gc_generated_playlists(store, clients, now, grace_days=None) -> list[dict]:
-    """Garbage-collect generated playlists that have gone (mostly) unplayed past their grace window.
-
-    A generated playlist (group == GENERATED_GROUP) is collected when BOTH hold:
-      • it's older than the grace window (now - first_seen ≥ grace_days), and
-      • fewer than GC_PLAYED_FRACTION of its tracks have been played since it was created.
-
-    YouTube exposes no per-playlist play count, so "played" is judged at the song level using each
-    track's last-played date: playing the playlist through lights up most of its tracks within the
-    window, whereas a couple of stray plays (a song heard via radio/autoplay) doesn't clear the bar.
-    Each collection backs up, deletes locally + on YouTube, and records an undoable GC_GENERATED
-    action, exactly like a manual delete, just automatic. Returns the collected playlists.
-    """
-    from yt_playlist.rec import rec_params
-    if grace_days is None:
-        grace_days = rec_params.get_param(store, "generated_gc_days")
-    grace_s = grace_days * 86400.0
-    clients = clients or {}
-    recency = store.charts.get_playlist_track_recency()         # pid -> [per-track last-played ts | None, ...]
-    collected = []
-    for pl in store.playlists.get_playlists():
-        if not store.playlists.is_quarantined_playlist(pl.scope_ref):
-            continue
-        created = pl.first_seen or now
-        if now - created < grace_s:                      # still inside its grace window, leave it
-            continue
-        lasts = recency.get(pl.id) or []
-        if lasts:                                        # fraction of tracks played since creation
-            played = sum(1 for t in lasts if t is not None and t >= created)
-            if played / len(lasts) >= GC_PLAYED_FRACTION:   # enough of it was played -> keep
-                continue
-        client = clients.get(pl.identity_id)
-        if client is None:                                # can't delete remotely without its client
-            continue
-        try:
-            backup_path = backup_playlist(store, pl.id, now, client)
-            logger.warning("GC: deleting unplayed generated playlist %s (backup at %s)",
-                           pl.ytm_playlist_id, backup_path)
-            client.delete_playlist(pl.ytm_playlist_id)
-            store.playlists.remove_playlist(pl.id)
-            store.rec_surface.delete_cluster_canvas(pl.ytm_playlist_id)   # #48: don't leave its (large) saved canvas behind
-            store.actions.record_action(GC_GENERATED,
-                                json.dumps({"ytm": pl.ytm_playlist_id, "title": pl.title}),
-                                "{}", "executed", json.dumps({"backup": backup_path}), now)
-            collected.append({"ytm": pl.ytm_playlist_id, "title": pl.title, "backup": backup_path})
-        except Exception:  # noqa: BLE001 - one playlist's failure must not stop the sweep
-            logger.warning("GC: could not delete generated playlist %s", pl.ytm_playlist_id,
-                           exc_info=True)
-    return collected
-
-def copy_playlist(store, playlist_ids, new_name, client, now) -> dict:
-    """Copy one or more playlists into a NEW playlist (non-destructive). With several, it's a
-    copy+merge: their tracks are unioned (de-duped, order preserved). Pulled into the store."""
-    pls = [p for p in (store.playlists.get_playlist(i) for i in playlist_ids) if p is not None]
-    if not pls:
-        raise ValueError("no playlists to copy")
-    vids, keys, seen = [], {}, set()
-    for pl in pls:
-        for (k, v, t, a, d, av) in _tracks_with_meta(store, pl.id):
-            if v and v not in seen:
-                seen.add(v)
-                vids.append(v)
-                keys[v] = k
-    title = (new_name or "").strip() or (f"{pls[0].title} (copy)" if len(pls) == 1 else "Combined playlist")
-    identity = pls[0].identity_id
-    new_pid = client.create_playlist(title, "Copied by TuneConsole")
-    addition = account_additions(_add_items, client, new_pid, vids, prior_tracks=[])
-    added, skipped = addition.added, addition.skipped
-    store.actions.record_action(COPY_PLAYLIST,
-                        json.dumps({"title": title, "source": ", ".join(p.title for p in pls),
-                                    "added": added, "skipped": len(skipped),
-                                    "addition": addition.diagnostics(), "partial": bool(addition.failure)}),
-                        "{}", "executed",
-                        json.dumps(_copy_undo(client, new_pid, identity,
-                                              [v for v in vids if v not in skipped],
-                                              title=title, description="Copied by TuneConsole",
-                                              addition=addition)), now)
-    # Seed the store from the tracks we know we added. A read-back from YouTube here would race
-    # its indexing lag and often returns an empty playlist; the sources are already in our store,
-    # so we map them directly. A later full sync reconciles canonical order/metadata.
-    added_vids = list(addition.confirmed)
-    tid_by_vid = store.tracks.track_ids_for_videos(added_vids)
-    track_ids = [tid_by_vid[v] for v in added_vids if v in tid_by_vid]
-    track_keys = list(dict.fromkeys(keys[v] for v in added_vids if v in keys))
-    db_pid = store.playlists.upsert_playlist(identity, new_pid, title, len(track_ids), content_hash(track_keys), now,
-                                   created_at=now)
-    store.playlists.set_playlist_tracks(db_pid, track_ids)
-    store.playlists.ensure_playlist_thumbnail(db_pid)
-    _retain_addition_snapshot(store, db_pid, addition, now)
-    addition.finish()
-    return {"new_ytm": new_pid, "title": title, "added": added, "skipped": len(skipped),
-            "skipped_video_ids": list(skipped), "from": len(pls)}
-
-def create_generated_playlist(store, title, tracks, client, now, identity_id=None, group=None,
-                              recipe=None) -> dict:
-    """Create a NEW playlist on YouTube from recommendation tracks (dicts with video_id + metadata),
-    record its generated origin and quarantine until explicit adoption, and optimistically
-    materialize it into the store so it shows up in the Playlists tab right away (a later sync
-    reconciles canonical order/metadata). Non-destructive: nothing existing is touched.
-
-    Quarantine makes the optimistic insert safe even for unowned tracks (e.g. 'fresh songs' not yet in
-    your library): the playlist is excluded from playlist-level signals, and its unplayed-only tracks
-    are excluded from the embedding baskets until you explicitly adopt the playlist."""
-    from yt_playlist.rec import rec_params
-    group = group or GENERATED_GROUP
-    uniq, seen = [], set()
-    for t in tracks:
-        v = (t or {}).get("video_id")
-        if v and v not in seen:
-            seen.add(v)
-            uniq.append(t)
-    if not uniq:
-        raise ValueError("no tracks to add")
-    # Resolve times before any remote writes: Fresh discoveries often have no stored duration,
-    # and finding a two-hour concert after adding it is too late (#44). Keep these copies so local
-    # materialization reuses each result, including unknowns, without another lookup (#26).
-    max_duration = rec_params.max_track_duration_s(store)
-    eligible = []
-    for t in uniq:
-        dur = t.get("duration")
-        if dur is None:
-            dur = store.tracks.known_duration(t.get("title") or "", t.get("artist") or "")
-        if dur is None:
-            dur = _fetch_song_duration(client, t["video_id"])
-        if dur is None or dur <= max_duration:
-            eligible.append({**t, "duration": dur})
-    excluded = len(uniq) - len(eligible)
-    uniq = eligible
-    if not uniq:
-        raise ValueError("No tracks are within the maximum track length set in Taste Model.")
-    title = (title or "Generated playlist").strip()
-    if recipe is not None:                                # recipe-driven: version the title
-        title = versioned_title(store, title)
-        # NB: the mix is already DJ-ordered in the proto card (journeys.journey_order in home._carded),
-        # so we persist the posted rows in the order the user actually saw: WYSIWYG. Re-ordering here
-        # would diverge from the preview (the shuffle is seed-stable but its input differs once rows
-        # are pruned). Pruning just drops rows; the survivors keep their already-good spacing.
-    new_pid = client.create_playlist(title, GENERATED_DESCRIPTION)
-    store.playlists.mark_generated_playlist(new_pid)
-    store.playlists.set_playlist_group(new_pid, group)
-    addition = account_additions(_add_items, client, new_pid, [t["video_id"] for t in uniq], prior_tracks=[])
-    added, skipped = addition.added, addition.skipped
-    db_pid = None
-    if identity_id is not None:                          # optimistic local materialization
-        confirmed = set(addition.confirmed)
-        track_ids, keys = [], []
-        for t in uniq:
-            if t["video_id"] not in confirmed:
-                continue
-            ti, ar = t.get("title") or "", t.get("artist") or ""
-            track_ids.append(store.tracks.upsert_track(
-                t["video_id"], ti, ar, t.get("album") or "", t["duration"], thumbnail=t.get("thumbnail")))
-        keys = [store.tracks.catalog_subject(tid)["identity_key"] for tid in track_ids]
-        db_pid = store.playlists.upsert_playlist(identity_id, new_pid, title, len(track_ids),
-                                       content_hash(list(dict.fromkeys(keys))), now, created_at=now)
-        store.playlists.set_playlist_tracks(db_pid, track_ids)
-        store.playlists.ensure_playlist_thumbnail(db_pid)
-        _retain_addition_snapshot(store, db_pid, addition, now)
-    store.actions.record_action(COPY_PLAYLIST,
-                        json.dumps({"title": title, "source": "recommendations", "group": group,
-                                    "added": added, "skipped": len(skipped) + excluded,
-                                    "addition": addition.diagnostics(), "partial": bool(addition.failure)}),
-                        "{}", "executed", json.dumps(_copy_undo(client, new_pid, identity_id,
-                            [t["video_id"] for t in uniq if t["video_id"] not in skipped],
-                            title=title, description=GENERATED_DESCRIPTION, addition=addition)), now)
-    if recipe is not None:
-        store.rec_surface.set_recipe(new_pid, recipe, now)           # remember exactly how this one was made
-    addition.finish()
-    return {"new_ytm": new_pid, "pid": db_pid, "title": title, "added": added,
-            "skipped": len(skipped) + excluded}
-
-def _playlist_ready(client, ytm_id) -> bool:
-    """Has YouTube materialized this playlist enough to load it? A just-created playlist returns a
-    valid id from create_playlist before its watch?list= page is loadable, so 'the API gave us an id'
-    is not 'it exists to play'. get_playlist returning tracks is a far better proxy. A throw (a 404
-    while it is still propagating) is a clean not-ready, not an error."""
-    try:
-        return bool((client.get_playlist(ytm_id, limit=1) or {}).get("tracks"))
-    except Exception:  # noqa: BLE001 - not-yet-propagated shows up as a fetch error; treat as not ready
-        return False
-
-
-def navigate_when_ready(client, bridge, ytm_id, watch_url, *, tries=20, interval_s=1.5,
-                        sleep=None) -> bool:
-    """Send the extension a navigate to a freshly-created playlist, but only once YouTube confirms it
-    exists. Navigating immediately lands on a not-yet-ready playlist (and, since #101, foregrounds
-    that tab), so poll get_playlist until it reports tracks, then navigate. Best-effort: if it never
-    confirms within tries*interval_s, skip the switch entirely rather than foreground a broken tab
-    (the in-app redirect and the manual 'Open on YouTube Music' link still work). Meant to run on a
-    background thread so the HTTP response is never held for the poll."""
-    import time
-    sleep = sleep or time.sleep
-    for i in range(tries):
-        if _playlist_ready(client, ytm_id):
-            bridge.send_control({"type": "navigate", "url": watch_url})
-            return True
-        if i < tries - 1:
-            sleep(interval_s)
-    logger.warning("playlist %s not confirmed ready after ~%.0fs; skipping the YTM switch",
-                   ytm_id, tries * interval_s)
-    return False
-
-
-def create_playlist_from_song(store, name, track, client, now, identity_id) -> dict:
-    """Create an ordinary user playlist, seeding it through the shared track-add operation.
-
-    Materialize the new playlist before adding so a rejected song still leaves a discoverable
-    playlist and the caller can report the partial result without creating another on retry.
-    """
-    title = (name or "").strip()
-    if not title or not track.get("videoId"):
-        raise ValueError("Choose a song and give the playlist a name.")
-    new_pid = client.create_playlist(title, "Created by TuneConsole")
-    # Creation is already a remote side effect. Retain its destination before any local
-    # materialization or seed work can fail; pending actions cannot be undone mid-write.
-    action_id = store.actions.record_action(
-        COPY_PLAYLIST, json.dumps({"title": title, "source": "song", "added": 0, "partial": True}),
-        "{}", "pending", json.dumps({"new_ytm": new_pid, "target_identity": identity_id,
-                                     "post": None}), now)
-    addition = None
-    try:
-        db_pid = store.playlists.upsert_playlist(
-            identity_id, new_pid, title, 0, content_hash([]), now, created_at=now)
-        # A playlist just created by this operation has a known empty baseline, even while
-        # YouTube's first readable page is still propagating. Existing destinations still read.
-        result = add_tracks_to_playlist(store, db_pid, [track], client, now, prior_tracks=[])
-    except PlaylistAddUncertain as exc:
-        addition = AdditionOutcome(exc.confirmed, exc.skipped, exc)
-        result = {"added": addition.added}
-    except Exception as exc:  # noqa: BLE001 - retain the destination after any post-creation failure
-        logger.warning("song playlist %s created but seed bookkeeping failed (%s)",
-                       new_pid, type(exc).__name__)
-        failure = PlaylistAddUncertain(new_pid, [], [], [track["videoId"]])
-        addition = AdditionOutcome((), (), failure)
-        result = {"added": 0}
-    store.actions.update_action(
-        action_id, "executed", now,
-        json.dumps(_copy_undo(client, new_pid, identity_id,
-                             [track["videoId"]] if result["added"] else [],
-                             title=title, description="Created by TuneConsole", addition=addition)),
-        params_json=json.dumps({"title": title, "source": "song", "added": result["added"],
-                                "partial": bool(addition),
-                                "addition": addition.diagnostics() if addition else None}))
-    if addition:
-        addition.finish()
-    return {**result, "db_pid": db_pid, "new_ytm": new_pid, "title": title}
-
-
-def create_playlist_from_album(store, browse_id, name, client, now, identity_id) -> dict:
-    """Create a NEW playlist from an album's tracks (non-destructive). Fetches the album, creates a
-    real (un-grouped) playlist under `identity_id` with its songs, and materializes it into the store
-    so it shows up immediately. Returns the new playlist's local db id for redirecting to its page."""
-    a = with_retry(lambda: client.get_album(browse_id))
-    if not a:
-        raise ValueError("couldn't load that album")
-    artist = ", ".join(x.get("name", "") for x in (a.get("artists") or []) if x.get("name"))
-    vids, seen, meta = [], set(), {}
-    for t in (a.get("tracks") or []):
-        v = t.get("videoId")
-        if v and v not in seen:
-            seen.add(v)
-            vids.append(v)
-            meta[v] = (t.get("title") or "", artist, a.get("title") or "")
-    if not vids:
-        raise ValueError("this album has no playable tracks")
-    title = (name or "").strip() or (a.get("title") or "Album playlist")
-    new_pid = client.create_playlist(title, f"Created from “{a.get('title')}” by TuneConsole")
-    addition = account_additions(_add_items, client, new_pid, vids, prior_tracks=[])
-    added, skipped = addition.added, addition.skipped
-    confirmed = set(addition.confirmed)
-    thumb = best_thumb(a.get("thumbnails"))
-    track_ids, keys = [], []
-    for v in vids:
-        if v not in confirmed:
-            continue
-        ti, ar, al = meta[v]
-        track_ids.append(store.tracks.upsert_track(v, ti, ar, al, None, thumbnail=thumb))
-    keys = [store.tracks.catalog_subject(tid)["identity_key"] for tid in track_ids]
-    db_pid = store.playlists.upsert_playlist(identity_id, new_pid, title, len(track_ids),
-                                   content_hash(list(dict.fromkeys(keys))), now, created_at=now)
-    store.playlists.set_playlist_tracks(db_pid, track_ids)
-    store.playlists.ensure_playlist_thumbnail(db_pid)
-    _retain_addition_snapshot(store, db_pid, addition, now)
-    store.actions.record_action(COPY_PLAYLIST,
-                        json.dumps({"title": title, "source": a.get("title") or "album",
-                                    "added": added, "skipped": len(skipped),
-                                    "addition": addition.diagnostics(), "partial": bool(addition.failure)}),
-                        "{}", "executed", json.dumps(_copy_undo(client, new_pid, identity_id,
-                            [v for v in vids if v not in skipped], title=title,
-                            description=f"Created from “{a.get('title')}” by TuneConsole",
-                            addition=addition)), now)
-    addition.finish()
-    return {"new_ytm": new_pid, "db_pid": db_pid, "title": title, "added": added, "skipped": len(skipped)}
-
-def copy_into_playlist(store, source_ids, target_id, client, now) -> dict:
-    """Copy the union of tracks from one or more source playlists INTO an existing target playlist
-    (non-destructive append). Songs already in the target (by identity_key) are skipped, so it's
-    safe to re-run. The source playlists are left untouched."""
-    target = store.playlists.get_playlist(target_id)
-    if target is None:
-        raise ValueError("target playlist no longer exists")
-    if target.ytm_playlist_id in SYSTEM_PLAYLIST_IDS:
-        raise ValueError("can't copy into a system playlist")
-    sources = [p for p in (store.playlists.get_playlist(i) for i in source_ids) if p is not None and p.id != target_id]
-    if not sources:
-        raise ValueError("no source playlists to copy")
-    # Add with the TARGET's client, so every source video must belong to the target's account. A
-    # cross-account copy would feed account A's videoIds to account B's client. Region/upload-scoped
-    # ids silently 400 and land in `skipped`, leaving the destination short. Require one account.
-    if any(p.identity_id != target.identity_id for p in sources):
-        raise ValueError("can only copy into a playlist on the same account")
-    have = set(store.playlists.get_playlist_track_keys(target_id))   # songs already in the target
-    vids, seen = [], set()
-    for pl in sources:
-        for (k, v, t, a, d, av) in _tracks_with_meta(store, pl.id):
-            if v and v not in seen and k not in have:
-                seen.add(v)
-                have.add(k)                                # also de-dupe across sources by song
-                vids.append(v)
-    addition = account_additions(_add_items, client, target.ytm_playlist_id, vids)
-    added, skipped = addition.added, addition.skipped
-    added_vids = list(addition.confirmed)
-    tid_by_vid = store.tracks.track_ids_for_videos(added_vids)
-    new_ids = [tid_by_vid[v] for v in added_vids if v in tid_by_vid]
-    combined = list(dict.fromkeys(store.playlists.get_playlist_track_ids(target_id) + new_ids))
-    store.playlists.set_playlist_tracks(target_id, combined)
-    store.playlists.set_playlist_track_count(target_id, len(combined), now)
-    store.playlists.ensure_playlist_thumbnail(target_id)
-    _retain_addition_snapshot(store, target_id, addition, now)
-    store.actions.record_action(COPY_INTO,
-                        json.dumps({"target": target.title, "added": added, "skipped": len(skipped),
-                                    "addition": addition.diagnostics(), "partial": bool(addition.failure),
-                                    "source": ", ".join(p.title for p in sources)}),
-                        "{}", "executed", json.dumps({"addition": addition.diagnostics(),
-                            "snapshot": addition.failure.snapshot if addition.failure else None}), now)
-    addition.finish()
-    return {"target_ytm": target.ytm_playlist_id, "title": target.title, "added": added,
-            "skipped": len(skipped), "skipped_video_ids": list(skipped),
-            "from": len(sources), "count": len(combined)}
-
-def _fetch_song_duration(client, video_id):
-    """Best-effort single-track duration (seconds) via get_song, for a track whose search result
-    carried no time (YouTube's unfiltered search often omits it). Returns None on any failure. A
-    missing time must never block an add."""
-    if not video_id:
-        return None
-    try:
-        details = (with_retry(lambda: client.get_song(video_id)) or {}).get("videoDetails") or {}
-        secs = details.get("lengthSeconds")
-        return int(secs) if secs not in (None, "") else None
-    except Exception:  # noqa: BLE001 - duration is a nicety; never let it fail the add
-        return None
-
-
-_PARENS_RE = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
-
-
-def _strip_parens(text):
-    """Drop parenthetical/bracketed qualifiers, e.g. 'Time Zero (Paul Ritch Remix)' -> 'Time Zero'."""
-    return _PARENS_RE.sub("", text or "").strip()
-
-
-def search_versions(client, title, artist, exclude=None, limit=14) -> list:
-    """Search YouTube Music for alternate versions of a song. Returns normalized candidates
-    (songs first, then videos, then unfiltered), de-duped by videoId, excluding the starting track.
-
-    The query uses the title with remix/live/etc. qualifiers stripped, so a track like
-    'Time Zero (Paul Ritch Remix)' searches for 'Time Zero <artist>' and surfaces every version,
-    the original and all remixes, rather than only that exact (often-removed) one."""
-    base_title = _strip_parens(title) or title
-    query = " ".join(x for x in (base_title, artist) if x).strip()
-    out, by_vid = [], {}
-    # UNFILTERED first: it mirrors a plain web search (the most relevant top hits, incl. tracks the
-    # filtered searches miss). Then songs/videos add structured extras. De-duped by videoId. The
-    # unfiltered/top-results pass frequently OMITS duration while the 'songs' pass carries
-    # duration_seconds, so a videoId first seen unfiltered is later back-filled with its time from a
-    # filtered pass (without this, the added alternate lands in the playlist with a blank time, #26).
-    for filt in (None, "songs", "videos"):
-        try:
-            results = with_retry(lambda f=filt: client.search(query, filter=f)) or []
-        except Exception:  # noqa: BLE001
-            logger.warning("alternate-version search (%s) failed for %r", filt, query)
-            results = []
-        for r in results:
-            vid = r.get("videoId")
-            if not vid or vid == exclude:
-                continue
-            dur = r.get("duration_seconds") or parse_duration(r.get("duration"))
-            cand = by_vid.get(vid)
-            if cand is not None:                  # seen in an earlier pass, top up a missing duration
-                if cand["duration"] is None and dur is not None:
-                    cand["duration"] = dur
-                continue
-            if len(out) >= limit:                 # at capacity for new candidates; keep back-filling above
-                continue
-            album = r.get("album")
-            is_video = filt == "videos" or r.get("resultType") == "video" \
-                or r.get("videoType") == "MUSIC_VIDEO_TYPE_UGC"
-            cand = {
-                "videoId": vid,
-                "title": r.get("title", ""),
-                "artist": ", ".join(a.get("name", "") for a in (r.get("artists") or []) if a.get("name")),
-                "album": album.get("name") if isinstance(album, dict) else None,
-                "album_browse": album.get("id") if isinstance(album, dict) else None,
-                "duration": dur,
-                "thumbnail": best_thumb(r.get("thumbnails")),
-                "kind": "video" if is_video else "song",
-            }
-            by_vid[vid] = cand
-            out.append(cand)
-        # Stop early only once we're full AND every candidate already has its time, otherwise keep
-        # scanning the remaining passes so they can back-fill the durations the first pass lacked.
-        if len(out) >= limit and all(c["duration"] is not None for c in out):
-            break
-    return out
 
 
 def add_tracks_to_playlist(store, playlist_id, tracks, client, now, after_video_id=None, *,
@@ -892,7 +476,7 @@ def add_tracks_to_playlist(store, playlist_id, tracks, client, now, after_video_
         # handful of tracks actually being added, so the playlist row shows a real duration (#26).
         dur = t.get("duration")
         if dur is None:
-            dur = _fetch_song_duration(client, t["videoId"])
+            dur = fetch_song_duration(client, t["videoId"])
         new_ids.append(store.tracks.upsert_track(t["videoId"], t.get("title", ""), t.get("artist"),
                                           t.get("album"), dur, 1,
                                           None, None, t.get("album_browse"), t.get("thumbnail")))
@@ -908,7 +492,7 @@ def add_tracks_to_playlist(store, playlist_id, tracks, client, now, after_video_
     store.playlists.set_playlist_tracks(playlist_id, combined)
     store.playlists.set_playlist_track_count(playlist_id, len(combined), now)
     store.playlists.ensure_playlist_thumbnail(playlist_id)
-    _retain_addition_snapshot(store, playlist_id, addition, now)
+    retain_addition_snapshot(store, playlist_id, addition, now)
     position_plan = {}
     if after_video_id and new_unique and not addition.failure:
         tmap = store.tracks.track_ids_for_videos([t["videoId"] for t in items])
@@ -928,18 +512,6 @@ def add_tracks_to_playlist(store, playlist_id, tracks, client, now, after_video_
     return {"added": added, "skipped": len(skipped), "count": len(combined), "position_pending": pending}
 
 
-def _set_video_ids(client, ytm_playlist_id) -> dict:
-    """Fetch the playlist and map videoId -> setVideoId (the per-item handle YT needs to move/remove
-    items). We don't persist setVideoIds (they're playlist-scoped and change), so we read them live."""
-    detail = with_retry(lambda: client.get_playlist(ytm_playlist_id, limit=None))
-    out = {}
-    for t in detail.get("tracks", []):
-        vid, svid = t.get("videoId"), t.get("setVideoId")
-        if vid and svid and vid not in out:
-            out[vid] = svid
-    return out
-
-
 def rename_playlist(store, playlist_id, title, client, now) -> dict:
     """Rename a playlist on YouTube and in the store."""
     pl = store.playlists.get_playlist(playlist_id)
@@ -950,7 +522,10 @@ def rename_playlist(store, playlist_id, title, client, now) -> dict:
     title = (title or "").strip()
     if not title:
         raise ValueError("name can't be empty")
-    with_retry(lambda: client.edit_playlist(pl.ytm_playlist_id, title=title))
+    confirm_playlist_write(
+        lambda: client.edit_playlist(pl.ytm_playlist_id, title=title),
+        lambda: _remote_snapshot(client, pl.ytm_playlist_id),
+        lambda detail: detail.get("title") == title, "rename")
     store.playlists.set_playlist_title(playlist_id, title, now)
     store.actions.record_action(RENAME_PLAYLIST,
                         json.dumps({"from": pl.title, "to": title}), "{}", "executed", "{}", now)
@@ -965,14 +540,20 @@ def remove_track(store, playlist_id, video_id, client, now) -> dict:
         raise ValueError("playlist no longer exists")
     if pl.ytm_playlist_id in SYSTEM_PLAYLIST_IDS:
         raise ValueError("can't remove tracks from a system playlist")
-    svid = _set_video_ids(client, pl.ytm_playlist_id).get(video_id)
-    if svid is None:
+    tracks = _remote_snapshot(client, pl.ytm_playlist_id)["tracks"]
+    index = next((i for i, track in enumerate(tracks) if track["videoId"] == video_id), None)
+    if index is None or not tracks[index].get("setVideoId"):
         raise ValueError("track not found on YouTube (already removed?)")
-    with_retry(lambda: client.remove_playlist_items(
-        pl.ytm_playlist_id, [{"videoId": video_id, "setVideoId": svid}]))
+    expected = tracks[:index] + tracks[index + 1:]
+    confirm_playlist_write(
+        lambda: client.remove_playlist_items(pl.ytm_playlist_id, [tracks[index]]),
+        lambda: _remote_snapshot(client, pl.ytm_playlist_id)["tracks"],
+        lambda actual: same_playlist_items(actual, expected), "track removal")
     cancel_insertions(store, playlist_id, now)
     moved_tid = store.tracks.track_ids_for_videos([video_id]).get(video_id)
-    ids = [i for i in store.playlists.get_playlist_track_ids(playlist_id) if i != moved_tid]
+    # A second occurrence of the same recording still belongs in the local membership.
+    retained = any(track["videoId"] == video_id for track in expected)
+    ids = [i for i in store.playlists.get_playlist_track_ids(playlist_id) if retained or i != moved_tid]
     store.playlists.set_playlist_tracks(playlist_id, ids)
     store.playlists.set_playlist_track_count(playlist_id, len(ids), now)
     store.actions.record_action(REMOVE_TRACK,
@@ -991,14 +572,16 @@ def reorder_track(store, playlist_id, video_id, before_video_id, client, now) ->
         raise ValueError("can't reorder a system playlist")
     if not video_id or video_id == before_video_id:
         return {"ok": True}
-    svids = _set_video_ids(client, pl.ytm_playlist_id)
-    moved = svids.get(video_id)
+    tracks = _remote_snapshot(client, pl.ytm_playlist_id)["tracks"]
+    moved = next((i for i, track in enumerate(tracks) if track["videoId"] == video_id), None)
     if moved is None:
         raise ValueError("track not found on YouTube")
-    successor = svids.get(before_video_id) if before_video_id else None
-    # moveItem=(moved, successor) places `moved` before `successor`; a bare setVideoId moves to the end
-    with_retry(lambda: client.edit_playlist(
-        pl.ytm_playlist_id, moveItem=(moved, successor) if successor else moved))
+    successor = next((i for i, track in enumerate(tracks) if track["videoId"] == before_video_id), None)
+    if before_video_id and successor is None:
+        raise ValueError("the requested destination track is not on YouTube. Re-sync before reordering")
+    target = [i for i in range(len(tracks)) if i != moved]
+    target.insert(target.index(successor) if successor is not None else len(target), moved)
+    apply_playlist_permutation(client, pl.ytm_playlist_id, tracks, target, movable={moved})
     cancel_insertions(store, playlist_id, now)
     tmap = store.tracks.track_ids_for_videos([video_id] + ([before_video_id] if before_video_id else []))
     moved_tid = tmap.get(video_id)
@@ -1006,61 +589,11 @@ def reorder_track(store, playlist_id, video_id, before_video_id, client, now) ->
     before_tid = tmap.get(before_video_id) if before_video_id else None
     if before_tid in ids:
         ids.insert(ids.index(before_tid), moved_tid)
-    else:
+    elif moved_tid is not None:
         ids.append(moved_tid)
     store.playlists.set_playlist_tracks(playlist_id, ids)
     return {"ok": True}
 
-
-def backup_playlist(store, playlist_id, now, client, *, snapshot=None) -> str:
-    """Publish a durable, ordered remote snapshot before any playlist deletion.
-
-    A caller that already verified a complete source may pass that exact snapshot, so the
-    recovery artifact and the copy-before-delete gate describe the same remote contents.
-    """
-    pl = store.playlists.get_playlist(playlist_id)
-    if pl is None:
-        raise ValueError("playlist no longer exists")
-    ytm = pl.ytm_playlist_id
-    # central guard: every delete path backs up first, so refusing here keeps undeletable
-    # system playlists (Liked Music, Episodes for Later) from ever being targeted.
-    if ytm in SYSTEM_PLAYLIST_IDS:
-        raise ValueError(f"“{pl.title}” is a system playlist and can't be deleted")
-    detail = _remote_snapshot(client, ytm) if snapshot is None else validate_playlist(snapshot)
-    tracks = [{"video_id": t["videoId"], "set_video_id": t.get("setVideoId"),
-               "position": pos, "title": t.get("title"), "artist": track_artist(t),
-               "duration_s": t.get("duration_seconds"), "remote": t}
-              for pos, t in enumerate(detail["tracks"])]
-    payload = {"playlist_id": playlist_id, "ytm_playlist_id": ytm, "identity_id": pl.identity_id,
-               "title": detail.get("title") or pl.title, "tracks": tracks,
-               "description": detail.get("description"), "captured_at": now,
-               "snapshot_version": 2, "group": store.playlists.get_playlist_groups().get(ytm),
-               "provenance": store.playlists.playlist_provenance(ytm)}
-    # ytm comes from the YouTube API (untrusted); strip anything that could escape
-    # the backups dir (e.g. "/" or "..") before using it in a filename.
-    safe_ytm = re.sub(r"[^A-Za-z0-9_-]", "_", ytm)
-    filename = f"{safe_ytm}_{playlist_id}_{int(now)}_{uuid4().hex}.json"
-    backups = paths.backups_dir().resolve()
-    path = (backups / filename).resolve()
-    if path.parent != backups:  # belt-and-suspenders: must stay inside backups dir
-        raise ValueError(f"refusing to write backup outside {backups}")
-    # A failed write must never replace a previous recovery artifact or authorize deletion.
-    temporary = path.with_suffix(".tmp")
-    try:
-        with temporary.open("x", encoding="utf-8") as stream:
-            json.dump(payload, stream, indent=2)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        if os.name != "nt":
-            directory = os.open(backups, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return str(path)
 
 def execute_planned(store, action_id, clients, now) -> None:
     """Execute a stored delete plan: remote-verify the keeper still holds every track of the copy
@@ -1068,6 +601,12 @@ def execute_planned(store, action_id, clients, now) -> None:
     action = store.actions.get_action(action_id)
     if action is None:
         raise ValueError(f"no such action {action_id}")
+    if action.status == "delete_pending":
+        from yt_playlist.library.playlist_deletion import reconcile_deletion
+        result = reconcile_deletion(store, action_id, clients, now)
+        if result.status != "executed":
+            raise ValueError("The playlist still exists. Review the saved deletion in the Action Log.")
+        return
     if action.status != "planned":
         raise ValueError(f"action {action_id} is {action.status}, not planned")
     pe = deserialize_plan(action)
@@ -1080,8 +619,6 @@ def execute_planned(store, action_id, clients, now) -> None:
         raise ValueError("source/target playlist no longer exists")
     if plan.source_playlist_id == plan.target_playlist_id:
         raise ValueError("source and target must differ")
-    backup_path = _verify_and_delete(
+    _verify_and_delete(
         store, plan.source_playlist_id, clients[src_pl.identity_id], clients[tgt_pl.identity_id],
-        tgt_pl.ytm_playlist_id, now)
-    store.playlists.remove_playlist(plan.source_playlist_id)  # drop it from the dashboard immediately
-    store.actions.update_action(action_id, "executed", now, undo_json=json.dumps({"backup": backup_path}))
+        tgt_pl.ytm_playlist_id, now, action_id=action_id)

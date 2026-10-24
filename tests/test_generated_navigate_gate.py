@@ -6,7 +6,7 @@ immediately lands on a not-yet-ready playlist. So poll get_playlist until it rep
 send the navigate. Best-effort: if it never confirms within the budget, skip the switch rather than
 foreground a broken tab (the in-app redirect and the manual link still work).
 """
-from yt_playlist.library import executor
+from yt_playlist.library import playlist_navigation
 
 
 class _Bridge:
@@ -32,7 +32,7 @@ class _Client:
 
 def test_navigates_once_the_playlist_reports_tracks():
     c, b, slept = _Client(ready_on_call=3), _Bridge(), []
-    ok = executor.navigate_when_ready(c, b, "PLX", "https://music.youtube.com/watch?list=PLX",
+    ok = playlist_navigation.navigate_when_ready(c, b, "PLX", "https://music.youtube.com/watch?list=PLX",
                                       tries=20, sleep=slept.append)
     assert ok is True
     assert b.sent == [{"type": "navigate", "url": "https://music.youtube.com/watch?list=PLX"}]
@@ -42,7 +42,7 @@ def test_navigates_once_the_playlist_reports_tracks():
 
 def test_does_not_navigate_before_the_playlist_is_ready():
     c, b, slept = _Client(ready_on_call=99), _Bridge(), []
-    ok = executor.navigate_when_ready(c, b, "PLX", "url", tries=4, sleep=slept.append)
+    ok = playlist_navigation.navigate_when_ready(c, b, "PLX", "url", tries=4, sleep=slept.append)
     assert ok is False
     assert b.sent == []                       # never confirmed within the budget -> no switch
     assert c.calls == 4                       # exhausted the try budget
@@ -60,6 +60,6 @@ def test_a_get_playlist_error_is_treated_as_not_ready_and_retried():
             return {"tracks": [{"videoId": "v1"}]}
 
     c, b = _Flaky(), _Bridge()
-    assert executor.navigate_when_ready(c, b, "PLX", "url", tries=5, sleep=lambda _s: None) is True
+    assert playlist_navigation.navigate_when_ready(c, b, "PLX", "url", tries=5, sleep=lambda _s: None) is True
     assert c.calls == 2                        # the throw was retried, not fatal
     assert b.sent == [{"type": "navigate", "url": "url"}]

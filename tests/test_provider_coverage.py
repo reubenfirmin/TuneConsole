@@ -43,19 +43,19 @@ def test_enabling_provider_revisits_fully_populated_tracks_and_preserves_user_ch
     w = worker(store, [a, b])
     assert w.drain_once() == 1
     recording = store.tracks.catalog_subject(tid)["recording_id"]
-    assert store.enrichment.provider_coverage(recording) == {"musicbrainz":"found", "deezer":"disabled"}
+    assert store.enrichment_state.provider_coverage(recording) == {"musicbrainz":"found", "deezer":"disabled"}
     store.tracks.set_track_genre(tid, "Selected genre")
     assert w.drain_once() == 0
     config(store, {"musicbrainz", "deezer"})
-    store.enrichment.reconcile_provider_configuration(enrichment.provider_configuration(store, {a.name:a, b.name:b}))
-    assert store.enrichment.queue_remaining() == 1
-    assert store.enrichment.coverage_stats()["processed"] == 0
-    assert store.enrichment.provider_coverage(recording)["deezer"] == "pending"
+    store.enrichment_state.reconcile_provider_configuration(enrichment.provider_configuration(store, {a.name:a, b.name:b}))
+    assert store.enrichment_reports.queue_remaining() == 1
+    assert store.enrichment_reports.coverage_stats()["processed"] == 0
+    assert store.enrichment_state.provider_coverage(recording)["deezer"] == "pending"
     assert w.drain_once() == 1
     assert a.calls == [tid] and b.calls == [tid]
     assert store.tracks.get_track_enrichment(tid) == ("Selected genre", "2024")
-    assert store.enrichment.queue_remaining() == 0
-    assert store.enrichment.coverage_stats()["processed"] == 1
+    assert store.enrichment_reports.queue_remaining() == 0
+    assert store.enrichment_reports.coverage_stats()["processed"] == 1
     assert w.drain_once() == 0
     statuses = {r["provider"]:r["status"] for r in store.conn.execute("SELECT * FROM enrichment_provider_config")}
     assert statuses == {"musicbrainz":"available", "deezer":"available"}
@@ -69,14 +69,14 @@ def test_reenrichment_keeps_genre_until_later_provider_replacement(store):
     with store.conn:
         store.conn.executemany('INSERT INTO enrichment_provider_jobs VALUES (?,?)',
                                [(recording, name) for name in order])
-    store.enrichment.record_enrichment_attempt('song|artist', 'musicbrainz', {}, providers=order)
+    store.enrichment_state.record_enrichment_attempt('song|artist', 'musicbrainz', {}, providers=order)
     assert store.tracks.get_track_enrichment(tid)[0] == 'Rock'
-    assert store.enrichment.metadata_provenance(tid)['fields']['genre']['source'] == 'musicbrainz'
+    assert store.enrichment_reports.metadata_provenance(tid)['fields']['genre']['source'] == 'musicbrainz'
     # A subsequent process can replace it using completed answers, without an empty interval.
     store.enrichment.apply_provider_fields(tid, 'discogs', {'genre': 'Soundtrack'}, providers=order)
-    store.enrichment.record_enrichment_attempt('song|artist', 'discogs', {'genre': 'Soundtrack'}, providers=order)
+    store.enrichment_state.record_enrichment_attempt('song|artist', 'discogs', {'genre': 'Soundtrack'}, providers=order)
     assert store.tracks.get_track_enrichment(tid)[0] == 'Soundtrack'
-    assert store.enrichment.metadata_provenance(tid)['fields']['genre']['source'] == 'discogs'
+    assert store.enrichment_reports.metadata_provenance(tid)['fields']['genre']['source'] == 'discogs'
 
 
 def test_adding_or_changing_effective_key_schedules_only_that_provider(store, monkeypatch):
@@ -118,14 +118,14 @@ def test_provider_settings_routes_wake_owned_worker(store):
 def test_disabled_provider_retains_retry_evidence_without_reporting_an_active_retry(store):
     tid = store.tracks.upsert_track("v1", "Song", "Artist", None, 200)
     track = store.tracks.catalog_subject(tid)
-    store.enrichment.record_enrichment_attempt(track["identity_key"], "deezer", {}, retry=True, now=1000,
+    store.enrichment_state.record_enrichment_attempt(track["identity_key"], "deezer", {}, retry=True, now=1000,
                                     error="timeout")
-    assert store.enrichment.enrichment_retry_status()["count"] == 1
+    assert store.enrichment_state.enrichment_retry_status()["count"] == 1
     config(store, set())
-    store.enrichment.reconcile_provider_configuration(enrichment.provider_configuration(store, {"deezer":Provider("deezer")}))
-    assert store.enrichment.enrichment_retry_status()["count"] == 0
-    assert store.enrichment.provider_coverage(track["recording_id"])["deezer"] == "disabled"
-    assert store.enrichment.enrichment_attempts(track["identity_key"])["deezer"]["status"] == "retry"
+    store.enrichment_state.reconcile_provider_configuration(enrichment.provider_configuration(store, {"deezer":Provider("deezer")}))
+    assert store.enrichment_state.enrichment_retry_status()["count"] == 0
+    assert store.enrichment_state.provider_coverage(track["recording_id"])["deezer"] == "disabled"
+    assert store.enrichment_state.enrichment_attempts(track["identity_key"])["deezer"]["status"] == "retry"
 
 
 @pytest.mark.parametrize('change', ['catalog', 'policy', 'vocabulary'])
@@ -144,7 +144,7 @@ def test_genre_revision_refreshes_completed_library_in_bounded_resumable_batches
         store.genres.add_genre('Dub Techno')
 
     assert w.drain_once(limit=1) == 1
-    assert store.enrichment.queue_remaining() == 2
+    assert store.enrichment_reports.queue_remaining() == 2
     assert len(genre_provider.calls) == 4 and len(audio_provider.calls) == 3
     # A replacement worker resumes persisted jobs instead of enqueueing the
     # completed first item again. The same revision eventually becomes idle.
@@ -186,4 +186,4 @@ def test_genre_refresh_preserves_existing_value_until_replacement_without_losing
     assert store.tracks.get_track_enrichment(tid) == (
         'My explicit genre' if explicit else (replacement or 'Rock'), '1993')
     assert fallback.probe.call_count == 2
-    assert store.enrichment.queue_remaining() == 0
+    assert store.enrichment_reports.queue_remaining() == 0

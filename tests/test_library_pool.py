@@ -13,7 +13,7 @@ from yt_playlist.util.matching import identity_key
 def two_ready_cards(store, monkeypatch):
     """The screenshot case: ready Wheelhouse and Fresh, with no assigned Catalog or Comfort."""
     seed_genres(store)
-    tracks = store.rec_surface.get_proposals("mode_bundles")["0"]["wheelhouse"][:12]
+    tracks = store.rec_proposals.get_proposals("mode_bundles")["0"]["wheelhouse"][:12]
     monkeypatch.setattr(mode_surfaces, "assemble_cards", lambda *a, **kw: [
         {"lane": "wheelhouse", "label": "More in your wheelhouse", "mode_id": 0,
          "ranker": "cosine", "tracks": tracks}])
@@ -129,9 +129,9 @@ def test_temporal_pool_keeps_its_date_band_and_live_feedback(store):
         store.tracks.set_track_genre(tid, "Jazz")
         store.tracks.set_track_year(tid, str(year))
         keys.append(identity_key(title, artist))
-    bundles = store.rec_surface.get_proposals("mode_bundles")
+    bundles = store.rec_proposals.get_proposals("mode_bundles")
     bundles["_meta"]["year_cuts"] = [1990, 2010]
-    store.rec_surface.put_proposals("mode_bundles", bundles, 1)
+    store.rec_proposals.put_proposals("mode_bundles", bundles, 1)
     parameters = {"lane": "temporal", "epoch": 1, "include_genres": ["jazz"], "avoid_genres": []}
     library_pool.prepare(store, 1, parameters)
     store.rec_model.record_feedback("for_you", keys[3], "dismiss", now=2)

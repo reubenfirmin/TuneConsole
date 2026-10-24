@@ -1,7 +1,9 @@
 """Rate controls verify a fresh MAIN identity and the player-bar binding before clicking."""
 from pathlib import Path
+import resource
 import shutil
 import subprocess
+import time
 
 import pytest
 
@@ -24,6 +26,9 @@ def test_rate_command_matches_current_player(scenario):
     script = r"""
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const scenario=process.argv[1],handlers=[],queue=[],clicks=[],snapshots=[],timers=new Map();
+const checkpoint = phase => fs.writeSync(2, JSON.stringify({scenario, phase,
+  uptime: process.uptime(), usage: process.resourceUsage()}) + '\n');
+checkpoint('started');
 const albumArt=['album_art','rating_target_only','controller_data','conflicting_controller','missing_binding','delayed_binding'].includes(scenario);
 let runtime, runtimeCount=0, timerSerial=0, playerId='A',barId='A',bindingReady=false,clock=1000;
 const missingBinding=()=>scenario==='missing_binding'||(scenario==='delayed_binding'&&!bindingReady);
@@ -74,10 +79,12 @@ const context=vm.createContext({window,document,navigator:{mediaSession:{metadat
 const flush=()=>{while(queue.length){const data=queue.shift();for(const fn of handlers)fn({source:window,data});}};
 if(scenario==='receiver_legacy')window.__tcBridgeLoaded=true;
 vm.runInContext(fs.readFileSync('extension/content.js','utf8'),context);
+checkpoint('receiver-loaded');
 if(scenario==='receiver_legacy'){
   assert.equal(runtimeCount,0,'cannot safely replace an anonymous legacy receiver');process.exit(0);
 }
 vm.runInContext(fs.readFileSync('extension/nowplaying_main.js','utf8'),context);flush();
+checkpoint('sensor-flushed');
 if(scenario==='receiver_upgrade'){
   const previous=window.__tcBridgeLoaded;
   previous.revision=0;
@@ -107,6 +114,7 @@ if(scenario==='cancelled_probe')runtime({type:'cancel-rating',ratingId:'one'},{}
 if(scenario==='superseded_probe')runtime({type:'rate',ratingId:'two',action:'like',videoId:'A',
  likeStatus:'INDIFFERENT',brandId:'brand',expiresAt:2000},{},()=>{});
 assert.equal(clicks.length,0);flush();
+checkpoint('command-flushed');
 if(scenario==='unconfirmed_click'){
   assert.equal(reply,undefined);
   assert.equal(clicks.length,1);
@@ -118,8 +126,8 @@ if(scenario==='unconfirmed_click'){
 }
 if(scenario==='delayed_binding'){
   assert.equal(reply.retryable,true);assert.equal(clicks.length,0);
-  assert.equal(reply.diagnostics.receiverRevision,3);
-  assert.equal(reply.diagnostics.mainRevision,4);
+  assert.equal(reply.diagnostics.receiverRevision,7);
+  assert.equal(reply.diagnostics.mainRevision,8);
   assert.equal(reply.diagnostics.binding.renderer,true);
   assert.equal(reply.diagnostics.binding.targetIds.length,0);
   bindingReady=true;
@@ -154,6 +162,18 @@ if(reply.ok){
     assert.equal(clicks[0],`#button-shape-${scenario==='clear_dislike'?'dislike':action} button`);
 }
 """
-    result = subprocess.run([node, "-e", script, scenario], cwd=Path(__file__).resolve().parents[1],
-                            capture_output=True, text=True, timeout=10)
+    started = time.monotonic()
+    before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    try:
+        result = subprocess.run([node, "-e", script, scenario], cwd=Path(__file__).resolve().parents[1],
+                                capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired as error:
+        after = resource.getrusage(resource.RUSAGE_CHILDREN)
+        cpu = after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime
+        diagnostics = error.stderr or "Node did not reach its first checkpoint."
+        if isinstance(diagnostics, bytes):
+            diagnostics = diagnostics.decode("utf-8", errors="replace")
+        pytest.fail(f"Node rating scenario {scenario!r} timed out: "
+                    f"wall={time.monotonic() - started:.3f}s, child CPU={cpu:.3f}s.\n"
+                    f"{diagnostics}", pytrace=False)
     assert result.returncode == 0, result.stderr

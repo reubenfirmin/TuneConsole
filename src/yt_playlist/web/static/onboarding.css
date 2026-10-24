@@ -1,14 +1,85 @@
 /* Shared onboarding and connection nudges. */
 /* Pre-sync onboarding placeholder: stands in for the whole rec feed before the first sync. */
-.presync { text-align: center; padding: 3.2rem 1.5rem; margin-bottom: 1.6rem; }
-.presync-art { display: block; width: 132px; height: 72px; margin: 0 auto 1.375rem;
+.presync { text-align: left; padding: 3.2rem 1.5rem; margin-bottom: 1.6rem; }
+.presync-art { display: block; width: 132px; height: 72px; margin: 0 0 1.375rem;
   filter: drop-shadow(0 6px 18px color-mix(in srgb, var(--accent) 35%, transparent)); }
 .presync-art .pbar { transform-box: fill-box; transform-origin: 50% 100%;
   animation: presync-eq 1.9s ease-in-out infinite; }
 @keyframes presync-eq { 0%, 100% { transform: scaleY(0.28); opacity: 0.55; } 50% { transform: scaleY(1); opacity: 1; } }
 .presync-title { font-family: var(--font-sans); font-size: var(--type-xl); font-weight: 600;
   color: var(--text); margin: 0 0 0.45rem; }
-.presync-sub { color: var(--dim); font-size: var(--type-body); max-width: 42ch; margin: 0 auto; line-height: 1.5; }
+.presync-sub { color: var(--dim); font-size: var(--type-body); max-width: 42ch; margin: 0; line-height: 1.5; }
+
+/* The first experience uses the space beside the rail, like the full Taste workspace. */
+.setup-home { max-width: 82rem; margin-inline: auto; }
+.arrival { position: relative; isolation: isolate; display: flex; align-items: center;
+  min-height: clamp(27rem, 37vw, 36rem); overflow: hidden; text-align: left;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-inset); }
+.arrival-copy { position: relative; z-index: 2; width: 52%; padding: clamp(2rem, 4vw, 4rem);
+  min-width: 0; animation: starter-arrive .8s cubic-bezier(.2,.75,.25,1) both; }
+.arrival h1 { margin: 0 0 1.25rem; max-width: 11ch; font-family: var(--font-sans);
+  font-size: clamp(2.5rem, 4.2vw, 4.5rem); font-weight: var(--weight-heavy); letter-spacing: -.035em; line-height: 1.02;
+  text-wrap: balance; }
+.arrival-intro { max-width: 30ch; margin: 0; color: var(--dim); font-size: clamp(1rem, 1.3vw, 1.125rem); line-height: 1.6; }
+.arrival-setup { margin-top: 2rem; }
+.arrival-setup p { margin: .85rem 0 0; color: var(--dim); font-size: var(--type-ui); }
+.arrival-art { position: absolute; inset: 0; pointer-events: none; z-index: -2; }
+.arrival-illustration { display: block; width: 100%; height: 100%; object-fit: cover; object-position: 65% center; }
+.arrival::after { content: ''; position: absolute; z-index: -1; inset: 0; pointer-events: none;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--surface-inset) 96%, transparent),
+    color-mix(in srgb, var(--surface-inset) 83%, transparent) 22%, transparent 64%); }
+.arrival.is-importing .arrival-illustration { animation: arrival-room 24s ease-in-out infinite alternate; transform-origin: right center; }
+@media (min-width: 65rem) {
+  body:not(:has(.page-clusters)) main.page-setup { width: calc(100% - 13.5rem); max-width: none;
+    margin-inline: 13.5rem 0; padding: clamp(1.5rem, 3vw, 3.5rem); padding-bottom: 5rem; }
+}
+.starter-mix { min-width: 0;
+  animation: starter-arrive .65s cubic-bezier(.2,.75,.25,1) both; }
+.starter-mix > .gen-card-body { display: grid; grid-template-columns: minmax(12rem, .7fr) minmax(0, 2fr); gap: 2.5rem; }
+.starter-head { display: flex; flex-direction: column; align-items: flex-start; gap: 1.25rem; padding-top: .75rem; }
+.starter-head h2 { margin: 0; max-width: 14ch; font-size: clamp(1.375rem, 2vw, 1.75rem); letter-spacing: -.025em; line-height: 1.15; }
+.starter-context { max-width: 23ch; margin: .5rem 0 0; color: var(--dim); font-size: var(--type-ui); line-height: 1.5; }
+.starter-actions { display: flex; align-items: center; gap: .5rem; flex-shrink: 0; }
+.starter-play { display: inline-flex; align-items: center; justify-content: center; gap: .45rem; white-space: nowrap; }
+.starter-play svg { width: 1rem; height: 1rem; }
+.starter-tracks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); list-style: none;
+  padding: 0; margin: 0; column-gap: 1.5rem; align-content: start; }
+.page-home .starter-track { display: grid; grid-template-columns: 1.2rem minmax(0, 1fr); gap: .6rem;
+  padding: .75rem 0; border-bottom: 1px solid var(--border); min-width: 0; align-items: center;
+  animation: starter-arrive .5s ease both; animation-delay: var(--track-delay); }
+.page-home .starter-track::before { content: none; }
+.starter-number { font-family: var(--font-mono); font-size: .65rem; color: var(--faint); }
+.starter-song { display: flex; align-items: center; gap: .75rem; min-width: 0; color: inherit; text-decoration: none; }
+.starter-song:hover .gen-title { color: var(--accent-2); }
+.starter-thumb { display: block; flex: none; width: 2.8rem; height: 2.8rem; overflow: hidden;
+  border-radius: .2rem; background: var(--placeholder); }
+.starter-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.starter-meta { display: grid; min-width: 0; gap: .2rem; }
+.setup-listening { margin-top: clamp(1.75rem, 3.5vw, 3rem); }
+@keyframes arrival-room { to { transform: scale(1.035); } }
+@keyframes starter-arrive { from { opacity: 0; transform: translateY(.65rem); } to { opacity: 1; transform: none; } }
+@media (max-width: 60rem) {
+  .starter-mix > .gen-card-body { grid-template-columns: minmax(10rem, .8fr) minmax(0, 1.6fr); gap: 1.5rem; }
+  .starter-tracks { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 40rem) {
+  .arrival { min-height: 35rem; align-items: flex-end; }
+  .arrival-copy { padding: 2rem 1.5rem; width: 100%; }
+  .arrival-illustration { object-position: 73% top; height: 75%; }
+  .arrival::after { background: linear-gradient(0deg, var(--surface-inset) 4%,
+    color-mix(in srgb, var(--surface-inset) 96%, transparent) 24%, transparent 72%); }
+  .arrival h1 { max-width: 12ch; font-size: clamp(2.5rem, 9vw, 3.25rem); margin-bottom: .85rem; }
+  .arrival-intro { max-width: 28ch; font-size: 1rem; line-height: 1.5; }
+  .arrival-setup { margin-top: 1.5rem; }
+  .starter-mix > .gen-card-body { display: block; }
+  .starter-head { flex-direction: row; justify-content: space-between; align-items: center; gap: 1rem; padding: 0 0 1rem; }
+  .starter-head h2 { font-size: var(--type-lg); }
+  .starter-context { font-size: var(--type-xs); }
+  .starter-play { font-size: var(--type-ui); padding-inline: .8rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .arrival-copy, .starter-mix, .page-home .starter-track, .arrival.is-importing .arrival-illustration { animation: none; }
+}
 
 /* Home nudge banner: icon, text, and dismiss as three columns so the copy never wraps under the
    icon. Violet-tinted to match the recommendation theme. */

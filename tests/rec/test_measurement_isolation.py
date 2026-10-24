@@ -9,7 +9,7 @@ import pytest
 
 from yt_playlist.core.activity import Activity, WorkClosing
 from yt_playlist.core.store import Store
-from yt_playlist.rec import measurement, rec_params
+from yt_playlist.rec import measurement, rec_params, scorecard
 from yt_playlist.rec.rec_worker import RecWorker
 
 
@@ -36,7 +36,7 @@ def test_ui_mutation_completes_during_fingerprint_and_offer_keeps_original_polic
             release.set()
         future.result(5)
     row = store.conn.execute("SELECT id FROM rec_served_impressions").fetchone()
-    trace = store.rec_surface.served_recommendation(row[0])
+    trace = scorecard.served_recommendation(store, row[0])
     assert trace["configuration"]["params"]["axis_weight_cap"] == 1.4
     assert rec_params.get_param(store, "axis_weight_cap") == 2
     store.conn.close()
@@ -78,7 +78,7 @@ def test_queued_offer_returns_before_fingerprint_and_retains_original_state(tmp_
             thread.submit(worker._flush_measurements).result(5)
         assert calls and all(ident != threading.get_ident() for ident in calls)
         row = store.conn.execute("SELECT id FROM rec_served_impressions").fetchone()
-        trace = store.rec_surface.served_recommendation(row[0])
+        trace = scorecard.served_recommendation(store, row[0])
         assert trace["configuration"]["params"]["axis_weight_cap"] == 1.4
         assert trace["score"] == 3
         assert not worker.jobs.measurements

@@ -73,7 +73,12 @@ def test_remote_track_overrides_cached_emptiness(empty_playlist):
 @pytest.mark.parametrize("detail", [{"tracks": []}, {"tracks": [], "trackCount": 0}])
 def test_confirmed_empty_response_still_backs_up_deletes_and_records_action(empty_playlist, monkeypatch, detail):
     t = empty_playlist
-    monkeypatch.setattr(t.client, "get_playlist", lambda playlist, limit=None: detail)
+    get = t.client.get_playlist
+
+    def read(playlist, limit=None):
+        return get(playlist, limit) if playlist in t.client.deleted else detail
+
+    monkeypatch.setattr(t.client, "get_playlist", read)
     backup = executor.delete_empty_playlist(t.store, t.pid, t.client, 2)
     assert json.loads(Path(backup).read_text())["tracks"] == []
     assert t.client.deleted == ["EMPTY"]
@@ -88,8 +93,11 @@ def test_transient_failure_uses_successful_retry_to_decide(empty_playlist, monke
     t = empty_playlist
     reads = []
     tracks = [_track("new", "Added elsewhere", "Artist")] if gained_tracks else []
+    get = t.client.get_playlist
 
     def transient(playlist, limit=None):
+        if playlist in t.client.deleted:
+            return get(playlist, limit)
         reads.append((playlist, limit))
         if len(reads) == 1:
             raise TimeoutError("temporary timeout")

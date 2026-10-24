@@ -156,45 +156,6 @@ def test_subject_color_genre_maps_to_family_else_accent():
     assert into_recently.subject_color({"kind": "artist", "subject": "artist:X"}) == default
 
 
-def _warm(wiki, subject, now=0.0):
-    """Mark a subject as having a usable, fresh card in the fake cache."""
-    wiki.put(subject, "artist", subject.split(":", 1)[1], _hit("artist", subject), now)
-    wiki.fresh.add(subject)
-
-
-def test_subjects_for_epoch_rotates_through_warm_subjects(monkeypatch):
-    # The reported bug: only the top-3 order rotated, so the walk collapsed onto the single subject
-    # that resolved. Now warm (cached) subjects rotate one-per-epoch, so consecutive epochs lead with
-    # DIFFERENT subjects instead of the same one forever.
-    wiki = FakeWiki()
-    store = FakeStore(favorites=[], corpus={}, wiki=wiki)
-    _leans(monkeypatch, {"artist:Alpha": 3.0, "artist:Bravo": 2.0, "artist:Charlie": 1.0})
-    for s in ("artist:Alpha", "artist:Bravo", "artist:Charlie"):
-        _warm(wiki, s)
-    leads = [into_recently.subjects_for_epoch(store, 0.0, epoch=e)[0]["display"] for e in range(4)]
-    assert leads == ["Alpha", "Bravo", "Charlie", "Alpha"]
-
-
-def test_subjects_for_epoch_warm_lead_then_cold_fallback(monkeypatch):
-    # Cold (un-cached) subjects trail the warm ones so a cold start still has something to try, but a
-    # warm subject always leads once one exists (the card never collapses back to a non-resolving head).
-    wiki = FakeWiki()
-    store = FakeStore(favorites=[], corpus={}, wiki=wiki)
-    _leans(monkeypatch, {"artist:Alpha": 3.0, "artist:Bravo": 2.0, "artist:Charlie": 1.0})
-    _warm(wiki, "artist:Charlie")                  # only the weakest is warm
-    order = [s["display"] for s in into_recently.subjects_for_epoch(store, 0.0, epoch=0)]
-    assert order[0] == "Charlie"                   # warm leads despite being lowest-ranked
-    assert set(order[1:]) == {"Alpha", "Bravo"}    # cold subjects follow as fallbacks
-
-
-def test_subjects_for_epoch_no_warm_keeps_rank_order(monkeypatch):
-    wiki = FakeWiki()
-    store = FakeStore(favorites=[], corpus={}, wiki=wiki)
-    _leans(monkeypatch, {"artist:Alpha": 3.0, "artist:Bravo": 2.0})
-    order = [s["display"] for s in into_recently.subjects_for_epoch(store, 0.0, epoch=5)]
-    assert order == ["Alpha", "Bravo"]             # nothing warm -> plain rank order, no rotation
-
-
 # --- prewarm_pool: the RecWorker step that pre-fetches the whole pool's wiki cards ----------------
 
 def _hit(kind, display):

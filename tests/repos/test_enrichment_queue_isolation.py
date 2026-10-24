@@ -13,7 +13,7 @@ def database(tmp_path):
     store = Store(tmp_path / "queue.db")
     store.init_schema()
     store.settings.set_setting("enrich_caught_up_at", "100")
-    store.enrichment.reconcile_provider_configuration({
+    store.enrichment_state.reconcile_provider_configuration({
         "deezer": {"fingerprint": "original", "status": "available"}})
     for video, title in (("one", "First"), ("two", "Second")):
         store.tracks.upsert_track(video, title, "Artist", None, 200, created_at=1)
@@ -40,7 +40,7 @@ def test_queue_calculation_allows_foreground_reads_and_writes(database, monkeypa
 
     monkeypatch.setattr(database, "read_snapshot", paused_reader)
     with ThreadPoolExecutor(2) as pool:
-        selection = pool.submit(database.enrichment.next_enrich_batch, 2, providers=["deezer"], now=1000)
+        selection = pool.submit(database.enrichment_queue.next_enrich_batch, 2, providers=["deezer"], now=1000)
         try:
             assert entered.wait(5)
 
@@ -62,8 +62,8 @@ def test_queue_calculation_allows_foreground_reads_and_writes(database, monkeypa
 def test_snapshot_candidates_are_revalidated_before_job_admission(database, monkeypatch, change):
     first = dict(database.conn.execute("SELECT * FROM catalog_tracks WHERE video_id='one'").fetchone())
     if change == "refresh_completed":
-        database.enrichment.mark_recordings_enriched([first["recording_id"]], 10)
-        database.enrichment.reconcile_provider_configuration({
+        database.enrichment_queue.mark_recordings_enriched([first["recording_id"]], 10)
+        database.enrichment_state.reconcile_provider_configuration({
             "deezer": {"fingerprint": "refresh", "status": "available"}})
     original = database.read_snapshot
 
@@ -72,14 +72,14 @@ def test_snapshot_candidates_are_revalidated_before_job_admission(database, monk
         with original() as snapshot:
             yield snapshot
             if change in ("completed", "pass_changed"):
-                database.enrichment.mark_recordings_enriched([first["recording_id"]], 1001)
+                database.enrichment_queue.mark_recordings_enriched([first["recording_id"]], 1001)
                 if change == "pass_changed":
                     # A new refresh belongs to a different pass, even with the same input.
                     with database.conn:
                         database.conn.execute("INSERT OR IGNORE INTO enrichment_provider_jobs VALUES (?,'deezer')",
                                               (first["recording_id"],))
             elif change in ("retry", "cooldown"):
-                database.enrichment.record_enrichment_attempt(first["identity_key"], "deezer", {},
+                database.enrichment_state.record_enrichment_attempt(first["identity_key"], "deezer", {},
                     retry=True, cooldown=change == "cooldown", now=1000)
             elif change == "removed":
                 with database.conn:
@@ -90,13 +90,13 @@ def test_snapshot_candidates_are_revalidated_before_job_admission(database, monk
                 with database.conn:
                     database.conn.execute("DELETE FROM library_memberships WHERE entry_id=?", (first["id"],))
             elif change.startswith("provider_"):
-                database.enrichment.reconcile_provider_configuration({"deezer": {
+                database.enrichment_state.reconcile_provider_configuration({"deezer": {
                     "fingerprint": "changed", "status": "disabled" if change == "provider_disabled" else "available"}})
             elif change == "refresh_completed":
-                database.enrichment.record_enrichment_attempt(first["identity_key"], "deezer", {}, now=1000)
+                database.enrichment_state.record_enrichment_attempt(first["identity_key"], "deezer", {}, now=1000)
 
     monkeypatch.setattr(database, "read_snapshot", changed_reader)
-    batch = database.enrichment.next_enrich_batch(2, providers=["deezer"], now=1000)
+    batch = database.enrichment_queue.next_enrich_batch(2, providers=["deezer"], now=1000)
     expected = [] if change in ("cooldown", "provider_disabled", "provider_reconfigured") else ["Second"]
     assert [t["title"] for t in batch] == expected
     assert not database.conn.in_transaction
@@ -105,6 +105,6 @@ def test_snapshot_candidates_are_revalidated_before_job_admission(database, monk
 def test_snapshot_reader_retains_its_own_pinned_queue(database):
     with database.read_snapshot() as snapshot:
         first = dict(database.conn.execute("SELECT * FROM catalog_tracks WHERE video_id='one'").fetchone())
-        database.enrichment.mark_recordings_enriched([first["recording_id"]], 1000)
-        assert [t["title"] for t in snapshot.store.enrichment.next_enrich_batch(2)] == ["First", "Second"]
-    assert [t["title"] for t in database.enrichment.next_enrich_batch(2)] == ["Second"]
+        database.enrichment_queue.mark_recordings_enriched([first["recording_id"]], 1000)
+        assert [t["title"] for t in snapshot.store.enrichment_queue.next_enrich_batch(2)] == ["First", "Second"]
+    assert [t["title"] for t in database.enrichment_queue.next_enrich_batch(2)] == ["Second"]

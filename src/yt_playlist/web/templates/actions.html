@@ -16,6 +16,8 @@
         <td class="num">{{ a.id }}</td>
         <td class="mono nowrap text-dim">{{ row.when }}</td>
         <td>{{ row.desc }} <span class="tag">{{ a.kind }}</span>
+          {% if a.status == 'delete_pending' %}<p class="text-dim" role="alert">Deletion is unconfirmed or local cleanup is incomplete. The backup is saved. Recheck YouTube before retrying; recovery does not repeat the deletion.</p>
+          {% elif a.status == 'delete_failed' %}<p class="text-dim" role="alert">Deletion did not complete. The backup is saved; Undo preserves a surviving original playlist.</p>{% endif %}
           {% if (row.uncertain or row.unattempted) and a.status != 'undone' %}<p class="text-dim" role="alert">{{ row.uncertain }} addition(s) remain unconfirmed; {{ row.unattempted }} were not attempted. Confirmed progress was retained. Review the destination before retrying; unconfirmed additions may still appear.</p>{% endif %}
           {% if row.missing_snapshot and a.status != 'undone' %}<p class="text-dim">The change was recorded, but its post-action snapshot could not be verified or was not saved. Automatic Undo cannot safely remove these changes. Review the playlist in YouTube Music before recovering manually.</p>
             {% if row.copy_ytm %}<a href="https://music.youtube.com/playlist?list={{ row.copy_ytm|urlencode }}" target="_blank" rel="noopener">Review created playlist</a>{% endif %}
@@ -30,14 +32,21 @@
           {% elif a.status in ('cancelled', 'undone') %}<span class="tag">{{ a.status }}</span>
           {% elif a.status == 'planned' %}<span class="tag amber">{{ a.status }}</span>
           {% elif a.status == 'pending' %}<span class="tag amber">{{ 'creating playlist' if a.kind == 'copy_playlist' else 'placement pending' }}</span>
+          {% elif a.status == 'delete_pending' %}<span class="tag amber">deletion pending</span>
+          {% elif a.status == 'delete_failed' %}<span class="tag amber">deletion failed</span>
           {% elif a.status == 'undo_failed' %}<span class="tag amber">recovery incomplete · {{ row.recovery_progress }}</span>
           {% elif a.status == 'undoing' %}<span class="tag amber">recovering · {{ row.recovery_progress }}</span>
           {% else %}<span class="tag">{{ a.status }}</span>{% endif %}
         </td>
         <td>
-          {% if a.status in ('executed', 'undo_failed', 'undoing') and row.undoable %}
+          {% if a.status in ('delete_pending', 'delete_failed') and row.deletions %}
+            <form method="post" action="/actions/{{ a.id }}/recheck-deletion" class="inline">
+              <button class="btn-ghost btn-sm">Recheck deletion</button>
+            </form>
+          {% endif %}
+          {% if a.status in ('executed', 'delete_pending', 'delete_failed', 'undo_failed', 'undoing') and row.undoable %}
             <form method="post" action="/undo/{{ a.id }}" class="inline">
-              <button class="btn-ghost btn-sm">{{ 'Undo' if a.status == 'executed' else 'Resume Undo' }}</button>
+              <button class="btn-ghost btn-sm">{{ 'Resume Undo' if a.status in ('undo_failed', 'undoing') else 'Undo' }}</button>
             </form>
           {% endif %}
         </td>

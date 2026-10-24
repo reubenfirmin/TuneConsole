@@ -238,6 +238,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
             yield
         finally:
             ctx.work.close_admission()
+            await ctx.pending_restart.close()
             diagnostics.stop()
             stop.set()
             ctx.rec_worker.shutdown()
@@ -306,12 +307,12 @@ def create_app(store, client_provider, *, now_fn=time.time,
             ctx = getattr(app.state, "ctx", None)
             if (ctx is not None and ctx.updater is not None
                     and ctx.updater.phase == "restarting"
-                    and request.url.path not in ("/app-update/restart", "/heartbeat", "/goodbye")):
+                    and request.url.path not in ("/app-update/restart", "/app-update/restart/cancel", "/heartbeat", "/goodbye")):
                 return PlainTextResponse("TuneConsole is restarting. Please wait.", status_code=503)
         ctx = getattr(app.state, "ctx", None)
         release = None
         if (ctx is not None and request.method not in _SAFE_METHODS
-                and request.url.path not in ("/app-update/restart", "/heartbeat", "/goodbye")):
+                and request.url.path not in ("/app-update/restart", "/app-update/restart/cancel", "/heartbeat", "/goodbye")):
             try:
                 release = ctx.work.admit("request " + request.url.path)
             except WorkClosing as error:
@@ -345,6 +346,8 @@ def create_app(store, client_provider, *, now_fn=time.time,
     from yt_playlist.enrich.enrich_worker import EnrichWorker
     ctx.enrich_worker = EnrichWorker(ctx)                      # drains the corpus through the waterfall
     templates.env.globals["auth_expired"] = ctx.auth_expired   # same dict; mutated during sync
+    from yt_playlist.rec import onboarding
+    templates.env.globals["initial_setup_pending"] = lambda: onboarding.initial_setup_pending(store, now_fn())
     templates.env.globals["has_multiple_identities"] = (
         lambda: len(store.identities.get_identities()) > 1
     )

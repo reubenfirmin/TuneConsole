@@ -1,0 +1,143 @@
+name: Final release candidates
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      REHEARSAL_TAG: publisher-contract-candidates-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: python3 packaging/release_services.py preflight "$RELEASE_TAG" --rehearsal-tag "$REHEARSAL_TAG"
+      - if: always()
+        run: python3 packaging/rehearse_publisher.py "$REHEARSAL_TAG" --cleanup-only
+  wheel:
+    needs: preflight
+    runs-on: ubuntu-latest
+    env:
+      SETUPTOOLS_SCM_PRETEND_VERSION: ${{ inputs.version }}
+      UV_HTTP_TIMEOUT: '30'
+      UV_HTTP_RETRIES: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Prepare locked wheel dependencies
+        timeout-minutes: 5
+        run: python3 packaging/ci_stage.py --timeout 120 --attempts 2 wheel-dependencies -- uv sync --locked --only-group build --no-install-project
+      - name: Build final-version wheel
+        timeout-minutes: 2
+        run: uv build --wheel --no-build-isolation --python .venv/bin/python
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wheel-timings-${{ github.run_attempt }}
+          path: ci-stage-timings.json
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-wheel
+          retention-days: 30
+          path: dist/*.whl
+          if-no-files-found: error
+  containers:
+    needs: preflight
+    uses: ./.github/workflows/container.yml
+    with:
+      version: ${{ inputs.version }}
+      stage: true
+  macos:
+    needs: preflight
+    uses: ./.github/workflows/macos.yml
+    secrets: inherit
+    with:
+      version: ${{ inputs.version }}
+      tag: ${{ inputs.tag }}
+  flatpak:
+    needs: [preflight, wheel]
+    uses: ./.github/workflows/flatpak.yml
+    secrets: inherit
+    with:
+      version: ${{ inputs.version }}
+      wheel-artifact: release-wheel
+      release-candidate: true
+  provenance:
+    needs: [wheel, containers, macos, flatpak]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: candidate
+      - name: Install repository assembly tools
+        timeout-minutes: 3
+        run: |
+          sudo timeout 120 apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
+          sudo timeout 120 apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2 install -y flatpak ostree
+      - name: Assemble and verify the final signed repository once in CI
+        timeout-minutes: 2
+        env:
+          FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          printf '%s' "$FLATPAK_GPG_KEY" | gpg --batch --import
+          fpr=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')
+          ostree --repo=candidate/flatpak-repo init --mode=archive-z2
+          for arch in x86_64 aarch64; do
+            mkdir -p "candidate/$arch"
+            tar -xf "candidate/flatpak-repo-$arch.tar" -C "candidate/$arch"
+            ostree --repo=candidate/flatpak-repo pull-local "candidate/$arch/repo"
+          done
+          # A single signed summary lets fresh clients verify both architectures' AppStream refs.
+          flatpak build-update-repo candidate/flatpak-repo --no-summary-index --gpg-sign="$fpr"
+          cp packaging/flatpak/tuneconsole.flatpakrepo candidate/flatpak-repo/
+          gpg --batch --export "$fpr" > repo-key.gpg
+          flatpak remote-add --user --gpg-import=repo-key.gpg ci-candidate "file://$PWD/candidate/flatpak-repo"
+          for arch in x86_64 aarch64; do
+            flatpak update --user --appstream --arch="$arch" ci-candidate
+            flatpak remote-ls --user --app --arch="$arch" --columns=application ci-candidate |
+              python3 -c 'import sys; assert "com.tuneconsole.TuneConsole" in sys.stdin.read().split()'
+            python3 packaging/flatpak/verify_metadata.py "${XDG_DATA_HOME:-$HOME/.local/share}" ci-candidate "$arch" "$VERSION"
+          done
+          tar -cf candidate/flatpak-repository.tar -C candidate flatpak-repo
+      - name: Bind final-version smoke-tested payloads to the exact CI commit
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: python3 packaging/candidate_provenance.py create candidate "$RELEASE_TAG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-provenance
+          overwrite: true
+          retention-days: 30
+          path: candidate/release-provenance.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-flatpak-repository
+          overwrite: true
+          retention-days: 30
+          path: candidate/flatpak-repository.tar
+          if-no-files-found: error

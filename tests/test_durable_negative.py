@@ -14,7 +14,7 @@ def test_dislike_direction_survives_restart_pruning_and_ban_expiry(tmp_path):
     store.tracks.set_track_genre(tid, "jazz")
     key = store.tracks.identity_key_for_video("bad")
     graduation.apply_dislikes(store, {key: "DISLIKE"}, now=100)
-    store.rec_surface.record_mood([key], -1, now=100)
+    store.rec_signals.record_mood([key], -1, now=100)
     V = np.array([[1., 0.], [0.9, 0.1], [0., 1.], [-1., 0.]])
     idx = {key: 0, "similar": 1, "unrelated": 2, "opposite": 3}
     fresh = scoring._mood_components(np.zeros(4), store, 100, V, idx)
@@ -23,7 +23,7 @@ def test_dislike_direction_survives_restart_pruning_and_ban_expiry(tmp_path):
     store = Store(path)
     store.init_schema()
     later = 100 + 2000 * 86400
-    store.rec_surface.record_mood([], 1, now=later, prune_before=later - 1)
+    store.rec_signals.record_mood([], 1, now=later, prune_before=later - 1)
     assert key not in store.rec_model.suppressed_keys("for_you", later)
     assert abs(transient.facet_leans(store, later)["genre:jazz"]) < 1e-10
     aged = scoring._mood_components(np.zeros(4), store, later, V, idx)

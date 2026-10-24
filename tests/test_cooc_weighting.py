@@ -4,14 +4,14 @@ the default (no weights) stays the binary-membership model."""
 import numpy as np
 from types import SimpleNamespace
 
-from yt_playlist.rec import embed
+from yt_playlist.rec import embedding_training as training
 
 
 def test_cooc_weighting_scales_pair_contributions():
     keys = ["a", "b", "c"]
     baskets = [["a", "b"], ["b", "c"]]
-    base = embed._cooc_matrix(baskets, keys)                       # binary membership
-    w = embed._cooc_matrix(baskets, keys, weights={"b": 2.0})      # b's pairings count double
+    base = training.cooc_matrix(baskets, keys)                       # binary membership
+    w = training.cooc_matrix(baskets, keys, weights={"b": 2.0})      # b's pairings count double
     ia, ib, ic = 0, 1, 2
     assert w[ia, ib] == base[ia, ib] * 2.0                         # pair (a,b): gain 1*2
     assert w[ib, ic] == base[ib, ic] * 2.0                         # pair (b,c): gain 2*1
@@ -22,13 +22,13 @@ def test_cooc_weighting_scales_pair_contributions():
 def test_cooc_weighting_off_matches_binary():
     keys = ["a", "b", "c"]
     baskets = [["a", "b", "c"]]
-    assert np.array_equal(embed._cooc_matrix(baskets, keys).toarray(),
-                          embed._cooc_matrix(baskets, keys, weights=None).toarray())
+    assert np.array_equal(training.cooc_matrix(baskets, keys).toarray(),
+                          training.cooc_matrix(baskets, keys, weights=None).toarray())
 
 
 def test_cooc_weights_grow_with_playcount(monkeypatch):
     # The per-track gain rises with play frequency; an unplayed track keeps the binary baseline (1.0).
     query = SimpleNamespace(play_counts=lambda: {"hot": 99, "warm": 3, "cold": 0})
-    w = embed._cooc_weights(SimpleNamespace(rec_query=query))
+    w = training.cooc_weights(query.play_counts())
     assert w.get("hot", 1.0) > w.get("warm", 1.0) > 1.0           # more plays -> larger gain
     assert w.get("cold", 1.0) == 1.0                              # never played -> neutral, never erased

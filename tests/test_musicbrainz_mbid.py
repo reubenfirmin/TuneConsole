@@ -43,7 +43,7 @@ def test_unrelated_recordings_cannot_supply_year_mbid_or_cover_releases(monkeypa
          "artist-credit": [{"name": "Deco (BE)"}], "releases": [{"id": "wrong-cover-2"}]},
     ]
     monkeypatch.setattr(musicbrainz, "_get", lambda path, params: {"recordings": recordings})
-    assert musicbrainz.enrich_full("You & Me", "Deco (BE)") == (None, None, None, [])
+    assert musicbrainz.enrich_full("You & Me", "Deco (BE)") == (None, None, None, [], [])
 
 
 def test_collaboration_and_matching_reissues_keep_correct_year(monkeypatch):
@@ -64,7 +64,7 @@ def test_collaboration_and_matching_reissues_keep_correct_year(monkeypatch):
         return {"genres": [{"name": "house", "count": 1}]}
     monkeypatch.setattr(musicbrainz, "_get", fake_get)
     assert musicbrainz.enrich_full("You & Me", "Deco (BE)") == (
-        "House", "2025", "right", ["right-cover", "original-cover"])
+        "House", "2025", "right", ["right-cover", "original-cover"], [])
     assert musicbrainz.recording_mbid("You & Me", "MAARVN & Deco (BE)") == "right"
 
 
@@ -98,5 +98,5 @@ def test_full_enrichment_retains_isrc_candidates(monkeypatch):
         assert "isrcs" in params["inc"]
         return {"isrcs": ["GB1234567890", "GB0987654321"]}
     monkeypatch.setattr(musicbrainz, "_get", fake_get)
-    assert musicbrainz.enrich_full("Song", "Artist", include_identifiers=True)[4] == [
+    assert musicbrainz.enrich_full("Song", "Artist")[4] == [
         "GB1234567890", "GB0987654321"]

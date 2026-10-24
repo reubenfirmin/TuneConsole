@@ -1,5 +1,6 @@
 """An uncertain write must never be replayed or reported as a rejected occurrence."""
 import pytest
+from yt_playlist.library import playlist_creation, playlist_generated
 
 from yt_playlist.library.playlist_writes import add_items, add_items_resilient, PlaylistAddUncertain
 
@@ -108,7 +109,7 @@ def test_uncertain_new_playlist_keeps_confirmed_membership_and_undo(store, monke
     monkeypatch.setattr(destination, "add_playlist_items", partial_commit)
     with pytest.raises(PlaylistAddUncertain) as failure:
         if operation == "copy":
-            executor.copy_playlist(store, [source], "Copy", destination, 10)
+            playlist_creation.copy_playlist(store, [source], "Copy", destination, 10)
         else:
             executor.copy_or_move_playlist(store, source, target_identity, source_client,
                                           destination, 10, delete_source=True)
@@ -202,13 +203,13 @@ def test_other_mutation_boundaries_retain_partial_progress(store, monkeypatch, o
     monkeypatch.setattr(destination, "add_playlist_items", partial)
     with pytest.raises(PlaylistAddUncertain) as failure:
         if operation == "generated":
-            executor.create_generated_playlist(store, "Generated", [
+            playlist_generated.create_generated_playlist(store, "Generated", [
                 {"video_id": t["videoId"], "title": t["title"], "artist": "Artist", "duration": 200}
                 for t in tracks], destination, 10, identity_id=identity)
         elif operation == "album":
-            executor.create_playlist_from_album(store, "ALBUM", "Album", destination, 10, identity)
+            playlist_creation.create_playlist_from_album(store, "ALBUM", "Album", destination, 10, identity)
         elif operation == "copy_into":
-            executor.copy_into_playlist(store, [source], target, destination, 10)
+            playlist_creation.copy_into_playlist(store, [source], target, destination, 10)
         elif operation == "merge":
             executor.apply_result(store, {identity: destination}, [source, target], ["v1", "v2"], target, 10)
         else:

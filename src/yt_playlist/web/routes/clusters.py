@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse, Response
 from yt_playlist.util import genre_map
 from yt_playlist.rec import embed, measurement, recipes
 from yt_playlist.rec.cluster_explain import connection_reasons
-from yt_playlist.library import executor
+from yt_playlist.library import playlist_generated, playlist_navigation
 from yt_playlist.library.playlist_writes import PlaylistAddUncertain
 from yt_playlist.web.cluster_scans import ClusterScans
 from yt_playlist.web.cluster_projection import search_results
@@ -46,7 +46,7 @@ def build(ctx) -> APIRouter:
     def clusters_state(ytm: str):
         """The saved canvas behind a generated cluster playlist (#48), so it can be reopened and
         regrown a different way. Returns the stored blob verbatim, or 404 when there is none."""
-        state = store.rec_surface.get_cluster_canvas(ytm)
+        state = store.playlist_recipes.get_cluster_canvas(ytm)
         if not state:
             return JSONResponse({"error": "no canvas"}, status_code=404)
         return Response(content=state, media_type="application/json")
@@ -136,7 +136,7 @@ def build(ctx) -> APIRouter:
                          "artist": m["artist"], "album": m["album"], "thumbnail": m["thumbnail"],
                          "genre": g, "family": genre_map.family(g), "score": round(score, 4),
                          "out_of_corpus": new})
-        return {"ring": ring}, list(dmeta)
+        return {"ring": ring}, [track["key"] for track in ring if track["key"] in dmeta]
 
     def _record_expand(payload, offered, body):
         if offered:
@@ -226,7 +226,7 @@ def build(ctx) -> APIRouter:
             result["error"] = account_error or "Keep at least one track to create a playlist."
         else:
             try:
-                res = executor.create_generated_playlist(store, name, tracks, client, now_fn(),
+                res = playlist_generated.create_generated_playlist(store, name, tracks, client, now_fn(),
                                                          identity_id, recipe=recipe)
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
                 if res["added"]:
@@ -238,7 +238,7 @@ def build(ctx) -> APIRouter:
                 bridge = getattr(ctx, "bridge", None)
                 if bridge is not None and getattr(bridge, "connected", False):
                     watch_url = f"https://music.youtube.com/watch?list={res['new_ytm']}"
-                    activity_for(ctx).start_thread(executor.navigate_when_ready,
+                    activity_for(ctx).start_thread(playlist_navigation.navigate_when_ready,
                         args=(client, bridge, res["new_ytm"], watch_url))
                 # #48: stash the full canvas so this playlist can be reopened in Clusters and regrown a
                 # different way. Stored verbatim (validated as JSON); absent for older clients / failures.
@@ -246,7 +246,7 @@ def build(ctx) -> APIRouter:
                 if state:
                     try:
                         json.loads(state)
-                        store.rec_surface.set_cluster_canvas(res["new_ytm"], state, now_fn())
+                        store.playlist_recipes.set_cluster_canvas(res["new_ytm"], state, now_fn())
                     except (ValueError, TypeError):
                         pass
             except PlaylistAddUncertain as exc:

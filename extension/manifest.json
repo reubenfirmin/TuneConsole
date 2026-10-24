@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TuneConsole session bridge",
-  "version": "0.1.18",
+  "version": "0.1.20",
   "description": "Bridges your signed-in YouTube Music session to the local TuneConsole app so it can read and manage your library.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwoxmIzJTT1Fs6XYs6QyBSiDCPSa0TnJ2U4iv2yBl9W5CV43Qm9VEqayvGUFmZFzvKbu5VmrhPSLeh5sIg/1/YUf6jOaPkHoBrk+v7/r+hpaucG4icx1R6R5eoHJTLMTMRISJr0ItDywX0hCxObrwNsUOB+cdrJ+memaOlKRM5Ap+B90Xz9XYvt8IEJtbmYU7jmYC5ZDeFbCoAHaVClhruptCPQpzGiIvdME7Ot3mAN3p9+Ax0FPQ0HsEm8Zu0kgfp6DWNf+wfNyMCDRweLFSeQpv5SHP/mN43daq3AMc6TJJEzIUVcdpQ0iAhx6yfXsW7rl+9Mj5OqTbw5KIh8VFgQIDAQAB",
   "icons": {
@@ -15,7 +15,8 @@
       "16": "icons/icon16.png",
       "32": "icons/icon32.png"
     },
-    "default_title": "TuneConsole session bridge"
+    "default_title": "TuneConsole connection and setup",
+    "default_popup": "setup.html"
   },
   "permissions": ["cookies", "tabs", "alarms", "scripting"],
   "host_permissions": [
@@ -34,7 +35,7 @@
     },
     {
       "matches": ["https://music.youtube.com/*"],
-      "js": ["content.js"],
+      "js": ["content.js", "music_setup.js"],
       "run_at": "document_idle"
     },
     {

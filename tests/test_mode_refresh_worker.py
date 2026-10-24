@@ -1,4 +1,4 @@
-"""Genre groups repair automatically, without sync, provider access or a full SVD rebuild."""
+"""Genre groups repair in the worker, without sync, provider access or request-time fitting."""
 import logging
 import threading
 import time
@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from yt_playlist.rec import embed, model_refresh, mode_surfaces, rec_params, rec_worker, taste_modes, taste_viz
+from yt_playlist.rec import (content_model, embedding_training as training, embedding_vectors as embed,
+                             model_refresh, mode_surfaces, rec_params, rec_worker, taste_modes, taste_viz)
 from yt_playlist.web.app import create_app
 from tests.model_support import build_content_model
 
@@ -47,7 +48,7 @@ def test_missing_pools_are_scheduled_even_while_models_need_refresh(store, monke
     scheduled = []
     monkeypatch.setattr(worker, '_schedule', lambda **kwargs: scheduled.append(kwargs))
     worker._poll_refresh()
-    assert {'full': True} in scheduled
+    assert {'full': True, 'prepare': True} in scheduled
     assert {'full': False, 'bundles': True} in scheduled
 
 
@@ -75,9 +76,8 @@ def test_startup_repairs_groups_without_sync_or_extension(store, library, monkey
     store.settings.set_setting("enrich_worker_enabled", "0")
 
     def forbidden(*args, **kwargs):
-        raise AssertionError("Local repair must not need a full rebuild or provider connection")
+        raise AssertionError("Requests must not fit models, and local repair must not need a provider")
 
-    monkeypatch.setattr(embed, "build_vectors", forbidden)
     monkeypatch.setattr(rec_worker.RecWorker, "start_ticker", lambda self: None)
     started, release, finished = threading.Event(), threading.Event(), threading.Event()
     original = rec_worker.RecWorker._do_mode_refresh
@@ -97,9 +97,10 @@ def test_startup_repairs_groups_without_sync_or_extension(store, library, monkey
         try:
             # Startup and requests remain available while the repair is still waiting.
             assert started.wait(5)
-            assert client.get("/taste").status_code == 200
-            assert not finished.is_set()
-            if reason in ("stale", "missing"):
+            with monkeypatch.context() as request_guard:
+                request_guard.setattr(training, "build_vectors_from_baskets", forbidden)
+                assert client.get("/taste").status_code == 200
+                assert not finished.is_set()
                 pending = client.get("/taste/panels/overview").text
                 assert 'hx-trigger="every 3s"' in pending
                 assert "Updating your music groups automatically" in pending
@@ -117,10 +118,12 @@ def test_startup_repairs_groups_without_sync_or_extension(store, library, monkey
         recent = taste_viz.overview(store, 2000.0)["recent"]
         assert recent["styles_current"] and recent["n"] == 4
         assert len(recent["shifts"]) == 3
-        html = client.get("/taste/panels/overview").text
+        with monkeypatch.context() as request_guard:
+            request_guard.setattr(training, "build_vectors_from_baskets", forbidden)
+            html = client.get("/taste/panels/overview").text
         assert "genre groups need to be updated" not in html
         assert 'hx-trigger="every 3s"' not in html
-        assert store.rec_surface.get_proposals("mode_bundles") is not None
+        assert store.rec_proposals.get_proposals("mode_bundles") is not None
 
 
 def test_content_update_refreshes_original_models_and_places_track(store, library, monkeypatch):
@@ -136,7 +139,7 @@ def test_content_update_refreshes_original_models_and_places_track(store, librar
     assert {m['mode_id'] for m in taste_modes.live_modes(store)} == {
         m['mode_id'] for m in store.modes.list_modes(active_only=True)}
     assert key in store.rec_model.content_vectors_by_keys([key])
-    bundles = store.rec_surface.get_proposals("mode_bundles")
+    bundles = store.rec_proposals.get_proposals("mode_bundles")
     assert key in {row["key"] for row in bundles["all"]["temporal"]}
 
 
@@ -145,24 +148,24 @@ def test_current_groups_are_not_recomputed_at_every_startup(store, library, monk
     saved = None
     if prepared:
         mode_surfaces.prepare_bundles(store, 1000.0)
-        saved = store.rec_surface.get_proposals("mode_bundles")
+        saved = store.rec_proposals.get_proposals("mode_bundles")
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Startup must reuse the saved model and current groups")
 
-    monkeypatch.setattr(embed, "build_content_vectors", forbidden)
+    monkeypatch.setattr(content_model, "build_library_content", forbidden)
     monkeypatch.setattr(taste_modes, "recompute", forbidden)
     # The one-time adoption of a pre-ledger model is itself incremental. Once
     # adopted, a restart with no source changes must not learn the corpus twice.
     _settle(store)
     mode_surfaces.prepare_bundles(store, 2000)
-    saved = store.rec_surface.get_proposals('mode_bundles')
+    saved = store.rec_proposals.get_proposals('mode_bundles')
     generation = store.rec_model.content_generation()
     worker = _worker(store)
     monkeypatch.setattr(worker, '_start_loop', lambda: None)
     worker._do_mode_refresh()
     assert store.rec_model.content_generation() == generation
-    bundles = store.rec_surface.get_proposals("mode_bundles")
+    bundles = store.rec_proposals.get_proposals("mode_bundles")
     assert bundles is not None
     if prepared:
         assert bundles == saved
@@ -178,14 +181,15 @@ def test_startup_repairs_absent_discovery_songs_while_reusing_saved_groups(store
     store.conn.execute("DELETE FROM rec_proposals WHERE surface='fresh_pool'")
     store.conn.commit()
     if cached is not None:
-        store.rec_surface.put_proposals("fresh_pool", cached, 1000)
+        store.rec_proposals.put_proposals("fresh_pool", cached, 1000)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Discovery repair must reuse the saved groups and model")
 
-    monkeypatch.setattr(taste_modes, "recompute", forbidden)
-    monkeypatch.setattr(embed, "build_vectors", forbidden)
+    # Adopt this fixture's saved spaces into the production fit ledger first.
     _settle(store)
+    monkeypatch.setattr(taste_modes, "recompute", forbidden)
+    monkeypatch.setattr(training, "build_vectors_from_baskets", forbidden)
     worker = _worker(store)
     monkeypatch.setattr(worker, '_start_loop', lambda: None)
     worker._do_mode_refresh()
@@ -309,7 +313,7 @@ def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, libr
     def invalidate_once(reader, now):
         attempts.append(store.settings.get_setting("rec_content_model"))
         if len(attempts) == 1:
-            # A new, ambiguous upload rekeys catalog subjects and clears derived models.
+            # A new, ambiguous upload rekeys catalog subjects and invalidates derived models.
             from yt_playlist.core.catalog import invalidate_derived
             with store.conn:
                 invalidate_derived(store.conn)
@@ -320,17 +324,22 @@ def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, libr
         pytest.fail("Recovering prepared pools must not fit the collaborative model")
 
     monkeypatch.setattr(mode_surfaces, "prepare_bundles", invalidate_once)
-    monkeypatch.setattr(embed, "build_vectors", forbidden)
     monkeypatch.setattr(worker, "_start_loop", lambda: None)
     _settle(store)
-    worker._refresh_bundles()
+    with monkeypatch.context() as request_guard:
+        request_guard.setattr(training, "build_vectors_from_baskets", forbidden)
+        worker._refresh_bundles()
     assert worker.jobs.retry['bundles'].dirty
+    # The worker settles invalidated model inputs before retrying candidate pools.
+    # Pool preparation must only read the model lifecycle's published result.
     _settle(store)
     monkeypatch.setattr(rec_worker.time, 'monotonic', lambda: worker.jobs.retry['bundles'].retry_at + 1)
-    worker._refresh_bundles()
+    with monkeypatch.context() as request_guard:
+        request_guard.setattr(training, "build_vectors_from_baskets", forbidden)
+        worker._refresh_bundles()
     assert len(attempts) == 2 and all(attempts)
     assert store.settings.get_setting("rec_content_model")
-    assert store.rec_surface.get_proposals("mode_bundles")
+    assert store.rec_proposals.get_proposals("mode_bundles")
 
 
 def test_enrichment_requests_repair_when_saved_clusters_have_lost_their_model(store, library, monkeypatch):
@@ -339,5 +348,5 @@ def test_enrichment_requests_repair_when_saved_clusters_have_lost_their_model(st
     store.settings.delete_setting("rec_content_model")
     monkeypatch.setattr(worker, "_schedule", lambda **kw: calls.append(kw))
     worker.trigger_content_update(["techno 0|artist"])
-    assert calls == [{"full": True}]
+    assert calls == [{"full": True, "prepare": True}]
     assert store.rec_refresh.revision() is not None

@@ -9,6 +9,7 @@ import pytest
 @pytest.mark.parametrize("scenario", [
     "fresh", "missing_main", "old_version", "stale", "missing_receiver", "partial_injection",
     "negative_age", "invalid_age", "infinite_age", "missing_observer", "old_main_revision", "old_receiver",
+    "old_receiver_revision",
 ])
 def test_health_repairs_main_sensor_even_when_content_receiver_answers(scenario):
     node = shutil.which("node")
@@ -22,8 +23,8 @@ const scenario = process.argv[1];
 const event = () => ({addListener() {}, removeListener() {}});
 const injections = [], probes = [], frames = [], sockets = [], reloads = [];
 let contentReady = scenario !== 'missing_receiver';
-let receiverRevision = scenario === 'old_receiver' ? undefined : 3;
-let mainRevision = scenario === 'old_main_revision' ? 3 : 4;
+let receiverRevision = scenario === 'old_receiver' ? undefined : scenario === 'old_receiver_revision' ? 6 : 7;
+let mainRevision = scenario === 'old_main_revision' ? 7 : 8;
 let mainVersion = scenario === 'old_version' ? 3
   : ['missing_main', 'partial_injection', 'missing_receiver'].includes(scenario) ? null : 4;
 let mainAgeMs = scenario === 'stale' ? 20000 : mainVersion === null ? null : 0;
@@ -53,11 +54,14 @@ const chrome = {
   },
   scripting: {executeScript: async call => {
     injections.push(call);
-    if (call.files.includes('content.js')) contentReady = true;
+    if (call.files.includes('content.js')) {
+      contentReady = true;
+      if (scenario !== 'old_receiver') receiverRevision = 7;
+    }
     if (call.files.includes('nowplaying_main.js')) {
       if (scenario === 'partial_injection') throw Error('MAIN injection failed');
       mainVersion = 4;
-      mainRevision = 4;
+      mainRevision = 8;
       mainAgeMs = 0;
     }
     if (scenario === 'missing_observer' && call.files.includes('observer_main.js'))
@@ -83,12 +87,12 @@ sockets[0].readyState = Socket.OPEN;
   assert.equal(report.reinjectedTabs, scenario === 'fresh' || ['partial_injection', 'missing_observer'].includes(scenario) ? 0 : 1);
   assert.equal(frames.at(-1).type, 'sensor-health');
   assert.equal(frames.at(-1).healthy, report.healthy);
-  assert.equal(report.versions[0].mainRevision, 4);
-  assert.equal(report.versions[0].receiverRevision, scenario === 'old_receiver' ? null : 3);
+  assert.equal(report.versions[0].mainRevision, 8);
+  assert.equal(report.versions[0].receiverRevision, scenario === 'old_receiver' ? null : 7);
   assert.equal(report.versions[0].capture.metadataVerified, false,
     'healthy transport must not hide an ineligible exact-play producer');
   assert.equal(probes.at(-1).main, true);
-  if (scenario === 'fresh') assert.equal(injections.length, 0);
+  if (scenario === 'fresh') assert.equal(injections.filter(call => !call.files.includes('music_setup.js')).length, 0);
   else assert(injections.some(call => call.world === 'MAIN' && call.files.includes('nowplaying_main.js')));
   if (scenario === 'partial_injection') {
     assert.match(report.error, /MAIN injection failed/);

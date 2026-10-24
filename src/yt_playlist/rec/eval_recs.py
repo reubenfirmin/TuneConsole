@@ -9,7 +9,7 @@ import math
 
 import numpy as np
 
-from yt_playlist.rec import artist_model, embed
+from yt_playlist.rec import artist_model, embedding_training as training, embedding_vectors as vector_reads
 from yt_playlist.util import genre_map
 
 
@@ -18,7 +18,7 @@ def best_holdout(store, cap_days=30) -> int:
 
     A holdout bigger than a third of the span starves the context side of sufficient history
     to learn from, so we size the window proportionally to how much history exists."""
-    lo, hi = store.rec_query.evaluation_history_bounds()
+    lo, hi = store.rec_evidence.evaluation_history_bounds()
     if lo is None or hi is None:
         return 1
     span_s = hi - lo
@@ -31,7 +31,7 @@ def best_holdout(store, cap_days=30) -> int:
 
 def recall_at_k(store, k=20, min_size=5, seed=0) -> dict:
     """Leave-one-out recall@k over playlists, plus the random baseline for comparison."""
-    keys, V, idx = embed.load_vectors(store)
+    keys, V, idx = vector_reads.load_vectors(store)
     if V is None:
         return {"recall_at_k": None, "trials": 0, "reason": "no vectors built"}
     rng = np.random.default_rng(seed)
@@ -102,17 +102,17 @@ def temporal_recall(store, holdout_days=30, k=20) -> dict:
     (generated_only_keys_since) would otherwise count the model's own suggestion as a successful
     prediction. The number dropped is reported as `generated_excluded`. Returns recall=None when
     there are no vectors, no history, or the split has no usable context/held-out plays."""
-    keys, V, idx = embed.load_vectors(store)
+    keys, V, idx = vector_reads.load_vectors(store)
     if V is None:
         return {"recall": None, "trials": 0, "reason": "no vectors built"}
-    _, hi = store.rec_query.evaluation_history_bounds()
+    _, hi = store.rec_evidence.evaluation_history_bounds()
     if hi is None:
         return {"recall": None, "trials": 0, "reason": "no history"}
     cutoff = hi - holdout_days * 86400
     before = store.history.history_keys_before(cutoff)
     after = store.history.get_recent_history_keys(cutoff)
     context = [key for key in before if key in idx]
-    gen_only = store.rec_query.generated_only_keys_since(cutoff)
+    gen_only = store.rec_evidence.generated_only_keys_since(cutoff)
     # The daily projection already suppresses known sync shadows. Include the excluded
     # event keys for accounting, then remove them before calculating any score.
     held = [key for key in after | gen_only if key in idx and key not in before]
@@ -143,12 +143,12 @@ def _causal_window(store, cutoff, end, k, dim, method) -> dict:
     Unlike temporal_recall, this never loads the live vectors. The explicit as-of baskets are fitted
     in memory, so neither persisted model state nor a later basket can leak into the representation.
     """
-    baskets, coverage = store.rec_query.rec_baskets_as_of(cutoff)
+    baskets, coverage = store.rec_evidence.rec_baskets_as_of(cutoff)
     weights = None
     if store.settings.get_setting("rec_cooc_weighting") == "1":
         weights = {key: 1.0 + math.log1p(count)
                    for key, count in store.history.play_counts_before(cutoff).items() if count}
-    keys, V = embed.build_vectors_from_baskets(
+    keys, V = training.build_vectors_from_baskets(
         baskets, dim=dim, method=method, weights=weights)
     base = {"cutoff": cutoff, "end": end, "k": k, "coverage": coverage,
             "baskets": len(baskets), "vectors": len(keys)}
@@ -159,7 +159,7 @@ def _causal_window(store, cutoff, end, k, dim, method) -> dict:
     before = store.history.history_keys_before(cutoff)
     after = store.history.history_keys_between(cutoff, end)
     context = [key for key in before if key in idx]
-    gen_only = store.rec_query.generated_only_keys_between(cutoff, end)
+    gen_only = store.rec_evidence.generated_only_keys_between(cutoff, end)
     held = [key for key in after | gen_only if key in idx and key not in before]
     generated_excluded = sum(key in gen_only for key in held)
     held = [key for key in held if key not in gen_only]
@@ -190,13 +190,13 @@ def rolling_temporal_recall(store, holdout_days=None, k=20, windows=3, dim=None,
     """
     if holdout_days is None:
         holdout_days = best_holdout(store)
-    _lo, hi = store.rec_query.evaluation_history_bounds()
+    _lo, hi = store.rec_evidence.evaluation_history_bounds()
     if hi is None:
         return {"recall": None, "trials": 0, "windows": [], "viable_windows": 0,
                 "holdout_days": holdout_days, "reason": "no history"}
     if dim is None:
-        _keys, live, _idx = embed.load_vectors(store)
-        dim = live.shape[1] if live is not None and live.ndim == 2 else embed.DIM
+        _keys, live, _idx = vector_reads.load_vectors(store)
+        dim = live.shape[1] if live is not None and live.ndim == 2 else training.DIM
     if method is None:
         method = store.settings.get_setting("rec_embed_method") or "svd"
     span = holdout_days * 86400.0
@@ -245,7 +245,7 @@ def projection_recall(store, k=20) -> dict:
     unseen-artist performance. Unscorable targets and insufficient training folds remain explicit.
     """
     from yt_playlist.rec.discover import ContentProjection
-    keys, V, idx = embed.load_vectors(store)
+    keys, V, idx = vector_reads.load_vectors(store)
     empty_bd = {"by_family": {}, "by_era": {}, "by_coverage": {}}
     result = {"recall": None, "trials": 0, "eligible": 0, "unscored": 0,
               "insufficient": 0, "k": k, "folds": 5, "split": "track_identity_5fold",
@@ -327,8 +327,8 @@ def content_rankable(store) -> dict:
     the content-space taste fit (a content vector present + content_taste built). Mirrors cold_rankable.
     Lazy imports avoid a scoring<->eval cycle."""
     from yt_playlist.rec.scoring import content_taste
-    _keys, _V, idx = embed.load_vectors(store)
-    _ckeys, CV, cidx = embed.load_content_vectors(store)
+    _keys, _V, idx = vector_reads.load_vectors(store)
+    _ckeys, CV, cidx = vector_reads.load_content_vectors(store)
     owned = set(store.rec_query.library_keys())
     vectorless_owned = owned - set(idx)
     if CV is None or not content_taste(store):

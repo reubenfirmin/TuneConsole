@@ -1,6 +1,6 @@
 {% extends "base.html" %}{% from "_macros.html" import banner %}
 {% block title %}Home - TuneConsole{% endblock %}
-{% block page_class %}page-home{% endblock %}
+{% block page_class %}page-home{% if onboarding or not sync.last_synced_ago %} page-setup{% endif %}{% endblock %}
 {% block page_styles %}
 <link rel="stylesheet" href="/static/generating.css?v={{ asset_v }}">
 <link rel="stylesheet" href="/static/radio.css?v={{ asset_v }}">
@@ -18,8 +18,7 @@
 {% endif %}{% endblock %}
 {% block body %}
 {% if flash %}
-{# Setup flash: dismissible, and auto-retires the moment a sync is kicked off (see homeStatus.refresh). #}
-<div class="notice ok banner" x-data="{ show: true }" x-show="show" x-cloak @sync-started.window="show = false">
+<div class="notice ok banner" x-data="{ show: true }" x-show="show" x-cloak>
   <span class="banner-body">{{ flash }}</span>
   <button type="button" class="banner-x" @click="show = false" title="Dismiss" aria-label="Dismiss">×</button>
 </div>
@@ -29,6 +28,7 @@
      then a compact live strip with what's playing and library freshness. #}
   <div>
     {# Not connected: left-aligned card with the live equalizer, sits above the user's feed (if any). #}
+    {% if sync.last_synced_ago and not onboarding %}
     <section class="onboard-card" x-show="!connected" x-cloak>
       <svg class="presync-art onb-art" viewBox="0 0 132 72" aria-hidden="true">
         <defs><linearGradient id="onb-g" x1="0" y1="1" x2="0" y2="0">
@@ -41,12 +41,14 @@
       </svg>
       <div class="onb-body">
         <span class="connection-waiting"><span class="onb-dot" aria-hidden="true"></span> Waiting for the extension</span>
-        <h2 class="onb-title">Connect the extension</h2>
-        <p class="onb-sub">Install the TuneConsole extension to connect. It pairs automatically.</p>
+        <h2 class="onb-title">{% if not sync.last_synced_ago %}Welcome to TuneConsole{% else %}Connect the extension{% endif %}</h2>
+        <p class="onb-sub">Install the TuneConsole extension, then open YouTube Music. It connects
+          automatically and brings in your library so you can start with a mix.</p>
         <a class="btn btn-primary" href="https://chromewebstore.google.com/detail/opmmbolbdgdkphfocffpjpgmelkkjkcn"
            target="_blank" rel="noopener">Get the extension {{ arrow_icon('external') }}</a>
       </div>
     </section>
+    {% endif %}
 
     {# The global layout owns Now Playing; only surface a sensor failure when there is a YTM tab
        that should be responding. Having no YTM tab open is normal and needs no warning. #}
@@ -59,26 +61,9 @@
       </span>
     </section>
 
-    {# First-run only: progress is useful while the initial library is being assembled. Once Home is
-       established, background syncing is an implementation detail and stays out of the interface. #}
-    {% if not sync.last_synced_ago %}
-    <section class="sync-console" x-show="running || lines.length" x-cloak>
-      <div class="sc-head">
-        <span class="sc-eye">Library sync</span>
-        <span class="sc-state" :class="{ 'is-run': running, 'is-err': failed }"
-              x-text="running ? 'syncing…' : (failed ? 'finished with errors' : 'done')"></span>
-      </div>
-      <div class="sc-bar" x-show="running" aria-hidden="true"><i></i></div>
-      <div class="sync-log" x-ref="log">
-        <template x-for="(ln, i) in lines" :key="i">
-          <div class="sc-line" :class="ln.cls"><span class="sc-pip" x-text="ln.pip"></span><span x-text="ln.text"></span></div>
-        </template>
-      </div>
-    </section>
-    {% endif %}
   </div>
 
-  {% if sync.last_synced_ago %}
+  {% if sync.last_synced_ago and not onboarding %}
   {% set spotify_result_waiting = spotify_library_job and spotify_library_job.status in ('done', 'error', 'preview') %}
   {% set dash_default = 'notices' if spotify_result_waiting else ('start' if onboarding else 'directions') %}
   {% set has_notices = show_takeout_nag or actions or show_intro or show_lastfm_nudge or
@@ -162,22 +147,7 @@
     {% if spotify_library_job %}
       {% with job=spotify_library_job %}{% include "_partials/spotify_library_notice.html" %}{% endwith %}
     {% endif %}
-    {% include "_partials/takeout_nag.html" %}
-  {# Pre-sync placeholder: only once the extension is connected (not while the live sync console is
-     streaming). Before connecting, the onboard hero above is the whole first-run screen. #}
-  <section class="presync card card--featured" x-show="connected && !running" x-cloak>
-    <svg class="presync-art" viewBox="0 0 132 72" aria-hidden="true">
-      <defs><linearGradient id="presync-g" x1="0" y1="1" x2="0" y2="0">
-        <stop class="eq-stop-start" offset="0"/><stop class="eq-stop-end" offset="1"/>
-      </linearGradient></defs>
-      {% for x, h in [(6,22),(24,40),(42,30),(60,56),(78,34),(96,48),(114,26)] %}
-      <rect class="pbar" style="animation-delay:-{{ loop.index0 * 0.22 }}s"
-            x="{{ x }}" y="{{ 72 - h }}" width="12" height="{{ h }}" rx="4" fill="url(#presync-g)"/>
-      {% endfor %}
-    </svg>
-    <h2 class="presync-title">Connecting in 30 seconds or less</h2>
-    <p class="presync-sub">We're pulling in your library. Your recommendations will start appearing here as soon as it syncs.</p>
-  </section>
+    {% include "_partials/onboarding_feed.html" %}
   </div>
   {% endif %}
 

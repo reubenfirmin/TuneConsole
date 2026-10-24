@@ -1,7 +1,7 @@
 """Explicit local experiment decisions; counterfactual outcomes cannot authorize promotion."""
 import json
 
-from yt_playlist.rec import rec_params
+from yt_playlist.rec import rec_params, scorecard
 
 
 def decisions(store):
@@ -42,7 +42,7 @@ def decide(store, decision, cohort, reason, now):
 def _prepare_decision(store, decision, cohort, reason, now):
     # Guard a concurrent allocation edit as well as the evidence/history reads.
     store.settings.get_setting(rec_params.SETTING_PREFIX + "ppr_ab_share")
-    report = store.rec_surface.experiment_report(max(0, now - 90 * 86400), now, now)
+    report = scorecard.experiment_report(store, max(0, now - 90 * 86400), now, now)
     arms = report["live"]
     ppr, cosine = arms.get(cohort + ":ppr"), arms.get(cohort + ":cosine")
     powered = all(a and a["clusters"] >= report["min_clusters_per_arm"] for a in (ppr, cosine))

@@ -5,16 +5,18 @@ second. We honour both: a process-wide lock paces every call to >= 1s apart, and
 two calls: a recording search (match + year from its releases) and a recording lookup (genre from
 genres/tags). Network/parse failures degrade to (None, None) so one bad track never stops a run.
 """
-import json
 import logging
 import re
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
+from threading import Lock
+from time import monotonic
 
 from yt_playlist.util import net
 from yt_playlist.util.matching import is_remix, normalize, recording_title
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter
-from yt_playlist.providers import genres
+from yt_playlist.providers import genres, transport
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +38,7 @@ def reset() -> None:
 def probe(track, store=None) -> EnrichmentResult:
     """Read-only lookup: genre, year, the recording MBID (which keys AcousticBrainz), and the
     candidate release MBIDs (which key Cover Art Archive). All from the one search."""
-    result = enrich_full(track["title"], track["artist"], include_identifiers=True)
-    genre, year, mbid, release_ids = result[:4]
-    isrcs = result[4] if len(result)>4 else []
+    genre, year, mbid, release_ids, isrcs = enrich_full(track["title"], track["artist"])
     fields = {}
     if genre:
         fields["genre"] = genre
@@ -62,17 +62,9 @@ _breaker = net.CircuitBreaker()           # stop a run once the host looks unrea
 
 
 def _get(path, params):
-    _pacer.wait()                         # serialize + pace all MB traffic across threads
     url = f"{_API}/{path}?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
-            data = json.load(resp)
-    except Exception as e:                # report the outcome to the breaker, then let callers handle it
-        _breaker.record(e)
-        raise
-    _breaker.record()
-    return data
+    return transport.request_json(req, timeout=_HTTP_TIMEOUT_S, pace=_pacer.wait, breaker=_breaker)
 
 
 def _lucene_escape(text):
@@ -139,22 +131,42 @@ def _top_label(obj):
     return genres.pick_genre(tags)
 
 
-_artist_genre_cache = {}
+_ARTIST_CACHE_SIZE = 1024
+_ARTIST_TTL_S = 24 * 60 * 60
+_ARTIST_MISS_TTL_S = 60 * 60
+_artist_genre_cache = OrderedDict()
+_artist_lookup_lock = Lock()
 
 
 def _artist_genre(mbid):
     """Artist-level genre (MusicBrainz keeps most genre data on artists, not recordings).
-    Cached per process so a same-artist playlist only costs one lookup."""
+
+    Re-enrichment shares fresh raw evidence: tagged responses live for a day, empty responses
+    for an hour. It does not force another artist lookup for every recording. Provider reset
+    resets only the circuit breaker, so worker batches also share this bounded cache.
+    """
     if not mbid:
         return None
-    if mbid not in _artist_genre_cache:
+    # As with provider pacing, serialize the lookup and fill across worker threads. A second
+    # request for the same artist sees the completed refresh rather than fetching it again.
+    with _artist_lookup_lock:
+        cached = _artist_genre_cache.pop(mbid, None)
+        if cached is not None and monotonic() < cached[1]:
+            _artist_genre_cache[mbid] = cached
+            return _top_label(cached[0])
         try:
             art = _get(f"artist/{mbid}", {"inc": "genres+tags", "fmt": "json"})
+            tagged = any(tag.get("name") for field in ("genres", "tags")
+                         for tag in art.get(field) or [])
+            genre = _top_label(art)
         except Exception as e:  # noqa: BLE001
             logger.debug("MB artist lookup failed for %s: %s", mbid, e)
             return None        # transient failure: don't cache, so a later track retries
-        _artist_genre_cache[mbid] = art  # Cache metadata so edits to the enabled list take effect.
-    return _top_label(_artist_genre_cache[mbid])
+        ttl = _ARTIST_TTL_S if tagged else _ARTIST_MISS_TTL_S
+        _artist_genre_cache[mbid] = (art, monotonic() + ttl)
+        while len(_artist_genre_cache) > _ARTIST_CACHE_SIZE:
+            _artist_genre_cache.popitem(last=False)
+        return genre
 
 
 _PARENS = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
@@ -167,7 +179,7 @@ def _strip_parens(title):
 
 def recording_mbid(title, artist):
     """Best-match MusicBrainz recording MBID for a track, or None. Used to key AcousticBrainz.
-    Retries once with parenthetical qualifiers stripped, same as enrich()."""
+    Retries once with parenthetical qualifiers stripped, same as enrich_full()."""
     recs = _recording_search(title, artist)
     return recs[0].get("id") if recs else None
 
@@ -188,7 +200,7 @@ def _search_recordings(title, artist):
 
 def _recording_search(title, artist):
     """One recording search with the parens-stripped retry (a remaster / live / remix suffix often
-    blocks the match). Shared by enrich(), recording_mbid() and enrich_full() so a single track
+    blocks the match). Shared by recording_mbid() and enrich_full() so a single track
     costs one search, not one per caller."""
     recs = [r for r in _search_recordings(title, artist) if _matches_recording(r, title, artist)]
     if not recs:
@@ -223,15 +235,6 @@ def _matches_recording(recording, title, artist):
     return wanted_artist in names
 
 
-def enrich(title, artist):
-    """Return (genre, year) for a track, or (None, None) on no match / error.
-
-    Unremixed recordings may fall back to artist tags. A remix needs its own genre evidence.
-    Year comes from the earliest release.
-    """
-    return _genre_year(_recording_search(title, artist), title=title)
-
-
 def _release_ids(recordings):
     """Candidate release MBIDs, best match first. Cover Art Archive is keyed by RELEASE (not
     recording), and these ride along in the search response we already made, so the fallback costs
@@ -245,18 +248,16 @@ def _release_ids(recordings):
     return ids
 
 
-def enrich_full(title, artist, *, include_identifiers=False):
-    """(genre, year, mb_recording_id, release_ids) from a SINGLE recording search. Callers that also
-    want the MBID (the enrichment waterfall) use this instead of enrich() plus a
-    separate recording_mbid(), so a track costs one search rather than two.
+def enrich_full(title, artist):
+    """(genre, year, mb_recording_id, release_ids, isrcs) from one recording search.
 
     release_ids keys Cover Art Archive (which is keyed by release, not recording). It rides along
     here rather than in its own function so the cover fallback costs no extra search, and so this
     stays the single seam where MusicBrainz touches the network."""
     recs = _recording_search(title, artist)
     genre, year = _genre_year(recs, title=title)
-    result = (genre, year, (recs[0].get("id") if recs else None), _release_ids(recs))
-    return (*result, (recs[0].get("isrcs") or []) if recs else []) if include_identifiers else result
+    return (genre, year, (recs[0].get("id") if recs else None), _release_ids(recs),
+            (recs[0].get("isrcs") or []) if recs else [])
 
 
 def _genre_year(recordings, *, title=""):

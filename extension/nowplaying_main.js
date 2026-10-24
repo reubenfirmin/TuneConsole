@@ -5,7 +5,7 @@
 // classifies skips/completions/sessions from the raw stream.
 (function () {
   var SENSOR_VERSION = 4;
-  var SENSOR_REVISION = 4; // Implementation changes can replace a compatible, healthy sensor.
+  var SENSOR_REVISION = 8; // Implementation changes can replace a compatible, healthy sensor.
   var previous = window.__tcNowPoller;
   if (previous && previous.version === SENSOR_VERSION && previous.revision === SENSOR_REVISION && !previous.stopped &&
       previous.lastSampleAt != null && Date.now() - previous.lastSampleAt < 10000) return;
@@ -19,7 +19,8 @@
   function playerInfo() {
     // The URL describes the page being browsed, which can differ from the playing song/queue.
     // Read both identifiers from the same player instead; unknown context stays empty.
-    var info = { videoId: "", playlist: "", title: "", artist: "", thumbnail: "" };
+    var info = { videoId: "", playlist: "", title: "", artist: "", thumbnail: "",
+                 position: null };
     try {
       var host = document.querySelector("ytmusic-player");
       var player = document.querySelector("#movie_player");
@@ -31,6 +32,18 @@
         info.artist = data.author || "";
       }
       if (info.videoId && player.getPlaylistId) info.playlist = player.getPlaylistId() || "";
+      // Only report elapsed time. Music's getDuration() grows with buffering; the app
+      // already knows the full song length. The raw media timeline can also span songs.
+      try {
+        var position = player && player.getCurrentTime && player.getCurrentTime();
+        if (info.videoId && Number.isFinite(position) && position >= 0) {
+          // A getter can expose a changing player. Do not attach a clock to another song.
+          var after = player.getVideoData();
+          if (after && after.video_id === info.videoId) {
+            info.position = position;
+          }
+        }
+      } catch (e) {}
       // Album-art URLs often have no video ID. The player response supplies that identity
       // separately, so it can cover a stale/missing bar without trusting stale MediaSession art.
       if (info.videoId && typeof player.getPlayerResponse === "function") {
@@ -264,6 +277,8 @@
                            __tcNow: { title: meta.title, artist: meta.artist, thumbnail: meta.thumbnail,
                                       metadataVerified: meta.verified,
                                       videoId: info.videoId, playlist: info.playlist,
+                                      // Each presence heartbeat anchors the app's local progress clock.
+                                      position: info.position,
                                       playerBar: bar,
                                       brandId: identity.brandId, brandKnown: identity.brandKnown,
                                       paused: !v || v.paused,

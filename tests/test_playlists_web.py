@@ -63,14 +63,14 @@ def test_delete_refreshes_cached_cleanup_summary(store, monkeypatch, tmp_path):
     store.playlists.set_playlist_tracks(a, t)
     store.playlists.set_playlist_tracks(b, t)
     actions.refresh_cleanup(store, 1.0)
-    assert store.rec_surface.get_proposals(CLEANUP_SURFACE)["count"] == 2      # both dupes pending
+    assert store.rec_proposals.get_proposals(CLEANUP_SURFACE)["count"] == 2      # both dupes pending
     fc = FakeClient(tracks={"PLA": [_track(f"v{i}", f"S{i}", "X") for i in range(4)]})
     c = _client(store, lambda: {iid: fc})
 
     r = c.post("/playlists/delete", data={"ids": str(a)})
     assert _refreshes(r)
     assert store.playlists.get_playlist(a) is None
-    assert store.rec_surface.get_proposals(CLEANUP_SURFACE)["count"] == 0      # survivor is no longer a dupe
+    assert store.rec_proposals.get_proposals(CLEANUP_SURFACE)["count"] == 0      # survivor is no longer a dupe
 
 
 def test_delete_hides_system_playlist_and_refreshes(store, monkeypatch, tmp_path):
@@ -264,7 +264,7 @@ def test_playlist_rows_use_song_artwork_when_no_cover_is_available(store):
 
 
 def test_playlists_page_carries_generated_created_at(store):
-    # The Generated card is ordered newest-first client-side (genRows in app.js sorts by `created`),
+    # The Generated card is ordered newest-first client-side (genRows in library-playlists.js sorts by `created`),
     # which relies on each playlist's actual created_at flowing into the page rows.
     import json
     import re
@@ -300,8 +300,8 @@ def test_generated_sort_recovers_dates_without_claiming_imports_were_created_at_
         store.playlists.upsert_playlist(iid, ytm, title, 0, "h", 500, created_at=created)
         store.playlists.set_playlist_group(ytm, "Generated")
         store.playlists.mark_generated_playlist(ytm)
-    store.rec_surface.set_recipe("recipe", {}, now=200)
-    store.rec_surface.set_recipe("known", {}, now=300)  # actual creation date takes precedence
+    store.playlist_recipes.set_recipe("recipe", {}, now=200)
+    store.playlist_recipes.set_recipe("known", {}, now=300)  # actual creation date takes precedence
 
     response = _client(store, lambda: {iid: FakeClient()}).get("/playlists")
     rows = json.loads(re.search(r"playlistsTab\((\[.*?\])\)", response.text).group(1))
@@ -329,7 +329,7 @@ def test_new_playlists_use_seven_day_creation_window_not_recent_edits(store):
     store.playlists.set_playlist_title(edited, "Renamed again", now)
     store.playlists.set_playlist_track_count(edited, 3, now)
     store.playlists.hide_playlist("hidden")
-    store.rec_surface.set_recipe("recipe", {"theme": "updated recipe"}, now)
+    store.playlist_recipes.set_recipe("recipe", {"theme": "updated recipe"}, now)
     store.playlists.set_playlist_group("generated", "Generated")
     store.playlists.mark_generated_playlist('generated')
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),

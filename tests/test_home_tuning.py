@@ -19,7 +19,7 @@ def assert_cleared(store):
     assert store.rec_model.get_leans() == {}
     assert store.rec_model.hidden_facets() == set()
     assert rec_params.get_param(store, "breadth_bias") == 0
-    assert store.rec_surface.get_proposals("home_genre_request") == {}
+    assert store.rec_proposals.get_proposals("home_genre_request") == {}
     assert store.settings.get_setting("home_mix_vibe") is None
     assert store.settings.get_setting(mix_tuning.UPDATED_AT_SETTING) is None
 
@@ -85,12 +85,12 @@ def test_last_adjustment_extends_window_and_new_session_drops_expired_choices(st
     clock[0] = 1000 + mix_tuning.TTL_S
     client.get("/home/cards")
     assert store.rec_model.get_lean("genre:jazz") == 2
-    assert store.rec_surface.get_proposals("home_genre_request")["include_genres"] == ["jazz"]
+    assert store.rec_proposals.get_proposals("home_genre_request")["include_genres"] == ["jazz"]
 
     clock[0] += 3600
     client.post("/home/breadth", data={"breadth_bias": ".5"})
     assert store.rec_model.get_leans() == {}
-    assert store.rec_surface.get_proposals("home_genre_request") == {}
+    assert store.rec_proposals.get_proposals("home_genre_request") == {}
     assert rec_params.get_param(store, "breadth_bias") == .5
     assert mix_tuning.remaining(store, clock[0]) == mix_tuning.TTL_S
 
@@ -121,5 +121,5 @@ def test_temporary_bias_does_not_become_learned_taste_across_midnight(store):
     graduation.graduate_slider_exposure(store, clock[0])
     clock[0] += 120
     graduation.graduate_slider_exposure(store, clock[0])
-    assert store.rec_surface.theme_rows() == []
+    assert store.rec_signals.theme_rows() == []
     assert store.rec_model.get_weights(now=clock[0]) == {}

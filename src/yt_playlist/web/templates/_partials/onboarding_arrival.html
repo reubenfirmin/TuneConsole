@@ -1,0 +1,14 @@
+<section class="arrival" :class="{ 'is-importing': running }" aria-labelledby="arrival-title">
+  <div class="arrival-copy">
+    <h1 id="arrival-title" x-text="connected || imported || running || songs > 0 ? 'Getting to know your music' : 'Welcome to TuneConsole'">Welcome to TuneConsole</h1>
+    <p class="arrival-intro" x-text="connected || imported || running || songs > 0 ? &quot;We're learning your music to build personal mixes and find your next favorites.&quot; : &quot;Connect your music. We'll build personal mixes and find your next favorites.&quot;">Connect your music. We'll build personal mixes and find your next favorites.</p>
+    <div class="arrival-setup" x-show="!connected && !imported && !running && !songs" x-cloak>
+      <a class="btn btn-primary" href="https://chromewebstore.google.com/detail/opmmbolbdgdkphfocffpjpgmelkkjkcn"
+         target="_blank" rel="noopener">Get the extension</a>
+      <p>Then open <a href="https://music.youtube.com/" target="_blank" rel="noopener">YouTube Music</a>.</p>
+    </div>
+  </div>
+  <div class="arrival-art" aria-hidden="true">
+    <img class="arrival-illustration" src="/static/onboarding-arrival.png" alt="" fetchpriority="high">
+  </div>
+</section>

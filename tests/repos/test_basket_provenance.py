@@ -12,7 +12,7 @@ Basket membership is asserted by content (a frozenset of keys), not list index, 
 album/artist/content baskets also come out of rec_baskets() in the same flat list.
 """
 from yt_playlist.util.matching import identity_key
-from yt_playlist.repos.rec_query import GENERATED_GROUP
+from yt_playlist.repos.base import GENERATED_GROUP
 
 _DAY = 86400
 _NOON = 43200
@@ -27,7 +27,7 @@ def _session_baskets(store):
     """frozensets of every basket rec_baskets() returns, so membership can be asserted without
     caring about basket order or which non-session baskets (playlist/album/artist/content) also
     happen to be present in the same flat list."""
-    return {frozenset(b) for b in store.rec_query.rec_baskets()}
+    return {frozenset(b) for b in store.rec_evidence.rec_baskets()}
 
 
 def test_generated_only_key_dropped_from_session_basket(store):

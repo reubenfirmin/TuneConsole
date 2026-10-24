@@ -4,6 +4,7 @@
 {% if dynamic or song.video_id|default('') %}
 <button type="button" class="dots song-menu-trigger{{ ' song-menu-trigger--mood' if context.mood_key|default('') else '' }}" title="More actions"
         aria-haspopup="menu"
+        popovertarget="song-action-menu"
         aria-controls="song-action-menu" aria-expanded="false"
         {% if context.mood_key|default('') %}
         :title="mood > 0 ? 'More actions · More like this is active' : mood < 0 ? 'More actions · Less like this is active' : 'More actions'"

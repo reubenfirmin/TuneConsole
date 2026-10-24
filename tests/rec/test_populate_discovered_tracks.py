@@ -1,6 +1,6 @@
 import logging
 
-from yt_playlist.rec import discover, embed
+from yt_playlist.rec import discover, embedding_vectors as embed
 from tests import model_support
 
 

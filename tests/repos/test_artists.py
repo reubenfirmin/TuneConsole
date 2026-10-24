@@ -41,11 +41,11 @@ def test_provider_ids_keep_homonyms_distinct_and_aliases_stable(store):
     assert store.artists.track_credits(a)[0]['artist_id'] == a_id
     assert store.artists.resolve('New spelling') == a_id
     store.discovery.mark_scanned(a_id,10)
-    store.rec_surface.cache_similar(a_id,[['Neighbor A',.9]],10)
-    store.rec_surface.cache_similar(b_id,[['Neighbor B',.8]],20)
-    assert store.rec_surface.cached_similar(a_id,30) == [['Neighbor A',.9]]
-    assert store.rec_surface.cached_similar(b_id,30) == [['Neighbor B',.8]]
-    assert store.rec_surface.cached_similar('Same',30) is None
+    store.artist_similarity.cache_similar(a_id,[['Neighbor A',.9]],10)
+    store.artist_similarity.cache_similar(b_id,[['Neighbor B',.8]],20)
+    assert store.artist_similarity.cached_similar(a_id,30) == [['Neighbor A',.9]]
+    assert store.artist_similarity.cached_similar(b_id,30) == [['Neighbor B',.8]]
+    assert store.artist_similarity.cached_similar('Same',30) is None
     store.discovery.upsert_discovered_artist('Same',1,[],[],None,10,artist_id=a_id)
     store.discovery.upsert_discovered_artist('Same',2,[],[],None,20,artist_id=b_id)
     assert len(store.discovery.get_discovered_artists()) == 2
@@ -112,7 +112,7 @@ def test_populated_upgrade_retains_literal_credit_state_feedback_and_backup(tmp_
     assert len(credits) == 1 and credits[0]['credit'] == 'Group, with comma'
     aid = credits[0]['artist_id']
     assert s.conn.execute('SELECT artist_id,scanned_at FROM artist_scans').fetchone()[:] == (aid,15)
-    assert s.rec_surface.cached_similar(aid,30) == [['Neighbor',.8]]
+    assert s.artist_similarity.cached_similar(aid,30) == [['Neighbor',.8]]
     assert s.conn.execute('SELECT item_key,kind FROM rec_feedback').fetchone()[:] == ('Group, with comma','less')
     assert s.conn.execute('SELECT artist_id FROM rec_feedback').fetchone()[0] == aid
     assert s.artists.resolve('Original credit') == aid

@@ -12,6 +12,7 @@ import pytest
 
 from yt_playlist.core.store import Store
 from yt_playlist.rec import trend_rollups as tr
+from yt_playlist.rec import trend_payload, trend_statistics as stats
 
 DAY = 86400
 
@@ -63,25 +64,39 @@ def test_day_counts_source_applies_the_generated_quarantine(store):
     assert tr.day_counts_source(store) == [(10, "b", 1)]
 
 
+def test_repetition_series_returns_only_latest_four_eligible_timestamps_per_key(store):
+    _generated(store, 1, "PL_gen")
+    for day in (0, 14, 22, 26, 28, 7):
+        _ev(store, "a", day * DAY)
+    _ev(store, "a", 40 * DAY, playlist="PL_gen")
+    _ev(store, "b", 9 * DAY)
+    _ev(store, "b", 9 * DAY)
+    _ev(store, "generated_only", 50 * DAY, playlist="PL_gen")
+    assert tr.repetition_series(store) == {
+        "a": [14 * DAY, 22 * DAY, 26 * DAY, 28 * DAY],
+        "b": [9 * DAY, 9 * DAY],
+    }
+
+
 # --- Task 2.2: the first-play index ---------------------------------------------------------------
 
 def test_first_play_index_retains_earlier_coarse_evidence_when_a_ledger_exists(store):
     store.history.record_history_plays(1, 10 * DAY, ["a"], source_timezone="UTC")
     _ev(store, "a", 20 * DAY)
-    tr._build_first_play_index(store)
+    store.trends.refresh_first_play()
     assert store.trends.first_play_map("track")["a"] == 10
 
 
 def test_first_play_index_uses_history_without_a_ledger(store):
     store.history.record_history_plays(1, 10 * DAY, ["a"], source_timezone="UTC")
-    tr._build_first_play_index(store)
+    store.trends.refresh_first_play()
     assert store.trends.first_play_map("track")["a"] == 10
 
 
 # --- Task 2.3: month_review -----------------------------------------------------------------------
 
 def _months(store):
-    return tr.compute_months(tr.day_counts_source(store), store.trends.track_meta(),
+    return stats.compute_months(tr.day_counts_source(store), store.trends.track_meta(),
                              store.trends.first_play_map("artist"))
 
 
@@ -92,7 +107,7 @@ def test_month_review_song_of_the_month_counts_real_plays(store):
     for d in (3, 12):
         _ev(store, "a", dt.datetime(2026, 6, d, 12, tzinfo=dt.UTC))
     now = dt.datetime(2026, 7, 9, tzinfo=dt.UTC).timestamp()
-    review = tr.month_review(_months(store), store, now, tr.day_counts_source(store),
+    review = trend_payload.month_review(_months(store), store, now, tr.day_counts_source(store),
                              store.trends.track_meta())
     assert review["month"] == "2026-06"
     assert review["top_track"]["plays"] == 2      # not 14
@@ -107,7 +122,7 @@ def test_month_review_top_artists_exclude_generated_playlist_plays(store):
     _ev(store, "a", dt.datetime(2026, 6, 3, 12, tzinfo=dt.UTC), playlist="PL_gen")
     _ev(store, "b", dt.datetime(2026, 6, 4, 12, tzinfo=dt.UTC))
     now = dt.datetime(2026, 7, 9, tzinfo=dt.UTC).timestamp()
-    review = tr.month_review(_months(store), store, now, tr.day_counts_source(store),
+    review = trend_payload.month_review(_months(store), store, now, tr.day_counts_source(store),
                              store.trends.track_meta())
     artists = [a["artist"] for a in review["top_artists"]]
     assert artists == ["Orbital"]                # Underworld was only ever played from a generated list
@@ -120,7 +135,7 @@ def test_month_review_falls_back_to_history_without_a_ledger(store):
     store.history.record_history_plays(1, dt.datetime(2026, 6, 3, 12, tzinfo=dt.UTC).timestamp(),
                                        ["a"], source_timezone="UTC")
     now = dt.datetime(2026, 7, 9, tzinfo=dt.UTC).timestamp()
-    review = tr.month_review(_months(store), store, now, tr.day_counts_source(store),
+    review = trend_payload.month_review(_months(store), store, now, tr.day_counts_source(store),
                              store.trends.track_meta())
     assert review["month"] == "2026-06"
     assert review["top_track"]["plays"] == 1
@@ -149,7 +164,7 @@ def test_compute_weeks_does_not_call_a_catalog_artist_new():
     """An artist already in your playlists is not a discovery, whenever we first happened to see them."""
     dc = [(10, "a", 3)]
     meta = {"a": ("Underworld", None)}
-    weeks = tr.compute_weeks(dc, meta, {"Underworld": 10}, {"a": 10},
+    weeks = stats.compute_weeks(dc, meta, {"Underworld": 10}, {"a": 10},
                              catalog_artists={"Underworld"}, catalog_keys={"a"})
     assert weeks[0]["new_artist_plays"] == 0
     assert weeks[0]["new_artists"] == 0
@@ -159,7 +174,7 @@ def test_compute_weeks_does_not_call_a_catalog_artist_new():
 def test_compute_weeks_counts_an_artist_absent_from_the_catalog():
     dc = [(10, "a", 3)]
     meta = {"a": ("Brand New Act", None)}
-    weeks = tr.compute_weeks(dc, meta, {"Brand New Act": 10}, {"a": 10}, catalog_artists=set())
+    weeks = stats.compute_weeks(dc, meta, {"Brand New Act": 10}, {"a": 10}, catalog_artists=set())
     assert weeks[0]["new_artist_plays"] == 3
     assert weeks[0]["new_artists"] == 1
 
@@ -168,7 +183,7 @@ def test_compute_months_respects_the_catalog(store):
     dc = [(10, "a", 2), (10, "b", 1)]
     meta = {"a": ("Owned", None), "b": ("Fresh", None)}
     af = {"Owned": 10, "Fresh": 10}
-    months = tr.compute_months(dc, meta, af, catalog_artists={"Owned"})
+    months = stats.compute_months(dc, meta, af, catalog_artists={"Owned"})
     assert months[0]["new_artist_plays"] == 1 and months[0]["new_artists"] == 1
 
 
@@ -177,9 +192,9 @@ def test_build_treats_a_migrated_library_as_known(store):
     _owned(store, 1, 1, "a", "Underworld")
     _ev(store, "a", 10 * DAY)
     _ev(store, "a", 11 * DAY)
-    tr._build_first_play_index(store)
+    store.trends.refresh_first_play()
     dc = tr.day_counts_source(store)
-    weeks = tr.compute_weeks(dc, store.trends.track_meta(),
+    weeks = stats.compute_weeks(dc, store.trends.track_meta(),
                              store.trends.first_play_map("artist"),
                              store.trends.first_play_map("track"),
                              store.trends.catalog_artists(), store.trends.catalog_track_keys())
@@ -193,9 +208,9 @@ def test_build_still_finds_a_true_discovery(store):
     seed_catalog_track(store,'fresh','t','Newcomer',track_id=2,video_id='vfresh')
     store.conn.commit()
     _ev(store, "fresh", 10 * DAY)
-    tr._build_first_play_index(store)
+    store.trends.refresh_first_play()
     dc = tr.day_counts_source(store)
-    weeks = tr.compute_weeks(dc, store.trends.track_meta(),
+    weeks = stats.compute_weeks(dc, store.trends.track_meta(),
                              store.trends.first_play_map("artist"),
                              store.trends.first_play_map("track"),
                              store.trends.catalog_artists(), store.trends.catalog_track_keys())
@@ -207,9 +222,9 @@ def test_a_generated_playlist_does_not_make_an_artist_familiar(store):
     """The app putting an artist in front of you is not you knowing them (repos/base.py quarantine)."""
     _owned(store, 1, 1, "sug", "Suggested Act", ytm="PL_gen", generated=True)
     _ev(store, "sug", 10 * DAY)                     # played, but NOT from the generated playlist
-    tr._build_first_play_index(store)
+    store.trends.refresh_first_play()
     dc = tr.day_counts_source(store)
-    weeks = tr.compute_weeks(dc, store.trends.track_meta(),
+    weeks = stats.compute_weeks(dc, store.trends.track_meta(),
                              store.trends.first_play_map("artist"),
                              store.trends.first_play_map("track"),
                              store.trends.catalog_artists(), store.trends.catalog_track_keys())

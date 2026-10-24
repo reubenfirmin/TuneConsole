@@ -31,8 +31,30 @@ body:has(.page-clusters) .global-now-playing-slot { display: none; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--type-xs); font-weight: 400; color: var(--dim);
 }
+.hs-progress {
+  position: absolute; inset: -1px 0 auto; display: block;
+  width: 100%; height: 2px; pointer-events: none;
+  --played: 0%;
+  --progress-gradient: linear-gradient(90deg, var(--teal), var(--accent) 55%, var(--accent-2));
+}
+.hs-progress progress {
+  display: block; pointer-events: auto;
+  width: 100%; height: 2px; margin: 0; padding: 0; border: 0; border-radius: 0;
+  overflow: hidden; appearance: none; background: var(--border); accent-color: var(--accent);
+}
+.hs-progress progress::-webkit-progress-bar { background: var(--border); }
+.hs-progress progress::-webkit-progress-value { background: var(--progress-gradient); }
+.hs-progress progress::-moz-progress-bar { background: var(--progress-gradient); }
+.hs-progress::after {
+  content: ''; position: absolute; top: 1px;
+  left: clamp(2px, var(--played, 0%), calc(100% - 2px));
+  width: 4px; height: 4px; border-radius: 50%; transform: translate(-50%, -50%);
+  background: color-mix(in srgb, var(--accent-2) 70%, var(--light-source));
+  box-shadow: 0 0 5px 2px color-mix(in srgb, var(--accent) 65%, transparent),
+              0 0 12px 3px color-mix(in srgb, var(--accent) 30%, transparent);
+}
 .hs-rate-group {
-  grid-column: 1 / -1; grid-row: 2; display: grid;
+  position: relative; grid-column: 1 / -1; grid-row: 2; display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: center; gap: .25rem;
   padding-block-start: .5rem; border-block-start: 1px solid var(--border);
 }
@@ -82,7 +104,15 @@ body:has(.page-clusters) .global-now-playing-slot { display: none; }
 @media (min-width: 45rem) and (max-width: 64.999rem) {
   .hs-now { grid-template-columns: 3rem minmax(0, 1fr) 10rem; }
   .hs-rate-group { grid-column: 3; grid-row: 1; padding: 0; border: 0; }
+  .hs-progress { inset: auto 0 -.25rem; }
   .hs-source { grid-column: 2 / -1; grid-row: 2; }
+}
+@media (forced-colors: active) {
+  .hs-progress progress { forced-color-adjust: none; background: Canvas; outline: 1px solid CanvasText; }
+  .hs-progress progress::-webkit-progress-bar { background: Canvas; }
+  .hs-progress progress::-webkit-progress-value { background: Highlight; }
+  .hs-progress progress::-moz-progress-bar { background: Highlight; }
+  .hs-progress::after { display: none; }
 }
 @media (min-width: 65rem) {
   .global-now-playing-slot { display: none; }

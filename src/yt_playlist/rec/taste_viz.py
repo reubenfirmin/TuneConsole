@@ -26,7 +26,7 @@ shapes ranking).
 import numpy as np
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import embed, layers, mix_tuning, mode_eval, mode_profiles, rec_params, scoring, surfaces, taste_analysis, transient
+from yt_playlist.rec import embedding_training as training, embedding_vectors as vectors, layers, mix_tuning, mode_eval, mode_profiles, rec_params, scoring, surfaces, taste_analysis, transient
 
 
 def _axis_rows(prefix, shares, weights, standing, leans, fparams):
@@ -63,8 +63,8 @@ def mix_choices(store):
 
 def generated_playlists(store, now):
     """Generation facts from prepared pools and saved settings; never rebuild a Home mix."""
-    bundles = store.rec_surface.get_proposals("mode_bundles") or {}
-    blocked = store.rec_model.suppressed_keys("for_you", now) | set(store.rec_query.generated_track_keys())
+    bundles = store.rec_proposals.get_proposals("mode_bundles") or {}
+    blocked = store.rec_model.suppressed_keys("for_you", now) | set(store.rec_eligibility.generated_track_keys())
     muted = store.rec_model.muted_artists()
     examples = {}
     for source in ("wheelhouse", "explore", "fresh", "comfort"):
@@ -134,7 +134,7 @@ def overview(store, now, profiles=None):
     shifts.sort(key=lambda r: -abs(r["delta"]))
     week_start = now - 7 * 86400
     changes = [_graduation_change(entry) for entry in
-               store.rec_surface.recent_graduations(limit=3, since=week_start, until=now)]
+               store.rec_signals.recent_graduations(limit=3, since=week_start, until=now)]
     return {"genres": [{"name": name, "share": share} for name, share in
                        sorted(bd["families"].items(), key=lambda x: -x[1])],
             "breadth_word": _breadth_word(bd["breadth"]),
@@ -220,7 +220,7 @@ def _sources(store, now):
     fades independently on its own wall-clock half-life (transient.decay_weight). Report those
     half-lives instead so the page states the real per-source decay, not a retired blend knob."""
     mood_pos = mood_neg = 0
-    mood_events = store.rec_surface.recent_mood_events()
+    mood_events = store.rec_signals.recent_mood_events()
     for _ts, direction, _keys in mood_events:
         if direction > 0:
             mood_pos += 1
@@ -266,7 +266,7 @@ def learning_progress(store, now) -> dict:
     threshold = rec_params.get_param(store, "theme_threshold")
     groups = {axis: {"axis": axis, "title": title, "rows": []} for axis, title in
               (("artist", "Artists"), ("genre", "Genres"), ("era", "Eras"))}
-    for entry in store.rec_surface.theme_rows():
+    for entry in store.rec_signals.theme_rows():
         axis, separator, name = entry["facet"].partition(":")
         if not separator:
             axis, name = "other", entry["facet"]
@@ -306,7 +306,7 @@ def learning_progress(store, now) -> dict:
     weight_sources["lanes"].sort(key=lambda row: (row["updated_at"] is None,
                                                 -(row["updated_at"] or 0), row["label"]))
     weight_sources["maximum"] = rec_params.LANE_MAX
-    changes = [_graduation_change(entry) for entry in store.rec_surface.recent_graduations(limit=50)]
+    changes = [_graduation_change(entry) for entry in store.rec_signals.recent_graduations(limit=50)]
     return {"groups": list(groups.values()), "activity": activity,
             "choices": {"rows": choices, "total": len(choices),
                         "offered": sum(row["offered"] for row in choices),
@@ -324,7 +324,7 @@ def model_transparency(store, now) -> dict:
     weights = store.rec_model.get_weights(now=now, revert_halflife_d=sources["lane_weight_halflife_days"])
     standing = store.rec_model.get_leans()
     leans = transient.facet_leans(store, now)
-    theme = {r["facet"]: r["score"] for r in store.rec_surface.theme_rows()}
+    theme = {r["facet"]: r["score"] for r in store.rec_signals.theme_rows()}
     fparams = (rec_params.get_param(store, "facet_gain"),
                rec_params.get_param(store, "facet_mult_min"),
                rec_params.get_param(store, "facet_mult_max"))
@@ -372,7 +372,7 @@ def model_transparency(store, now) -> dict:
 def engine_panel(store) -> dict:
     """The track similarity model's technical setup, without loading vectors or taste contexts."""
     return {"vectors": store.rec_model.rec_vectors_count(),
-            "dim": int(store.settings.get_setting("rec_dim") or embed.DIM),
+            "dim": int(store.settings.get_setting("rec_dim") or training.DIM),
             "method": store.settings.get_setting("rec_embed_method") or "auto"}
 
 
@@ -466,7 +466,7 @@ def centroid_tilt_panel(store, now, top=6) -> dict:
     panel = {"families": [], "has_session": False, "has_transient": False,
              "halflife_h": rec_params.get_param(store, "session_halflife_h"),
              "play_halflife_d": rec_params.get_param(store, "play_halflife_d")}
-    keys, V, idx = embed.load_vectors(store)
+    keys, V, idx = vectors.load_vectors(store)
     if V is None:
         return panel
     # Keep each tilt's magnitude: normalizing again would hide decay from the live model display.

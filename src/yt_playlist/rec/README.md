@@ -1,5 +1,15 @@
 # Recommendation application boundaries
 
+Listening analytics uses three calculation owners. `trend_statistics` handles UTC
+calendar boundaries, distinct listening days, weekly/monthly folds and overlays.
+`trend_insights` accepts detached play counts and exact timestamp series, applies
+the existing editorial thresholds and ranks candidates without repository reads.
+`trend_payload` prepares recap, health and artwork fields on the private snapshot
+reader. `trend_rollups` reads quarantined inputs and publishes the assembled JSON
+and first-play index through the existing source-generation check. Expensive work
+stays in background maintenance; a stale or failed publication preserves the prior
+generation and cannot consume its month-review notification.
+
 Radio's genre dial has explicit endpoints. Fully Eclectic actively chooses a
 different genre from the preceding song, favors genres heard less recently, and
 uses genre-family distance to prefer broader changes when recency ties. Fully
@@ -30,15 +40,35 @@ returns feedback/exclusion results for the coordinator to apply.
 `radio_persistence` retains the v2 checkpoint shape and migrates v1 flags.
 Receipt journaling updates only the current episode's operation, preserving a
 concurrent Stop and any newer queued choice. Playback observation/navigation
-and HTTP projections remain separate collaborators.
+and HTTP projections remain separate collaborators. `radio_launch` owns seed
+resolution, initial creation, settled initial readback and checkpoint attachment;
+only the coordinator selects the live session and navigates after persistence.
+`radio_listening` owns observed history, feedback application, visible-menu
+attribution and ephemeral direction changes. `radio_preparation` returns prepared
+candidate upgrades and detached listening samples; the coordinator rejects results
+for stopped or replaced sessions before publication. These owners receive explicit
+ports and session inputs, with no reference or callbacks to the whole controller.
+`Session` applies confirmed mutation results and preserves heard positions and
+choice credit when the server accepts an alternate upload.
 
 `home_cards.HomeCards` owns Home candidate assembly, lane and genre policy, pool
 selection, offered counts, served impressions and diagnostic audits. Its request
 and result dataclasses carry policy inputs and template-independent results. The
 job port admits pool work only on an explicit start request; reading cards or
-polling a pool does not start work. `web/routes/home.py` parses and validates HTTP
-input, renders the results, and preserves the Home audit point after rendering.
+polling a pool does not start work. `web/routes/home.py` composes the page and the
+board, tuning, discovery, onboarding and generation route groups. `home_views`
+shares request-cached prepared reads and fragment presentation across those groups,
+including response headers and audit points. Recommendation policy stays outside HTTP.
 Existing rankers, recipes and recommendation surfaces remain the policy engines.
+
+Initial setup offers verified library songs as soon as they arrive. Leaving setup
+requires a completed import and usable prepared mixes; sparse accounts can receive
+these offers before any taste modes are fitted. Empty imported accounts have no
+library preparation to wait for. Metadata coverage is reported as counts rather
+than a readiness percentage. The obsolete
+`onboard_coverage_min` and `onboard_library_min` controls and their saved overrides
+are retired. `onboard_feedback_min` still controls when the optional getting-started
+suggestions end; it does not bypass prepared-offer readiness.
 
 Road-trip work has three owners:
 
@@ -54,7 +84,7 @@ Road-trip work has three owners:
   results to the draft and delegates searches to the acquisition owner.
 
 The road-trip routes continue to persist drafts through `repos.road_trip` and
-create playlists through `library.executor`. These boundaries do not change
+create playlists through `library.playlist_generated`. These boundaries do not change
 eligibility, pool budgets, duration fitting or the persisted draft format. Pool
 exhaustion behavior, including the concern in #205, remains a separate behavior
 change rather than an implicit part of this extraction.
@@ -64,6 +94,33 @@ definitions and detached data models, but must not import recommendation policy,
 Store or web orchestration. Shared saved-setting definitions live in
 `core.recommendation_settings`; runtime code does not import numbered migrations.
 Historical migration definitions remain frozen.
+
+Recommendation reads have four explicit owners. `repos.rec_query` projects catalog
+metadata, content inputs and library distributions. `repos.rec_evidence` reads
+historical provenance and constructs current or cutoff training baskets on one
+pinned snapshot. `repos.rec_eligibility` shares generated-playlist quarantine,
+catch-all exclusion, feedback suppression and saved track-length rules.
+`repos.rec_candidates` retrieves bounded, ranked playable library candidates;
+`rec.surfaces` composes those sources and applies personalized lane policy.
+Each owner binds directly to the serving Store or its private snapshot. Catalog
+queries do not forward historical, eligibility or candidate methods.
+
+Serving persistence has explicit owners too. `repos.rec_ledger` owns rendered
+offers, responses, exposure counters, immutable serving policies and historical
+attribution inputs. Its reserved `home_shown` proposal key only deduplicates
+actual offers. `repos.rec_proposals` owns last-good prepared output;
+`repos.playlist_recipes` owns saved recipes and Clusters canvases;
+`repos.rec_signals` owns mood feedback, themes and graduation history; and
+`repos.artist_similarity` owns the Last.fm cache and canonical similarity edges.
+`rec.scorecard` calculates rates, clustered intervals and experiment eligibility
+from detached ledger inputs after the private reporting snapshot is released.
+Trace policies and outcomes are loaded on the same snapshot, preserving historical
+ownership even after catalog changes. Repositories do not import scorecard policy.
+
+Bundle publication calls `rec_ledger.publish_prepared_policies`,
+`rec_proposals.publish_prepared_bundles` and `settings.publish_values` in one
+`ReadSnapshot.publish` transaction. None commits independently. Failure or stale
+inputs retain both last-good proposal sets and prevent partial policy publication.
 
 `model_refresh` prepares serialized model results on a private snapshot without
 constructing SQL. Publication calls each persistence owner inside one
@@ -160,9 +217,55 @@ publication tests cover model equivalence, stale inputs, coalesced notifications
 and rollback after a late publication failure. These boundaries preserve the SVD
 and item2vec implementations and ranking policy.
 
-`model_refresh` is the production training lifecycle. Enrichment queues source
-changes for that lifecycle; it does not run an independent incremental placement
-pipeline. The like-ratchet upgrade remains frozen in migration `v007_like_ratchet`.
+`model_refresh` retains the complete collaborative and artist training lifecycle.
+`progressive.Preparation` also captures changed recordings in durable slices and
+fits the established content encoder and taste clusters from accepted inputs.
+An empty catalog waits for evidence; a sparse catalog can publish a content vector
+without waiting for providers or the clustering minimum; growing catalogs expand
+their content space and clusters while the previous results remain available.
+Each captured batch re-encodes only its recordings against the exact published
+basis, including its audio normalization. A changed basis replaces both content
+spaces and its reconciled modes atomically. Catalog writes during this fit only
+queue later capture; prepared-input or competing-model writes still reject it.
+No stale-source exception is used for model publication.
+
+Capture admits at most 32 recordings every five seconds, within two seconds of
+cooperative work. Hot batches halve and rotate behind other work. Basis fitting
+has a ten-second cooperative budget, a 32,768-row limit, a 128 MiB working-set
+estimate and a one-minute interval. Native operations finish before the next
+cooperative checkpoint. A basis needs ten percent changed recordings, capped at
+128 and with a one-recording floor for small catalogs. A complete model fit needs
+four explicit evidence changes or ten percent changed recordings (floor four,
+cap 128), or changed model settings. Both stages admit smaller aged changes after
+15 minutes. Complete fits retain the worker's one-minute admission interval and
+have a twenty-second cooperative budget and a 512 MiB working-set estimate checked
+before collaborative matrix construction and content encoding. Deferred work keeps its durable inputs
+and last published output; retries continue even after capture drains its queue.
+These are resource admission limits, not a claim that the entire catalog is ready.
+The worker also retains up to 64 MiB of detached collaborative fits across deferred
+publications. A retry reads its baskets and weights again and reuses a fit only
+when their exact input fingerprint matches. This preserves SVD and SGNS objectives,
+account/recording keys and strict publication guards. Accepted content inputs survive
+restart; the bounded fit cache is disposable and is rebuilt after restart.
+
+`Preparation.status()` exposes pending/prepared counts, published vector counts,
+fit checkpoints, input fingerprints, estimated bytes and budgets. Bounded
+maintenance summaries distinguish initial/accumulated/aged evidence, hot inputs,
+bootstrap coverage, memory limits and time limits. Listener setup copy does not
+expose these diagnostics. The like-ratchet upgrade remains frozen in migration `v007_like_ratchet`.
 Isolated model builders used by algorithm and saved-format tests live in
 `tests/model_support.py`; they are not application entry points. Production
 invalidation, equivalence and atomic-publication tests exercise `model_refresh`.
+
+Embedding calculations have explicit input and result contracts. `embedding_training`
+fits sparse collaborative models from detached baskets and optional play-count gains,
+returning `FittedVectors`. `content_model` fits the shared genre/audio vocabulary from
+`ContentInputs`, encodes library and discovery rows, and owns persisted model identity.
+`embedding_vectors` reads and decodes committed generations as `VectorSpace` values;
+its discovery re-encoding retains the generation compare-and-publish check. `embed`
+owns neighbor retrieval, connection geometry and cluster expansion. Its `expand_spaces`
+calculation receives detached spaces and explicit blend/seed controls. Track and artist
+models share normalization and percentile blending through `vector_math`. Request
+adapters read existing vectors; fitting and complete publication remain in the worker's
+snapshot lifecycle. These boundaries preserve key ordering, empty-space sentinels,
+float32 output, sparse accumulation, deterministic random seeds and cancellation.

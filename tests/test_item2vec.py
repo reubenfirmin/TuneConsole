@@ -1,6 +1,6 @@
 import numpy as np
 
-from yt_playlist.rec import embed
+from yt_playlist.rec import embed, embedding_vectors as vectors
 from tests import model_support
 
 
@@ -13,7 +13,7 @@ def test_item2vec_builds_unit_vectors(store):
     store.settings.set_setting("rec_embed_method", "item2vec")
 
     assert model_support.build_track_model(store, dim=8) == 16
-    keys, V, idx = embed.load_vectors(store)
+    keys, V, idx = vectors.load_vectors(store)
     assert V.shape == (16, 8)
     assert np.allclose(np.linalg.norm(V, axis=1), 1.0, atol=1e-3)   # L2-normalized
     assert embed.neighbors(store, "a0|ab", topn=3)                  # produces neighbours

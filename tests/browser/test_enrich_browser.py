@@ -7,7 +7,7 @@ def _seed(store):
     first = store.tracks.upsert_track("v1", "Checked song", "First artist", None, 200)
     second = store.tracks.upsert_track("v2", "Queued song", "Second artist", None, 200)
     store.tracks.set_track_enrichment(first, "Rock", "1999")
-    store.enrichment.mark_enriched([first], 1.0)
+    store.enrichment_queue.mark_enriched([first], 1.0)
     store.enrichment.upsert_conflict(first, "genre", [{"provider": "musicbrainz", "value": "Rock"},
                                            {"provider": "discogs", "value": "Pop"}])
     return first, second
@@ -35,14 +35,14 @@ def test_tiles_navigate_and_conflict_choice_is_saved(live_app, store, page):
     expect(page.locator(".conflict-help-icon svg")).to_be_visible()
     expect(page.get_by_role("button", name="Keep selected value")).to_have_count(0)
     page.get_by_role("radio", name="Pop", exact=True).check()
-    expect(page.get_by_role("status")).to_have_text("Saved")
+    expect(page.locator(".conflict-save-status")).to_have_text("Saved")
     expect(page.locator(".conflict-save-status svg")).to_be_visible()
     expect(page.locator(".conflict-choice.is-current")).to_contain_text("Pop")
     expect(page.get_by_role("radio", name="Pop", exact=True)).to_be_checked()
     assert store.tracks.get_track_enrichment(first)[0] == "Pop"
     # The card stays in place; another click can correct a choice without navigating away.
     page.get_by_role("radio", name="Rock", exact=True).check()
-    expect(page.get_by_role("status")).to_have_text("Saved")
+    expect(page.locator(".conflict-save-status")).to_have_text("Saved")
     expect(page.locator(".conflict-choice.is-current")).to_contain_text("Rock")
     assert store.tracks.get_track_enrichment(first)[0] == "Rock"
     page.reload()
@@ -55,7 +55,7 @@ def test_counts_advance_without_reloading_and_fit_mobile(live_app, store, page):
     page.goto(f"{live_app}/enrich")
     status = page.locator(".enrich-status-card")
     expect(page.locator('.metric[href="/enrich/queue"] .v')).to_have_text("1")
-    store.enrichment.mark_enriched([second], 1.0)
+    store.enrichment_queue.mark_enriched([second], 1.0)
     expect(page.locator('.metric[href="/enrich/queue"] .v')).to_have_text("0", timeout=6000)
     expect(page.locator('.metric[href="/enrich/processed"] .v')).to_have_text("100%")
     expect(page.get_by_text("Caught up", exact=False)).to_be_visible()
@@ -65,8 +65,8 @@ def test_counts_advance_without_reloading_and_fit_mobile(live_app, store, page):
     status.get_by_role("button", name="Resume worker").click()
     expect(status.get_by_text("Caught up", exact=True)).to_be_visible()
     configuration = {"musicbrainz": {"fingerprint": "old", "status": "available"}}
-    store.enrichment.reconcile_provider_configuration(configuration)
-    store.enrichment.reconcile_provider_configuration({
+    store.enrichment_state.reconcile_provider_configuration(configuration)
+    store.enrichment_state.reconcile_provider_configuration({
         "musicbrainz": {"fingerprint": "new", "status": "available"}})
     queue = page.locator('.metric[href="/enrich/queue"]')
     expect(queue.locator(".v")).to_have_text("2", timeout=6000)
@@ -75,8 +75,8 @@ def test_counts_advance_without_reloading_and_fit_mobile(live_app, store, page):
     queue.click()
     expect(page.get_by_role("cell", name="Re-enrichment", exact=True)).to_have_count(2)
     track = store.tracks.catalog_subject(first)
-    store.enrichment.record_enrichment_attempt(track["identity_key"], "musicbrainz", {}, now=10.0)
-    store.enrichment.mark_enriched([first], 10.0)
+    store.enrichment_state.record_enrichment_attempt(track["identity_key"], "musicbrainz", {}, now=10.0)
+    store.enrichment_queue.mark_enriched([first], 10.0)
     page.goto(f"{live_app}/enrich")
     expect(page.locator('.metric[href="/enrich/queue"] .v')).to_have_text("1")
     expect(page.locator('.metric[href="/enrich/processed"] .v')).to_have_text("50%")
@@ -122,12 +122,12 @@ def test_clicking_current_radio_saves_and_keyboard_choice_updates(live_app, stor
     page.goto(f"{live_app}/enrich/conflicts")
     # Clicking the already-checked current value must still count as an explicit choice.
     page.get_by_role("radio", name="Rock", exact=True).click()
-    expect(page.get_by_role("status")).to_have_text("Saved")
-    assert store.enrichment.outstanding_conflicts() == 0
+    expect(page.locator(".conflict-save-status")).to_have_text("Saved")
+    assert store.enrichment_reports.outstanding_conflicts() == 0
     page.get_by_role("radio", name="Rock", exact=True).focus()
     page.keyboard.press("ArrowRight")
     expect(page.locator(".conflict-choice.is-current")).to_contain_text("Pop")
-    expect(page.get_by_role("status")).to_have_text("Saved")
+    expect(page.locator(".conflict-save-status")).to_have_text("Saved")
     expect(page.get_by_role("radio", name="Pop", exact=True)).to_be_focused()
     assert store.tracks.get_track_enrichment(first)[0] == "Pop"
 
@@ -137,10 +137,10 @@ def test_failed_save_restores_current_radio_and_retry_works(live_app, store, pag
     page.goto(f"{live_app}/enrich/conflicts")
     page.route("**/enrich/conflicts/*/genre*", lambda route: route.fulfill(status=500, body="Failed"))
     page.get_by_role("radio", name="Pop", exact=True).check()
-    expect(page.get_by_role("status")).to_contain_text("Could not save")
+    expect(page.locator(".conflict-save-status")).to_contain_text("Could not save")
     expect(page.get_by_role("radio", name="Rock", exact=True)).to_be_checked()
     assert store.tracks.get_track_enrichment(first)[0] == "Rock"
     page.unroute("**/enrich/conflicts/*/genre*")
     page.get_by_role("radio", name="Pop", exact=True).check()
-    expect(page.get_by_role("status")).to_have_text("Saved")
+    expect(page.locator(".conflict-save-status")).to_have_text("Saved")
     assert store.tracks.get_track_enrichment(first)[0] == "Pop"

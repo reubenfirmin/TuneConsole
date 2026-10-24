@@ -1,14 +1,15 @@
 """#28 Artist-relationship model: relate artists by this user's co-curation (+ content + Last.fm edges).
 
-Mirrors the track model (embed.py) at the artist level; the vocabulary uses canonical artist IDs.
+Mirrors collaborative track training at the artist level; the vocabulary uses canonical artist IDs.
 Names are resolved only at display and provider boundaries. Collaborative vectors reduce the track
-model's baskets to distinct-artist sets and use the same PPMI + truncated SVD (embed._svd).
+model's baskets to distinct-artist sets and use the same sparse PPMI and truncated SVD.
 Content vectors and Last.fm edges also contribute to related-artist and completion candidates.
 The background model_refresh lifecycle owns fitting and coherent publication.
 """
 import numpy as np
 
-from yt_playlist.rec import embed, rec_params
+from yt_playlist.rec import (content_model, embedding_training as training,
+                             embedding_vectors as vectors, rec_params, vector_math)
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import normalize
 
@@ -19,7 +20,7 @@ def artist_baskets(store):
     dropped: they would only self-relate an artist. Returns a list of distinct normalized-artist lists."""
     out = []
     refs = store.artists.track_keys(library=True)
-    for basket in store.rec_query.rec_baskets():
+    for basket in store.rec_evidence.rec_baskets():
         artists = {a for k in basket for a in refs.get(k,())}
         artists.discard("")
         if len(artists) >= 2:
@@ -27,20 +28,20 @@ def artist_baskets(store):
     return out
 
 
-def build_collab_artist_vectors(store, dim=embed.DIM):
+def build_collab_artist_vectors(store, dim=training.DIM):
     """(artists, V): L2-normalized collaborative artist vectors from PPMI + truncated SVD over the
-    artist baskets (reusing embed._svd, already generic over baskets of tokens). Empty when there's
+    artist baskets (reusing training.svd, already generic over baskets of tokens). Empty when there's
     too little co-curation to model (fewer artists than the SVD needs)."""
     baskets = artist_baskets(store)
     artists = sorted({a for b in baskets for a in b})
-    if len(artists) < dim + embed._MIN_VOCAB_MARGIN:
+    if len(artists) < dim + training.MIN_VOCAB_MARGIN:
         return [], np.zeros((0, dim), dtype=np.float32)
-    return embed._svd(baskets, artists, dim)
+    return training.svd(baskets, artists, dim)
 
 
 def load_artist_vectors(store):
     """(artists, V, idx) from persisted collaborative artist vectors, or ([], None, {}) if none built."""
-    return embed._load_vector_rows(store.rec_model.get_rec_artist_vectors())
+    return vectors.load_vector_rows(store.rec_model.get_rec_artist_vectors())
 
 
 # --- §B content block: relate artists by what they ARE (genre family / subgenre / decade / audio) ---
@@ -70,7 +71,7 @@ def artist_content_profiles(store):
     for k, d in dao.track_audio_features().items():
         for artist in refs.get(k,()):
             ac = accum.setdefault(artist, {})
-            for f in embed.CONTINUOUS_AUDIO:
+            for f in content_model.CONTINUOUS_AUDIO:
                 v = d.get(f)
                 if v is not None:
                     s = ac.setdefault(f, [0.0, 0]); s[0] += float(v); s[1] += 1
@@ -82,7 +83,7 @@ def artist_content_profiles(store):
 def build_artist_content_model(profiles):
     """Shared artist-content space: a categorical token index (fam:/sub:/dec:) + per-audio-feature
     z-score stats across artists. Persisted so OUT-OF-CORPUS artists encode into the SAME space.
-    Returns {'cat': {token: col}, 'ncat': int, 'cont': [[feat, mu, sd]]}. Mirrors embed.build_content_model."""
+    Returns {'cat': {token: col}, 'ncat': int, 'cont': [[feat, mu, sd]]}. Mirrors content_model.build_content_model."""
     cat: dict = {}
 
     def col(tok):
@@ -96,7 +97,7 @@ def build_artist_content_model(profiles):
         for dec in p["decades"]:
             col(f"dec:{dec}")
     cont = []
-    for f in embed.CONTINUOUS_AUDIO:
+    for f in content_model.CONTINUOUS_AUDIO:
         vals = [p["audio"][f] for p in profiles.values() if f in p.get("audio", {})]
         if len(vals) >= 2:
             mu = sum(vals) / len(vals)
@@ -123,7 +124,7 @@ def encode_artist_content(model, profile):
     for j, (f, mu, sd) in enumerate(cont):
         v = audio.get(f)
         if v is not None and sd:
-            vec[ncat + j] = embed.AUDIO_DIM_W * (float(v) - mu) / sd
+            vec[ncat + j] = content_model.AUDIO_DIM_W * (float(v) - mu) / sd
     n = float(np.linalg.norm(vec))
     return (vec / n).astype(np.float32) if n > 0 else None
 
@@ -141,13 +142,13 @@ def _discovered_artist_profiles(store):
 
 def load_artist_content_vectors(store):
     """(artists, V, idx) from persisted artist content vectors, or ([], None, {}) if none built."""
-    return embed._load_vector_rows(store.rec_model.get_rec_artist_content_vectors())
+    return vectors.load_vector_rows(store.rec_model.get_rec_artist_content_vectors())
 
 
 def _blended_set_scores(store, seeds):
     """{artist: blended relatedness} to a SET of `seeds` (all normalized). The §A collaborative and §B
     content cosine spaces (each to the seeds' centroid in that space) are combined via
-    embed._blend_spaces (w = artist_content_weight; a candidate present in only one space falls back to
+    vector_math.blend_spaces (w = artist_content_weight; a candidate present in only one space falls back to
     it), then the §C Last.fm edges of the seeds are folded in as an additive bonus. The §C term reaches
     out-of-corpus artists with no §A/§B vector (they appear at their edge strength alone). {} when no
     seed is in any space and there are no edges. One seed = the single-artist neighbour case.
@@ -163,20 +164,20 @@ def _blended_set_scores(store, seeds):
     collab_s = {}
     si = [idx[a] for a in seeds if V is not None and a in idx]
     if si:
-        sims = V @ embed._normalize(V[si].mean(0))
+        sims = V @ vector_math.normalize(V[si].mean(0))
         collab_s = {artists[i]: float(sims[i]) for i in range(len(artists))}
     content_s = {}
     if w > 0.0:
         cart, CV, cidx = load_artist_content_vectors(store)
         ci = [cidx[a] for a in seeds if CV is not None and a in cidx]
         if ci:
-            csims = CV @ embed._normalize(CV[ci].mean(0))
+            csims = CV @ vector_math.normalize(CV[ci].mean(0))
             content_s = {cart[i]: float(csims[i]) for i in range(len(cart))}
-    blended = embed._blend_spaces(collab_s, content_s, w)
+    blended = vector_math.blend_spaces(collab_s, content_s, w)
     w_edge = float(rec_params.get_param(store, "artist_edge_weight"))
     if w_edge > 0.0:
         for seed in seeds:
-            for name, match in store.rec_surface.artist_similar_edges(seed):
+            for name, match in store.artist_similarity.artist_similar_edges(seed):
                 cand = store.artists.key(name)
                 if cand and cand not in seeds:
                     blended[cand] = blended.get(cand, 0.0) + w_edge * float(match)
@@ -208,33 +209,40 @@ def artist_neighbors(store, artist, topn=12, exclude=None):
     return [(public[a], score) for a, score in ranked]
 
 
-def related_artists(store, seed_artists, topn=12, exclude_owned=True):
-    """Artists related to a SET of seeds (e.g. a playlist's artists), by the blended seed-centroid
-    score. `exclude_owned` drops artists already in the library, biasing toward discovery (#18); pass
-    False for completion (#24), where owned related artists are exactly what you want."""
+def related_artist_scores(store, seed_artists, topn=12, exclude_owned=True):
+    """Canonical artist keys mapped to blended scores, in descending rank order.
+
+    Exclude seeds, and optionally owned artists for discovery. Internal candidate expansion keeps
+    these identities; related_artists converts them to public names for presentation callers.
+    """
     seeds = {store.artists.key(a) for a in seed_artists if a}
     seeds.discard(None)
     excl = set(seeds)
     if exclude_owned:
         excl |= {a for refs in store.artists.track_keys(library=True).values() for a in refs}
-    ranked = _ranked(_blended_set_scores(store, seeds), excl, topn)
-    public = store.artists.public_keys(a for a, _ in ranked)
-    return [(public[a], score) for a, score in ranked]
+    return dict(_ranked(_blended_set_scores(store, seeds), excl, topn))
 
 
-def artist_track_candidates(store, seed_artists, topn=24, include_out_of_corpus=True):
+def related_artists(store, seed_artists, topn=12, exclude_owned=True):
+    """Present artists related to a set of seeds, optionally excluding owned artists."""
+    ranked = related_artist_scores(store, seed_artists, topn=topn, exclude_owned=exclude_owned)
+    public = store.artists.public_keys(ranked)
+    return [(public[a], score) for a, score in ranked.items()]
+
+
+def artist_track_candidates(store, seed_artists, topn=24, include_out_of_corpus=True, *,
+                            scores=None, artist_refs=None):
     """Expand the artists related to `seed_artists` into candidate TRACKS: owned tracks by those
     artists, plus (when include_out_of_corpus) out-of-corpus discovered tracks whose artist is related.
     Each dict carries key/title/artist/album/video_id/thumbnail (+ out_of_corpus=True for OOC). Powers
-    'Complete this playlist' beyond the library (#24). Uses exclude_owned=False so owned related artists
-    contribute their tracks."""
-    ranked = related_artists(store, seed_artists, topn=topn, exclude_owned=False)
-    scores = dict(ranked)
+    'Complete this playlist' beyond the library (#24). Each candidate has an artist_score. Callers
+    can share canonical scores and a credit snapshot; otherwise they are loaded once here."""
+    if scores is None:
+        scores = related_artist_scores(store, seed_artists, topn=topn, exclude_owned=False)
     if not scores:
         return []
     out = list(store.rec_query.tracks_by_artists(scores))
-    refs = store.artists.track_keys()
-    scores = {store.artists.key(a):score for a,score in scores.items()}
+    refs = store.artists.track_keys() if artist_refs is None else artist_refs
     for row in out:
         row["artist_score"] = max((scores.get(a,0) for a in refs.get(row['key'],())),default=0)
     if include_out_of_corpus:

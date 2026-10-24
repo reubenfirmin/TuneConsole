@@ -48,10 +48,13 @@ const {radio} = require('./tests/extension_worker.cjs').loadWorker({chrome, WebS
 (async () => {
   const result = await radio.update({playlist:'PL_fixture',videoIds:['first','next'],refresh:1,id:42});
   assert.equal(result.playback_synced,true);
-  assert.deepEqual([...calls[0].files],['radio_session.js']);
-  assert.equal(calls[0].world,'MAIN');
-  assert.equal(calls[1].target.tabId,7);
-  assert.deepEqual(JSON.parse(JSON.stringify(calls[1].args)),
+  assert(calls.some(call => call.files?.includes('music_setup.js')),
+    'setup must reach an already-open tab without a backend connection or install event');
+  const radioCalls = calls.filter(call => !call.files?.includes('music_setup.js'));
+  assert.deepEqual([...radioCalls[0].files],['radio_session.js']);
+  assert.equal(radioCalls[0].world,'MAIN');
+  assert.equal(radioCalls[1].target.tabId,7);
+  assert.deepEqual(JSON.parse(JSON.stringify(radioCalls[1].args)),
     [{playlist:'PL_fixture',videoIds:['first','next'],refresh:true}]);
 })().catch(error => { console.error(error); process.exitCode=1; });
 """

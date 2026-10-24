@@ -234,10 +234,11 @@ def test_home_is_landing_with_status_and_sections(live_app, page):
     page.goto(f"{live_app}/")
     # Home is the default tab. Syncing is automatic in the background now, so there is no manual
     # sync button. On this live_app (no extension, never synced) the landing is the
-    # connect-the-extension hero; the feed and the freshness line wait for a first sync.
+    # welcome screen; the feed and the freshness line wait for a first sync.
     assert page.get_by_role("button", name="Full sync").count() == 0
     assert page.get_by_role("button", name="Sync plays").count() == 0
-    assert page.get_by_role("heading", name="Connect the extension").is_visible()
+    assert page.get_by_role("heading", name="Welcome to TuneConsole").is_visible()
+    assert page.get_by_role("link", name="Get the extension").is_visible()
     assert page.get_by_text("Library synced").count() == 0     # no awkward "not yet" line anymore
 
 
@@ -459,7 +460,7 @@ def test_mix_controls_automatically_reset_an_open_page_after_four_hours(live_app
         page.clock.fast_forward(mix_tuning.TTL_S * 1000)
     expect(slider).to_have_value("0")
     expect(page.locator("#home-mode-cards")).to_have_attribute("data-requested-genres", "[]")
-    assert store.rec_surface.get_proposals("home_genre_request") == {}
+    assert store.rec_proposals.get_proposals("home_genre_request") == {}
     assert rec_params.get_param(store, "breadth_bias") == 0
     expect(panel.locator("dialog")).to_be_visible()
     page.get_by_role("tab", name="Genre focus", exact=True).click()
@@ -615,10 +616,10 @@ def test_quick_genres_show_favorites_and_search_reaches_the_rest(live_app, store
     for day in range(30):
         store.history.record_history_plays(iid, 1 - day * 86400,
             [identity_key("Favorite", "Favorite artist")], source_timezone="UTC")
-    bundles = store.rec_surface.get_proposals("mode_bundles")
+    bundles = store.rec_proposals.get_proposals("mode_bundles")
     bundles["all"]["wheelhouse"] += [
         {"key": f"archive-{i}", "genre": f"Archive {i}"} for i in range(20)]
-    store.rec_surface.put_proposals("mode_bundles", bundles, 1.0)
+    store.rec_proposals.put_proposals("mode_bundles", bundles, 1.0)
     prepare_home(store, 1)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(f"{live_app}/")
@@ -643,7 +644,12 @@ def test_nav_has_home_and_playlists(live_app, page):
 
 
 @pytest.mark.parametrize("width", [1280, 1920])
-def test_desktop_uses_side_rail_but_clusters_has_only_exit_control(live_app, page, width):
+def test_desktop_uses_side_rail_but_clusters_has_only_exit_control(live_app, store, page, width):
+    from tests.onboarding_support import publish_personal_mix
+
+    # Check the normal Home layout after setup; the arrival screen uses a wider canvas.
+    store.settings.set_setting('last_sync_at', '1')
+    publish_personal_mix(store, now=1)
     page.set_viewport_size({"width": width, "height": 800})
     page.goto(f"{live_app}/")
     tools = page.get_by_role("button", name="Tools")

@@ -9,7 +9,7 @@ import logging
 import uuid
 from copy import deepcopy
 
-from yt_playlist.rec import embed, rec_params, scoring, transient
+from yt_playlist.rec import embedding_vectors as vectors, rec_params, scoring, transient
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.repos.base import synchronized
 from yt_playlist.util import genre_map
@@ -77,7 +77,7 @@ def _serving_policy(store, now, ranker):
         "muted_artists": sorted(store.rec_model.muted_artists()),
         "suppressed": sorted(store.rec_model.suppressed_keys("for_you", now)),
         "facet_leans": transient.facet_leans(store, now),
-        "mood": store.rec_surface.recent_mood_events(),
+        "mood": store.rec_signals.recent_mood_events(),
         "recent_plays": store.history.recent_plays_with_ts(limit=int(params["recent_play_limit"])),
         "evidence_plays": transient.evidence_plays(store, int(params["recent_play_limit"])),
         "recent_likes": store.rec_model.recent_liked_with_ts(limit=int(params["recent_play_limit"])),
@@ -85,7 +85,7 @@ def _serving_policy(store, now, ranker):
         "radio_lists": transient.radio_list_ids(store),
         "home": {"vibe": store.settings.get_setting("home_mix_vibe"),
                  "tuning_at": store.settings.get_setting("home_mix_tuning_updated_at"),
-                 "genre_request": store.rec_surface.get_proposals("home_genre_request")},
+                 "genre_request": store.rec_proposals.get_proposals("home_genre_request")},
         "modes": {"definitions": [{k: v for k, v in m.items() if k != "centroid"}
                                    for m in store.modes.list_modes()],
                   "offered": store.modes.impression_counts(), "picks": store.modes.pick_rows()},
@@ -99,7 +99,7 @@ def _model_identities(store):
     """Content identities, reusable only while all observed model/taste inputs are unchanged."""
     taste = scoring.playlist_taste(store)
     content_taste = scoring.content_taste(store)
-    return {"content_space": embed.content_space_id(store),
+    return {"content_space": vectors.content_space_id(store),
             "collaborative": _vector_identity(store.rec_model.get_rec_vectors()),
             "content": _vector_identity(store.rec_model.get_rec_content_vectors()),
             "discovered_content": _vector_identity(store.rec_model.get_rec_discovered_content_vectors()),
@@ -108,7 +108,7 @@ def _model_identities(store):
             "taste": hashlib.sha256(taste.centroids.tobytes() + taste.weights.tobytes()).hexdigest(),
             "content_taste": hashlib.sha256(content_taste.centroids.tobytes() +
                                              content_taste.weights.tobytes()).hexdigest(),
-            "baskets": hashlib.sha256(json.dumps(sorted(sorted(b) for b in store.rec_query.rec_baskets()))
+            "baskets": hashlib.sha256(json.dumps(sorted(sorted(b) for b in store.rec_evidence.rec_baskets()))
                                       .encode()).hexdigest(),
             "modes": _vector_identity([(str(m["mode_id"]), m["centroid"].tobytes())
                                        for m in store.modes.list_modes()])}
@@ -197,8 +197,8 @@ class CapturedOffer:
             try:
                 version, config, rows = _prepare_impressions(
                     self.snapshot.store, items, self.now, configuration=configuration, **options)
-                self.store.rec_surface.record_serving_policy(version, config, self.now)
-                self.store.rec_surface.record_served_impressions(request_id, self.surface, rows,
+                self.store.rec_ledger.record_serving_policy(version, config, self.now)
+                self.store.rec_ledger.record_served_impressions(request_id, self.surface, rows,
                     self.now, prune_before=self.now - RETAIN_DAYS * 86400)
             except WorkClosing:
                 raise
@@ -262,7 +262,7 @@ def stamp_pool(store, items, now, ranker="candidate-pool"):
         with store.read_snapshot() as snapshot:
             policies = PoolPolicies(snapshot.store, now)
             stamped = policies.stamp(items, ranker)
-        store.rec_surface.record_prepared_policies(list(policies.rows.values()))
+        store.rec_ledger.record_prepared_policies(list(policies.rows.values()))
         return stamped
     except WorkClosing:
         raise
@@ -287,7 +287,7 @@ def record_action(store, kind, now, *, keys=(), video_id=None, playlist_id=None,
                             if r["video_id"] == video_id)
         if playlist_id is not None:
             keys.update(store.playlists.get_playlist_track_keys(playlist_id))
-        store.rec_surface.record_recommendation_outcomes(event_id or uuid.uuid4().hex, kind, keys, now,
+        store.rec_ledger.record_recommendation_outcomes(event_id or uuid.uuid4().hex, kind, keys, now,
                                              generated=generated)
     except Exception:
         log.warning("recommendation response measurement failed for %s", kind, exc_info=True)

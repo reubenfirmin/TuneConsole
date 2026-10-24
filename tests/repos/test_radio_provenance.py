@@ -21,16 +21,16 @@ def test_radio_playlist_play_is_quarantined_by_real_list_id(store):
     store.playlists.mark_generated_playlist('PLRADIO')
     # A play carrying the playlist's REAL ytm id as provenance. UTC day int(100000//86400) == 1.
     store.history.record_play_event(ident, "k1", "v1", 100000.0, playlist_ytm_id="PLRADIO", source_timezone='UTC')
-    assert (1, "k1") in store.rec_query.generated_only_play_days()
-    assert "k1" in store.rec_query.generated_only_keys_since(0.0)
+    assert (1, "k1") in store.rec_evidence.generated_only_play_days()
+    assert "k1" in store.rec_evidence.generated_only_keys_since(0.0)
 
 
 def test_real_non_generated_play_not_quarantined(store):
     ident = _ident(store)
     store.history.record_play_event(ident, "k2", "v2", 100000.0, playlist_ytm_id=None)
     store.history.record_play_event(ident, "k3", "v3", 100000.0, playlist_ytm_id="PLreal")
-    assert (1, "k2") not in store.rec_query.generated_only_play_days()
-    assert (1, "k3") not in store.rec_query.generated_only_play_days()
+    assert (1, "k2") not in store.rec_evidence.generated_only_play_days()
+    assert (1, "k3") not in store.rec_evidence.generated_only_play_days()
 
 
 # --- #93 plays_by_list_ids_since: the cross-session freshness cooldown's own query. Independent of
@@ -43,18 +43,18 @@ def test_plays_by_list_ids_since_matches_given_ids_within_window(store):
     store.history.record_play_event(ident, "kB", "vB", 100000.0, playlist_ytm_id="PLB")
     store.history.record_play_event(ident, "kOther", "vOther", 100000.0, playlist_ytm_id="PLREAL")
     store.history.record_play_event(ident, "kNoList", "vNoList", 100000.0, playlist_ytm_id=None)
-    assert store.rec_query.plays_by_list_ids_since({"PLA", "PLB"}, 0.0) == {"kA", "kB"}
+    assert store.rec_evidence.plays_by_list_ids_since({"PLA", "PLB"}, 0.0) == {"kA", "kB"}
 
 
 def test_plays_by_list_ids_since_excludes_plays_before_the_window(store):
     ident = _ident(store)
     store.history.record_play_event(ident, "kOld", "vOld", 100.0, playlist_ytm_id="PLA")
     store.history.record_play_event(ident, "kNew", "vNew", 1000.0, playlist_ytm_id="PLA")
-    assert store.rec_query.plays_by_list_ids_since({"PLA"}, 500.0) == {"kNew"}
+    assert store.rec_evidence.plays_by_list_ids_since({"PLA"}, 500.0) == {"kNew"}
 
 
 def test_plays_by_list_ids_since_empty_ids_short_circuits_with_no_query(store):
     ident = _ident(store)
     store.history.record_play_event(ident, "k", "v", 100000.0, playlist_ytm_id="PLA")
-    assert store.rec_query.plays_by_list_ids_since(set(), 0.0) == set()
-    assert store.rec_query.plays_by_list_ids_since({None, ""}, 0.0) == set()   # falsy ids filtered, same as empty
+    assert store.rec_evidence.plays_by_list_ids_since(set(), 0.0) == set()
+    assert store.rec_evidence.plays_by_list_ids_since({None, ""}, 0.0) == set()   # falsy ids filtered, same as empty

@@ -20,15 +20,15 @@ def prepare(store, now, parameters):
     tracks = home_themes.matching_genres(store, tracks, include=parameters["include_genres"],
                                         avoid=parameters["avoid_genres"])
     tracks = measurement.stamp_pool(store, tracks, now, lane)
-    store.rec_surface.put_proposals(f"home_pool:{lane}", {"parameters": parameters, "tracks": tracks}, now)
+    store.rec_proposals.put_proposals(f"home_pool:{lane}", {"parameters": parameters, "tracks": tracks}, now)
 
 
 def pick(store, now, parameters, exclude_keys=()):
-    cached = store.rec_surface.get_proposals(f"home_pool:{parameters['lane']}") or {}
+    cached = store.rec_proposals.get_proposals(f"home_pool:{parameters['lane']}") or {}
     if cached.get("parameters") != parameters:
         return []
     dao = store.rec_query
-    blocked = set(exclude_keys) | dao.generated_track_keys() | store.rec_model.suppressed_keys("for_you", now)
+    blocked = set(exclude_keys) | store.rec_eligibility.generated_track_keys() | store.rec_model.suppressed_keys("for_you", now)
     owned, muted = dao.library_keys(), store.rec_model.muted_artists()
     weights = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     tracks = home_themes.matching_genres(store, cached["tracks"], include=parameters["include_genres"],
@@ -37,7 +37,7 @@ def pick(store, now, parameters, exclude_keys=()):
               and t["artist"] not in muted
               and weights.get(f"genre:{genre_map.family(t.get('genre'))}", 1.0) != 0]
     if parameters["lane"] == "temporal":
-        cuts = (store.rec_surface.get_proposals("mode_bundles") or {}).get("_meta", {}).get("year_cuts")
+        cuts = (store.rec_proposals.get_proposals("mode_bundles") or {}).get("_meta", {}).get("year_cuts")
         if not cuts:
             return []
         tracks = [t for t in tracks if mode_surfaces._in_band(t.get("year"), parameters["epoch"] % 3,

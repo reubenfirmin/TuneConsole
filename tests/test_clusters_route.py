@@ -92,7 +92,7 @@ def test_save_resolves_keys_to_tracks(store):
     # generated mix ("My Cluster #1") and its recipe is persisted.
     assert fc.created[0][1].startswith("My Cluster")
     assert sorted(fc.added[0][1]) == ["va", "vb"]
-    assert store.rec_surface.get_recipe(fc.created[0][0])["model"] == "cluster"
+    assert store.playlist_recipes.get_recipe(fc.created[0][0])["model"] == "cluster"
 
 
 def test_save_always_folds_in_central_tracks(store):

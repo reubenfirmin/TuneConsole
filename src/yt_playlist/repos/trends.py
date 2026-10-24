@@ -76,6 +76,24 @@ class TrendsRepo(Repo):
         return self.conn.execute("SELECT 1 FROM play_events LIMIT 1").fetchone() is not None
 
     @synchronized
+    def repetition_series(self, per_track) -> dict:
+        """Latest exact timestamps per track, oldest first, using retained play-time policy.
+
+        Unknown provenance remains eligible, as in the other descriptive Trends reads.
+        Filter before ranking so generated plays cannot displace eligible evidence.
+        """
+        rows = self.conn.execute(
+            "WITH ranked AS (SELECT identity_key,played_at,id,ROW_NUMBER() OVER ("
+            "PARTITION BY identity_key ORDER BY played_at DESC,id DESC) position "
+            "FROM play_events WHERE COALESCE(is_generated,0)=0) "
+            "SELECT identity_key,played_at FROM ranked WHERE position<=? "
+            "ORDER BY identity_key,played_at,id", (per_track,)).fetchall()
+        series = {}
+        for row in rows:
+            series.setdefault(row["identity_key"], []).append(row["played_at"])
+        return series
+
+    @synchronized
     def ledger_day_counts(self, exclude_generated=True) -> list:
         """[(day, identity_key, plays)] from the play ledger: one row per (account day, track), plays =
         the number of REAL plays that day. Same shape as play_day_counts(), so the rollup consumes it

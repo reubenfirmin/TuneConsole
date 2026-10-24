@@ -103,7 +103,7 @@ def test_model_backoff_preserves_retry_without_delaying_ratings(scheduled, monke
     monkeypatch.setattr(rec_worker.time, "monotonic", lambda: now[0])
     # Missing/expired candidates have an independent recovery job. This case
     # isolates the model failure clock; candidate recovery is covered separately.
-    monkeypatch.setattr(worker.ctx.store.rec_surface, 'get_proposals', lambda *_: {'all': {}})
+    monkeypatch.setattr(worker.ctx.store.rec_proposals, 'get_proposals', lambda *_: {'all': {}})
     monkeypatch.setattr(candidate_refresh, 'due', lambda *_: False)
 
     def fail():

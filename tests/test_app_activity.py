@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.core.activity import Activity, WorkClosing, check_stopping
 from yt_playlist.core.update_lifecycle import acquire_restart_locks
-from yt_playlist.library import executor
+from yt_playlist.library import playlist_generated
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
 from yt_playlist.web.jobs import SyncJobs
@@ -52,6 +52,27 @@ def test_restart_closes_admission_before_the_activity_check():
     assert locks is not None
     for lock in locks:
         lock.release()
+
+
+def test_cancel_restart_resumes_admission_without_interrupting_active_work():
+    work = Activity()
+    finish = work.admit("remote mutation")
+    work.close_admission("restart")
+    work.resume_restart()
+    assert work.accepting and work.active == ("remote mutation",)
+    work.close_admission("restart")
+    work.close_admission("shutdown")
+    work.resume_restart()
+    assert not work.accepting and work.closing_reason == "shutdown"
+    finish()
+
+
+def test_idle_shutdown_cannot_take_over_an_accepted_restart():
+    ctx = _ctx()
+    ctx.work.close_admission("restart")
+    assert acquire_restart_locks(ctx, reason="idle")[0] is None
+    assert not ctx.sync_lock.locked() and not ctx.spotify_import_lock.locked()
+    assert ctx.work.closing_reason == "restart"
 
 
 @pytest.mark.parametrize("reason", ["shutdown", "idle", "update"])
@@ -172,7 +193,7 @@ def test_restart_waits_for_a_generated_playlist_save(store, monkeypatch):
         assert release.wait(5)
         return {"new_ytm": "new", "pid": None, "added": 1}
 
-    monkeypatch.setattr(executor, "create_generated_playlist", save)
+    monkeypatch.setattr(playlist_generated, "create_generated_playlist", save)
     with TestClient(app, base_url="http://127.0.0.1") as client, ThreadPoolExecutor(1) as requests:
         response = requests.submit(client.post, "/home/generate",
             data={"name": "Mix", "tracks": json.dumps([{"video_id": "v"}])})
@@ -194,7 +215,7 @@ def test_generated_playlist_gc_drains_before_restart(store, monkeypatch):
         assert release.wait(5)
         return []
 
-    monkeypatch.setattr(executor, "gc_generated_playlists", collect)
+    monkeypatch.setattr(playlist_generated, "gc_generated_playlists", collect)
     worker = RecWorker(ctx, gc_initial_s=0)
     worker.start_ticker()
     try:

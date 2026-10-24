@@ -1,0 +1,57 @@
+.viz-dim { margin-bottom: 1.1rem; }
+.viz-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 1.375rem; }
+@media (max-width: 640px) { .viz-pair { grid-template-columns: 1fr; } }
+/* A column flex so the footer caption sits on the baseline across all four roses of a card, even
+   when one of them carries an extra "quiet" line above it. */
+figure.rose { margin: 0; text-align: center; display: flex; flex-direction: column; }
+.rose-cap { font-size: var(--type-sm); font-weight: 650; color: var(--text); margin-bottom: 0.4rem; }
+.rose-cap .muted { font-weight: 400; }
+.rose-svg { width: 100%; max-width: 360px; height: auto; }
+.rose-svg .petal { fill: var(--petal-c, var(--accent)); stroke: var(--bg); stroke-width: 0.6;
+  transition: filter 0.15s; }
+.rose-svg .petal:hover { filter: brightness(1.18); }
+.rose-svg .petal.away { opacity: 0.78; }   /* leaning away - same hue, gently receded */
+.rose-svg .rose-neutral { fill: none; stroke: var(--faint); stroke-width: 0.8; stroke-dasharray: 2 3; }
+.rose-quiet { font-size: var(--type-xs); color: var(--dim); margin: 0.3rem 0 0; }
+
+.viz-bars { display: flex; flex-direction: column; gap: 0.4rem; }
+.viz-bar-row { display: flex; align-items: center; gap: 0.5rem; }
+.vb-name { flex: none; width: 8rem; font-size: var(--type-sm); color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vb-val { flex: none; width: 3.2rem; text-align: right; font-size: var(--type-xs); color: var(--dim); }
+.vb-perm { flex: 1; height: 0.55rem; background: var(--accent-soft); border-radius: 3px; overflow: hidden; }
+.vb-perm i { display: block; height: 100%; background: var(--control-primary); border-radius: 3px; }
+.vb-div { flex: 1; position: relative; height: 0.55rem; background: var(--surface);
+  border-radius: 3px; overflow: hidden; }
+.vb-div::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px;
+  background: var(--faint); }
+.vb-div i { position: absolute; top: 0; bottom: 0; min-width: 1px; }
+.vb-div i.pos { left: 50%; background: var(--teal); border-radius: 0 3px 3px 0; }
+.vb-div i.neg { right: 50%; background: var(--danger); border-radius: 3px 0 0 3px; }
+.vb-legend { margin: 0.5rem 0 0; font-size: var(--type-xs); }
+
+/* A facet axis read at four readings side by side: evidence, then the three multipliers that
+   compose. Two-up before it gets cramped, one-up on a phone. */
+.viz-quad { display: grid; grid-template-columns: repeat(4, 1fr); gap: .9375rem; }
+@media (max-width: 1100px) { .viz-quad { grid-template-columns: 1fr 1fr; gap: 1.3rem; } }
+@media (max-width: 560px) { .viz-quad { grid-template-columns: 1fr; } }
+.rose-foot { font-size: 0.68rem; color: var(--faint); margin: 0.25rem 0 0; line-height: 1.3;
+  margin-top: auto; padding-top: 0.25rem; }
+
+/* The same four readings as bars, for axes with too many rows to draw as a rose (artists), and the
+   two-column variant for the session/transient embedding tilt. */
+.chain-bars { display: flex; flex-direction: column; gap: 0.4rem; }
+.chain-row { display: grid; grid-template-columns: 9rem 1fr 1fr 1fr 1fr; gap: 0.55rem;
+  align-items: center; }
+.chain-row.tilt-row { grid-template-columns: 9rem 1fr 1fr; }
+.chain-head { font-size: 0.66rem; color: var(--faint); text-transform: uppercase;
+  letter-spacing: 0.05em; margin-bottom: 0.15rem; }
+.chain-head .muted { text-transform: none; letter-spacing: 0; }
+.vb-absent { background: transparent; box-shadow: none; }
+.vb-absent::before { display: none; }
+@media (max-width: 720px) {
+  .chain-row { grid-template-columns: 6.5rem 1fr 1fr 1fr 1fr; gap: 0.3rem; }
+  .chain-row.tilt-row { grid-template-columns: 6.5rem 1fr 1fr; }
+  .chain-head { font-size: 0.6rem; }
+}
+

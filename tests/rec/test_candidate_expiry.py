@@ -6,7 +6,7 @@ import pytest
 
 from tests.rec.test_candidate_refresh import candidate, library, no_fit, refresh
 from yt_playlist.core.store import Store
-from yt_playlist.rec import candidate_refresh, embed
+from yt_playlist.rec import candidate_refresh, embedding_training as embed
 from yt_playlist.rec.rec_worker import RecWorker
 
 
@@ -87,6 +87,8 @@ def test_idle_worker_notices_expiry(store, monkeypatch):
     ticks = iter((False, True))
     monkeypatch.setattr(worker._stop, 'wait', lambda timeout: next(ticks))
     monkeypatch.setattr(worker.projections, 'poll', lambda: None)
+    # This check isolates suppression expiry from independent content preparation.
+    monkeypatch.setattr(worker.preparation, 'due', lambda now: False)
     triggers = []
     monkeypatch.setattr(worker, '_schedule', lambda **kwargs: triggers.append(kwargs))
     worker._maintenance_loop()

@@ -1,7 +1,7 @@
 import numpy as np
 
 from yt_playlist.core.store import Store
-from yt_playlist.rec import embed
+from yt_playlist.rec import embed, embedding_vectors as vectors
 from tests import model_support
 from yt_playlist.util.matching import identity_key
 
@@ -38,7 +38,7 @@ def test_discovered_vectors_share_the_library_model_space(tmp_path):
     s.discovery.upsert_discovered_track(dkey, "vD", "NewTrack", "NewArtist", "Alb", "th",
                               "Techno", "2020", "bid", 1.0)
     model_support.build_content_model(s)
-    _, CV, _ = embed.load_content_vectors(s)
-    _, DV, _ = embed.load_discovered_content_vectors(s)
+    _, CV, _ = vectors.load_content_vectors(s)
+    _, DV, _ = vectors.load_discovered_content_vectors(s)
     assert CV is not None and DV is not None
     assert DV.shape[1] == CV.shape[1]      # same dimensionality ⇒ cosines are comparable

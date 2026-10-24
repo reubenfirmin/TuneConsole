@@ -128,11 +128,11 @@ def test_representative_home_queries(tmp_path, monkeypatch):
                         finally:
                             explain_seconds += time.monotonic() - started
 
-        def measured_lock(acquire, *args):
+        def measured_lock(acquire, *args, **kwargs):
             nonlocal lock_seconds
             started = time.monotonic()
             try:
-                return original_lock(acquire, *args)
+                return original_lock(acquire, *args, **kwargs)
             finally:
                 lock_seconds += time.monotonic() - started
 
@@ -192,7 +192,7 @@ def test_representative_home_queries(tmp_path, monkeypatch):
         if playlist:
             run("playlist_tracks_detail", lambda: store.charts.playlist_tracks_detail(playlist["playlist_id"]), playlist["n"])
         now = store.conn.execute("SELECT MAX(served_at) FROM rec_served_impressions").fetchone()[0] or time.time()
-        run("impression_retention", lambda: store.rec_surface.record_served_impressions(
+        run("impression_retention", lambda: store.rec_ledger.record_served_impressions(
             "profile-retention", "home", [], now, prune_before=now - 90 * 86400), 0)
         original_evidence = v026_listening_observations.PROJECTIONS[2]
         original_evidence = original_evidence[original_evidence.index(' AS') + 3:]

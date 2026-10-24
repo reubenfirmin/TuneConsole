@@ -126,7 +126,7 @@ def test_musicbrainz_skips_noisy_or_disabled_top_tags_and_keeps_relevance():
 
 def test_musicbrainz_cached_artist_rechecks_edited_vocabulary(monkeypatch):
     calls = []
-    monkeypatch.setattr(musicbrainz, "_artist_genre_cache", {})
+    monkeypatch.setattr(musicbrainz, "_artist_genre_cache", musicbrainz.OrderedDict())
     def lookup(*args):
         calls.append(args)
         return {"genres": [{"name": "hip-hop", "count": 10}, {"name": "jazz", "count": 5}]}

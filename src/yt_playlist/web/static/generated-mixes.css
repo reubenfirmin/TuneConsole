@@ -1,0 +1,108 @@
+/* Auto-playlist proposals */
+.auto-card { display: flex; flex-direction: column; gap: 0.5rem; }
+.auto-head { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
+.auto-sample { margin: 0; padding-left: .9375rem; color: var(--dim); font-size: var(--type-sm); line-height: 1.5; }
+.auto-sample .auto-more { list-style: none; margin-left: -1rem; color: var(--faint); font-style: italic; }
+.auto-foot { margin-top: auto; padding-top: 0.4rem; }
+
+/* Every unfilled mix stays clickable; only an active pool build animates the skeleton. */
+.page-home .dash-directions .gen-card.fresh-pool { grid-template-columns: 1fr; grid-template-rows: 1fr; border-style: dashed; }
+.page-home .dash-directions .gen-lanes.has-focus .gen-card.fresh-pool.is-focused { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+.fresh-pool-shell { position: relative; min-height: 0; height: 100%; }
+.fresh-pool-action { display: grid; grid-template-rows: minmax(8rem, 4fr) auto; width: 100%; height: 100%; padding: 0; border: 0; color: var(--text); background: transparent; text-align: left; box-shadow: none; }
+button.fresh-pool-action { cursor: pointer; }
+button.fresh-pool-action:focus-visible { outline: 3px solid var(--accent-2); outline-offset: -4px; }
+.fresh-pool-art { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 1px; min-height: 0; background: var(--border); }
+.fresh-pool-tile { display: flex; align-items: center; justify-content: center; gap: .45rem; background: var(--surface-sunk); overflow: hidden; }
+.fresh-pool-tile > span { width: .55rem; height: 20%; min-height: 1rem; border-radius: 1rem; background: var(--border-strong); transform: scaleY(.6); }
+.fresh-pool-tile > span:nth-child(2) { height: 36%; animation-delay: -.3s !important; }
+.fresh-pool-tile > span:nth-child(3) { height: 26%; animation-delay: -.6s !important; }
+.fresh-pool-copy { display: grid; gap: .35rem; padding: 1rem 1.2rem; background: var(--surface-raised); }
+.fresh-pool-copy .gen-theme { display: block; }
+.fresh-pool-genres, .fresh-pool-status { color: var(--dim); font-size: var(--type-sm); line-height: 1.4; }
+.fresh-pool-back { position: absolute; top: .75rem; left: .75rem; z-index: 1; }
+.fresh-pool.is-building .fresh-pool-tile > span,
+.fresh-pool-action.htmx-request .fresh-pool-tile > span { background: var(--accent-2); animation: fresh-pool-beat 1.2s ease-in-out infinite alternate; }
+@keyframes fresh-pool-beat { to { transform: scaleY(1.4); opacity: .4; } }
+
+/* --- generated proto-playlists: the two dated, saveable lanes at the top of Home --- */
+.gen-lanes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9375rem; align-items: stretch;
+  margin-bottom: 1.375rem; }   /* stretch: both cards in a row take the row's max height */
+.gen-lanes > .gen-card { grid-column: span 1; }
+.gen-lanes > .gen-card:only-child,
+.gen-lanes > .gen-card:last-child:nth-child(odd) { grid-column: 1 / -1; }
+@media (max-width: 60rem) {
+  .gen-lanes { grid-template-columns: 1fr; }
+  .gen-lanes > .gen-card { grid-column: 1; }
+}
+.gen-card { display: flex; flex-direction: column; }
+.gen-head { margin-bottom: 0.7rem; }
+/* The tagline now describes the card's actual mix ("...indie rock and post-rock from the 2010s and
+   2020s"), which doesn't fit one line, so it wraps. Two lines are RESERVED so the track lists in a
+   row still start at the same y; three are allowed before it clips, which a genre pair plus a
+   decade pair stays inside. */
+.gen-head .section-note { margin: 0.35rem 0 0; line-height: 1.4; min-height: 2.8em;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.gen-refresh { float: right; background: none; border: 0; cursor: pointer; font-size: var(--type-lg);
+  line-height: 1; color: var(--dim); padding: 0.1rem 0.35rem; border-radius: 5px; }
+.gen-refresh:hover { color: var(--cta); background: var(--surface-2); }   /* CTA green on hover */
+.gen-refresh[disabled] { opacity: 0.45; cursor: wait; }
+.gen-name { font-family: var(--font-sans); font-size: var(--type-lg); line-height: 1.25;
+  letter-spacing: -0.01em; margin: 0.2rem 0 0; color: var(--text);
+  /* Reserve 2 lines so a 1-line title still aligns its tagline/track-list with a 2-line neighbour. */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  min-height: 2.5em; }
+.gen-list { list-style: none; margin: 0 0 0.2rem; padding: 0; counter-reset: gen; }
+.gen-row { position: relative; display: grid; grid-template-columns: 1.375rem 2.3rem minmax(0, 1fr) auto;
+  align-items: center; column-gap: 0.65rem; row-gap: 0.35rem; padding: 0.4rem 0.2rem;
+  border-bottom: 1px solid var(--border); }
+.gen-row:last-child { border-bottom: none; }
+.gen-row:hover { background: var(--accent-soft); border-radius: var(--radius-sm); }
+.gen-row::before { counter-increment: gen; content: counter(gen); text-align: right;
+  font-size: var(--type-xs); color: var(--faint); font-variant-numeric: tabular-nums; }
+.gen-th { width: 2.3rem; height: 2.3rem; border-radius: 6px; overflow: hidden; background: var(--surface-2);
+  border: 1px solid var(--border); flex-shrink: 0; }
+.gen-th img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gen-th.no-art { background: var(--placeholder); }
+.gen-meta { min-width: 0; display: flex; flex-direction: column; }
+.gen-title { font-weight: 600; font-size: var(--type-ui); color: var(--text); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.gen-title:hover { color: var(--accent-2); text-decoration: none; }
+.gen-artist { font-size: var(--type-xs); color: var(--dim); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.gen-why { color: var(--accent-2); }
+.gen-rm { justify-self: end; background: transparent; border: none; box-shadow: none; color: var(--faint);
+  cursor: pointer; font-size: var(--type-ui); line-height: 1; padding: 0.2rem 0.3rem; border-radius: 6px;
+  opacity: 0.5; transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease; }
+.gen-row:hover .gen-rm, .gen-rm:focus-visible { opacity: 1; }
+.gen-rm:hover { color: var(--danger); background: var(--surface-2); box-shadow: none; }
+.gen-foot { margin-top: auto; padding-top: .8125rem; display: flex; flex-direction: column;
+  align-items: flex-start; gap: 0.5rem; }
+.gen-foot-note { color: var(--dim); font-size: var(--type-xs); line-height: 1.4; }
+.gen-done { justify-content: center; }
+/* "More mixes coming" note, shown below the taste panel while the model still produces < 4 cards. */
+.gen-more { display: flex; align-items: center; gap: .875rem; margin-bottom: 1.375rem; }
+/* display:flex above beats the UA stylesheet's [hidden] rule, so the JS reveal toggle silently
+   stopped hiding this card (seen live: it sat under a full 4-mix row). Re-assert the attribute. */
+.gen-more[hidden] { display: none; }
+.gen-more-icon { flex: none; color: var(--accent-2); font-size: var(--type-lg); }
+.gen-more p { margin: 0; color: var(--dim); font-size: var(--type-body); line-height: 1.5; }
+
+/* "Generated" pinned as its own collapsible card above the playlists table */
+.gen-grp { border: 1px solid var(--accent); margin-bottom: .9375rem; }
+.gen-grp-head { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; }
+.gen-grp-head .section-label { color: var(--text); }
+.gen-grp-head .gen-grp-count { color: var(--faint); font-size: var(--type-ui); }
+.gen-grp-head .gen-grp-caret { margin-left: auto; color: var(--accent-2); }
+.gen-grp table { margin-top: 0.6rem; }
+.gen-gc-note { margin: 0.7rem 0 0; padding-top: 0.7rem; border-top: 1px solid var(--border);
+  font-size: var(--type-sm); line-height: 1.5; }
+.generated-title-actions { display: grid; grid-template-columns: minmax(0, 1fr); gap: .2rem; }
+.generated-title-actions .ptitle { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.promote-btn { justify-self: start; margin: 0; padding: .2rem 0; min-height: 1.5rem;
+  background: transparent; border: 0; box-shadow: none; color: var(--faint);
+  font-size: var(--type-xs); font-weight: 400; text-align: left; white-space: normal; cursor: pointer; }
+.promote-btn:hover { color: var(--accent-2); background: transparent; box-shadow: none;
+  text-decoration: underline; text-underline-offset: 3px; }
+.promote-btn:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+

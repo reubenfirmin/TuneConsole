@@ -1,0 +1,25 @@
+<div class="setup-status" x-data="initialSetup()" @setup-status.window="apply($event.detail)"
+     @bridge-status.window="connected = $event.detail.connected">
+  <div class="setup-banner" :class="{ 'is-working': running || training }" role="status" x-show="!complete" x-cloak>
+    <strong>Setting up your music</strong>
+    <span class="setup-banner-step" x-text="summary"></span>
+    <button type="button" @click="openDetails()">Details</button>
+  </div>
+  <dialog class="setup-details" x-ref="details" aria-labelledby="setup-details-title"
+          @click="if ($event.target === $el) $el.close()">
+    <div class="setup-details-head">
+      <h2 id="setup-details-title">Setup progress</h2>
+      <button type="button" class="btn-ghost" @click="$refs.details.close()" aria-label="Close setup details">×</button>
+    </div>
+    <p class="setup-details-note">You can listen while we get everything ready.</p>
+    <dl class="setup-evidence">
+      <div><dt>Your music</dt><dd x-text="songs.toLocaleString() + (songs === 1 ? ' song ready' : ' songs ready')">Waiting</dd></div>
+      <div><dt>Song details</dt><dd x-text="analyzed.toLocaleString() + ' of ' + total.toLocaleString() + ' checked'"></dd></div>
+      <div><dt>Personal mixes</dt><dd x-text="mixes_ready ? 'Ready' : 'Getting ready'"></dd></div>
+    </dl>
+    <div class="setup-event-log" role="log" aria-label="Import details">
+      <p x-show="!events.length" x-text="summary"></p>
+      <template x-for="(event, i) in events" :key="i"><p :class="{ 'is-error': event.type === 'err' }" x-text="event.text"></p></template>
+    </div>
+  </dialog>
+</div>

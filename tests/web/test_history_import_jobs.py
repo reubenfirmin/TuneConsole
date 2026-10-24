@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
+import httpx
 from fastapi import FastAPI
 from fastapi.templating import Jinja2Templates
 from fastapi.testclient import TestClient
@@ -14,6 +15,7 @@ from yt_playlist.core.bridge import Bridge
 from yt_playlist.library import spotify_data, takeout
 from yt_playlist.web.history_imports import HistoryImports
 from yt_playlist.web.routes import bridge, setup
+from tests.test_spotify_library_import import _account_zip
 
 
 REPORT = {'matched': 0, 'unmatched': 0, 'plays_added': 0, 'events_added': 0,
@@ -141,6 +143,101 @@ def test_cancelled_import_request_remains_owned_until_worker_finishes(store, mon
         assert imports.status('takeout')['outcome'] == 'complete'
 
     asyncio.run(run())
+
+
+def test_library_decode_keeps_requests_and_bridge_responsive_and_is_drained(store, monkeypatch):
+    ctx = context(store)
+    ctx.spotify_import_lock = threading.Lock()
+    store.identities.upsert_identity('main', 'credential', None, True)
+    app = FastAPI()
+    app.include_router(setup.build(ctx))
+    app.include_router(bridge.build(ctx))
+    entered, release = threading.Event(), threading.Event()
+    worker_threads = []
+    decode = setup.load_spotify_library
+
+    @app.get('/responsive')
+    async def responsive():
+        return {'thread': threading.get_ident()}
+
+    def slow_decode(raw):
+        worker_threads.append(threading.get_ident())
+        entered.set()
+        assert release.wait(5)
+        return decode(raw)
+
+    monkeypatch.setattr(setup, 'load_spotify_library', slow_decode)
+    with ThreadPoolExecutor(max_workers=4) as callers, TestClient(app) as client:
+        with client.websocket_connect('/bridge/ws', headers={'origin': bridge.EXTENSION_ORIGIN}) as ws:
+            upload = callers.submit(client.post, '/import/spotify-library/v6',
+                                    files={'file': ('Account Data.zip', _account_zip())})
+            try:
+                assert entered.wait(2)
+                ping = callers.submit(client.get, '/responsive').result(timeout=1).json()
+                assert ping['thread'] != worker_threads[0]
+                remote = callers.submit(ctx.bridge.execute, 'GET', 'test', None, timeout=2)
+                frame = callers.submit(ws.receive_json).result(timeout=1)
+                ws.send_json({'id': frame['id'], 'status': 200, 'body': 'reply'})
+                assert remote.result(timeout=1) == (200, 'reply')
+                assert not upload.done()
+                ctx.work.close_admission()
+                assert not ctx.work.wait(.01)
+            finally:
+                release.set()
+            response = upload.result(timeout=2)
+            assert response.status_code == 200
+            assert 'Road songs' in response.text and 'selection_token' in response.text
+            assert response.headers['HX-Retarget'] == '#spotify-library-import-block'
+            assert ctx.work.wait(2)
+
+
+def test_cancelled_library_upload_keeps_decoder_owned(store, monkeypatch):
+    ctx = context(store)
+    ctx.spotify_import_lock = threading.Lock()
+    store.identities.upsert_identity('main', 'credential', None, True)
+    app = FastAPI()
+    app.include_router(setup.build(ctx))
+    entered, release = threading.Event(), threading.Event()
+    decode = setup.load_spotify_library
+
+    def slow_decode(raw):
+        entered.set()
+        assert release.wait(5)
+        return decode(raw)
+
+    monkeypatch.setattr(setup, 'load_spotify_library', slow_decode)
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url='http://127.0.0.1') as client:
+            upload = asyncio.create_task(client.post('/import/spotify-library',
+                files={'file': ('Account Data.zip', _account_zip())}))
+            try:
+                assert await asyncio.to_thread(entered.wait, 1)
+                upload.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await upload
+                ctx.work.close_admission()
+                assert ctx.work.active and not ctx.work.wait(.01)
+            finally:
+                release.set()
+            assert await asyncio.to_thread(ctx.work.wait, 2)
+
+    asyncio.run(exercise())
+
+
+def test_library_upload_format_error_keeps_guidance_and_releases_work(store):
+    ctx = context(store)
+    ctx.spotify_import_lock = threading.Lock()
+    store.identities.upsert_identity('main', 'credential', None, True)
+    app = FastAPI()
+    app.include_router(setup.build(ctx))
+    with TestClient(app) as client:
+        response = client.post('/import/spotify-library/v6', files={'file': ('bad.zip', b'invalid')})
+    assert response.status_code == 200
+    assert 'Could not find Spotify playlists or saved albums' in response.text
+    assert 'Account Data' in response.text and 'selection_token' not in response.text
+    assert not ctx.work.active
 
 
 def test_removal_waits_for_model_publication_without_blocking_requests(store):

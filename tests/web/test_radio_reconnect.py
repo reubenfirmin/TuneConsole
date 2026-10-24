@@ -7,7 +7,7 @@ import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from tests.test_radio_session import poc, play
+from tests.radio_session_support import poc, play
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN, build
@@ -48,7 +48,7 @@ def test_playback_arriving_after_startup_restores_and_extends_the_last_saved_son
     assert frames == before_frames and not remote.adds and not remote.removes
 
     # The restored observer catches up to the last song and saves its successor.
-    restored._browser(s)
+    restored.listening.observe(s)
     restored.advance(s)
     assert s.position == 2 and len(remote.ids) == 4
     assert len(remote.adds) == 1 and remote.ids[-1] not in {'v1', 'v2', 'v3'}

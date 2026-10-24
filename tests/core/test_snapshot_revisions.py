@@ -24,7 +24,7 @@ def test_unrelated_settings_and_analytics_do_not_invalidate_catalog_snapshot(dat
         assert snapshot.store.conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0] == 1
         assert snapshot.store.settings.get_setting("model-input") == "old"
         store.settings.set_setting("sync-watermark", "new")
-        store.rec_surface.record_serving_policy("new", "{}", 10)
+        store.rec_ledger.record_serving_policy("new", "{}", 10)
         assert snapshot.publish(lambda: published.append(True))
     assert published == [True]
 
@@ -159,3 +159,41 @@ def test_ranking_tolerance_keeps_external_writer_guard(tmp_path):
                                         allow_stale_tables={'recordings'})
     finally:
         store.conn.close()
+
+
+def test_scoped_capture_keeps_complete_counters_and_bounds_work_after_key_churn(database):
+    store = database
+    store.tracks.upsert_track('video', 'Song', 'Artist', None, None)
+    store.settings.set_setting('takeout_imported_at', '123')
+    wanted = {('recordings', ''), ('settings', 'key:takeout_imported_at'),
+              ('settings', 'key:missing')}
+
+    def measured_capture():
+        steps = 0
+
+        def step():
+            nonlocal steps
+            steps += 1
+            return 0
+
+        store.conn.set_progress_handler(step, 1)
+        try:
+            result = store._snapshot_revisions.capture(wanted)
+        finally:
+            store.conn.set_progress_handler(None, 0)
+        return result, steps
+
+    before, small_steps = measured_capture()
+    with store.conn:
+        store.conn.executemany('INSERT INTO settings VALUES (?,?)',
+                               [(f'unrelated-{i}', 'value') for i in range(4000)])
+        store.conn.execute("DELETE FROM settings WHERE key LIKE 'unrelated-%'")
+    after, large_steps = measured_capture()
+    assert after == before
+    assert set(after) == wanted - {('settings', 'key:missing')}
+    # Count VM instructions rather than timing a small query on a loaded test machine.
+    assert large_steps <= small_steps + 100
+    complete = store._snapshot_revisions.capture()
+    assert len(complete) > 4000
+    assert ('settings', 'key:unrelated-3999') in complete
+    assert store._snapshot_revisions.capture(set()) == {}

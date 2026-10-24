@@ -431,7 +431,8 @@ class RecModelRepo(Repo):
 
     @synchronized
     def clear_feedback(self) -> None:
-        self.conn.execute("DELETE FROM rec_feedback")
+        """Clear visible feedback while keeping receipts for the learning we retain."""
+        self.conn.execute("DELETE FROM rec_feedback WHERE kind NOT IN ('like_grad','dislike_grad')")
         self.conn.execute("DELETE FROM rec_impressions")
         self.conn.commit()
 
@@ -580,6 +581,20 @@ class RecModelRepo(Repo):
             result.update(self.conn.execute(f'SELECT identity_key,vec FROM {table} WHERE identity_key IN ('
                 + ','.join('?' for _ in batch) + ')', batch).fetchall())
         return result
+
+    @synchronized
+    def content_vector_pools(self, keys):
+        """Keep library and discovery provenance separate for bounded encoder updates."""
+        keys = list(dict.fromkeys(keys))
+        pools = {'library': {}, 'discovered': {}}
+        for scope, table in (('library', 'rec_content_vectors'),
+                             ('discovered', 'rec_discovered_content_vectors')):
+            for offset in range(0, len(keys), 500):
+                batch = keys[offset:offset + 500]
+                pools[scope].update(self.conn.execute(
+                    f'SELECT identity_key,vec FROM {table} WHERE identity_key IN ('
+                    + ','.join('?' for _ in batch) + ')', batch))
+        return pools
 
     @synchronized
     def content_vectors_by_keys(self, keys) -> dict:

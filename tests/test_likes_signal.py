@@ -41,7 +41,7 @@ def test_apply_dislikes_graduates_sync_likes_at_low_weight():
     graduation.apply_dislikes(s, {"song|band": "LIKE"}, 1000.0)
     fam = genre_map.family("Techno")
     assert s.rec_model.recent_liked_keys() == ["song|band"]                 # captured
-    assert abs(s.rec_surface.get_theme(f"genre:{fam}")) == rec_params.SOURCE_W_LIKE_SYNCED
+    assert abs(s.rec_signals.get_theme(f"genre:{fam}")) == rec_params.SOURCE_W_LIKE_SYNCED
     assert rec_params.SOURCE_W_LIKE_SYNCED < rec_params.get_param(s, "theme_threshold")
     assert s.rec_model.like_provenance("song|band") == "sync"
 
@@ -52,7 +52,7 @@ def test_apply_dislikes_graduates_action_likes_at_normal_weight():
     s.tracks.set_track_genre(tid, "Techno")
     graduation.apply_dislikes(s, {"song|band": "LIKE"}, 1000.0, provenance="action")
     fam = genre_map.family("Techno")
-    assert abs(s.rec_surface.get_theme(f"genre:{fam}")) == rec_params.SOURCE_W_LIKE
+    assert abs(s.rec_signals.get_theme(f"genre:{fam}")) == rec_params.SOURCE_W_LIKE
     assert s.rec_model.like_provenance("song|band") == "action"
 
 
@@ -63,7 +63,7 @@ def test_apply_dislikes_likes_idempotent_on_resync():
     graduation.apply_dislikes(s, {"song|band": "LIKE"}, 1000.0)
     graduation.apply_dislikes(s, {"song|band": "LIKE"}, 1001.0)    # re-sync
     fam = genre_map.family("Techno")
-    assert abs(s.rec_surface.get_theme(f"genre:{fam}")) == rec_params.SOURCE_W_LIKE_SYNCED   # fed exactly once
+    assert abs(s.rec_signals.get_theme(f"genre:{fam}")) == rec_params.SOURCE_W_LIKE_SYNCED   # fed exactly once
 
 
 def test_provenance_upgrade_wins_and_does_not_regraduate():
@@ -75,7 +75,7 @@ def test_provenance_upgrade_wins_and_does_not_regraduate():
     assert s.rec_model.like_provenance("song|band") == "sync"
     graduation.apply_dislikes(s, {"song|band": "LIKE"}, 1001.0, provenance="action")  # re-observed live
     assert s.rec_model.like_provenance("song|band") == "action"            # upgraded
-    assert abs(s.rec_surface.get_theme(f"genre:{fam}")) == rec_params.SOURCE_W_LIKE_SYNCED   # NOT re-graduated
+    assert abs(s.rec_signals.get_theme(f"genre:{fam}")) == rec_params.SOURCE_W_LIKE_SYNCED   # NOT re-graduated
     # and never downgraded back to sync by a later library sync
     graduation.apply_dislikes(s, {"song|band": "LIKE"}, 1002.0)
     assert s.rec_model.like_provenance("song|band") == "action"

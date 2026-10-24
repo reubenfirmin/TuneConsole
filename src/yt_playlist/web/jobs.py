@@ -50,12 +50,9 @@ def run_library_sync(ctx, job, *, automatic=False, retry_now=False, max_age_s=86
 
 def start_playlist_enrichment(ctx, playlist_id):
     """Start or rejoin a playlist waterfall, shared by creation and the manual enrich action."""
-    active = ctx.jobs.find_active(playlist_id)
-    if active is not None:
-        return active
-    job = ctx.jobs.create()
-    job.playlist_id = playlist_id
-    job.source = "waterfall"
+    job, created = ctx.jobs.create_or_rejoin_playlist(playlist_id)
+    if not created:
+        return job
 
     def run():
         try:
@@ -68,7 +65,12 @@ def start_playlist_enrichment(ctx, playlist_id):
         finally:
             job.done = True
 
-    activity_for(ctx).start_thread(run)
+    try:
+        activity_for(ctx).start_thread(run)
+    except BaseException as exc:
+        job.error = str(exc) or type(exc).__name__
+        job.done = True
+        raise
     return job
 
 
@@ -245,6 +247,17 @@ class SyncJobs:
                     return job, False
             job = self._create(kind)
             job.parameters = parameters
+            return job, True
+
+    def create_or_rejoin_playlist(self, playlist_id):
+        """Reserve a fully initialized waterfall before another request can join it."""
+        with self._lock:
+            for job in reversed(self._active.values()):
+                if job.playlist_id == playlist_id and not job.done:
+                    return job, False
+            job = self._create(None)
+            job.playlist_id = playlist_id
+            job.source = "waterfall"
             return job, True
 
     def has_active(self) -> bool:

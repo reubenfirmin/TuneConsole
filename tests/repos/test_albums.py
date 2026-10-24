@@ -152,8 +152,8 @@ def test_full_fetch_round_trip_order_coverage_and_conflicts_follow_all_releases(
     assert store.collection.cached_album_share('release')['video_ids']==['b','a','b']
     store.enrichment.upsert_conflict(a,'genre',[{'provider':'lastfm','value':'Rock'},{'provider':'musicbrainz','value':'Pop'}])
     for bid in ('other','release'):
-        assert store.enrichment.conflict_count_for_album(bid)==1
-        assert store.enrichment.unresolved_conflicts_for_album(bid)[0]['track_id']==a
+        assert store.enrichment_reports.conflict_count_for_album(bid)==1
+        assert store.enrichment_reports.unresolved_conflicts_for_album(bid)[0]['track_id']==a
     assert store.conn.execute("SELECT year FROM albums WHERE id=?", (store.collection.album_id('release'),)).fetchone()[0]=='2001'
     store.conn.execute('DELETE FROM library_memberships WHERE entry_id=?', (b,))
     store.conn.commit()

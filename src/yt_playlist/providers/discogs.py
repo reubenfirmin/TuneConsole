@@ -8,18 +8,15 @@ the earliest year (avoids reissue dates) and the first recognized style/genre.
 Works anonymously (25 requests/min) or, with a free personal access token, faster (60/min). Set a
 token via $DISCOGS_TOKEN or `discogs_token` in config.toml / the settings table. It's optional.
 """
-import json
 import logging
 import re
-import tomllib
 import urllib.parse
 import urllib.request
 
-from yt_playlist.providers import genres
+from yt_playlist.providers import credentials, genres, transport
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter
 from yt_playlist.util import net
 from yt_playlist.util.matching import normalize, recording_title
-from yt_playlist.core import paths
 
 name = "discogs"
 
@@ -34,21 +31,8 @@ _breaker = net.CircuitBreaker()           # stop a run once the host looks unrea
 
 def token(store=None, config_path=None):
     """Optional Discogs token: $DISCOGS_TOKEN, then the settings table, then config.toml."""
-    import os
-    env = os.environ.get("DISCOGS_TOKEN")
-    if env and env.strip():
-        return env.strip()
-    if store is not None:
-        saved = store.settings.get_setting("discogs_token")
-        if saved and saved.strip():
-            return saved.strip()
-    path = config_path or paths.config_path()
-    try:
-        data = tomllib.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
-    tok = data.get("discogs_token")
-    return tok.strip() if isinstance(tok, str) and tok.strip() else None
+    return credentials.resolve(env_name="DISCOGS_TOKEN", setting_name="discogs_token",
+                               store=store, config_path=config_path)
 
 
 def available(store=None) -> bool:
@@ -88,17 +72,9 @@ def _search(query, tok):
 def _get(path, params, tok):
     if tok:
         params["token"] = tok
-    _pace(tok)
     url = f"{_API}/{path}?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
-            data = json.load(resp)
-    except Exception as e:                # report the outcome to the breaker, then let callers handle it
-        _breaker.record(e)
-        raise
-    _breaker.record()
-    return data
+    return transport.request_json(req, timeout=_HTTP_TIMEOUT_S, pace=lambda: _pace(tok), breaker=_breaker)
 
 
 def _artist_key(artist):

@@ -2,7 +2,7 @@
 import pytest
 
 from tests.rec.test_home_prepared import seed
-from yt_playlist.rec import (discover, embed, home_prepared, home_themes, home_vibe,
+from yt_playlist.rec import (discover, embedding_vectors as embed, home_prepared, home_themes, home_vibe,
                              mode_surfaces, rec_params, surfaces, transient)
 
 
@@ -53,7 +53,7 @@ def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(
     bundles = seed(store)
     bundles['_ppr'] = {str(mid): [item['key'] for items in bundles[str(mid)].values()
                                   for item in reversed(items)] for mid in range(6)}
-    store.rec_surface.put_proposals('mode_bundles', bundles, 1)
+    store.rec_proposals.put_proposals('mode_bundles', bundles, 1)
     rec_params.set_param(store, 'ppr_ab_share', 0.5)
     store.rec_model.record_dislike(bundles['0']['wheelhouse'][0]['key'], until=None, now=1)
     orders = [(epoch, tuple(range(epoch, 6)) + tuple(range(epoch))) for epoch in range(3)]
@@ -64,7 +64,7 @@ def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(
         preparation = {'leans': transient.facet_leans(reader, 1000),
                        'vibe_rank': home_vibe.ranker(reader, 1000)}
         checks, resolved = [], []
-        check = reader.rec_query.suppressed_candidate_keys
+        check = reader.rec_eligibility.suppressed_candidate_keys
         resolve = home_themes.resolved_genres
 
         def counted_check(keys, now):
@@ -75,7 +75,7 @@ def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(
             resolved.append(frozenset(item['key'] for item in items))
             return resolve(store, items)
 
-        monkeypatch.setattr(reader.rec_query, 'suppressed_candidate_keys', counted_check)
+        monkeypatch.setattr(reader.rec_eligibility, 'suppressed_candidate_keys', counted_check)
         monkeypatch.setattr(home_themes, 'resolved_genres', counted_resolve)
         actual = [mode_surfaces.assemble_cards(reader, 1000, epoch, mode_order=order,
                                               include_genres=include, preparation=preparation)
@@ -95,7 +95,7 @@ def test_preparation_never_rebuilds_the_library_for_cold_or_shallow_bundles(stor
                                                                         missing_bundles):
     bundles = seed(store)
     bundles['_meta']['full_pools'] = False
-    store.rec_surface.put_proposals('mode_bundles', None if missing_bundles else bundles, 1)
+    store.rec_proposals.put_proposals('mode_bundles', None if missing_bundles else bundles, 1)
 
     def forbidden(*args, **kwargs):
         raise AssertionError('Preparation must wait for refreshed bundles instead of reranking the library')

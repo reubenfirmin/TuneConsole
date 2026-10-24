@@ -76,9 +76,9 @@ def test_save_passes_journey_through(store):
             "journey": "deep_dive"}
     r = c.post("/clusters/save", data=form)
     assert r.status_code == 200
-    from yt_playlist.repos.rec_query import GENERATED_GROUP
+    from yt_playlist.repos.base import GENERATED_GROUP
     ytm = next(y for y, g in store.playlists.get_playlist_groups().items() if g == GENERATED_GROUP)
-    assert store.rec_surface.get_recipe(ytm)["journey"] == "deep_dive"
+    assert store.playlist_recipes.get_recipe(ytm)["journey"] == "deep_dive"
 
 
 def test_cluster_recipe_remembers_inputs_in_params(store):
@@ -110,10 +110,10 @@ def test_save_tags_cluster_recipe(store):
     r = c.post("/clusters/save", data=form)
     assert r.status_code == 200
 
-    from yt_playlist.repos.rec_query import GENERATED_GROUP
+    from yt_playlist.repos.base import GENERATED_GROUP
     groups = store.playlists.get_playlist_groups()
     ytm = next(y for y, g in groups.items() if g == GENERATED_GROUP)
-    recipe = store.rec_surface.get_recipe(ytm)
+    recipe = store.playlist_recipes.get_recipe(ytm)
     assert recipe is not None
     assert recipe["model"] == "cluster"
     assert recipe["facets"]["artists"] == ["Ritmo"]
@@ -127,6 +127,6 @@ def test_save_without_seeds_or_whitelist_still_tags_cluster(store):
     form = {"name": "Mix", "keep_keys": json.dumps([a, b]), "central_keys": "[]"}
     r = c.post("/clusters/save", data=form)
     assert r.status_code == 200
-    from yt_playlist.repos.rec_query import GENERATED_GROUP
+    from yt_playlist.repos.base import GENERATED_GROUP
     ytm = next(y for y, g in store.playlists.get_playlist_groups().items() if g == GENERATED_GROUP)
-    assert store.rec_surface.get_recipe(ytm)["model"] == "cluster"
+    assert store.playlist_recipes.get_recipe(ytm)["model"] == "cluster"

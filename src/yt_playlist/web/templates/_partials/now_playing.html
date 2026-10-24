@@ -2,6 +2,7 @@
 <section class="home-status card card--status is-live global-now-playing" x-data="playerStatus()"
          x-init="$nextTick(() => mountNowPlayingDock())"
          @bridge-status.window="apply($event.detail)"
+         @playback-progress.window="applyProgress($event.detail)"
          @hashchange.window="currentLocation = location.href"
          @track-like-requested.window="requestLike($event)"
          @song-metadata-updated.window="updateMetadata($event.detail)"
@@ -32,8 +33,14 @@
           </a>
         </template>
         <span class="hs-rate-group" role="group" aria-label="Playback and ratings">
+          <span class="hs-progress" x-show="timing.position !== null && timing.duration !== null" x-cloak
+                :style="'--played: ' + Math.min(100, Math.max(0, (timing.position ?? 0) / (timing.duration || 1) * 100)) + '%'">
+            <progress :value="timing.position ?? 0" :max="timing.duration || 1" aria-label="Track progress"
+                      :title="timeLabel(timing.position) + ' of ' + timeLabel(timing.duration)"
+                      :aria-valuetext="timeLabel(timing.position) + ' of ' + timeLabel(timing.duration)"></progress>
+          </span>
           <button type="button" class="hs-playpause btn-primary" @click="toggle()"
-                  :title="nowPlaying.paused ? 'Play' : 'Pause'"
+                  :title="nowPlaying.paused ? 'Play (Space)' : 'Pause (Space)'"
                   :aria-label="nowPlaying.paused ? 'Play' : 'Pause'">
             <svg x-show="!nowPlaying.paused" x-cloak viewBox="0 0 24 24" aria-hidden="true" focusable="false">
               <path d="M6 4h4v16H6zm8 0h4v16h-4z"/>

@@ -5,9 +5,9 @@ import time
 import numpy as np
 import pytest
 
-from tests.test_radio_session import poc, play
+from tests.radio_session_support import poc, play
 from tests.test_radio_tuning import prepared
-from yt_playlist.rec import embed, radio_tuning, rec_params
+from yt_playlist.rec import embedding_vectors as embed, radio_tuning, rec_params
 from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.web import radio_session
 

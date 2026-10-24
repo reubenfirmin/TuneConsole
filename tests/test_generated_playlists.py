@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
+from yt_playlist.library import playlist_generated
 from tests.conftest import FakeClient
 from tests.test_mode_cards_route import prepare_home
 
@@ -33,7 +34,7 @@ def _seed_generated(store, iid, n=3):
 def test_generated_excluded_until_promoted(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     pid, ytm, gkeys = _seed_generated(store, iid, n=2)
-    dao = store.rec_query
+    dao = store.rec_eligibility
 
     assert dao.excluded_playlist_ids() == {pid}                 # quarantined while "Generated"
 
@@ -54,7 +55,7 @@ def test_generated_excluded_until_promoted(store):
 def test_generated_tracks_in_no_basket_until_promoted(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     _pid, ytm, gkeys = _seed_generated(store, iid, n=3)
-    dao = store.rec_query
+    dao = store.rec_evidence
 
     for _ in range(2):
         store.history.record_history_plays(iid, 1.0, list(gkeys), source_timezone="UTC")
@@ -116,10 +117,10 @@ def test_fresh_creation_starts_enrichment_and_page_rejoins(store, monkeypatch, r
     only_provider(store, "musicbrainz")
     started, release = threading.Event(), threading.Event()
 
-    def enrich(title, artist, **kwargs):
+    def enrich(title, artist):
         started.set()
         assert release.wait(timeout=10)
-        return "Rock", "1998", None, []
+        return "Rock", "1998", None, [], []
 
     monkeypatch.setattr(musicbrainz, "enrich_full", enrich)
     c = _client(store, lambda: {iid: FakeClient()})
@@ -167,7 +168,7 @@ def test_save_button_opens_generating_screen(store):
     c = _client(store, lambda: {iid: FakeClient()})
 
     r = c.get("/")
-    app_js = c.get("/static/app.js")
+    app_js = c.get("/static/playlist-generation.js")
 
     assert r.status_code == 200 and app_js.status_code == 200
     assert "function genOpenYT(" in app_js.text
@@ -182,7 +183,7 @@ def test_saved_proto_tracks_not_re_offered(store):
     store.playlists.set_playlist_group("PLG", "Generated")
     store.playlists.mark_generated_playlist('PLG')
 
-    keys = store.rec_query.generated_track_keys()
+    keys = store.rec_eligibility.generated_track_keys()
     assert keys == {identity_key("S0", "Art"), identity_key("S1", "Art")}   # spoken for; don't re-offer
 
 
@@ -212,7 +213,7 @@ def test_home_renders_generated_cards(store):
         payload["1"][surf] = [{"key": f"{surf}{i}", "video_id": f"{surf}{i}", "title": f"Song {surf} {i}",
                                "artist": f"Art {i}", "album": "", "thumbnail": None,
                                "plays": 0, "reason": "", "lane": "", "genre": ""} for i in range(4)]
-    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_proposals.put_proposals("mode_bundles", payload, 1.0)
     prepare_home(store, 1.0)
     c = _client(store, lambda: {iid: FakeClient()})
 
@@ -257,11 +258,11 @@ def test_create_generated_playlist_stores_recipe_and_versions(store):
     tracks = [{"video_id": f"v{i}", "title": f"S{i}", "artist": "A" if i % 2 else "B"} for i in range(4)]
     recipe = {"model": "fresh", "facets": {"genres": ["house"], "eras": ["2010"]},
               "dj": {"stickiness": 0.0, "seed": 5}}
-    r1 = executor.create_generated_playlist(store, "Fresh songs - June 21 2026", list(tracks),
+    r1 = playlist_generated.create_generated_playlist(store, "Fresh songs - June 21 2026", list(tracks),
                                             fc, now=1.0, identity_id=iid, recipe=recipe)
     assert r1["title"] == "Fresh songs - June 21 2026 #1"          # versioned at save
-    assert store.rec_surface.get_recipe(r1["new_ytm"])["facets"]["genres"] == ["house"]   # recipe stored
-    r2 = executor.create_generated_playlist(store, "Fresh songs - June 21 2026", list(tracks),
+    assert store.playlist_recipes.get_recipe(r1["new_ytm"])["facets"]["genres"] == ["house"]   # recipe stored
+    r2 = playlist_generated.create_generated_playlist(store, "Fresh songs - June 21 2026", list(tracks),
                                             fc, now=2.0, identity_id=iid, recipe=recipe)
     assert r2["title"] == "Fresh songs - June 21 2026 #2"          # next version that day
 
@@ -287,7 +288,7 @@ def test_gc_deletes_stale_unplayed_generated(store, monkeypatch, tmp_path):
     pid, ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day)   # 10d old, never played
     fc = FakeClient()
 
-    collected = executor.gc_generated_playlists(store, {iid: fc}, now)     # 7-day grace by default
+    collected = playlist_generated.gc_generated_playlists(store, {iid: fc}, now)     # 7-day grace by default
 
     assert [c["ytm"] for c in collected] == [ytm]
     assert store.playlists.get_playlist(pid) is None         # pruned locally
@@ -304,7 +305,7 @@ def test_gc_keeps_young_generated(store, monkeypatch, tmp_path):
     pid, _ytm, _ = _seed_generated_at(store, iid, created=now - 2 * day)   # still inside the grace window
     fc = FakeClient()
 
-    assert executor.gc_generated_playlists(store, {iid: fc}, now) == []
+    assert playlist_generated.gc_generated_playlists(store, {iid: fc}, now) == []
     assert store.playlists.get_playlist(pid) is not None and fc.deleted == []
 
 
@@ -316,7 +317,7 @@ def test_gc_keeps_generated_played_since_creation(store, monkeypatch, tmp_path):
     pid, _ytm, keys = _seed_generated_at(store, iid, created=now - 10 * day)
     store.history.record_history_plays(iid, now - day, list(keys), source_timezone="UTC")
 
-    assert executor.gc_generated_playlists(store, {iid: FakeClient()}, now) == []
+    assert playlist_generated.gc_generated_playlists(store, {iid: FakeClient()}, now) == []
     assert store.playlists.get_playlist(pid) is not None
 
 
@@ -329,7 +330,7 @@ def test_gc_keeps_generated_when_at_least_half_played(store, monkeypatch, tmp_pa
     half = [identity_key(f"PLGT{i}", "GenArt") for i in (0, 1)]            # 2 of 4 = 50% played since creation
     store.history.record_history_plays(iid, now - day, half, source_timezone="UTC")
 
-    assert executor.gc_generated_playlists(store, {iid: FakeClient()}, now) == []
+    assert playlist_generated.gc_generated_playlists(store, {iid: FakeClient()}, now) == []
     assert store.playlists.get_playlist(pid) is not None
 
 
@@ -342,7 +343,7 @@ def test_gc_deletes_generated_when_under_half_played(store, monkeypatch, tmp_pat
     store.history.record_history_plays(iid, now - day, [identity_key("PLGT0", "GenArt")], source_timezone="UTC")
     fc = FakeClient()
 
-    collected = executor.gc_generated_playlists(store, {iid: fc}, now)
+    collected = playlist_generated.gc_generated_playlists(store, {iid: fc}, now)
     assert [c["ytm"] for c in collected] == [ytm]                          # a stray play or two doesn't save it
 
 
@@ -355,7 +356,7 @@ def test_gc_ignores_plays_before_creation(store, monkeypatch, tmp_path):
     store.history.record_history_plays(iid, now - 20 * day, list(keys), source_timezone="UTC")
     fc = FakeClient()
 
-    collected = executor.gc_generated_playlists(store, {iid: fc}, now)
+    collected = playlist_generated.gc_generated_playlists(store, {iid: fc}, now)
     assert [c["ytm"] for c in collected] == [ytm]                          # a pre-creation play doesn't save it
 
 
@@ -369,7 +370,7 @@ def test_gc_ignores_non_generated_playlists(store, monkeypatch, tmp_path):
     store.playlists.set_playlist_tracks(pl, [t])
     fc = FakeClient()
 
-    assert executor.gc_generated_playlists(store, {iid: fc}, now) == []
+    assert playlist_generated.gc_generated_playlists(store, {iid: fc}, now) == []
     assert store.playlists.get_playlist(pl) is not None and fc.deleted == []
 
 
@@ -380,7 +381,7 @@ def test_gc_deletion_is_undoable(store, monkeypatch, tmp_path):
     day = 86400.0; now = 100 * day
     _pid, ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day)
     fc = FakeClient()
-    executor.gc_generated_playlists(store, {iid: fc}, now)
+    playlist_generated.gc_generated_playlists(store, {iid: fc}, now)
     aid = store.actions.get_actions()[0].id
 
     playlist_undo.undo_action(store, aid, {iid: fc}, now + day)

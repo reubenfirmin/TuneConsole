@@ -24,7 +24,7 @@ def test_month_old_mood_tap_is_nearly_gone():
     s = _store()
     _track(s, "song|artist")
     now = 1000 * DAY
-    s.rec_surface.record_mood(["song|artist"], +1, now - 30 * DAY)      # one month old, nothing since
+    s.rec_signals.record_mood(["song|artist"], +1, now - 30 * DAY)      # one month old, nothing since
     leans = transient.facet_leans(s, now)
     val = leans.get("genre:techno", 0.0)
     assert 0 <= val < 0.06                                   # 30d at 7d half-life ~ 0.05

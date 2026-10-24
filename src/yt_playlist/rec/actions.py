@@ -72,11 +72,11 @@ def refresh_cleanup(store, now=None, *, summary=None) -> dict | None:
     if summary is None:
         with store.read_snapshot() as snapshot:
             payload = analysis.cleanup_summary(snapshot.store).as_payload()
-            if not snapshot.publish(lambda: store.rec_surface.put_proposals(CLEANUP_SURFACE, payload, now)):
+            if not snapshot.publish(lambda: store.rec_proposals.put_proposals(CLEANUP_SURFACE, payload, now)):
                 return None
         return payload
     payload = summary.as_payload()
-    store.rec_surface.put_proposals(CLEANUP_SURFACE, payload, now)
+    store.rec_proposals.put_proposals(CLEANUP_SURFACE, payload, now)
     return payload
 
 
@@ -96,7 +96,7 @@ def take_action(store, now, auth_expired) -> list[ActionItem]:
             note="Signed out - sync is paused", badge="!"))
 
     # Read the cached summary the rec worker / cleanup page materialize. Never scan on home load.
-    cleanup = store.rec_surface.get_proposals(CLEANUP_SURFACE) or {}
+    cleanup = store.rec_proposals.get_proposals(CLEANUP_SURFACE) or {}
     n = cleanup.get("count", 0)
     if n:
         items.append(ActionItem(

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 from yt_playlist.core.store import Store
-from yt_playlist.rec import embed, surfaces, mode_surfaces as ms
+from yt_playlist.rec import embedding_vectors as embed, surfaces, mode_surfaces as ms
 
 
 @pytest.fixture
@@ -37,14 +37,14 @@ def test_prepare_buckets_by_nearest_mode(monkeypatch, store):
     fresh = surfaces.ForYouItem("New song", "New artist", "", "new", None, 0, "", key="new|artist",
                                 genre="house", year=2026)
     monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None: [fresh])
-    store.rec_surface.put_proposals("fresh_pool", [{"key": "stale|artist", "genre": "techno"}], 1)
+    store.rec_proposals.put_proposals("fresh_pool", [{"key": "stale|artist", "genre": "techno"}], 1)
 
     payload = ms.prepare_bundles(store, now=10.0)
     assert [d["key"] for d in payload["1"]["wheelhouse"]] == ["k1"]
     assert [d["key"] for d in payload["2"]["wheelhouse"]] == ["k2"]
     assert payload["all"]["fresh"][0]["year"] == 2026
-    assert store.rec_surface.get_proposals("mode_bundles") is not None
-    refreshed = store.rec_surface.get_proposals("fresh_pool")
+    assert store.rec_proposals.get_proposals("mode_bundles") is not None
+    refreshed = store.rec_proposals.get_proposals("fresh_pool")
     assert len(refreshed) == 1 and refreshed[0]["key"] == "new|artist"
     assert refreshed[0]["genre"] == "house" and refreshed[0]["year"] == 2026
     assert refreshed[0]["score"] is None
@@ -81,7 +81,7 @@ def test_temporal_excludes_disliked_library_tracks(monkeypatch, store):
 
 def test_prepare_empty_when_no_modes(store):
     assert ms.prepare_bundles(store, now=10.0) == {}
-    assert store.rec_surface.get_proposals("mode_bundles") == {}
+    assert store.rec_proposals.get_proposals("mode_bundles") == {}
 
 
 def test_fresh_refresh_discards_pools_without_live_models_or_candidates(store):
@@ -89,8 +89,8 @@ def test_fresh_refresh_discards_pools_without_live_models_or_candidates(store):
 
     old = [{"key": "stale", "artist": "Artist", "genre": "house"}]
     library = [{"key": "owned", "artist": "Library artist", "genre": "house"}]
-    store.rec_surface.put_proposals("fresh_pool", old, 1)
-    store.rec_surface.put_proposals("mode_bundles", {
+    store.rec_proposals.put_proposals("fresh_pool", old, 1)
+    store.rec_proposals.put_proposals("mode_bundles", {
         "1": {"fresh": old, "wheelhouse": library},
         "all": {"fresh": old, "wheelhouse": library},
         "_meta": {"full_pools": True}, "_ppr": {"1": ["owned"]},
@@ -99,8 +99,8 @@ def test_fresh_refresh_discards_pools_without_live_models_or_candidates(store):
     fresh_pool.prepare(store, 10)  # No discoveries remain.
 
     assert fresh_pool.pick(store, 10) == []
-    assert store.rec_surface.get_proposals("mode_bundles") == {}
-    assert store.rec_surface.get_proposals("fresh_pool") == []
+    assert store.rec_proposals.get_proposals("mode_bundles") == {}
+    assert store.rec_proposals.get_proposals("fresh_pool") == []
 
 
 def test_prepare_reaches_genres_below_the_old_global_pool_cutoff(monkeypatch, store):

@@ -146,6 +146,18 @@ The radio controller serializes playlist changes outside the bridge response pum
 readback distinguishes complete, partial, and failed writes; only confirmed uploads enter applied
 state. Partial queues remain retryable and appear in the radio card and `/bridge/status` diagnostics.
 
+Playlist snapshot errors include a validation stage and a bounded envelope report:
+fixed schema names, value types, counts capped at 1,000, and at most eight sampled
+actions/items. These distinguish missing continuation envelopes, wrong contents
+types, unsupported renderers and parser failures without logging response bodies,
+unknown field names, titles, account data or continuation tokens. The read-only
+`/playlist/{local_id}/snapshot-report` also returns the failed page diagnostics.
+The two Radio page-two failures observed on 2026-10-23 recovered their next-track
+queue within about five seconds. Their original payloads were not retained, so
+their upstream cause remains unknown. Collect the new stage/envelope evidence if
+they recur before changing parsing or retry policy; an incomplete read never proves
+that songs are missing and never authorizes replaying an uncertain write.
+
 Takeout and Spotify history imports run as tracked jobs outside the ASGI loop, sharing the library
 sync lock. The import form polls phase and terminal status; disconnecting a request leaves its job
 owned until processing finishes, so shutdown waits for history writes, repair, and discovery seeding.

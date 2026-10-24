@@ -130,8 +130,8 @@ def test_enrich_track_events_carry_rendered_row(store, monkeypatch):
     import yt_playlist.providers.musicbrainz as mb
     from tests.conftest import only_provider
     monkeypatch.setattr(mb, "enrich_full",
-                        lambda title, artist, **kwargs: ("Rock", "1998", None, []) if title == "S0"
-                        else (None, None, None, []))
+                        lambda title, artist: ("Rock", "1998", None, [], []) if title == "S0"
+                        else (None, None, None, [], []))
     iid, a = _seed_one_track(store)
     only_provider(store, "musicbrainz")
     c = _client(store, lambda: {iid: FakeClient()})
@@ -489,7 +489,7 @@ def test_generated_playlist_shows_stored_recipe(store):
     store.playlists.set_playlist_tracks(pid, [a])
     store.playlists.set_playlist_group("PLF", "Generated")
     store.playlists.mark_generated_playlist('PLF')
-    store.rec_surface.set_recipe("PLF", {"model": "fresh", "facets": {"genres": ["house"], "eras": ["2010"]},
+    store.playlist_recipes.set_recipe("PLF", {"model": "fresh", "facets": {"genres": ["house"], "eras": ["2010"]},
                              "dj": {"stickiness": 0.8}}, now=1.0)
     c = _client(store, lambda: {iid: FakeClient()})
     html = c.get(f"/playlist/{pid}").text

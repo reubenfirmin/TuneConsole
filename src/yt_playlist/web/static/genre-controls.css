@@ -1,0 +1,73 @@
+/* enrichment progress strip below the header */
+.enrich-strip { display: flex; align-items: center; gap: .8125rem; margin: -0.6rem 0 1.6rem; }
+.enrich-bar { flex: 1; height: 6px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.enrich-bar > i { display: block; height: 100%; width: 0; border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 0.3s ease; }
+.enrich-status { color: var(--dim); font-size: var(--type-sm); white-space: nowrap; max-width: 60%;
+  overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono); }
+/* Genre display and metadata suggestions. */
+.mb-genre { position: relative; }
+.genre-display-wrap { display: inline-flex; align-items: center; flex-wrap: nowrap; white-space: nowrap;
+  color: inherit; }
+.genre-candidates { width: min(28rem, calc(100vw - 2rem)); max-width: none; }
+.genre-track-artist { margin-top: -.3rem; }
+.genre-picker { margin-top: .9rem; }
+.genre-option-list { display: grid; gap: .4rem; margin: 0 0 .9rem; padding: 0; border: 0; }
+.genre-option { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center;
+  gap: .55rem; padding: .55rem .7rem; border: 1px solid var(--border-2); border-radius: 7px; cursor: pointer; }
+.genre-option:hover, .genre-option.selected { border-color: var(--accent); background: var(--accent-soft); }
+.genre-option input { margin: 0; }
+.genre-option-value { font-weight: 700; }
+.genre-providers { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .25rem; }
+.genre-providers small { padding: .08rem .35rem; border-radius: 999px; background: var(--surface-2); color: var(--faint); }
+.genre-option em { color: var(--accent-2); font-size: var(--type-xs); font-style: normal; }
+.genre-override-link { display: inline; margin-right: auto; padding: 0; border: 0; background: none;
+  box-shadow: none; color: var(--accent-2); font-size: var(--type-sm); text-decoration: underline; }
+.genre-override-link:hover { background: none; box-shadow: none; }
+.genre-override { margin-top: .8rem; padding-top: .8rem; border-top: 1px solid var(--border); }
+.genre-override > label { display: block; margin-bottom: .35rem; color: var(--dim); font-size: var(--type-sm); }
+.genre-override .ginput-wrap, .genre-override .ginput { width: 100%; max-width: none; }
+.genre-override .genre-suggest { position: static; width: 100%; min-width: 0; max-width: none;
+  margin-top: .4rem; box-sizing: border-box; box-shadow: none; }
+.genre-picker .modal-actions { align-items: center; margin-top: 1rem; }
+.genre-lookup-progress { display: grid; grid-template-columns: minmax(4rem, 1fr); gap: .45rem;
+  margin-top: .7rem; min-width: 0; }
+.genre-lookup-progress .enrich-bar { width: 100%; min-width: 0; }
+.genre-lookup-progress .enrich-status { display: block; width: 100%; min-width: 0; max-width: none;
+  white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
+.genre-empty-state { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  padding: .7rem .75rem; border: 1px solid var(--border-2); border-radius: 8px; color: var(--dim); }
+.genre-lookup { display: inline-flex; align-items: center; justify-content: center; padding: .35rem;
+  color: var(--accent-2); background: var(--accent-soft); border: 1px solid var(--border-2); }
+.genre-lookup:hover { border-color: var(--accent); }
+.ginput-wrap { position: relative; display: inline-block; }
+.ginput { width: 100%; max-width: 8rem; padding: 0.18rem 0.4rem; font-size: var(--type-sm);
+  background: var(--bg-2); border: 1px solid var(--accent); border-radius: 6px; color: var(--text); }
+/* custom autosuggest dropdown: constrained height, anchored under the input */
+.genre-suggest { position: absolute; left: 0; top: calc(100% + 3px); z-index: 40;
+  min-width: 9.5rem; max-width: 14rem; max-height: 12rem; overflow-y: auto; padding: 0.25rem;
+  background: var(--surface); border: 1px solid var(--border-2); border-radius: 9px;
+  box-shadow: 0 16px 38px -12px color-mix(in srgb, var(--shadow-ink) 75%, transparent); }
+.genre-opt { display: block; width: 100%; text-align: left; background: transparent; border: none;
+  box-shadow: none; color: var(--text); font-size: var(--type-sm); padding: 0.34rem 0.55rem; border-radius: 6px;
+  cursor: pointer; white-space: nowrap; }
+.genre-opt:hover, .genre-opt.sel { background: var(--accent-soft); box-shadow: none; }
+/* Read-only table metadata; editing lives in the song menu. */
+.ydisplay { display: inline-flex; align-items: center; justify-content: flex-end;
+  min-height: 1.5rem; min-width: 2.5rem; }
+/* Tight horizontal chrome so all four year digits fit the narrow year column (4rem on albums). */
+td.mb-year { padding-left: 0.25rem; padding-right: 0.3rem; }
+.gtag { display: inline-block; font-size: var(--type-xs); padding: 0.08rem 0.4rem; border-radius: 999px;
+  background: var(--surface-2); border: 1px solid var(--border-2); color: var(--dim); white-space: nowrap; }
+
+/* genre whitelist editor */
+.genre-add { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+.genre-add input { flex: 1; min-width: 12rem; }
+.genre-count { margin-left: auto; font-size: var(--type-ui); }
+.genre-chips { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.3rem; }
+.genre-chip { display: inline-flex; align-items: center; gap: 0.3rem; font-size: var(--type-sm);
+  padding: 0.22rem 0.3rem 0.22rem 0.7rem; border-radius: 999px; color: var(--text);
+  background: var(--surface-2); border: 1px solid var(--border-2); }
+.chip-x { background: transparent; border: none; box-shadow: none; color: var(--faint); cursor: pointer;
+  font-size: var(--type-body); line-height: 1; padding: 0 0.25rem; border-radius: 999px; }
+.chip-x:hover { background: var(--danger-soft); color: var(--danger); box-shadow: none; }

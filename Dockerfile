@@ -1,10 +1,14 @@
 FROM docker.io/library/python:3.12-slim-bookworm AS base
 
 FROM base AS builder
-RUN python -m pip install --no-cache-dir uv==0.12.19
+RUN python -m pip install --no-cache-dir --timeout 30 --retries 2 uv==0.12.19
 ENV UV_PYTHON_DOWNLOADS=never \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    UV_HTTP_TIMEOUT=30 \
+    UV_HTTP_RETRIES=2 \
+    PIP_DEFAULT_TIMEOUT=30 \
+    PIP_RETRIES=2
 WORKDIR /build
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --group build --no-install-project

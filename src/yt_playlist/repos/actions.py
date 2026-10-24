@@ -20,7 +20,8 @@ class ActionRepo(Repo):
         if action is None:
             raise ValueError(f"no such action {action_id}")
         from yt_playlist.util.action_kinds import is_undoable
-        if not is_undoable(action.kind) or action.status not in ("executed", "undo_failed", "undoing"):
+        if not is_undoable(action.kind) or action.status not in (
+                "executed", "delete_failed", "undo_failed", "undoing"):
             raise ValueError(f"action {action_id} ({action.kind}/{action.status}) is not undoable")
         with self.conn:
             changed = self.conn.execute(
@@ -105,6 +106,23 @@ class ActionRepo(Repo):
         rows = self.conn.execute("SELECT * FROM actions ORDER BY id DESC").fetchall()
         return [Action(r["id"], r["kind"], r["params_json"], r["plan_json"], r["undo_json"],
                        r["status"], r["created_at"], r["executed_at"]) for r in rows]
+
+    @synchronized
+    def get_pending_deletion(self, identity_id, ytm_playlist_id) -> Action | None:
+        """Read only the newest pending owner for this account and remote playlist.
+
+        The partial index excludes completed history before inspecting intent JSON.
+        Query afresh for every admission so a collection sweep sees intervening writes.
+        """
+        row = self.conn.execute(
+            "SELECT a.* FROM actions a WHERE a.status='delete_pending' AND EXISTS ("
+            "SELECT 1 FROM json_each(a.undo_json,'$.deletions') d "
+            "WHERE json_extract(d.value,'$.identity')=? AND json_extract(d.value,'$.ytm')=?) "
+            "ORDER BY a.id DESC LIMIT 1", (identity_id, ytm_playlist_id)).fetchone()
+        if row is None:
+            return None
+        return Action(row["id"], row["kind"], row["params_json"], row["plan_json"],
+                      row["undo_json"], row["status"], row["created_at"], row["executed_at"])
 
     @synchronized
     def get_pending_actions(self, kind) -> list[Action]:

@@ -31,7 +31,7 @@ def test_slow_rollup_sql_allows_ui_reads_and_writes_before_shutdown(tmp_path, mo
     store = Store(tmp_path / "state.db")
     store.init_schema()
     store.trends.upsert_first_play_min([("track", "saved", 1, 86400, "saved")])
-    store.rec_surface.put_proposals("trend_rollups", {"saved": True})
+    store.rec_proposals.put_proposals("trend_rollups", {"saved": True})
     entered = threading.Event()
     reader_connections = []
     work = Activity()
@@ -51,7 +51,7 @@ def test_slow_rollup_sql_allows_ui_reads_and_writes_before_shutdown(tmp_path, mo
         # Deliberately execute these synchronous repository calls on an event loop, as some
         # existing async handlers do. A blocked shared lock would freeze that loop too.
         assert store.trends.first_play_map("track") == {"saved": 1}
-        assert store.rec_surface.get_proposals("trend_rollups") == {"saved": True}
+        assert store.rec_proposals.get_proposals("trend_rollups") == {"saved": True}
         store.settings.set_setting("interactive-write", "saved")
         await asyncio.sleep(0)
         return store.settings.get_setting("interactive-write")
@@ -68,7 +68,7 @@ def test_slow_rollup_sql_allows_ui_reads_and_writes_before_shutdown(tmp_path, mo
             worker.join(3)
             assert work.wait(0)
             assert store.trends.first_play_map("track") == {"saved": 1}
-            assert store.rec_surface.get_proposals("trend_rollups") == {"saved": True}
+            assert store.rec_proposals.get_proposals("trend_rollups") == {"saved": True}
             assert not store.conn.in_transaction
         finally:
             work.close_admission()
@@ -79,7 +79,7 @@ def test_slow_rollup_sql_allows_ui_reads_and_writes_before_shutdown(tmp_path, mo
 
 def test_source_reset_during_calculation_cannot_publish_stale_rollup(database, monkeypatch):
     store = database
-    store.rec_surface.put_proposals("trend_rollups", {"saved": True})
+    store.rec_proposals.put_proposals("trend_rollups", {"saved": True})
     calculate = trend_rollups._calculate
 
     def reset_during_calculation(reader, now):
@@ -90,7 +90,7 @@ def test_source_reset_during_calculation_cannot_publish_stale_rollup(database, m
     monkeypatch.setattr(trend_rollups, "_calculate", reset_during_calculation)
     assert trend_rollups.build(store, 6 * 86400) is None
     assert not store.trends.first_play_map("track")
-    assert store.rec_surface.get_proposals("trend_rollups") == {"saved": True}
+    assert store.rec_proposals.get_proposals("trend_rollups") == {"saved": True}
     assert not store.conn.in_transaction
     monkeypatch.setattr(trend_rollups, "_calculate", calculate)
     assert trend_rollups.build(store, 6 * 86400)["weeks"] == []
@@ -99,7 +99,7 @@ def test_source_reset_during_calculation_cannot_publish_stale_rollup(database, m
 def test_failed_publication_keeps_previous_index_rollup_and_review_stamp(database):
     store = database
     store.trends.upsert_first_play_min([("track", "saved", 1, 86400, "saved")])
-    store.rec_surface.put_proposals("trend_rollups", {"saved": True})
+    store.rec_proposals.put_proposals("trend_rollups", {"saved": True})
     store.settings.set_setting("trend_spotlight_review_month", "saved")
     with store.conn:
         store.conn.execute("CREATE TRIGGER reject_rollup BEFORE INSERT ON rec_proposals "
@@ -108,7 +108,7 @@ def test_failed_publication_keeps_previous_index_rollup_and_review_stamp(databas
     with pytest.raises(sqlite3.IntegrityError, match="rejected publication"):
         trend_rollups.build(store, 6 * 86400)
     assert store.trends.first_play_map("track") == {"saved": 1}
-    assert store.rec_surface.get_proposals("trend_rollups") == {"saved": True}
+    assert store.rec_proposals.get_proposals("trend_rollups") == {"saved": True}
     assert store.settings.get_setting("trend_spotlight_review_month") == "saved"
     assert not store.conn.in_transaction
 

@@ -89,9 +89,18 @@ def test_recovery_after_lost_response_reuses_destination_and_does_not_duplicate(
     _run(t)
     t[3].failed_title = None
     t[3].lost_response = lost_response
-    assert _run(t, 101)["playlists_failed"] == 1
-    assert not _state(t)["complete"]
-    assert _run(t, 102)["playlists_imported"] == 1
+    recovered = _run(t, 101)
+    if lost_response == "add":
+        assert recovered["playlists_failed"] == 1
+        assert not _state(t)["complete"]
+        assert _run(t, 102)["playlists_imported"] == 1
+    else:
+        # A complete ordered read confirms a move even when its reply was lost.
+        assert recovered["playlists_imported"] == 1
+        assert _state(t)["complete"] and _state(t)["order_verified"]
+        writes = len(t[3].added), len(t[3].edited)
+        assert _run(t, 102)["playlists_skipped"] == 1
+        assert (len(t[3].added), len(t[3].edited)) == writes
     assert _order(t) == ["yt-One", "yt-Two", "yt-Three"]
     assert len(t[3].created) == 1
     assert Counter(video for _, batch in t[3].added for video in batch) == {

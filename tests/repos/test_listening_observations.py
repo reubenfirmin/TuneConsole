@@ -38,7 +38,7 @@ def test_temporal_cutoffs_keep_exact_times_instead_of_account_date_keys(listenin
     assert s.history.history_keys_before(cutoff)=={past}
     assert s.history.history_keys_between(cutoff,ts+1200)=={later}
     assert s.history.play_counts_before(cutoff)=={past:1}
-    baskets,_ = s.rec_query.rec_baskets_as_of(cutoff,max_album=0)
+    baskets,_ = s.rec_evidence.rec_baskets_as_of(cutoff,max_album=0)
     assert not any({past,later}<=set(basket) for basket in baskets)
     assert s.history.listening_day_counts()=={past:1,later:1}
 
@@ -61,7 +61,7 @@ def test_event_generation_policy_does_not_change_with_later_playlist_curation(li
     s.playlists.adopt_generated_playlist('PL')
     assert s.trends.ledger_track_plays(ts-1,ts+7200)=={'ordinary':1}
     assert s.history.listening_day_counts()=={'ordinary':1}
-    assert s.rec_query.generated_only_play_days()=={(int(ts//86400),'generated')}
+    assert s.rec_evidence.generated_only_play_days()=={(int(ts//86400),'generated')}
 
 
 def test_installed_layout_retains_raw_evidence_and_unknown_precision():

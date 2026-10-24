@@ -42,7 +42,7 @@ def test_computed_bands_rotate_relative_to_library(store, monkeypatch, years):
     payload = ms.prepare_bundles(store, now=1000)
     cuts = payload["_meta"]["year_cuts"]
     assert years[0] <= cuts[0] < years[1] <= cuts[1] < years[2]
-    assert store.rec_surface.get_proposals("mode_bundles")["_meta"]["year_cuts"] == cuts
+    assert store.rec_proposals.get_proposals("mode_bundles")["_meta"]["year_cuts"] == cuts
 
     for epoch, (year, label) in enumerate(zip(years, ("Throwback", "Time Flies", "Recent Picks"))):
         cards = ms.assemble_cards(store, now=1000, epoch=epoch)

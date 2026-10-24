@@ -36,7 +36,7 @@
   <h2 class="section section-flush">Recent requests <span class="muted">(newest first)</span></h2>
   <div class="table-scroll">
   <table>
-    <thead><tr><th>When</th><th>Verdict</th><th>Via</th><th>Method</th><th>Host</th><th>Path</th><th>Status</th></tr></thead>
+    <thead><tr><th>When</th><th>Verdict</th><th>Via</th><th>Method</th><th>Host</th><th>Path</th><th>Status</th><th>Failure</th></tr></thead>
     <tbody>
     {% for r in rows %}
       <tr>
@@ -49,9 +49,10 @@
         <td class="mono">{{ r.host }}</td>
         <td class="mono text-dim break-anywhere">{{ r.path }}</td>
         <td class="mono">{{ r.status if r.status not in (None, 'None') else '' }}</td>
+        <td>{{ r.failure if r.failure is defined and r.failure not in (None, 'None') else '' }}</td>
       </tr>
     {% else %}
-      <tr><td colspan="7" class="empty">No requests logged yet. They'll appear here once the app talks to YouTube (e.g. a sync).</td></tr>
+      <tr><td colspan="8" class="empty">No requests logged yet. They'll appear here once the app talks to YouTube (e.g. a sync).</td></tr>
     {% endfor %}
     </tbody>
   </table>

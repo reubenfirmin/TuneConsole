@@ -19,6 +19,34 @@ def build(ctx) -> APIRouter:
         job = jobs.find_active_library()
         return {"job_id": job.id if job else None}
 
+    @router.get("/sync/recent")
+    def sync_recent():
+        """Retain access to the last import's detail stream after it finishes."""
+        job = jobs.latest("library", None)
+        if job:
+            return {"events": [event for _, event in job.events.since(0)[1]],
+                    "outcome": job.outcome}
+        state = ctx.store.settings.get_setting("library_sync_state")
+        if not state:
+            return {"events": [], "outcome": None}
+        import json
+        result = json.loads(state)
+        events = []
+        for account in result.get("accounts", {}).values():
+            resources = account.get("resources", {})
+            titles = {p["playlistId"]: p.get("title", p["playlistId"])
+                      for p in resources.get("playlist_listing", {}).get("entries", [])}
+            for name, resource in resources.items():
+                events.append({"type": "info", "text": f"{account.get('label', '')}: "
+                    f"{name.replace('_', ' ')} — {resource['status']}. {resource.get('message', '')}"})
+                for key, item in resource.get("items", {}).items():
+                    events.append({"type": "info" if item["status"] == "complete" else "err",
+                        "text": f"{titles.get(key, key)}: {item['status']}. {item.get('message', '')}"})
+        for name, resource in result.get("resources", {}).items():
+            events.append({"type": "info", "text": f"{name.replace('_', ' ')} — "
+                f"{resource['status']}. {resource.get('message', '')}"})
+        return {"events": events, "outcome": result.get("status")}
+
     @router.post("/sync")
     def do_sync():
         # Run the (slow, network-bound) sync in a background thread and stream progress over SSE.

@@ -20,7 +20,7 @@ def reset(store) -> None:
         store.rec_model.clear_all_leans()
         store.rec_model.clear_hidden_facets()
         rec_params.reset_param(store, "breadth_bias")
-        store.rec_surface.put_proposals("home_genre_request", {}, 0.0)
+        store.rec_proposals.put_proposals("home_genre_request", {}, 0.0)
         store.settings.delete_setting("home_mix_vibe")
         store.settings.delete_setting(UPDATED_AT_SETTING)
 

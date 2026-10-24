@@ -14,5 +14,5 @@ def test_catchall_is_size_based(store):
     small = store.playlists.upsert_playlist(iid, "ytm_small", "Small", 2, "h", 0.0)
     store.playlists.set_playlist_tracks(small, [_trk(store, "s0", "S0", "B"), _trk(store, "s1", "S1", "C")])
 
-    catchall = store.rec_query.catchall_playlist_ids(size_floor=3)
+    catchall = store.rec_eligibility.catchall_playlist_ids(size_floor=3)
     assert big in catchall and small not in catchall

@@ -1,4 +1,16 @@
-/* Session-scoped, slowly evolving contours for the radio landscape. */
+/**
+ * @typedef {Object} RadioArtworkView
+ * @property {string|null} playlistId Drawing identity, independent of a status request.
+ * @property {boolean} visible Whether the Radio panel is displayed.
+ * @property {boolean} moving Whether the session allows artwork motion.
+ * @property {number} connectedSlot Hover/focus preview or the active direction.
+ * @property {number} directionCount Number of displayed queue directions.
+ *
+ * Presentation mixin: the host supplies a readonly artworkView, Alpine $refs
+ * and $nextTick. It owns geometry, DOM measurements, motion and saved drawings;
+ * it never reads session payloads or starts requests. Compose its property
+ * descriptors so computed geometry remains reactive rather than being copied.
+ */
 function radioArtwork() {
   // A saved seed reproduces the whole motion, without storing geometry or
   // choosing new random values on every frame.
@@ -16,8 +28,26 @@ function radioArtwork() {
   return {
     artworkPhase: 0, artworkSeed: 0, artworkRhythms: rhythms(0), artworkPlaylistId: null,
     artworkFrame: null, artworkRunning: false,
+    queueCenters: {},
+    junctionHub: {x: 500, y: 56, rx: 45, ry: 40, insetX: 4, insetY: 4},
+    drawingSpace: {width: 1200, historyHeight: 340, gapHeight: 112},
+    fieldHub: {x: 0, y: 0, r: 0},
+    fieldArea: {cx: 0, cy: 0, rx: 1, ry: 1},
+    initArtwork() {
+      this._artworkChanged = () => this.syncArtworkMotion();
+      this._artworkLeaving = () => this.pauseArtworkMotion();
+      document.addEventListener('visibilitychange', this._artworkChanged);
+      window.addEventListener('pagehide', this._artworkLeaving);
+      window.addEventListener('pageshow', this._artworkChanged);
+    },
+    destroyArtwork() {
+      this.pauseArtworkMotion();
+      document.removeEventListener('visibilitychange', this._artworkChanged);
+      window.removeEventListener('pagehide', this._artworkLeaving);
+      window.removeEventListener('pageshow', this._artworkChanged);
+    },
     syncArtworkSession() {
-      const playlistId = this.state.active && this.state.playlist_id;
+      const playlistId = this.artworkView.playlistId;
       if (!playlistId) {
         if (this.artworkPlaylistId) {
           this.pauseArtworkMotion();
@@ -50,8 +80,7 @@ function radioArtwork() {
     },
     syncArtworkMotion() {
       this.syncArtworkSession();
-      const running = this.visible && this.state.active && !this.state.starting &&
-        !this.destroyed && !document.hidden;
+      const running = this.artworkView.moving && !document.hidden;
       if (!running) {
         this.pauseArtworkMotion();
         return;
@@ -60,7 +89,7 @@ function radioArtwork() {
       this.artworkRunning = true;
       let previous = performance.now();
       const frame = now => {
-        if (!this.visible || !this.state.active || this.state.starting || this.destroyed || document.hidden) {
+        if (!this.artworkView.moving || document.hidden) {
           this.pauseArtworkMotion();
           return;
         }
@@ -87,8 +116,9 @@ function radioArtwork() {
       const sway = freedom * wave(0), fold = freedom * wave(1), turn = freedom * wave(2);
       const breath = freedom * (1 + wave(3)) / 2;
       const spread = index - 6.5;
+      const slot = this.artworkView.connectedSlot;
       const stream = Math.max(.08, Math.min(.92,
-        (this.queueCenters[this.connectedSlot] ?? (this.connectedSlot + .5) * 250) / 1000));
+        (this.queueCenters[slot] ?? (slot + .5) * 250) / 1000));
       const stretch = Math.max(0, historyHeight + gapHeight * .82 - (300 * scale + offset));
       const drift = (stream - .5) * width * .045;
       // Deform the whole field together as its lower part opens into the junction.
@@ -138,6 +168,203 @@ function radioArtwork() {
       }
       const ink = .68 + .32 * freedom * ((1 + wave(4) * Math.cos(index * .26)) / 2) ** 6;
       return `d: path("${path}"); opacity: ${ink}`;
+    },
+    measureQueues() {
+      const content = this.$refs.fieldContent?.getBoundingClientRect();
+      if (content?.width && content.height) {
+        // A broad radial fade leaves a faint trace of dots at the viewport edges.
+        const cx = content.left + content.width / 2, cy = content.top + content.height / 2;
+        const feather = Math.max(640, Math.min(900, content.width * .6));
+        this.fieldArea = {cx, cy,
+          rx: Math.max(content.width / 2 + feather, Math.max(cx, window.innerWidth - cx) * 1.08),
+          ry: content.height / 2 + feather};
+      }
+      const bounds = this.$refs.junction?.getBoundingClientRect();
+      if (!bounds?.width) return;
+      const centers = {};
+      this.$refs.directions?.querySelectorAll('.radio-direction').forEach(queue => {
+        const rect = queue.getBoundingClientRect();
+        centers[queue.dataset.slot] = (rect.left + rect.width / 2 - bounds.left) / bounds.width * 1000;
+      });
+      this.queueCenters = centers;
+      const playlist = this.$refs.playlist;
+      const headerHeight = playlist?.querySelector('thead')?.getBoundingClientRect().height || 0;
+      if (playlist) this.drawingSpace = {
+        width: bounds.width,
+        historyHeight: Math.max(1, playlist.getBoundingClientRect().height - headerHeight),
+        gapHeight: bounds.height,
+      };
+      const button = this.$refs.tuningControl?.getBoundingClientRect();
+      if (button?.width && bounds.height) {
+        this.fieldHub = {x: button.left + button.width / 2,
+          y: button.top + button.height / 2, r: button.width / 2 + 4};
+        this.junctionHub = {
+          x: (button.left + button.width / 2 - bounds.left) / bounds.width * 1000,
+          y: (button.top + button.height / 2 - bounds.top) / bounds.height * 112,
+          rx: (button.width / 2 + 8) / bounds.width * 1000,
+          ry: (button.height / 2 + 8) / bounds.height * 112,
+          insetX: 4 / bounds.width * 1000, insetY: 4 / bounds.height * 112,
+        };
+      }
+    },
+    get engravingTransform() {
+      const {width, historyHeight} = this.drawingSpace;
+      const scale = Math.max(width / 1200, historyHeight / 340);
+      return `translate(0 ${(historyHeight - 340 * scale) / 2}) scale(${scale})`;
+    },
+    get landscapeToJunction() {
+      const {width, historyHeight, gapHeight} = this.drawingSpace;
+      return `matrix(${1000 / width} 0 0 ${112 / gapHeight} 0 ${-historyHeight * 112 / gapHeight})`;
+    },
+    get drawingClearance() {
+      const {width, historyHeight, gapHeight} = this.drawingSpace;
+      const {x, y, rx, ry, insetX, insetY} = this.junctionHub;
+      const cx = x * width / 1000, cy = historyHeight + y * gapHeight / 112;
+      const w = (rx - insetX) * width / 1000, h = (ry - insetY) * gapHeight / 112;
+      return `M0 0H${width}V${historyHeight + gapHeight}H0Z M${cx - w} ${cy} ` +
+        `a${w} ${h} 0 1 0 ${w * 2} 0 a${w} ${h} 0 1 0 ${-w * 2} 0Z`;
+    },
+    junctionStyle(slot, detail = false) {
+      const x = Math.round(this.queueCenters[slot] ?? (slot + .5) * 1000 / this.artworkView.directionCount);
+      // Keep both table attachments fixed as the fork moves between streams.
+      const left = 40, right = 960;
+      const {x: cx, y: cy, rx, ry, insetX, insetY} = this.junctionHub;
+      const half = 18, clearance = rx + half + insetX;
+      const fork = Math.abs(x - cx) < clearance ? cx + (x < cx ? -1 : 1) * clearance : x;
+      const midpoint = (a, b) => a.map((value, i) => (value + b[i]) / 2);
+      const split = points => {
+        const a = midpoint(points[0], points[1]), b = midpoint(points[1], points[2]);
+        const c = midpoint(points[2], points[3]), d = midpoint(a, b), e = midpoint(b, c);
+        const center = midpoint(d, e);
+        return [[points[0], a, d, center], [center, e, c, points[3]]];
+      };
+      const arm = (start, end, depth, shoulder, radiusX, radiusY) => {
+        const points = [[start, 8], [start, shoulder], [end, 22], [end, depth]];
+        let crosses = false;
+        for (let i = 1; i < 32; i++) {
+          const t = i / 32, u = 1 - t;
+          const at = [0, 1].map(axis => u ** 3 * points[0][axis] + 3 * u ** 2 * t * points[1][axis]
+            + 3 * u * t ** 2 * points[2][axis] + t ** 3 * points[3][axis]);
+          if (((at[0] - cx) / radiusX) ** 2 + ((at[1] - cy) / radiusY) ** 2 < 1) {
+            crosses = true;
+            break;
+          }
+        }
+        if (crosses) {
+          const direction = Math.sign(start - cx), s = Math.SQRT1_2;
+          const k = 4 / 3 * Math.tan(Math.PI / 16), top = cy - radiusY;
+          const entry = [cx + direction * radiusX * s, cy - radiusY * s];
+          const exit = [cx - direction * radiusX * s, cy - radiusY * s];
+          // Two circular eighth-turns follow the control's upper rim. Tangent
+          // joins keep this bend local instead of lifting the entire Y arm.
+          return [points[0], points[1],
+            [entry[0] + direction * radiusX * .3, entry[1] + radiusY * .3], entry,
+            [entry[0] - direction * k * s * radiusX, entry[1] - k * s * radiusY],
+            [cx + direction * k * radiusX, top], [cx, top],
+            [cx - direction * k * radiusX, top],
+            [exit[0] + direction * k * s * radiusX, exit[1] - k * s * radiusY], exit,
+            [exit[0] - direction * radiusX * .3, exit[1] + radiusY * .3], points[2], points[3]];
+        }
+        // Split a clear arm without changing its original curve. Every route
+        // has matching commands, so hover previews can still morph smoothly.
+        const segments = split(points).flatMap(split);
+        return [points[0], ...segments.flatMap(segment => segment.slice(1))];
+      };
+      const trace = (points, reverse = false, move = 'M') => {
+        const p = reverse ? [...points].reverse() : points;
+        let path = reverse ? `${move}${p[0].join(' ')}` : `${move}${p[0][0]} -3 L${p[0].join(' ')}`;
+        for (let i = 1; i < p.length; i += 3) path += ` C${p.slice(i, i + 3).flat().join(' ')}`;
+        if (reverse) path += ` L${p[p.length - 1][0]} -3`;
+        return path;
+      };
+      // Preserve the natural Y. Only an arm that approaches the control gets
+      // an upper arc; an arm on the other side of the page keeps its own course.
+      let path;
+      if (detail) {
+        const flowLeft = arm(left + 12, fork - 6, 82, 36, rx - insetX / 2, ry - insetY / 2);
+        const flowRight = arm(right - 12, fork + 6, 82, 36, rx - insetX / 2, ry - insetY / 2);
+        // One circuit: descend through the left arm and return up the right.
+        // Both turnarounds sit just outside the viewport, keeping the visible
+        // dots inside the Y while preserving a continuous route during previews.
+        path = trace(flowLeft) + ` C${fork - 6} 104 ${x - 6} 104 ${x - 6} 112 ` +
+          `C${x - 6} 120 ${x + 6} 120 ${x + 6} 112 ` +
+          `C${x + 6} 104 ${fork + 6} 104 ${fork + 6} 82 ` + trace(flowRight, true, 'L') + ' Z';
+      } else {
+        const outerLeft = arm(left, fork - half, 82, 48, rx, ry);
+        const outerRight = arm(right, fork + half, 82, 48, rx, ry);
+        const innerLeft = arm(left + 24, fork, 68, 26, rx - insetX, ry - insetY);
+        const innerRight = arm(right - 24, fork, 68, 26, rx - insetX, ry - insetY);
+        path = trace(outerLeft) + ` C${fork - half} 104 ${x - half} 104 ${x - half} 112 L${x + half} 112 ` +
+          `C${x + half} 104 ${fork + half} 104 ${fork + half} 82 ` + trace(outerRight, true, 'L') + ' ' +
+          trace(innerRight, false, 'L') + ' ' + trace(innerLeft, true, 'L') + ' Z';
+      }
+      return `d: path("${path}")`;
+    },
+    get junctionClearance() {
+      const {x, y, rx, ry, insetX, insetY} = this.junctionHub;
+      const w = rx - insetX * 1.5, h = ry - insetY * 1.5;
+      // Keep the unfilled control clear during intermediate hover frames too.
+      return `M0 0H1000V112H0Z M${x - w} ${y} a${w} ${h} 0 1 0 ${w * 2} 0 a${w} ${h} 0 1 0 ${-w * 2} 0Z`;
+    },
+    layoutHistory() {
+      const scroller = this.$refs.playlist?.querySelector('.radio-track-scroll');
+      const space = scroller?.querySelector('.radio-history-space');
+      const history = scroller?.querySelector('.radio-history');
+      if (!space || !history || !scroller.clientHeight) return;
+      const headerHeight = scroller.querySelector('thead')?.getBoundingClientRect().height || 0;
+      const rowHeight = history.querySelector('tr')?.getBoundingClientRect().height || 48;
+      const height = Math.max(0, scroller.clientHeight - headerHeight - history.getBoundingClientRect().height);
+      this.$refs.playlist.style.setProperty('--radio-table-head', headerHeight + 'px');
+      const layoutKey = [scroller.clientWidth, scroller.clientHeight, height, history.lastElementChild?.dataset.vid].join(':');
+      if (space.dataset.layout === layoutKey) return;
+      space.dataset.layout = layoutKey;
+      const count = Math.ceil(height / rowHeight);
+      space.replaceChildren(...Array.from({length: count}, () => {
+        const row = document.createElement('tr');
+        row.className = 'radio-empty-row';
+        row.style.height = height / count + 'px';
+        const cell = row.insertCell();
+        cell.colSpan = scroller.querySelector('thead tr')?.children.length || 10;
+        return row;
+      }));
+      // Keep the newest played row at the junction, including after a table swap.
+      scroller.scrollTop = scroller.scrollHeight;
+    },
+    launchPosition(index) {
+      const angle = index * Math.PI / 4;
+      return {x: 50 + 38 * Math.cos(angle), y: 50 + 34 * Math.sin(angle)};
+    },
+    fitSpace() {
+      if (!this.artworkView.visible) return;
+      const main = this.$refs.fieldContent.closest('main');
+      const bottomPadding = main ? parseFloat(getComputedStyle(main).paddingBottom) : 20;
+      for (const [element, variable] of [[this.$refs.seeds, '--radio-grid-height'],
+                                        [this.$refs.launch, '--radio-launch-height'],
+                                        [this.$refs.session, '--radio-session-height']]) {
+        if (!element?.getClientRects().length) continue;
+        const top = element.getBoundingClientRect().top + window.scrollY;
+        const height = Math.max(0, window.innerHeight - top - bottomPadding);
+        element.style.setProperty(variable, height + 'px');
+        if (element === this.$refs.session) {
+          const junction = this.$refs.junction.getBoundingClientRect().height;
+          const history = Math.max(0, Math.min(height * .52, height - junction - 120,
+            Math.max(140, window.innerHeight * .5 - top - 16)));
+          element.style.setProperty('--radio-history-height', history + 'px');
+        }
+      }
+      this.layoutHistory();
+      this.measureQueues();
+    },
+    animateQueues(slots) {
+      if (!slots.length || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      this.$nextTick(() => {
+        for (const slot of slots) {
+          const card = this.$refs.directions?.querySelector(`[data-slot="${slot}"]`);
+          for (const element of card?.querySelectorAll('.radio-queue-art, .radio-direction-tracks') || [])
+            element.animate([{opacity: .15, filter: 'blur(4px)', transform: 'translateY(8px)'},
+              {opacity: 1, filter: 'blur(0)', transform: 'translateY(0)'}], {duration: 650, easing: 'cubic-bezier(.2,.8,.2,1)'});
+        }
+      });
     },
   };
 }

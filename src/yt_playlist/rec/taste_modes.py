@@ -7,12 +7,45 @@ Fully automatic, no seeded genres."""
 import numpy as np
 
 from yt_playlist.core.activity import check_stopping
-from yt_playlist.rec import embed, rec_params
+from yt_playlist.rec import embedding_vectors as vectors, rec_params
 from yt_playlist.util import genre_map
 
 _SEED = 1234567
 _MAX_ITERS = 40
 _MIN_CORPUS = 80
+_DISTANCE_WORK_BYTES = 4 * 1024 * 1024
+
+
+def _distance_batches(X, centers):
+    """Squared Euclidean distances with at most 4 MiB of differences (or one row).
+
+    Keep subtraction, squaring and summation over the feature axis in the same order as the
+    original full tensor. Norm/dot subtraction can round near ties differently, and centroids
+    need not have unit norm after a Lloyd update.
+    """
+    row_bytes = max(1, len(centers) * X.shape[1] * X.dtype.itemsize)
+    batch_rows = max(1, _DISTANCE_WORK_BYTES // row_bytes)
+    for start in range(0, len(X), batch_rows):
+        check_stopping()
+        differences = X[start:start + batch_rows, None, :] - centers[None, :, :]
+        np.square(differences, out=differences)
+        distances = differences.sum(axis=2)
+        del differences
+        yield start, distances
+
+
+def _distance_to(X, center):
+    distances = np.empty(len(X), dtype=X.dtype)
+    for start, batch in _distance_batches(X, center[None, :]):
+        distances[start:start + len(batch)] = batch[:, 0]
+    return distances
+
+
+def _nearest_centers(X, centers):
+    labels = np.empty(len(X), dtype=int)
+    for start, batch in _distance_batches(X, centers):
+        labels[start:start + len(batch)] = batch.argmin(axis=1)
+    return labels
 
 
 def _kmeanspp(X, k, seed):
@@ -23,7 +56,7 @@ def _kmeanspp(X, k, seed):
     # k-means++ seeding.
     first = int(rng.integers(n))
     centers = [X[first]]
-    d2 = ((X - centers[0]) ** 2).sum(axis=1)
+    d2 = _distance_to(X, centers[0])
     for _ in range(1, k):
         check_stopping()
         total = d2.sum()
@@ -32,15 +65,14 @@ def _kmeanspp(X, k, seed):
             continue
         nxt = int(rng.choice(n, p=d2 / total))
         centers.append(X[nxt])
-        d2 = np.minimum(d2, ((X - X[nxt]) ** 2).sum(axis=1))
+        d2 = np.minimum(d2, _distance_to(X, X[nxt]))
     C = np.array(centers, dtype=X.dtype)
     labels = np.zeros(n, dtype=int)
     for _ in range(_MAX_ITERS):
         check_stopping()
         # Assign by nearest center (cosine == dot here is not safe once centroids drift off the unit
         # sphere, so use euclidean, which is monotonic with cosine on normalized inputs anyway).
-        dist = ((X[:, None, :] - C[None, :, :]) ** 2).sum(axis=2)
-        new_labels = dist.argmin(axis=1)
+        new_labels = _nearest_centers(X, C)
         if np.array_equal(new_labels, labels):
             labels = new_labels
             break
@@ -64,7 +96,7 @@ def mode_label(families) -> str:
     return top_fam
 
 
-def discover_modes(store, *, k=None, min_members=None, n_rep=6, seed=_SEED, snapshot=None) -> list[dict]:
+def discover_modes(store, *, k=None, min_members=None, n_rep=6, seed=_SEED, snapshot=None, genres=None) -> list[dict]:
     """Cluster the library content vectors and return the dense clusters as taste modes. Each mode is
     {centroid, space, size, families, rep_keys, label}. `space` fingerprints the content space the
     centroid lives in, so reconcile can tell a stale centroid from a comparable one. Empty list when
@@ -74,14 +106,14 @@ def discover_modes(store, *, k=None, min_members=None, n_rep=6, seed=_SEED, snap
     if min_members is None:
         min_members = rec_params.get_param(store, "modes_min_members")
     snapshot = snapshot if snapshot is not None else store.rec_model.content_generation()
-    space = embed.content_space_id(store, snapshot=snapshot)
-    keys, V, _idx = embed.load_content_vectors(store, snapshot=snapshot)
+    space = vectors.content_space_id(store, snapshot=snapshot)
+    keys, V, _idx = vectors.load_content_vectors(store, snapshot=snapshot)
     if V is None or len(keys) < max(int(min_members), _MIN_CORPUS):
         return []
     Vf = V.astype(np.float64)
     k = min(int(k), len(keys))
     labels, _centroids = _kmeanspp(Vf, k, seed)
-    genres = store.modes.genres_for(keys)               # {identity_key: genre}
+    genres = store.modes.genres_for(keys) if genres is None else genres
     modes = []
     for j in range(k):
         member_rows = np.where(labels == j)[0]
@@ -124,7 +156,7 @@ def live_modes(store, *, snapshot=None):
     against live content vectors must go through here, not `store.modes.list_modes`, or they are one
     enrichment batch away from either a shape error or a silently wrong cosine.
     """
-    space = embed.content_space_id(store, snapshot=snapshot)
+    space = vectors.content_space_id(store, snapshot=snapshot)
     return [m for m in store.modes.list_modes(active_only=True) if (m.get("space") or "") == space]
 
 
@@ -160,7 +192,7 @@ def reconcile(existing, discovered, *, threshold):
 
     * TIER 0, same content space: centroid cosine >= `threshold`. The centroid is the best available
       description of a mode, but it means nothing outside the space that built it, and that space is
-      rebuilt whenever enrichment adds a genre/key token (see embed.content_model_fingerprint).
+      rebuilt whenever enrichment adds a genre/key token (see content_model.content_model_fingerprint).
       Scoring a cross-space pair by cosine either crashes on a dimension mismatch or, worse, silently
       matches modes through a reordered basis.
     * TIER 1, across a rebuild: >= REP_MATCH_THRESHOLD of the existing mode's `rep_keys` fall inside
@@ -210,9 +242,9 @@ def reconcile(existing, discovered, *, threshold):
     return upserts, retired_ids
 
 
-def prepare_modes(store, now, *, k=None, min_members=None, snapshot=None):
+def prepare_modes(store, now, *, k=None, min_members=None, snapshot=None, genres=None):
     """Calculate reconciled clusters without writing; a model batch supplies its new content space."""
-    discovered = discover_modes(store, k=k, min_members=min_members, snapshot=snapshot)
+    discovered = discover_modes(store, k=k, min_members=min_members, snapshot=snapshot, genres=genres)
     if not discovered:
         # Nothing to cluster this pass (too few content vectors, or every cluster fell below
         # min_members). Keep the existing modes rather than reconcile-retiring ALL of them, which would

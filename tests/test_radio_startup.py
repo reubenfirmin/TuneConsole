@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from tests.test_radio_session import poc, play
+from tests.radio_session_support import poc, play
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending
 from yt_playlist.web.radio_session import PlaylistRadio
 

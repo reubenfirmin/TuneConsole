@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
-from yt_playlist.rec import autotune_run, eval_recs, experiments, model_selection, rec_params, rose, surfaces, taste_analysis, taste_viz
+from yt_playlist.rec import autotune_run, eval_recs, experiments, model_selection, rec_params, rose, scorecard, surfaces, taste_analysis, taste_viz
 from yt_playlist.web.context import form_float, request_form
 
 
@@ -132,7 +132,7 @@ def build(ctx) -> APIRouter:
              ]),
             ("discovery", "Finding new music", "blue",
              "Choose how widely Discover searches and how long unadded suggestions stay available. Your library is kept.", [
-                 ("", ("discovery_", "palette_")),
+                 ("", ("discovery_",)),
              ]),
             ("preferences", "Ranking & feedback", "amber",
              "Set how strongly stated preferences affect rankings, how long dislikes exclude tracks, and what counts as mainstream for feedback.", [
@@ -194,7 +194,7 @@ def build(ctx) -> APIRouter:
             "breadth": bd["breadth"],
             "breadth_tagged": bd["n_tagged"],
             "breadth_families": bd["n_families"],
-            "baskets": len(store.rec_query.rec_baskets()),
+            "baskets": len(store.rec_evidence.rec_baskets()),
         }
 
     def _autotune_context(*, limit=6):
@@ -328,8 +328,8 @@ def build(ctx) -> APIRouter:
                                            "temporal": eval_recs.rolling_temporal_recall(
                                                store, holdout_days=holdout_days, k=20),
                                            "holdout_days": holdout_days,
-                                           "grad_counts": store.rec_surface.graduation_log_counts(),
-                                           "served": store.rec_surface.recommendation_scorecard(
+                                           "grad_counts": store.rec_signals.graduation_log_counts(),
+                                           "served": scorecard.recommendation_scorecard(store,
                                                now - 30 * 86400, now)})
 
     @router.get("/taste/preview")
@@ -347,11 +347,11 @@ def build(ctx) -> APIRouter:
         start = end - 30 * 86400 if start is None else start
         if not (0 <= start < end and end - start <= 90 * 86400):
             raise HTTPException(422, "Choose an ordered date range of at most 90 days.")
-        return store.rec_surface.recommendation_scorecard(start, end)
+        return scorecard.recommendation_scorecard(store, start, end)
 
     @router.get("/taste/served/{impression_id}")
     def served_trace(impression_id: int):
-        trace = store.rec_surface.served_recommendation(impression_id)
+        trace = scorecard.served_recommendation(store, impression_id)
         if trace is None:
             raise HTTPException(404, "Recommendation impression not found.")
         return trace
@@ -363,7 +363,7 @@ def build(ctx) -> APIRouter:
         start = max(0, end - 30 * 86400) if start is None else start
         if not (0 <= start < end <= now and end - start <= 90 * 86400):
             raise HTTPException(422, "Choose a past date range of at most 90 days.")
-        return {**store.rec_surface.experiment_report(start, end, now), **experiments.lifecycle(store),
+        return {**scorecard.experiment_report(store, start, end, now), **experiments.lifecycle(store),
                 "decisions": experiments.decisions(store)}
 
     @router.post("/taste/experiments/decision")

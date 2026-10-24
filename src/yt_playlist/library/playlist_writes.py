@@ -5,8 +5,35 @@ from dataclasses import dataclass
 
 from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.util.retry import with_retry
+from yt_playlist.util.matching import track_artist
+from yt_playlist.util.thumbnails import best_thumb
 
 logger = logging.getLogger(__name__)
+
+
+def retain_addition_snapshot(store, playlist_id, addition, now):
+    """Mirror a complete reconciliation read without another fetch or positional writes."""
+    if not addition.failure:
+        return
+    snapshot = addition.failure.snapshot
+    if snapshot is None:
+        known = store.tracks.track_ids_for_videos(addition.confirmed)
+        ids = list(dict.fromkeys(store.playlists.get_playlist_track_ids(playlist_id) +
+                                [known[v] for v in addition.confirmed if v in known]))
+        store.playlists.set_playlist_tracks(playlist_id, ids)
+        store.playlists.set_playlist_track_count(playlist_id, len(ids), now)
+        return
+    track_ids = []
+    for track in snapshot["tracks"]:
+        album = track.get("album") or {}
+        track_ids.append(store.tracks.upsert_track(
+            track["videoId"], track.get("title") or "", track_artist(track),
+            album.get("name") if isinstance(album, dict) else album,
+            track.get("duration_seconds"), thumbnail=best_thumb(track.get("thumbnails"))))
+    track_ids = list(dict.fromkeys(track_ids))
+    store.playlists.set_playlist_tracks(playlist_id, track_ids)
+    store.playlists.set_playlist_track_count(playlist_id, len(track_ids), now)
+    store.playlists.ensure_playlist_thumbnail(playlist_id)
 
 
 class PlaylistAddUncertain(ValueError):

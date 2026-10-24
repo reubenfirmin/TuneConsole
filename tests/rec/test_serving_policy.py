@@ -1,7 +1,7 @@
 """Serving fingerprints change with policy/model changes, and cached ranks retain their build."""
 import numpy as np
 
-from yt_playlist.rec import measurement, rec_params
+from yt_playlist.rec import measurement, rec_params, scorecard
 
 
 def test_policy_fingerprint_tracks_preferences_parameters_and_actual_vectors(store):
@@ -31,7 +31,7 @@ def test_cached_score_and_build_policy_survive_new_rendering_preferences(store):
     rec_params.set_param(store, "axis_weight_cap", 2)
     measurement.record_recommendations(store, "home", tracks, 150)
     row = store.conn.execute("SELECT id FROM rec_served_impressions").fetchone()
-    trace = store.rec_surface.served_recommendation(row["id"])
+    trace = scorecard.served_recommendation(store, row["id"])
     assert trace["score"] == .42
     assert trace["provenance"]["score_available"] is True
     assert trace["model_version"] != tracks[0]["pool_policy"]

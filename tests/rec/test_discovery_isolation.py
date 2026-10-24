@@ -21,8 +21,8 @@ from yt_playlist.rec.rec_worker import RecWorker
     lambda s: s.rec_query.top_played_keys(),
     lambda s: s.history.spotify_history_stats(),
     lambda s: s.rec_query.library_artists(),
-    lambda s: s.rec_query.rec_baskets(),
-    lambda s: s.rec_query.rec_baskets_as_of(100),
+    lambda s: s.rec_evidence.rec_baskets(),
+    lambda s: s.rec_evidence.rec_baskets_as_of(100),
 ], ids=["interest", "due", "track-view", "anchors", "seed-tracks", "spotify-stats", "library-artists",
         "embedding-baskets", "historical-baskets"])
 def test_discovery_read_does_not_block_ui_and_stops_on_shutdown(tmp_path, monkeypatch, query):

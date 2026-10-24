@@ -12,7 +12,7 @@ import random
 
 import numpy as np
 
-from yt_playlist.rec import arc_energy, embed, layers, rec_params, radio_catalog, radio_tuning
+from yt_playlist.rec import arc_energy, embedding_vectors as vectors, layers, rec_params, radio_catalog, radio_tuning
 from yt_playlist.core.work_diagnostics import work_span
 from yt_playlist.rec.radio_genres import GenrePolicy, genre
 from yt_playlist.util import genre_map
@@ -52,10 +52,10 @@ class RadioCandidates:
         with store._lock:
             self.generation = store.settings.get_setting("rec_content_generation")
             self.encoding_model = store.settings.get_setting("rec_content_model")
-            space = embed.content_space_id(store)
+            space = vectors.content_space_id(store)
             self.modes = {str(m["mode_id"]): m for m in store.modes.list_modes()
                           if m.get("space") == space}
-            bundles = store.rec_surface.get_proposals("mode_bundles") or {}
+            bundles = store.rec_proposals.get_proposals("mode_bundles") or {}
         if now_source is None:
             self.refresh_now(now)
         else:
@@ -113,7 +113,7 @@ class RadioCandidates:
                         "SELECT identity_key AS key, video_id, title, artist, album, thumbnail, "
                         "duration_s AS duration, genre, mb_year AS year FROM playable_library_tracks "
                         "WHERE video_id IS NOT NULL AND video_id<>'' LIMIT ?", (CLUSTER_POOL_LIMIT,))]
-            fresh = bundles.get("all", {}).get("fresh", []) or store.rec_surface.get_proposals("fresh_pool") or []
+            fresh = bundles.get("all", {}).get("fresh", []) or store.rec_proposals.get_proposals("fresh_pool") or []
             fresh = [{**t, "_radio_fresh": True} for t in fresh if self._allowed(t)]
             quota = round(CLUSTER_POOL_LIMIT * .85 * (1 - self.tuning["comfort"]))
             combined = fresh[:quota] + rows + fresh[quota:]

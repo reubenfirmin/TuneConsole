@@ -23,11 +23,11 @@ def test_refresh_card_advances_rotation_and_rerenders(store, monkeypatch):
     monkeypatch.setattr(surfaces, "explore_for_you", forbidden)
     c = _client(store, iid)
 
-    before = store.rec_surface.card_views("wheelhouse")
+    before = store.rec_ledger.card_views("wheelhouse")
     r = c.post("/home/refresh-card/wheelhouse")
     assert r.status_code == 200
     assert 'id="gen-wheelhouse"' in r.text                # the one card re-rendered in place
-    assert store.rec_surface.card_views("wheelhouse") > before        # rotation advanced to a fresh slice
+    assert store.rec_ledger.card_views("wheelhouse") > before        # rotation advanced to a fresh slice
 
 
 def test_refresh_card_rejects_unknown_card(store):

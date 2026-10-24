@@ -173,7 +173,7 @@ def test_story_rotation_keeps_connected_spreads_whole_within_nine_story_limit(st
                           'group': f'artist:Band {i}-0', 'extract': 'A complete paragraph.',
                           'thumbnail': 'http://img', 'color': 'var(--accent)', 'seed': subject,
                           'genre': None, 'depth': 2})
-    store.rec_surface.put_proposals(into_recently.SURFACE, {
+    store.rec_proposals.put_proposals(into_recently.SURFACE, {
         'schema': into_recently.SCHEMA, 'built_at': NOW, 'pending': False, 'cards': cards}, NOW)
     for epoch in range(4):
         selected, pending = into_recently.load(store, NOW, epoch=epoch)
@@ -248,7 +248,7 @@ def test_specific_topic_redirecting_to_a_genre_primer_is_not_published(store, mo
 
 
 def test_previous_story_selection_is_reprepared_before_serving(store):
-    store.rec_surface.put_proposals(into_recently.SURFACE, {
+    store.rec_proposals.put_proposals(into_recently.SURFACE, {
         'schema': into_recently.SCHEMA - 1, 'built_at': NOW, 'pending': False,
         'cards': [{'kind': 'genre', 'subject': 'genre:techno', 'display': 'techno',
                    'extract': 'A genre primer.', 'thumbnail': None, 'color': 'var(--accent)',
@@ -267,7 +267,7 @@ def test_cached_indie_rock_and_redirected_primers_are_filtered_before_display(st
                       'extract': f'About {title}.', 'thumbnail': 'http://genre.jpg' if name == 'dub techno' else None,
                       'lead_allowed': name == 'dub techno', 'color': 'var(--accent)',
                       'seed': None, 'genre': name, 'depth': 2})
-    store.rec_surface.put_proposals(into_recently.SURFACE, {
+    store.rec_proposals.put_proposals(into_recently.SURFACE, {
         'schema': into_recently.SCHEMA, 'built_at': NOW, 'pending': False, 'cards': cards,
     }, NOW)
     scheduled = []
@@ -443,7 +443,7 @@ def test_cold_fragment_only_schedules_work_and_prepared_reads_do_no_ranking(stor
     card = {"kind": "artist", "subject": "artist:Band", "display": "Band", "extract": "A band.",
             "thumbnail": "http://img", "url": "http://wiki/Band", "color": "var(--accent)",
             "seed": "Band", "genre": None, "depth": 2}
-    store.rec_surface.put_proposals(into_recently.SURFACE,
+    store.rec_proposals.put_proposals(into_recently.SURFACE,
         {"schema": into_recently.SCHEMA, "built_at": NOW, "cards": [card], "pending": False}, NOW)
     response = client.get("/home/into-recently")
     assert "A band." in response.text and scheduled == [True]
@@ -615,10 +615,10 @@ def test_only_visible_known_stories_count_and_fragment_polls_do_not_count_again(
     client = _client(store)
     for _ in range(2):
         client.get('/home/into-recently')
-    assert store.rec_surface.story_views() == {}
+    assert store.rec_ledger.story_views() == {}
     for subjects in [['artist:Band'], ['artist:Band', 'artist:Unknown'], ['artist:Band']]:
         assert client.post('/home/into-recently/impressions', json={'subjects': subjects}).status_code == 204
-    assert store.rec_surface.story_views() == {'artist:Band': {'views': 1, 'last_shown': NOW}}
+    assert store.rec_ledger.story_views() == {'artist:Band': {'views': 1, 'last_shown': NOW}}
 
 
 def test_story_variety_waits_for_next_edition_and_survives_restart(tmp_path, monkeypatch):
@@ -636,7 +636,7 @@ def test_story_variety_waits_for_next_edition_and_survives_restart(tmp_path, mon
     into_recently.prepare(store, NOW)
     original, _ = into_recently.load(store, NOW)
     assert [s['subject'] for s in original] == [s['subject'] for s in subjects[:9]]
-    store.rec_surface.record_story_views([s['subject'] for s in original], NOW)
+    store.rec_ledger.record_story_views([s['subject'] for s in original], NOW)
     # More warming/polling must not replace an article while it is being read.
     into_recently.prepare(store, NOW + 60)
     assert into_recently.load(store, NOW + 60)[0] == original

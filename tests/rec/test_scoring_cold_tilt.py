@@ -16,7 +16,7 @@ def test_apply_mood_default_content_vecs_uses_library_loader(monkeypatch, store)
         called["lib"] = True
         return [], None, {}
 
-    monkeypatch.setattr(scoring.embed, "load_content_vectors", loader)
+    monkeypatch.setattr(scoring.vectors, "load_content_vectors", loader)
     V = np.eye(2, dtype=np.float32)
     out = scoring._apply_mood(np.zeros(2), store, 0.0, V, {"a": 0, "b": 1})
     assert called.get("lib") is True            # default path consulted the library loader
@@ -27,7 +27,7 @@ def test_audio_tilt_boost_uses_supplied_content_vecs(monkeypatch, store):
     # A provided (keys, CV, cidx) triple is used verbatim; the library loader must NOT run.
     monkeypatch.setattr(scoring.transient, "audio_centroid_tilt",
                         lambda s, now, **kwargs: np.array([1.0, 0.0], dtype=np.float64))
-    monkeypatch.setattr(scoring.embed, "load_content_vectors",
+    monkeypatch.setattr(scoring.vectors, "load_content_vectors",
                         lambda s: pytest.fail("library loader must not run for the cold path"))
     CV = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
     boost = scoring._audio_tilt_boost(store, 0.0, {"x": 0, "y": 1},

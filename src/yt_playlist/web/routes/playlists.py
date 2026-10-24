@@ -14,7 +14,6 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Res
 from yt_playlist.providers import lastfm
 from yt_playlist.rec import actions, journeys, rec_params, taste_analysis
 from yt_playlist.repos.base import GENERATED_GROUP
-from yt_playlist.library import executor
 from yt_playlist.library.playlist_metadata import PROMOTED_DESCRIPTION
 from yt_playlist.library.playlist_positions import pending_insertions
 from yt_playlist.library.playlist_writes import PlaylistAddUncertain
@@ -130,7 +129,7 @@ def build(ctx) -> APIRouter:
     def playlists_page(request: Request):
         labels = {i.id: i.label for i in store.identities.get_identities()}
         groups = store.playlists.get_playlist_groups()                 # ytm -> group name
-        recipe_dates = store.rec_surface.get_recipe_created_ats()
+        recipe_dates = store.playlist_recipes.get_recipe_created_ats()
         stats = store.charts.get_playlist_listen_stats()            # pid -> (last_ts, count)
         thumbnails = store.playlists.get_playlist_thumbnails()         # cover or first song artwork
         hidden = store.playlists.get_hidden_playlists()                # ytm of playlists hidden from this tab
@@ -192,7 +191,7 @@ def build(ctx) -> APIRouter:
         from yt_playlist.rec import measurement
         measurement.record_action(store, "open", now_fn(), playlist_id=pid)
         is_generated = store.playlists.is_quarantined_playlist(pl.scope_ref)
-        recipe = store.rec_surface.get_recipe(pl.scope_ref) if is_generated else None
+        recipe = store.playlist_recipes.get_recipe(pl.scope_ref) if is_generated else None
         return templates.TemplateResponse(request, "playlist.html", {
             "pl": pl, "tracks": tracks, "identity": labels.get(pl.identity_id, "?"),
             "show_identity": len(labels) > 1,
@@ -203,14 +202,14 @@ def build(ctx) -> APIRouter:
             "mood_states": taste_analysis.track_mood_states(store, now_fn()) if is_generated else {},
             "recipe": recipe,
             # #48: a cluster-derived playlist whose canvas we saved can be reopened and regrown
-            "has_cluster_canvas": bool(store.rec_surface.get_cluster_canvas(pl.scope_ref)) if is_generated else False,
+            "has_cluster_canvas": bool(store.playlist_recipes.get_cluster_canvas(pl.scope_ref)) if is_generated else False,
             "journey_label": journeys.JOURNEY_LABELS.get((recipe or {}).get("journey")) if is_generated else None,
             "journey_desc": journeys.JOURNEY_DESCRIPTIONS.get((recipe or {}).get("journey")) if is_generated else None,
             "kind": store.playlists.playlist_kind(pid), "total_plays": sum(t["plays"] for t in tracks),
             # autosuggest = the editable whitelist plus whatever genres already exist in the library
             "genres": sorted(set(store.genres.get_genre_whitelist()) | set(store.genres.all_genres()), key=str.lower),
             "lastfm_configured": lastfm.api_key(store) is not None,
-            "conflict_count": store.enrichment.conflict_count_for_playlist(pid),  # drives the header conflict icon
+            "conflict_count": store.enrichment_reports.conflict_count_for_playlist(pid),  # drives the header conflict icon
             "active_job": ctx.jobs.find_active(pid),     # an in-progress enrichment to rejoin, if any
             "position_pending": len(pending_insertions(store, pid)),
         })
@@ -239,6 +238,16 @@ def build(ctx) -> APIRouter:
             raise HTTPException(409, str(exc)) from None
         report = playlist_read_report(client, playlist.ytm_playlist_id)
         return JSONResponse({'identity_id': identity_id, 'playlist_id': pid, 'reads': report},
+                            headers={'Cache-Control': 'no-store'})
+
+    @router.get('/liked-music/{identity_id}/snapshot-report')
+    def liked_music_snapshot_report(identity_id: int):
+        """Inspect an account even when its partial Liked Music read was never cached."""
+        try:
+            identity_id, client = client_for(store, ctx.client_provider(), identity_id=identity_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return JSONResponse({'identity_id': identity_id, 'reads': playlist_read_report(client, 'LM')},
                             headers={'Cache-Control': 'no-store'})
 
     @router.get("/playlist/{pid}/feedback-facets")
@@ -319,7 +328,7 @@ def build(ctx) -> APIRouter:
             added = next((t for t in reversed(details) if t["video_id"] == video_id), None)
             if added is not None:
                 if not added.get("genre"):
-                    store.enrichment.requeue_enrichment([added["track_id"]])
+                    store.enrichment_queue.requeue_enrichment([added["track_id"]])
                     if ctx.enrich_worker:
                         ctx.enrich_worker.trigger()
                 gen = _is_generated(pid)
@@ -355,9 +364,9 @@ def build(ctx) -> APIRouter:
     def playlist_conflicts(request: Request, pid: int):
         """The conflict-resolver modal: unresolved provider disagreements for this playlist's tracks."""
         return templates.TemplateResponse(request, "_partials/conflicts_modal.html", {
-            "conflicts": store.enrichment.unresolved_conflicts_for_playlist(pid),
+            "conflicts": store.enrichment_reports.unresolved_conflicts_for_playlist(pid),
             "resolve_url": f"/playlist/{pid}/conflicts/resolve",
-            "count_left": store.enrichment.conflict_count_for_playlist(pid)})
+            "count_left": store.enrichment_reports.conflict_count_for_playlist(pid)})
 
     @router.post("/playlist/{pid}/conflicts/resolve")
     async def playlist_resolve_conflicts(request: Request, pid: int):
@@ -374,9 +383,9 @@ def build(ctx) -> APIRouter:
                 except ValueError:
                     pass
         return templates.TemplateResponse(request, "_partials/conflicts_modal.html", {
-            "conflicts": store.enrichment.unresolved_conflicts_for_playlist(pid),
+            "conflicts": store.enrichment_reports.unresolved_conflicts_for_playlist(pid),
             "resolve_url": f"/playlist/{pid}/conflicts/resolve",
-            "count_left": store.enrichment.conflict_count_for_playlist(pid)})
+            "count_left": store.enrichment_reports.conflict_count_for_playlist(pid)})
 
     @router.get("/playlist/enrich/events/{job_id}")
     async def playlist_enrich_events(request: Request, job_id: int):

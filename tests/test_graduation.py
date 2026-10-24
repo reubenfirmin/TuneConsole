@@ -21,7 +21,7 @@ def test_graduation_crosses_threshold_and_resets(store):
     assert w.get("artist:Coltrane", 1.0) > 1.0
     assert w.get("era:1960", 1.0) > 1.0
     assert any(ax.startswith("genre:") and v > 1.0 for ax, v in w.items())
-    assert store.rec_surface.get_theme("artist:Coltrane") == pytest.approx(0.8)   # 2.0 - 1.2 remainder
+    assert store.rec_signals.get_theme("artist:Coltrane") == pytest.approx(0.8)   # 2.0 - 1.2 remainder
 
 
 def test_presence_weighting_tames_diffuse_artist(store):

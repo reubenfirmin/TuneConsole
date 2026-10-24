@@ -236,7 +236,7 @@ def test_refreshing_a_card_actually_changes_it():
 
     seen = []
     for _ in range(3):
-        s.rec_surface.refresh_card("explore", 3, 1000.0)
+        s.rec_ledger.refresh_card("explore", 3, 1000.0)
         card = home._carded(s, "explore", "From your catalog", pool, 1000.0)
         seen.append(tuple(t["key"] for t in card["tracks"]))
 

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 from yt_playlist.core.store import Store
-from yt_playlist.rec import embed, surfaces, ppr, mode_surfaces as ms
+from yt_playlist.rec import embedding_vectors as embed, surfaces, ppr, mode_surfaces as ms
 
 
 @pytest.fixture
@@ -36,7 +36,7 @@ def test_prepare_stashes_ppr_order(monkeypatch, store):
 
     payload = ms.prepare_bundles(store, now=10.0)
     assert payload["_ppr"] == {"1": ["k2", "k1"]}
-    assert store.rec_surface.get_proposals("mode_bundles")["_ppr"] == {"1": ["k2", "k1"]}
+    assert store.rec_proposals.get_proposals("mode_bundles")["_ppr"] == {"1": ["k2", "k1"]}
 
 
 def test_prepare_ppr_failopen(monkeypatch, store):

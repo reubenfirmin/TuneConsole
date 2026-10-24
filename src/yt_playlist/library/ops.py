@@ -1,4 +1,4 @@
-"""PlaylistOps: a service facade over the executor.
+"""PlaylistOps: a route-facing service facade over playlist operation owners.
 
 Route handlers shouldn't thread the store, the per-identity client provider, and the clock
 through every executor call. PlaylistOps binds those three once and exposes the high-level
@@ -13,15 +13,18 @@ from yt_playlist.core.accounts import client_for
 
 from yt_playlist.library import analysis
 from yt_playlist.library import ratings
-from yt_playlist.library import sync as sync_mod
 from yt_playlist.library.executor import (
-    MergePlan, add_tracks_to_playlist, apply_result, copy_into_playlist, copy_or_move_playlist,
-    copy_playlist, create_playlist_from_album, create_playlist_from_song, delete_empty_playlist, delete_playlist,
-    deserialize_plan, execute_planned, forget_empty_playlist, remove_track, rename_playlist,
-    reorder_track, search_versions, store_plan)
+    MergePlan, add_tracks_to_playlist, apply_result, copy_or_move_playlist,
+    delete_empty_playlist, delete_playlist,
+    execute_planned, forget_empty_playlist, remove_track, rename_playlist,
+    reorder_track, store_plan)
+from yt_playlist.library.playlist_creation import (
+    copy_into_playlist, copy_playlist, create_playlist_from_album, create_playlist_from_song)
+from yt_playlist.library.playlist_catalog import search_versions
 from yt_playlist.library.playlist_undo import undo_action
 from yt_playlist.library.liked_music import LikedMusic
 from yt_playlist.library.playlist_positions import retry_insertions
+from yt_playlist.library.playlist_deletion import reconcile_deletion
 
 logger = logging.getLogger("yt_playlist.ops")
 
@@ -183,13 +186,14 @@ class PlaylistOps:
         self.set_rating(video_id, "LIKE" if on else "INDIFFERENT")
         return {"liked": bool(on)}
 
-    def set_rating(self, video_id, status) -> dict:
+    def set_rating(self, video_id, status, *, after_confirmed=None) -> dict:
         """Rate the exact requested video in the main account, including the playing song."""
         identity_id,client = client_for(self.store,self._clients())
-        ratings.set_rating(self.store, identity_id, video_id, status, client, self.now_fn())
+        native = ratings.set_rating(self.store, identity_id, video_id, status, client, self.now_fn(),
+                                    after_confirmed=after_confirmed)
         if self._rating_updated is not None:
             self._rating_updated()
-        return {"likeStatus": status}
+        return {"likeStatus": status, **(native or {})}
 
     def _require_client(self, playlist_id):
         pl = self.store.playlists.get_playlist(playlist_id)
@@ -213,16 +217,9 @@ class PlaylistOps:
                                      self.now_fn(), delete_source=not copy_only)
 
     # --- undo ---------------------------------------------------------------
+    def recheck_deletion(self, action_id):
+        return reconcile_deletion(self.store, action_id, self._clients(), self.now_fn())
+
     def undo(self, action_id) -> None:
         clients = self._clients()
         undo_action(self.store, action_id, clients, self.now_fn())
-        # best-effort targeted refresh of the undo target (only meaningful for planned deletes);
-        # avoids a slow full re-sync. Non-plan kinds make deserialize_plan raise -> harmless skip.
-        try:
-            tgt = self.store.playlists.get_playlist(
-                deserialize_plan(self.store.actions.get_action(action_id)).plan.target_playlist_id)
-            if tgt is not None and tgt.identity_id in clients:
-                sync_mod.refresh_playlist(self.store, tgt.identity_id, clients[tgt.identity_id],
-                                          tgt.ytm_playlist_id, tgt.title, self.now_fn())
-        except Exception:  # noqa: BLE001 - best-effort refresh
-            logger.exception("post-undo refresh failed (non-fatal)")

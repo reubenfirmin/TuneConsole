@@ -8,7 +8,7 @@ import time
 import numpy as np
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import embed, layers, mix_tuning, negative, rec_params, transient
+from yt_playlist.rec import embedding_vectors as vectors, layers, mix_tuning, negative, rec_params, transient, vector_math
 from yt_playlist.rec.taste_analysis import taste_breadth
 from yt_playlist.rec.taste_context import PlaylistTaste
 
@@ -23,8 +23,8 @@ def _playlist_centroids(store, M, idx) -> PlaylistTaste:
     `M` (rows indexed by `idx` = {key: row}), play-weighted. Shared by playlist_taste (co-occurrence
     space) and content_taste (#38, content space). Generated + grab-bag catch-all playlists are skipped."""
     stats = store.charts.get_playlist_listen_stats()                # {pid: (last_ts, listen_count)}
-    excluded = store.rec_query.excluded_playlist_ids()         # generated playlists don't shape taste
-    catchall = store.rec_query.catchall_playlist_ids()                 # #38: large + genre-incoherent grab-bags only
+    excluded = store.rec_eligibility.excluded_playlist_ids()  # generated playlists don't shape taste
+    catchall = store.rec_eligibility.catchall_playlist_ids()  # overlarge grab-bags carry weak signal
     titles, cents, ws, pids = [], [], [], []
     for p in store.playlists.get_playlists():
         if p.id in excluded or p.id in catchall:             # skip generated + grab-bags (coherent large OK)
@@ -75,7 +75,7 @@ def playlist_taste(store) -> PlaylistTaste:
     tracks you actually play form one extra taste context weighted BEHAVIOR_TASTE_W, so taste leans on
     listening, not only playlist curation. Falls back to behavior-only when you have no shaping playlists,
     and to playlists-only when you've played nothing modeled."""
-    keys, V, idx = embed.load_vectors(store)
+    keys, V, idx = vectors.load_vectors(store)
     if V is None:
         return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
     pt = _playlist_centroids(store, V, idx)
@@ -98,7 +98,7 @@ def content_taste(store, *, snapshot=None) -> PlaylistTaste:
     can still be ranked by how well they fit the contexts you actually play, no projection needed.
     Empty until content vectors are built. Pass the candidate generation's snapshot when scoring
     vectors that were loaded separately, so a concurrent rebuild cannot change column meanings."""
-    ckeys, CV, cidx = embed.load_content_vectors(store, snapshot=snapshot)
+    ckeys, CV, cidx = vectors.load_content_vectors(store, snapshot=snapshot)
     if CV is None:
         return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
     return _playlist_centroids(store, CV, cidx)
@@ -112,7 +112,7 @@ AXIS_WEIGHT_UNBOUNDED = rec_params.GENRE_MAX ** 4
 def axis_adjusted_scores(scores, mult, cap=AXIS_WEIGHT_UNBOUNDED):
     """Re-weight taste scores by a precomputed per-key multiplier (generalizes genre weighting).
 
-    #86: rank/percentile base (bounds pool influence; see embed.percentile_scores), not
+    #86: rank/percentile base (bounds pool influence; see vector_math.percentile_scores), not
     shift-by-min. No-op when `mult` is falsy or all-neutral. Returns a new {key: score}.
 
     `cap` bounds the multiplier from ABOVE only. The base is a percentile in (0, 1] while the
@@ -124,7 +124,7 @@ def axis_adjusted_scores(scores, mult, cap=AXIS_WEIGHT_UNBOUNDED):
     genre (weight 0) must stay a hard exclusion, and a de-emphasis must keep biting."""
     if not scores or not mult or all(m == 1.0 for m in mult.values()):
         return scores
-    base = embed.percentile_scores(scores)
+    base = vector_math.percentile_scores(scores)
     return {k: base[k] * min(cap, mult.get(k, 1.0)) for k in scores}
 
 
@@ -323,7 +323,7 @@ def _audio_tilt_boost(store, now, idx, content_vecs=None, content_snapshot=None)
     out-of-corpus and so absent from the library store."""
     if content_vecs is None or content_snapshot is not None:
         snapshot = content_snapshot if content_snapshot is not None else store.rec_model.content_generation()
-        library = embed.load_content_vectors(store, snapshot=snapshot)
+        library = vectors.load_content_vectors(store, snapshot=snapshot)
         atilt = transient.audio_centroid_tilt(store, now, content_vecs=library)
         content_vecs = library if content_vecs is None else content_vecs
     else:
@@ -416,7 +416,7 @@ def score_with_traces(store, taste, keys, V, idx, now):
         mult, axis_details, final, ranked_base = None, {}, combined, combined
     else:
         mult, axis_details = weighted
-        ranked_base = embed.percentile_scores(combined)
+        ranked_base = vector_math.percentile_scores(combined)
         cap = rec_params.get_param(store, "axis_weight_cap")
         final = {k: ranked_base[k] * min(cap, mult.get(k, 1.0)) for k in combined}
     traces = {}

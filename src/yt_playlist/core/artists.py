@@ -3,7 +3,8 @@ import json
 import time
 
 from yt_playlist.core.activity import check_cancellable_work
-from yt_playlist.core.discovery_sources import reconcile_artist_sources
+from yt_playlist.core.discovery_sources import reconcile_artist as reconcile_discovery_artist
+from yt_playlist.rec import artist_state
 from yt_playlist.util.matching import normalize
 
 
@@ -61,66 +62,15 @@ def reconcile_provisional(conn, previous, target, *, source, now=None):
     conn.execute('INSERT INTO artist_redirects VALUES (?,?,?,?)',
                  (previous,target,source,time.time() if now is None else now))
     conn.execute('UPDATE artist_redirects SET artist_id=? WHERE artist_id=?',(target,previous))
-    for table in ('track_artists','album_artists','rec_feedback'):
+    for table in ('track_artists','album_artists'):
         conn.execute(f'UPDATE {table} SET artist_id=? WHERE artist_id=?',(target,previous))
     conn.execute('INSERT OR IGNORE INTO artist_aliases SELECT ?,alias,source FROM artist_aliases WHERE artist_id=?',
                  (target,previous))
-    reconcile_artist_sources(conn,previous,target)
+    reconcile_discovery_artist(conn,previous,target,source=source)
+    artist_state.reconcile_artist(conn,previous,target,source=source)
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='spotify_history_listens'").fetchone():
         conn.execute('UPDATE spotify_history_listens SET artist_id=? WHERE artist_id=?', (target,previous))
 
-    for table,clock in (('artist_scans','scanned_at'),('rec_artist_similar','fetched_at'),
-                        ('discovered_artists','found_at')):
-        rows = [dict(r) for r in conn.execute(f'SELECT * FROM {table} WHERE artist_id IN (?,?)',
-                                             (previous,target))]
-        if not rows:
-            continue
-        for r in rows:
-            conn.execute('INSERT OR IGNORE INTO identity_state_archive VALUES (?,?,?,?)',
-                ('artist_reconcile:'+table,json.dumps([previous,target,r['artist']]),json.dumps(r),source))
-        # Deterministic precedence for derived payloads; lifecycle evidence is folded below.
-        winner = max(rows,key=lambda r:(r[clock] if r[clock] is not None else float('-inf'),
-                                       r['artist_id']==target,json.dumps(r,sort_keys=True)))
-        if table=='discovered_artists':
-            # Impression evidence outlives pool membership. Deduplicate only views
-            # counted in both surviving candidate lifecycles, not a prior GC cycle.
-            lifecycles = {r['artist_id']:r['first_shown'] for r in rows}
-            duplicates = conn.execute("SELECT COUNT(*) FROM discovery_visible_impressions a "
-                "JOIN discovery_visible_impressions b ON a.view_id=b.view_id AND a.kind=b.kind "
-                "WHERE a.kind='artist' AND a.item_id=? AND b.item_id=? "
-                "AND a.shown_at>=? AND b.shown_at>=?",
-                (str(previous),str(target),lifecycles.get(previous),lifecycles.get(target))).fetchone()[0]
-            for field in ('found_at','first_shown','legacy_first_shown'):
-                winner[field] = min((r[field] for r in rows if r[field] is not None),default=None)
-            for field in ('last_shown','legacy_last_shown'):
-                winner[field] = max((r[field] for r in rows if r[field] is not None),default=None)
-            winner['offered_count'] = max(0,sum(r['offered_count'] or 0 for r in rows)-duplicates)
-            winner['legacy_offered_count'] = sum(r['legacy_offered_count'] or 0 for r in rows)
-        winner.update(artist_id=target,artist=token(target))
-        conn.execute(f'DELETE FROM {table} WHERE artist_id IN (?,?)',(previous,target))
-        columns = ','.join(winner)
-        conn.execute(f'INSERT INTO {table} ({columns}) VALUES ({",".join("?" for _ in winner)})',
-                     tuple(winner.values()))
-
-    impressions = conn.execute("SELECT view_id,shown_at FROM discovery_visible_impressions "
-                               "WHERE kind='artist' AND item_id=?",(str(previous),)).fetchall()
-    for r in impressions:
-        conn.execute("INSERT INTO discovery_visible_impressions VALUES (?,'artist',?,?) "
-            'ON CONFLICT(view_id,kind,item_id) DO UPDATE SET shown_at=MIN(shown_at,excluded.shown_at)',
-            (r['view_id'],str(target),r['shown_at']))
-    conn.execute("DELETE FROM discovery_visible_impressions WHERE kind='artist' AND item_id=?",(str(previous),))
-    edges = conn.execute('SELECT * FROM artist_similarity_targets WHERE source_artist_id=? OR target_artist_id=?',
-                         (previous,previous)).fetchall()
-    conn.execute('DELETE FROM artist_similarity_targets WHERE source_artist_id=? OR target_artist_id=?',
-                 (previous,previous))
-    for edge in edges:
-        conn.execute('INSERT INTO artist_similarity_targets VALUES (?,?,?) '
-            'ON CONFLICT(source_artist_id,target_artist_id) DO UPDATE SET weight=MAX(weight,excluded.weight)',
-            (target if edge['source_artist_id']==previous else edge['source_artist_id'],
-             target if edge['target_artist_id']==previous else edge['target_artist_id'],edge['weight']))
-    for table in ('rec_artist_vectors','rec_artist_content_vectors','rec_proposals'):
-        conn.execute(f'DELETE FROM {table}')
-    conn.execute("DELETE FROM settings WHERE key='rec_artist_content_model'")
     return target
 
 

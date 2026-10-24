@@ -7,7 +7,7 @@ from ytmusicapi.exceptions import YTMusicServerError
 
 from tests.conftest import FakeClient, _track
 from yt_playlist.core.store import Store
-from yt_playlist.library import executor, playlist_undo
+from yt_playlist.library import executor, playlist_undo, playlist_backups
 from yt_playlist.library.undo_conflicts import playlist_state
 from yt_playlist.util.action_kinds import APPLY_MERGE, COPY_PLAYLIST, UNDO
 
@@ -120,7 +120,7 @@ def test_failure_on_later_backup_does_not_recreate_completed_first_backup(store)
     backups = []
     for remote in ("ONE", "TWO"):
         pid = store.playlists.upsert_playlist(iid, remote, remote, 1, "", 1)
-        backups.append(executor.backup_playlist(store, pid, 2, client))
+        backups.append(playlist_backups.backup_playlist(store, pid, 2, client))
         client.delete_playlist(remote)
         store.playlists.remove_playlist(pid)
     aid = store.actions.record_action(APPLY_MERGE, "{}", "{}", "executed",

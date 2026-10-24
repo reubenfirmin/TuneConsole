@@ -72,6 +72,18 @@ def _is_auth_error(e) -> bool:
     return ("401" in s or "403" in s or "unauthorized" in s
             or "signinendpoint" in s or "singlecolumnbrowseresultsrenderer" in s)
 
+
+def _first_playlist_order(playlist):
+    """Get a small playable seed before large lists, empty lists, and Liked Music."""
+    if playlist["playlistId"] in ("LM", "VLLM"):
+        return (3, 0)
+    count = playlist.get("count")
+    if isinstance(count, str) and count.isdecimal():
+        count = int(count)
+    if type(count) is int and count > 0:
+        return (0, count)
+    return (2, 0) if count == 0 else (1, 0)
+
 def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
                   on_auth_expired=None, on_auth_ok=None, *, schedule=None):
     schedule = schedule or SyncSchedule(store, now)
@@ -130,7 +142,7 @@ def _sync_playlists(store, identity_id, client, now, on_progress, label, on_auth
     # Only these rows can be disproved by this library snapshot. A playlist created while
     # the remote fetch is in flight may not appear in it yet, even while it is playing.
     existing_playlists = [p for p in store.playlists.get_playlists() if p.identity_id == identity_id]
-    _emit(on_progress, "info", f"{label}: fetching playlists…")
+    _emit(on_progress, "info", f"{label}: fetching playlists…", stage="playlists")
     try:
         if schedule.resource_due(identity_id, "playlist_listing"):
             playlists = with_retry(lambda: client.get_library_playlists(limit=None),
@@ -177,8 +189,13 @@ def _sync_playlists(store, identity_id, client, now, on_progress, label, on_auth
     # sweeps reuse healthy membership without claiming fresh neutral evidence.
     full_refresh = (previous_listing.get("status") == "complete" and
                     schedule.resource_due(identity_id, "playlist_listing"))
+    first_load = (not schedule.state and not existing_playlists
+                  and store.settings.get_setting("last_sync_at") is None)
+    # Leave the stored listing in its original order. Only the first load prioritizes a
+    # quick seed; subsequent refreshes keep their existing ordering and retry policy.
+    fetch_order = sorted(playlists, key=_first_playlist_order) if first_load else playlists
     items = {}
-    for i, pl in enumerate(playlists, 1):
+    for i, pl in enumerate(fetch_order, 1):
         check_stopping()
         pid = pl["playlistId"]
         context = f"playlist {pl.get('title', '')!r} ({pid}), account {label!r} (identity {identity_id})"
@@ -190,9 +207,10 @@ def _sync_playlists(store, identity_id, client, now, on_progress, label, on_auth
             # An older snapshot cannot prove that a rating became neutral today.
             ratings_complete = False
             continue
+        _emit(on_progress, "info", f"Reading playlist {i} of {total}: {pl.get('title', '')}", i=i, total=total, stage="playlists")
         try:
             detail = with_retry(lambda: client.get_playlist(pid, limit=None), operation=f"fetch {context}",
-                                check_cancelled=check_stopping)
+                                attempts=1 if first_load else 3, check_cancelled=check_stopping)
             if (not isinstance(detail, dict) or not isinstance(detail.get("tracks"), list)
                     or any(not isinstance(t, dict) for t in detail["tracks"])
                     or detail.get("error")
@@ -266,7 +284,7 @@ def _sync_playlists(store, identity_id, client, now, on_progress, label, on_auth
         refreshed += 1
         items[pid] = resource("complete")
         _emit(on_progress, "step", f"{label} › {pl.get('title', '')} ({len(track_ids)} tracks)",
-              i=i, total=total)
+              i=i, total=total, stage="playlists")
 
     # Prune playlists no longer in this identity's remote library (deleted elsewhere / stale rows),
     # but ONLY when the fetch actually returned a library. An empty result is almost always a
@@ -321,7 +339,7 @@ def _sync_playlists(store, identity_id, client, now, on_progress, label, on_auth
 
 
 def _sync_history(store, identity_id, client, now, on_progress, label, on_auth_expired):
-    _emit(on_progress, "info", f"{label}: fetching history…")
+    _emit(on_progress, "info", f"{label}: fetching history…", stage="history")
     try:  # history is best-effort (powers stale detection); never let it fail the whole sync
         history = with_retry(lambda: client.get_history(),
                              operation=f"fetch history for {label!r} (identity {identity_id})",
@@ -394,6 +412,7 @@ def _sync_saved_albums(store, clients, on_progress, *, schedule=None):
             continue
         try:
             revisions[identity_id] = store.collection.saved_album_revision(identity_id)
+            _emit(on_progress, "info", "Reading saved albums…", stage="albums")
             albums = with_retry(lambda: client.get_library_albums(limit=None), check_cancelled=check_stopping)
             if not isinstance(albums, list):
                 raise ValueError("saved-album snapshot is unavailable")
@@ -466,7 +485,7 @@ def _materialize_album_tracks(store, clients, saved, on_progress):
         meta = saved[bid]
         _emit(on_progress, "step",
               f"albums › {i}/{len(todo)} {meta.get('title') or '(album)'}, {meta.get('artist') or '?'}",
-              count=len(todo), index=i)
+              count=len(todo), index=i, stage="albums")
         try:
             album = with_retry(lambda: client.get_album(bid), check_cancelled=check_stopping)
             if not isinstance(album, dict) or not isinstance(album.get("tracks"), list):
@@ -475,6 +494,7 @@ def _materialize_album_tracks(store, clients, saved, on_progress):
             raise
         except Exception as e:  # noqa: BLE001 - one album's failure shouldn't abort the rest
             logger.warning("album-tracks fetch failed for %s: %s", bid, e)
+            _emit(on_progress, "err", f"Could not read album {meta.get('title') or bid}: {error_summary(e)}")
             failed += 1
             continue
         for t in (album or {}).get("tracks") or []:
@@ -485,7 +505,7 @@ def _materialize_album_tracks(store, clients, saved, on_progress):
                                album_browse_id=bid, thumbnail=meta["thumbnail"],credits=t.get('artists') or album.get('artists'))
             added += 1
         remember_album(store, bid, album, meta)
-        if bid not in store.collection.complete_album_tracklist_ids():
+        if not store.collection.is_album_tracklist_complete(bid):
             failed += 1
     _emit(on_progress, "info", f"album tracks folded in: {added} from {len(todo)} album(s)")
     if failed:

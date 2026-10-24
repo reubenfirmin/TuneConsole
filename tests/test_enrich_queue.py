@@ -34,7 +34,7 @@ def test_tiers_ordered_new_played_container_orphan(store):
     store.settings.set_setting("enrich_caught_up_at", "100.0")
     newbie = _track(store, "v4", "NewArrival", "D", created_at=200.0)
 
-    order = _names(store.enrichment.next_enrich_batch(10))
+    order = _names(store.enrichment_queue.next_enrich_batch(10))
     assert order.index("NewArrival") < order.index("Played")          # tier 0 first
     assert order.index("Played") < order.index("InPlayedPlaylist")    # tier 1 before tier 2
     assert order.index("InPlayedPlaylist") < order.index("Orphan")    # tier 2 before tier 3
@@ -47,17 +47,17 @@ def test_played_songs_sorted_by_playcount(store):
     b = _track(store, "v2", "High", "Y", created_at=1.0)
     _play(store, identity_key("Low", "X"), 2)
     _play(store, identity_key("High", "Y"), 9)
-    assert _names(store.enrichment.next_enrich_batch(10))[:2] == ["High", "Low"]
+    assert _names(store.enrichment_queue.next_enrich_batch(10))[:2] == ["High", "Low"]
 
 
 def test_batch_excludes_processed_and_respects_limit(store):
     store.settings.set_setting("enrich_caught_up_at", "0")
     t1 = _track(store, "v1", "One", "A", created_at=1.0)
     _track(store, "v2", "Two", "B", created_at=1.0)
-    store.enrichment.mark_enriched([t1], now=5.0)                  # One is now processed
-    batch = store.enrichment.next_enrich_batch(10)
+    store.enrichment_queue.mark_enriched([t1], now=5.0)                  # One is now processed
+    batch = store.enrichment_queue.next_enrich_batch(10)
     assert _names(batch) == ["Two"]                     # processed track excluded
-    assert len(store.enrichment.next_enrich_batch(1)) == 1         # limit honored
+    assert len(store.enrichment_queue.next_enrich_batch(1)) == 1         # limit honored
 
 
 def test_startup_requeues_legacy_processed_rows_with_no_attempt_evidence(legacy_store):
@@ -70,7 +70,7 @@ def test_startup_requeues_legacy_processed_rows_with_no_attempt_evidence(legacy_
     row = store.conn.execute(
         "SELECT first_enriched_at, last_enriched_at FROM tracks WHERE id=?", (tid,)).fetchone()
     assert row["first_enriched_at"] is None and row["last_enriched_at"] is None
-    assert [t["id"] for t in store.enrichment.next_enrich_batch(10)] == [tid]
+    assert [t["id"] for t in store.enrichment_queue.next_enrich_batch(10)] == [tid]
 
 
 def test_coverage_stats_and_queue_remaining(store):
@@ -78,11 +78,11 @@ def test_coverage_stats_and_queue_remaining(store):
     _track(store, "v2", "Two", "B")
     store.tracks.set_track_enrichment(t1, "Rock", "1999")     # genre+year on one
     store.tracks.set_track_audio(t1, bpm=120.0)
-    store.enrichment.mark_enriched([t1], now=5.0)
-    cov = store.enrichment.coverage_stats()
+    store.enrichment_queue.mark_enriched([t1], now=5.0)
+    cov = store.enrichment_reports.coverage_stats()
     assert cov["total"] == 2 and cov["processed"] == 1
     assert cov["genre"] == 1 and cov["year"] == 1 and cov["bpm"] == 1 and cov["energy"] == 0
-    assert store.enrichment.queue_remaining() == 1                # Two still unprocessed
+    assert store.enrichment_reports.queue_remaining() == 1                # Two still unprocessed
 
 
 def test_resweep_selects_stale_incomplete_only(store):
@@ -91,18 +91,18 @@ def test_resweep_selects_stale_incomplete_only(store):
     t3 = _track(store, "v3", "Complete", "C")
     store.tracks.set_track_enrichment(t3, "Rock", "1999")     # complete-ish
     store.tracks.set_track_audio(t3, bpm=120.0, energy=0.5, danceability=0.5)
-    store.enrichment.mark_enriched([t1], now=1.0)                 # stale + incomplete
-    store.enrichment.mark_enriched([t2], now=1000.0)              # fresh
-    store.enrichment.mark_enriched([t3], now=1.0)                 # stale but complete
-    sweep = _names(store.enrichment.resweep_batch(10, stale_before=500.0))
+    store.enrichment_queue.mark_enriched([t1], now=1.0)                 # stale + incomplete
+    store.enrichment_queue.mark_enriched([t2], now=1000.0)              # fresh
+    store.enrichment_queue.mark_enriched([t3], now=1.0)                 # stale but complete
+    sweep = _names(store.enrichment_queue.resweep_batch(10, stale_before=500.0))
     assert sweep == ["Stale"]                          # only stale AND incomplete
 
 
 def test_processed_timeline_is_cumulative(store):
     for i, ts in enumerate([10.0, 20.0, 30.0]):
         t = _track(store, f"v{i}", f"T{i}", "A")
-        store.enrichment.mark_enriched([t], now=ts)
-    tl = store.enrichment.processed_timeline(buckets=3)
+        store.enrichment_queue.mark_enriched([t], now=ts)
+    tl = store.enrichment_reports.processed_timeline(buckets=3)
     assert tl[-1]["n"] == 3                            # cumulative reaches total
     assert [p["n"] for p in tl] == sorted(p["n"] for p in tl)  # monotonic
 
@@ -110,10 +110,10 @@ def test_processed_timeline_is_cumulative(store):
 def test_re_enrichment_extends_the_chart_without_counting_another_first_pass(store):
     first = _track(store, "v1", "First", "A")
     second = _track(store, "v2", "Second", "A")
-    store.enrichment.mark_enriched([first, second], now=10.0)
-    store.enrichment.mark_enriched([first], now=30.0)
-    store.enrichment.mark_enriched([first], now=50.0)
-    timeline = store.enrichment.processed_timeline(buckets=4)
+    store.enrichment_queue.mark_enriched([first, second], now=10.0)
+    store.enrichment_queue.mark_enriched([first], now=30.0)
+    store.enrichment_queue.mark_enriched([first], now=50.0)
+    timeline = store.enrichment_reports.processed_timeline(buckets=4)
     assert timeline[-1] == {"t": 50.0, "n": 2, "refresh": 1}
     assert [point["n"] for point in timeline] == [2, 2, 2, 2]
     assert [point["refresh"] for point in timeline] == [0, 0, 0, 1]
@@ -131,10 +131,10 @@ def test_one_priority_order_applies_to_both_sources_before_limit_and_offset(stor
     store.discovery.upsert_discovered_track(played_key, "disc-played", "Played discovery", "D", None, None,
                                   None, None, "radio:s", 1.0)
     _play(store, played_key, 5)
-    assert _names(store.enrichment.next_enrich_batch(10)) == [
+    assert _names(store.enrichment_queue.next_enrich_batch(10)) == [
         "Newest library", "New discovery", "Played discovery", "Old library"]
-    assert _names(store.enrichment.next_enrich_batch(2, 1)) == ["New discovery", "Played discovery"]
-    assert store.enrichment.queue_remaining() == 4
+    assert _names(store.enrichment_queue.next_enrich_batch(2, 1)) == ["New discovery", "Played discovery"]
+    assert store.enrichment_reports.queue_remaining() == 4
 
 
 def test_discovery_uses_artist_engagement_in_shared_priority(store):
@@ -143,18 +143,18 @@ def test_discovery_uses_artist_engagement_in_shared_priority(store):
     store.settings.set_setting("enrich_caught_up_at", "100")
     played = _track(store, "played", "Played", "Artist", created_at=1.0)
     _play(store, identity_key("Played", "Artist"), 5)
-    store.enrichment.mark_enriched([played], 10.0)
+    store.enrichment_queue.mark_enriched([played], 10.0)
     _track(store, "orphan", "Library orphan", "Other", created_at=2.0)
     store.discovery.upsert_discovered_track("new|artist", "new", "Artist discovery", "Artist", None, None,
                                   None, None, "radio:s", 1.0)
-    assert _names(store.enrichment.next_enrich_batch(10)) == ["Artist discovery", "Library orphan"]
+    assert _names(store.enrichment_queue.next_enrich_batch(10)) == ["Artist discovery", "Library orphan"]
 
 
 def test_container_counts_deduplicate_recordings_and_retries_yield_fairly(store):
     from yt_playlist.util.matching import identity_key
 
     store.settings.set_setting("enrich_caught_up_at", "100")
-    store.enrichment.reconcile_provider_configuration({
+    store.enrichment_state.reconcile_provider_configuration({
         "deezer": {"fingerprint": "test", "status": "available"}})
     playlist_anchor = _track(store, "anchor", "Playlist anchor", "P", created_at=1)
     alternate = _track(store, "alternate", "Playlist anchor", "P", created_at=1)
@@ -182,48 +182,48 @@ def test_container_counts_deduplicate_recordings_and_retries_yield_fairly(store)
                                  ("Album anchor", "Album anchor artist", 7),
                                  ("Artist anchor", "Shared artist", 8), ("Played", "Played artist", 2)):
         _play(store, identity_key(title, artist), count)
-    store.enrichment.mark_enriched([playlist_anchor, additional, album_anchor, artist_anchor], 10)
-    store.enrichment.record_enrichment_attempt(identity_key("Tried new", "Tried artist"),
+    store.enrichment_queue.mark_enriched([playlist_anchor, additional, album_anchor, artist_anchor], 10)
+    store.enrichment_state.record_enrichment_attempt(identity_key("Tried new", "Tried artist"),
                                                "deezer", {}, now=50)
 
-    batch = store.enrichment.next_enrich_batch(20, providers=["deezer"], now=1000)
+    batch = store.enrichment_queue.next_enrich_batch(20, providers=["deezer"], now=1000)
     # The playlist has six listening days, not eleven from its alternate upload.
     # A previously attempted job yields even when its new-arrival tier is higher.
     assert _names(batch) == ["New", "Played", "Artist candidate", "Album candidate",
                              "Playlist candidate", "Orphan", "Tried new"]
     assert len({t["recording_id"] for t in batch}) == len(batch)
     assert next(t for t in batch if t["title"] == "Playlist candidate")["id"] == playlist_candidate
-    assert _names(store.enrichment.next_enrich_batch(3, 2, providers=["deezer"], now=1000)) == [
+    assert _names(store.enrichment_queue.next_enrich_batch(3, 2, providers=["deezer"], now=1000)) == [
         "Artist candidate", "Album candidate", "Playlist candidate"]
 
 
 def test_combined_coverage_processed_list_activity_and_timeline(store):
     library = _track(store, "lib", "Library", "A", created_at=1.0)
-    store.enrichment.mark_enriched([library], 10.0)
+    store.enrichment_queue.mark_enriched([library], 10.0)
     store.discovery.upsert_discovered_track("new|b", "new", "Discovery", "B", None, None,
                                   "techno", "2024", "radio:s", 1.0)
     store.discovery.set_discovered_audio("new|b", bpm=128.0)
-    assert store.enrichment.queue_remaining() == 1
-    assert store.enrichment.coverage_stats(include_discovery=True) == {
+    assert store.enrichment_reports.queue_remaining() == 1
+    assert store.enrichment_reports.coverage_stats(include_discovery=True) == {
         "total": 2, "processed": 1, "genre": 1, "year": 1, "bpm": 1, "energy": 0, "danceability": 0}
     store.discovery.mark_discovered_enriched(["new|b"], 20.0)
-    assert store.enrichment.queue_remaining() == 0
-    assert [track["title"] for track in store.enrichment.enriched_tracks()] == ["Discovery", "Library"]
-    assert store.enrichment.enrichment_activity_stats(1000.0) == {"latest": 20.0, "recent": 0}
-    assert store.enrichment.enrichment_activity_stats(100.0) == {"latest": 20.0, "recent": 2}
-    assert store.enrichment.processed_timeline()[-1]["n"] == 2
+    assert store.enrichment_reports.queue_remaining() == 0
+    assert [track["title"] for track in store.enrichment_reports.enriched_tracks()] == ["Discovery", "Library"]
+    assert store.enrichment_reports.enrichment_activity_stats(1000.0) == {"latest": 20.0, "recent": 0}
+    assert store.enrichment_reports.enrichment_activity_stats(100.0) == {"latest": 20.0, "recent": 2}
+    assert store.enrichment_reports.processed_timeline()[-1]["n"] == 2
     # Onboarding's existing library-coverage query must not change with the discovery pool.
-    assert store.enrichment.coverage_stats()["total"] == 1
+    assert store.enrichment_reports.coverage_stats()["total"] == 1
 
 
 def test_resweep_selects_both_sources_by_oldest_check(store):
     library = _track(store, "lib", "Library", "A")
-    store.enrichment.mark_enriched([library], 20.0)
+    store.enrichment_queue.mark_enriched([library], 20.0)
     for title, timestamp in (("Stale", 10.0), ("Fresh", 1000.0), ("Complete", 1.0)):
         store.discovery.upsert_discovered_track(title, title, title, "B", None, None,
                                       None, None, "radio:s", 1.0)
         store.discovery.mark_discovered_enriched([title], timestamp)
     store.discovery.set_discovered_enrichment("Complete", "techno", "2024")
     store.discovery.set_discovered_audio("Complete", bpm=128.0, energy=.8, danceability=.7)
-    assert _names(store.enrichment.resweep_batch(10, stale_before=500.0)) == ["Stale", "Library"]
-    assert store.enrichment.resweep_batch(1, stale_before=500.0)[0]["identity_key"] == "Stale"
+    assert _names(store.enrichment_queue.resweep_batch(10, stale_before=500.0)) == ["Stale", "Library"]
+    assert store.enrichment_queue.resweep_batch(1, stale_before=500.0)[0]["identity_key"] == "Stale"

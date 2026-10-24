@@ -11,6 +11,7 @@ from yt_playlist.core.migrations import v027_artist_identity_redirects as upgrad
 from yt_playlist.core.migrations import v029_artist_provisional_names as names_upgrade
 from yt_playlist.core.store import Store
 from yt_playlist.library.sync import refresh_playlist
+from yt_playlist.rec import artist_state, model_refresh
 
 
 REGISTRY = (*MIGRATIONS[:28],Migration(29,'artist_provisional_names',names_upgrade.apply))
@@ -39,12 +40,12 @@ def test_first_provider_identity_keeps_provisional_id_and_feedback(store):
     tid = store.tracks.upsert_track('v','Song','Artist',None,200)
     aid = store.artists.track_credits(tid)[0]['artist_id']
     mute(store,aid)
-    store.rec_surface.cache_similar(aid,[['Neighbor',.8]],20)
+    store.artist_similarity.cache_similar(aid,[['Neighbor',.8]],20)
     refresh(store)
     assert store.artists.track_credits(tid)[0]['artist_id']==aid
     assert store.artists.get_artist(aid)['provider_ids']=={'youtube':'verified'}
     assert store.tracks.identity_key_for_video('v') in store.rec_model.suppressed_keys('for_you',30)
-    assert store.rec_surface.cached_similar(aid,30)==[['Neighbor',.8]]
+    assert store.artist_similarity.cached_similar(aid,30)==[['Neighbor',.8]]
     assert store.conn.execute('SELECT scanned_at FROM artist_scans WHERE artist_id=?',(aid,)).fetchone()[0]==10
 
 
@@ -63,7 +64,7 @@ def test_existing_provider_reconciles_state_and_old_handles_atomically(store,oth
     for aid,when in [(old,20),(target,30)]:
         store.discovery.upsert_discovered_artist('Artist',1,[],[],None,when,artist_id=aid)
         store.discovery.record_discovery_impressions('artist',[f'@artist:{aid}'],'same-view',when)
-        store.rec_surface.cache_similar(aid,[['Neighbor',.8]],when)
+        store.artist_similarity.cache_similar(aid,[['Neighbor',.8]],when)
     store.collection.add_saved_album({'browse':'album','title':'Album','artist':'Artist','credits':[]})
     store.conn.execute('UPDATE album_artists SET artist_id=?',(old,))
     store.conn.commit()
@@ -77,7 +78,7 @@ def test_existing_provider_reconciles_state_and_old_handles_atomically(store,oth
     assert store.conn.execute('SELECT artist_id FROM album_artists').fetchone()[0]==target
     candidate = store.discovery.get_discovered_artists()[0]
     assert candidate['found_at']==20 and candidate['offered_count']==1
-    assert store.rec_surface.cached_similar(old,40)==[['Neighbor',.8]]
+    assert store.artist_similarity.cached_similar(old,40)==[['Neighbor',.8]]
     assert store.conn.execute('SELECT COUNT(*) FROM artist_credit_observations').fetchone()[0]==observations+1
     assert store.conn.execute("SELECT COUNT(*) FROM identity_state_archive WHERE kind LIKE 'artist_reconcile:%'").fetchone()[0]==6
     store.discovery.mark_scanned(old,50)
@@ -98,6 +99,86 @@ def test_failed_contextual_reconciliation_rolls_back_all_state(store,monkeypatch
     with pytest.raises(RuntimeError,match='interrupted artist'):
         refresh(store)
     assert list(store.conn.iterdump())==before
+
+
+@pytest.mark.parametrize('via', ['track', 'release'])
+@pytest.mark.parametrize('feature', ['discovery', 'recommendations'])
+def test_feature_reconciliation_failure_rolls_back_ingestion_and_exact_release(store, monkeypatch, via, feature):
+    tid = store.tracks.upsert_track('v','Song','Artist','Album',200,album_browse_id='album')
+    old = store.artists.track_credits(tid)[0]['artist_id']
+    refresh(store,'known')
+    store.collection.add_saved_album({'browse':'album','title':'Album','artist':'Artist'})
+    mute(store,old)
+    store.discovery.upsert_discovered_artist('Artist',1,[],[],None,20,artist_id=old)
+    store.discovery.record_discovery_impressions('artist',[old],'view',30)
+    store.artist_similarity.cache_similar(old,[['Neighbor',.8]],20)
+    store.rec_model.replace_rec_artist_vectors([(artists.token(old),b'vector')])
+    store.rec_proposals.put_proposals('home',{'artist':artists.token(old)},20)
+    before = list(store.conn.iterdump())
+    owner, name = ((artists,'reconcile_discovery_artist') if feature=='discovery'
+                   else (artist_state,'reconcile_artist'))
+    original = getattr(owner,name)
+    def interrupted(*args,**kwargs):
+        original(*args,**kwargs)
+        raise RuntimeError('interrupted feature reconciliation')
+    monkeypatch.setattr(owner,name,interrupted)
+    with pytest.raises(RuntimeError,match='interrupted feature'):
+        if via=='track':
+            refresh(store)
+        else:
+            store.collection.cache_album_tracklist('album','Album','Artist',None,[],
+                credits=[{'name':'Artist','id':'verified'}])
+    assert list(store.conn.iterdump())==before
+
+
+@pytest.mark.parametrize('via', ['track', 'release'])
+def test_artist_reconciliation_excludes_retired_candidates_and_rebuilds_artist_space(store, via):
+    tid = store.tracks.upsert_track('v','Song','Artist','Album',200,album_browse_id='album')
+    old = store.artists.track_credits(tid)[0]['artist_id']
+    known = refresh(store,'known')
+    target = store.artists.track_credits(known)[0]['artist_id']
+    store.collection.add_saved_album({'browse':'album','title':'Album','artist':'Artist'})
+    store.tracks.set_track_genre(tid,'Techno')
+    assert model_refresh.rebuild(store,100)
+    assert artists.token(old) in dict(store.rec_model.get_rec_artist_content_vectors())
+    track_space = store.rec_model.content_generation()
+    store.rec_proposals.put_proposals('home',{'artist':artists.token(old)},100)
+    with store.conn:
+        store.conn.execute("INSERT INTO rec_model_selection_runs(started_at,result_json,identity_version) VALUES (1,'{}',2)")
+    if via=='track':
+        refresh(store)
+    else:
+        store.collection.cache_album_tracklist('album','Album','Artist',None,[],
+            credits=[{'name':'Artist','id':'verified'}])
+    assert store.artists.resolve(old)==target
+    assert not store.rec_model.get_rec_artist_vectors()
+    assert not store.rec_model.get_rec_artist_content_vectors()
+    assert store.rec_proposals.get_proposals('home') is None
+    assert store.rec_model.content_generation()==track_space
+    assert store.rec_refresh.has_pending_changes()
+    assert store.settings.get_setting('rec_artist_fit_inputs') is None
+    assert store.conn.execute('SELECT identity_version FROM rec_model_selection_runs').fetchone()[0]==0
+    prepared = model_refresh.rebuild(store,101)
+    assert prepared is not None and 'rec_artist_content_vectors' in prepared['vectors']
+    rebuilt = dict(store.rec_model.get_rec_artist_content_vectors())
+    assert artists.token(target) in rebuilt and artists.token(old) not in rebuilt
+    assert not store.rec_refresh.has_pending_changes()
+
+
+def test_equal_timestamp_reconciliation_prefers_surviving_payload_and_retains_originals(store):
+    tid = store.tracks.upsert_track('v','Song','Artist',None,200)
+    old = store.artists.track_credits(tid)[0]['artist_id']
+    target = store.artists.track_credits(refresh(store,'known'))[0]['artist_id']
+    for aid,score,neighbor in [(target,2,'Target neighbor'),(old,1,'Old neighbor')]:
+        store.discovery.upsert_discovered_artist('Artist',score,[],[],None,20,artist_id=aid)
+        store.artist_similarity.cache_similar(aid,[[neighbor,.8]],20)
+    refresh(store)
+    assert store.discovery.get_discovered_artists()[0]['score']==2
+    assert store.artist_similarity.cached_similar(target,30)==[['Target neighbor',.8]]
+    archived = list(store.conn.execute('SELECT kind,payload FROM identity_state_archive '
+                                      "WHERE kind LIKE 'artist_reconcile:%'"))
+    assert len(archived)==4
+    assert {r[0] for r in archived}=={'artist_reconcile:discovered_artists','artist_reconcile:rec_artist_similar'}
 
 
 @pytest.mark.parametrize('surviving',['old','target'])
@@ -136,9 +217,9 @@ def test_contextual_reconciliation_preserves_all_feedback_and_similarity_edges(s
     neighbor = store.artists.ensure_artist('Neighbor')
     mute(store,old)
     store.rec_model.record_feedback('for_you',f'artist:@artist:{target}','mute',now=2)
-    store.rec_surface.cache_similar(old,[['Neighbor',.5]],10)
-    store.rec_surface.cache_similar(target,[['Neighbor',.8]],20)
-    store.rec_surface.cache_similar(neighbor,[[f'@artist:{old}',.7]],20)
+    store.artist_similarity.cache_similar(old,[['Neighbor',.5]],10)
+    store.artist_similarity.cache_similar(target,[['Neighbor',.8]],20)
+    store.artist_similarity.cache_similar(neighbor,[[f'@artist:{old}',.7]],20)
     raw_feedback = list(store.conn.execute('SELECT surface,item_key,kind,created_at FROM rec_feedback'))
     refresh(store)
     assert list(store.conn.execute('SELECT surface,item_key,kind,created_at FROM rec_feedback'))==raw_feedback

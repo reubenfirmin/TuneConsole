@@ -59,7 +59,7 @@ def test_temporal_recall_excludes_generated_only_held_plays(store, source):
     # quarantined generated playlist, per play_events provenance) must not count as a successful
     # prediction. Keys with organic evidence in the window (mixed, or no play_events rows at all)
     # stay. Independent dated evidence also prevents exclusion.
-    from yt_playlist.repos.rec_query import GENERATED_GROUP
+    from yt_playlist.repos.base import GENERATED_GROUP
     iid = _two_cluster_playlists(store)
     day, t_recent = 86400, 1_000_000.0
     store.history.record_history_plays(iid, t_recent - 10 * day,
@@ -89,7 +89,7 @@ def test_temporal_recall_excludes_generated_only_held_plays(store, source):
 def test_temporal_recall_all_held_generated_is_insufficient_not_perfect(store, source):
     # When EVERY held-out play is app-caused, the honest answer is "no usable split", never a
     # recall score computed over zero real plays.
-    from yt_playlist.repos.rec_query import GENERATED_GROUP
+    from yt_playlist.repos.base import GENERATED_GROUP
     iid = _two_cluster_playlists(store)
     day, t_recent = 86400, 1_000_000.0
     store.history.record_history_plays(iid, t_recent - 10 * day,
@@ -152,7 +152,7 @@ def test_as_of_baskets_ignore_post_cutoff_playlist_changes(store):
     store.playlists.set_playlist_tracks(changed, tracks[4:])
     store.playlists.upsert_playlist(iid, "changed", "Changed", 4, "future", 200)
 
-    before, coverage = store.rec_query.rec_baskets_as_of(100)
+    before, coverage = store.rec_evidence.rec_baskets_as_of(100)
     changed_keys = {identity_key(f"T{i}", "Artist") for i in range(4, 8)}
 
     assert coverage["safe_playlists"] == 1

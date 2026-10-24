@@ -26,6 +26,23 @@ class OverlapRepo(Repo):
         self.conn.commit()
 
     @synchronized
+    def suppress_overlaps(self, pairs, now) -> None:
+        """Publish one bulk dismissal, preserving timestamps of previously hidden pairs."""
+        if not isinstance(pairs, (list, tuple)):
+            return
+        pairs = {tuple(pair) for pair in pairs
+                 if isinstance(pair, (list, tuple)) and len(pair) == 2
+                 and all(isinstance(ref, str) and ref for ref in pair)}
+        if not pairs:
+            return
+        with self.conn:
+            refs = {ref: ensure(self.conn, ref) for ref in sorted({ref for pair in pairs for ref in pair})}
+            normalized = {tuple(sorted((refs[a], refs[b]))) for a, b in pairs}
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO suppressed_overlaps(a,b,created_at) VALUES (?,?,?)",
+                [(a, b, now) for a, b in sorted(normalized)])
+
+    @synchronized
     def unsuppress_overlap(self, ytm_a, ytm_b) -> None:
         ytm_a,ytm_b = ensure(self.conn,ytm_a),ensure(self.conn,ytm_b)
         a, b = sorted((ytm_a, ytm_b))

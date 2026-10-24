@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from yt_playlist.core.store import Store
-from yt_playlist.rec import embed, layers, mode_surfaces, ppr, rec_params, surfaces, taste_modes
+from yt_playlist.rec import content_model, embedding_vectors as vectors, layers, mode_surfaces, ppr, rec_params, surfaces, taste_modes
 from tests import model_support
 
 
@@ -34,7 +34,7 @@ def test_failed_publication_rolls_back_all_artifacts_even_after_later_commit(sto
 
 def test_discovery_encoder_retries_against_competing_library_generation(store, monkeypatch):
     tid = _seed(store)
-    encode = embed._encode_discovered
+    encode = content_model.encode_discovered
     switched = False
 
     def competing_encode(rows, model):
@@ -45,8 +45,8 @@ def test_discovery_encoder_retries_against_competing_library_generation(store, m
             model_support.build_content_model(store)
         return encode(rows, model)
 
-    monkeypatch.setattr(embed, "_encode_discovered", competing_encode)
-    assert embed.build_discovered_content_vectors(store) == 0
+    monkeypatch.setattr(content_model, "encode_discovered", competing_encode)
+    assert vectors.build_discovered_content_vectors(store) == 0
     snapshot = store.rec_model.content_generation()
     assert "fam:folk-country" in json.loads(snapshot["model"])["cat"]
     assert snapshot["library"] and snapshot["discovered"] == []
@@ -111,7 +111,7 @@ def _seed_remappable_space(store):
         list(zip(keys, (v.tobytes() for v in vectors))), [], json.dumps(model), "rev", "old", "")
     store.modes.replace_modes([
         {"mode_id": i + 1, "label": key, "families": [], "centroid": vectors[i],
-         "size": 1, "rep_keys": [key], "space": embed.content_model_fingerprint(model)}
+         "size": 1, "rep_keys": [key], "space": content_model.content_model_fingerprint(model)}
         for i, key in enumerate(keys[:2])
     ], retired_ids=[], now=1)
 
@@ -161,7 +161,7 @@ def test_bundles_keep_ppr_in_candidate_generation_during_pool_rebuild(store, mon
 
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", capture)
     assert mode_surfaces.prepare_bundles(store, 100_000) is None
-    assert store.rec_surface.get_proposals("mode_bundles") is None
+    assert store.rec_proposals.get_proposals("mode_bundles") is None
     payload = calculated[0]
     assert payload["_ppr"]["1"][0] == keys[0]
     assert payload["_ppr"]["2"][0] == keys[1]

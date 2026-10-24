@@ -27,6 +27,23 @@ WebSocket only from that `chrome-extension://` origin, which a web page cannot f
 
 ## What you should see
 
+- The extension toolbar icon opens a connection and setup panel. It explains that mixes, library
+  tools and listening history require the local TuneConsole app. A fresh install opens
+  `https://tuneconsole.com/extension-setup`, a dedicated page with app downloads, launch steps, and
+  Mac first-launch approval instructions. If the app is already connected, it opens the app instead.
+  Starting the app from setup replaces the install instructions with step 3: “Time to rock out!”
+  and an Open TuneConsole button. Reloading an unpacked
+  development extension also runs this check, as does
+  re-enabling the extension on Chrome 155 and newer. The toolbar and YouTube Music reminder link
+  to this same page. No extra management permission is required.
+  Setup reuses an existing TuneConsole website tab, and opening the app reuses its existing tab.
+- On YouTube Music, an app that remains disconnected for five seconds gets a setup reminder.
+  Starting the app removes it automatically. Dismissal lasts for that tab's session, including page
+  reloads; the toolbar panel stays available. Brief disconnects do not flash the reminder. Store
+  updates and browser restarts never open a setup tab. Setup does not interrupt playback.
+- The extension alone keeps YouTube Music working normally; it does not provide standalone
+  recommendations or save listening history while the app is stopped. Playback events are relayed
+  to the running local app rather than buffered for offline history.
 - The app shows the extension connection status. Routine connection and playback activity
   stays quiet in the browser console.
 - When the app makes a request (for example, a sync), the request appears in the YTM tab's
@@ -66,6 +83,18 @@ Now Playing and playback controls select the same music tab, preferring audible,
 Muted or paused secondary tabs cannot replace an audible tab's card. Playback launches and library
 requests share tab-creation coordination, and concurrent library requests share the startup wait
 for a new or already-loading music tab before sending fetches.
+
+The two-second Now Playing heartbeat carries the player's per-song elapsed time through
+both extension worlds and the worker. The app estimates progress locally between heartbeats,
+then reconciles seeks, track changes and pause state with the next snapshot. Timing comes from
+the same player's getCurrentTime() API as its song ID. The server supplies the full length stored
+for that exact video ID. Music's getDuration() can grow as media buffers, so it is never used
+for the progress total, including when an older extension still sends it. An unknown catalog
+length stays unknown until metadata arrives. The underlying video's media timeline can span
+multiple songs, so neither MAIN nor DOM fallback uses it for progress.
+The sensor rechecks the player's identity after reading timing to reject a changing sample.
+Missing player timing remains unknown; progress never waits for the media stream to reset.
+Reduced motion keeps the thin progress divider visible; unknown/non-finite times remain unknown.
 
 The extension observes the video element and player UI to capture listening behavior. Each event
 includes the video ID, playback position (in seconds), track duration, and current shuffle/repeat
@@ -168,6 +197,9 @@ the public site's Local Player button reuses an existing app tab.
 - `worker/ratings.js`: one native desired-rating recovery on its original tab, with a deadline,
   revision checks, cancellation, and bounded pending/terminal diagnostics.
 - `worker/sensors.js`: isolated/MAIN probes, injection, resync, and idle-only reload cooldowns.
+- `worker/setup.js`: connection-only status for the toolbar panel and YouTube Music setup reminder.
+- `music_setup.js`: isolated, dismissible setup reminder on YouTube Music; no playback controls.
+- `setup.html`, `setup.js`, `setup.css`: toolbar connection and setup panel.
 - `worker/site.js`: public-site connection status and local-player tab activation, with its own
   coalesced open request. It receives no music/library state.
 - `worker/radio.js`: saved-playlist companion injection and response delivery. It borrows playback's
@@ -198,7 +230,7 @@ MAIN and isolated scripts on Music, and the public-site script on the two TuneCo
 
 | Boundary | Messages and response |
 | --- | --- |
-| MAIN sensor to isolated content | `window.postMessage` carries `__tcSensorVersion: 4` plus `__tcNow` (player/bar metadata, queue, account availability, pause/mute) with `__tcSensorRevision: 4`, or `__tcPlayer` (raw playback event). The isolated receiver accepts messages from the same window, ignores obsolete sensor versions/revisions, and persists neither unknown-account nor unverified metadata snapshots as plays. |
+| MAIN sensor to isolated content | `window.postMessage` carries `__tcSensorVersion: 4` plus `__tcNow` (player/bar metadata, queue, account availability, pause/mute, elapsed position) with `__tcSensorRevision: 8`, or `__tcPlayer` (raw playback event). The isolated receiver accepts messages from the same window, ignores obsolete sensor versions/revisions, and persists neither unknown-account nor unverified metadata snapshots as plays. |
 | MAIN fetch observer to isolated content | `__tcCuration` carries a bounded request body, endpoint, page URL, and account. Ratings include settled `success`/`httpStatus`; other actions report intent. The observer returns the page's original fetch promise unchanged. |
 | Isolated content to MAIN | `__tcSensorProbe: {version, id}` requests an immediate sample. MAIN echoes `__tcSensorProbeId` on `__tcNow`. Health and rating commands use this handshake instead of trusting interval timing. |
 | Worker to isolated content | `sensor-ping` replies with receiver revision and MAIN version/revision/age, plus bounded `capture` diagnostics from its fresh MAIN probe; `main: false` checks fetch readiness alone. `fetch` carries URL/method/body/auth and replies with status/body/time zone. Both worker and receiver enforce the youtubei allowlist. |
@@ -210,7 +242,7 @@ MAIN and isolated scripts on Music, and the public-site script on the two TuneCo
 | Public site to worker | Only `local-player-status` and `open-local-player`, checked against the sender's exact site origin. Replies expose connection/open status, never account, track, or library data. |
 
 Native rating recovery carries a `ratingId` and absolute `expiresAt`. Every attempt stays on
-the original tab and checks receiver revision 3 and MAIN revision 4 before delivery. The receiver
+the original tab and checks the configured receiver and MAIN revisions before delivery. The receiver
 checks expiry and cancellation after its fresh probe, immediately before a possible click.
 `cancel-rating` invalidates an awaiting probe when a newer request, song/account snapshot, tab
 closure, or recovery deadline ends the job. A lost reply or an unconfirmed click ends recovery.

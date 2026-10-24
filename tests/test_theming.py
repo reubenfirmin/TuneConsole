@@ -82,6 +82,8 @@ def test_every_referenced_token_is_defined():
         "--node-hue", "--node-sat", "--node-light", "--bg-grad", "--v", "--tile",
         "--mix-order", "--mix-x", "--mix-y", "--genre-tint",
         "--part-opacity", "--playlist-c", "--share",
+        "--arrival-delay", "--track-delay",
+        "--setup-banner-height",
     }
     missing = {}
     for p in _source_files():
@@ -116,15 +118,15 @@ def test_tokens_css_loads_before_the_stylesheets_that_use_it(template):
 
 @pytest.mark.parametrize("template", ["base.html", "story_reel.html", "generating.html"])
 def test_application_stylesheets_keep_cascade_order(template):
-    expected = ["tokens.css", "app.css"]
+    expected = ["tokens.css", "app.css", "components.css"]
     text = (WEB / "templates" / template).read_text()
     sheets = re.findall(r'<link[^>]+href="/static/([a-z_-]+\.css)', text)
     assert sheets[:len(expected)] == expected, f"{template} stylesheet order changed: {sheets}"
     assert "page-overrides.css" not in sheets
     if template == "story_reel.html":
-        assert sheets == ["tokens.css", "app.css", "story.css"]
+        assert sheets == ["tokens.css", "app.css", "components.css", "story.css"]
     if template == "generating.html":
-        assert sheets == ["tokens.css", "app.css", "clusters.css", "generating.css"]
+        assert sheets == ["tokens.css", "app.css", "components.css", "clusters.css", "generating.css"]
 
 
 def test_no_inline_style_blocks_in_templates():
@@ -158,7 +160,7 @@ def test_generating_takeover_title_is_scoped():
 def test_flat_surface_foundation_and_protected_experiences():
     """Ordinary cards use flat roles; Clusters and Recap keep their palette bindings."""
     tokens = TOKENS.read_text()
-    app = (WEB / "static" / "app.css").read_text()
+    app = (WEB / "static" / "components.css").read_text()
     for role in ("--canvas", "--surface-card", "--surface-interactive", "--surface-raised",
                  "--surface-inset", "--border-subtle", "--border-strong"):
         assert role in tokens
@@ -194,7 +196,7 @@ def test_application_shell_is_flat():
 
 
 def test_flat_card_variants_exist_and_are_used():
-    app = (WEB / "static" / "app.css").read_text()
+    app = (WEB / "static" / "components.css").read_text()
     templates = "\n".join(p.read_text() for p in (WEB / "templates").rglob("*.html"))
     for variant in ("interactive", "featured", "status", "data", "inset", "toolbar"):
         selector = f".card--{variant}"
@@ -207,7 +209,7 @@ def test_flat_card_variants_exist_and_are_used():
 
 
 def test_neon_green_is_reserved_for_explicit_primary_actions():
-    app = (WEB / "static" / "app.css").read_text()
+    app = (WEB / "static" / "components.css").read_text()
     base = re.search(r"(?s)button, \.btn\s*\{(.*?)\}", app).group(1)
     base_hover = re.search(r"(?s)button:hover, \.btn:hover\s*\{(.*?)\}", app).group(1)
     primary = re.search(r"(?s)\.btn-primary\s*\{(.*?)\}", app).group(1)
@@ -251,7 +253,7 @@ def test_shared_typography_uses_the_application_scale():
                  "--leading-compact", "--leading-body"):
         assert role in tokens
 
-    app = (WEB / "static" / "app.css").read_text()
+    app = "\n".join((WEB / "static" / name).read_text() for name in ("app.css", "components.css"))
     for selector, role in ((".page-head h1", "--type-page"), ("h2.section", "--type-xl"),
                            ("h3.section", "--type-lg"), ("button, .btn", "--type-ui"),
                            (".section-note", "--type-ui")):
@@ -261,7 +263,11 @@ def test_shared_typography_uses_the_application_scale():
     # Home's display treatments are page-owned; shared controls keep the application scale.
     ordinary = "\n".join(
         (WEB / "static" / name).read_text()
-        for name in ("app.css", "onboarding.css", "analytics.css", "setup.css")
+        for name in ("app.css", "components.css", "tables.css", "song-actions.css", "genre-controls.css",
+                     "library-controls.css", "onboarding.css", "setup.css", "visualizations.css",
+                     "taste-controls.css", "taste-learning.css", "taste-evidence.css",
+                     "taste-profile.css", "taste-health.css", "enrichment.css",
+                     "enrichment-conflicts.css", "discovery.css", "road-trip.css")
     )
     assert not re.search(
         r"font-size:\s*(?:\.7[24568]|\.8(?:0|2|4|5|6|8)?|\.9(?:0|2|5|8)?|1\.(?:05|1|12|15))rem",
@@ -271,7 +277,7 @@ def test_shared_typography_uses_the_application_scale():
 
 def test_shared_spacing_scale_and_layout_primitives_are_used():
     tokens = TOKENS.read_text()
-    app = (WEB / "static" / "app.css").read_text()
+    app = (WEB / "static" / "components.css").read_text()
     templates = "\n".join(
         (WEB / "templates" / name).read_text()
         for name in ("albums.html", "charts.html", "cleanup.html", "move.html", "_partials/move_panel.html",
@@ -301,14 +307,15 @@ def test_static_presentation_is_not_repeated_inline():
     )
     assert not [rule for rule in forbidden if rule in templates]
 
-    app = (WEB / "static" / "app.css").read_text()
+    app = (WEB / "static" / "components.css").read_text()
     for selector in (".push-end", ".section-flush", ".inline", ".control-auto",
                      ".cell-actions", ".col-thumb", ".col-length"):
         assert selector in app
 
 
 def test_dense_pages_have_scoped_compact_screen_behavior():
-    app = (WEB / "static" / "app.css").read_text()
+    app = "\n".join((WEB / "static" / name).read_text()
+                    for name in ("components.css", "library-controls.css"))
     assert "@media (max-width: 720px)" in app
     for selector in (".playlist-index", ".track-table", ".album-index", ".table-scroll"):
         assert selector in app
@@ -328,7 +335,7 @@ def test_dense_pages_have_scoped_compact_screen_behavior():
 
 
 def test_ordinary_interactions_have_keyboard_and_touch_support():
-    app = (WEB / "static" / "app.css").read_text()
+    app = (WEB / "static" / "components.css").read_text()
     assert "main:not(.page-clusters)" in app
     assert ":focus-visible" in app
     assert "@media (pointer: coarse)" in app
@@ -369,7 +376,7 @@ def test_final_style_foundation_has_no_obsolete_layout_aliases():
 
 def test_selected_controls_use_the_flat_blue_application_signal():
     tokens = TOKENS.read_text()
-    app = (WEB / "static" / "app.css").read_text()
+    app = (WEB / "static" / "components.css").read_text()
     merge = (WEB / "static" / "merge.css").read_text()
     assert "--control-selected:      var(--p-blue-600)" in tokens
     assert "--control-primary:       var(--control-selected)" in tokens

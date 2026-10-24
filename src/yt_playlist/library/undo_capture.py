@@ -8,6 +8,25 @@ from yt_playlist.library.undo_conflicts import playlist_state
 logger = logging.getLogger(__name__)
 
 
+def capture_copy(client, playlist_id, identity_id, expected_videos=None, *, title=None,
+                 description=None, addition=None):
+    """Copy recovery uses the exact constrained read of its additions, including partial writes."""
+    metadata = {k: v for k, v in {"title": title, "description": description}.items() if v is not None}
+    if addition is not None:
+        expected_videos = addition.confirmed
+    if addition is not None and addition.failure:
+        snapshot = addition.failure.snapshot
+        post = playlist_state(snapshot) if snapshot is not None else None
+        if post is not None and (post["videos"] != list(addition.confirmed) or any(
+                post.get(k) is not None and post[k] != v for k, v in metadata.items())):
+            post = None
+        return {"new_ytm": playlist_id, "target_identity": identity_id,
+                "post": post, "addition": addition.diagnostics()}
+    return {"new_ytm": playlist_id, "target_identity": identity_id,
+            "post": capture_post(client, playlist_id, expected_videos=expected_videos,
+                                 expected_metadata=metadata)}
+
+
 def capture_post(client, playlist_id, *, expected_videos, expected_metadata=None,
                  sleep=time.sleep):
     # A complete later read proves contents, not ownership. Never capture an

@@ -73,5 +73,5 @@ def test_waterfall_resolves_mbid_then_fills_and_records_evidence(store, monkeypa
     rows = store.tracks.tracks_missing_audio(pid)
     assert rows == []  # fully populated now
     assert any(e.get("type") == "done" for e in events)
-    attempt = store.enrichment.enrichment_attempts("song|artist")["acousticbrainz"]
+    attempt = store.enrichment_state.enrichment_attempts("song|artist")["acousticbrainz"]
     assert attempt["status"] == "found" and attempt["fields"]["mb_recording_id"] == "mbid-live"

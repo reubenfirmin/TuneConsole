@@ -147,8 +147,9 @@ def test_new_song_playlist_seeds_before_first_readable_page(songs, monkeypatch, 
 
     monkeypatch.setattr(client, 'add_playlist_items', seed)
     monkeypatch.setattr(client, 'get_playlist', reader.get_playlist)
-    monkeypatch.setattr(executor, '_capture_post',
-                        lambda *a, **kw: undo_capture.capture_post(*a, **kw, sleep=lambda _: None))
+    capture = undo_capture.capture_post
+    monkeypatch.setattr(undo_capture, 'capture_post',
+                        lambda *a, **kw: capture(*a, **kw, sleep=lambda _: None))
     result = songs['http'].post('/songs/create-playlist', json={'name': 'Mix', 'song': SONG})
     assert result.status_code == 200
     data = result.json()
@@ -228,7 +229,7 @@ def test_metadata_loads_current_values_originals_and_genre_sources(songs):
     tid = store.playlists.get_playlist_track_ids(songs['source'])[0]
     store.tracks.set_track_title(tid, 'Corrected title')
     store.tracks.set_track_enrichment(tid, 'Electronic', '1995')
-    store.enrichment.log_enrichment(tid, 'run', 'discogs', 'genre', 'Art Pop', now=1)
+    store.enrichment_state.log_enrichment(tid, 'run', 'discogs', 'genre', 'Art Pop', now=1)
     data = songs['http'].get('/songs/metadata', params={'video_id': 'owned-song'}).json()
     assert data['metadata'] == {
         'track_id': tid, 'title': 'Corrected title', 'artist': 'Artist & Friends',
@@ -268,7 +269,7 @@ def test_metadata_save_preserves_unchanged_provider_selection(songs):
     body = {'song': {'video_id': 'owned-song', 'title': 'Owned Song'},
             'title': 'Fixed title', 'artist': 'Artist & Friends', 'genre': 'Electronic', 'year': '1995'}
     assert songs['http'].post('/songs/metadata', json=body).status_code == 200
-    fields = store.enrichment.metadata_provenance(tid)['fields']
+    fields = store.enrichment_reports.metadata_provenance(tid)['fields']
     assert fields['genre']['source'] == fields['mb_year']['source'] == 'discogs'
     assert not fields['genre']['override'] and not fields['mb_year']['override']
 

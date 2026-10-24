@@ -27,7 +27,7 @@ def test_duplicate_legacy_decisions_reconcile_without_arbitrary_winner(legacy_st
     s.conn.commit()
     s.init_schema()
     assert s.tracks.get_track_enrichment(3)[0] == ''
-    detail = s.enrichment.enrichment_conflict_detail(3,'genre')
+    detail = s.enrichment_reports.enrichment_conflict_detail(3,'genre')
     assert {o['value'] for o in detail['options']} >= set(values)
     conflict = s.conn.execute('SELECT resolved,resolved_value FROM enrichment_conflict').fetchone()
     assert tuple(conflict) == (0,None)
@@ -35,9 +35,9 @@ def test_duplicate_legacy_decisions_reconcile_without_arbitrary_winner(legacy_st
     choices = s.conn.execute('SELECT value_json,chosen_at FROM metadata_decisions '
                              'WHERE legacy_ref IS NOT NULL ORDER BY chosen_at').fetchall()
     assert [(json.loads(r[0]),r[1]) for r in choices] == [(values[0],10),(values[1],20)]
-    before = s.enrichment.metadata_provenance(3)
+    before = s.enrichment_reports.metadata_provenance(3)
     s.init_schema()
-    assert s.enrichment.metadata_provenance(3) == before
+    assert s.enrichment_reports.metadata_provenance(3) == before
     s.enrichment.resolve_conflict(7,'genre',values[1],now=30)
     assert s.tracks.get_track_enrichment(3)[0] == values[1]
     assert tuple(s.conn.execute('SELECT resolved,resolved_value FROM enrichment_conflict').fetchone()) == (1,values[1])
@@ -66,13 +66,13 @@ def test_provider_refresh_selection_and_blank_override_with_worker_sink(store):
         catalog.choose_field(store.conn,track,'bpm',None)
     a._by_title['Song'] = {'genre':'House','bpm':128}
     run()
-    fields = store.enrichment.metadata_provenance(track)['fields']
+    fields = store.enrichment_reports.metadata_provenance(track)['fields']
     assert fields['genre'] == {'value':'','override':True,'source':'user'}
     assert fields['bpm'] == {'value':None,'override':True,'source':'user'}
     assert tuple(store.conn.execute('SELECT genre,bpm,typeof(bpm) FROM recordings').fetchone()) == ('House',128,'real')
     with store.conn:
         store.conn.execute('DELETE FROM entry_field_choices WHERE entry_id=?', (track,))
-    fields = store.enrichment.metadata_provenance(track)['fields']
+    fields = store.enrichment_reports.metadata_provenance(track)['fields']
     assert fields['genre'] == {'value':'House','override':False,'source':'musicbrainz'}
     assert store.conn.execute('SELECT COUNT(*) FROM metadata_findings').fetchone()[0] == 12
 
@@ -95,13 +95,13 @@ def test_populated_upgrade_does_not_invent_user_intent_and_rolls_back(tmp_path):
     assert not s.conn.execute("SELECT 1 FROM sqlite_master WHERE name='metadata_decisions'").fetchone()
     assert s.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 19
     s.init_schema()
-    fields = s.enrichment.metadata_provenance(1)['fields']
+    fields = s.enrichment_reports.metadata_provenance(1)['fields']
     assert fields['genre'] == {'value':'Rock','override':False,'source':'legacy_unknown'}
     assert fields['title'] == {'value':'Edited','override':True,'source':'user'}
     assert fields['orig_title']['value'] == 'Original'
-    before = s.enrichment.metadata_provenance(1)
+    before = s.enrichment_reports.metadata_provenance(1)
     s.init_schema()
-    assert s.enrichment.metadata_provenance(1) == before
+    assert s.enrichment_reports.metadata_provenance(1) == before
     for backup in (tmp_path / 'backups').glob('*.db'):
         with sqlite3.connect(backup) as conn:
             assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'

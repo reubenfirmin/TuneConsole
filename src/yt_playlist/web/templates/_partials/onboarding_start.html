@@ -1,0 +1,41 @@
+<div{% if not subsequent_mix %} id="onboarding-start"{% endif %}{% if not proto %}
+     hx-get="/home/onboard/start" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+  {% if proto %}
+  {% set p = proto %}
+  <section class="starter-mix" id="gen-{{ p.lane }}" aria-labelledby="starter-title-{{ p.lane }}">
+    <div class="gen-card-body" data-name="{{ p.name }}">
+      <header class="starter-head">
+        <div>
+          <h2 id="starter-title-{{ p.lane }}">Something to listen to</h2>
+          <p class="starter-context">while we complete setup for you.</p>
+        </div>
+        <div class="starter-actions">
+          <button class="btn btn-primary starter-play" type="button" aria-label="Save and play this mix"
+                  hx-post="/home/generate" hx-target="#gen-{{ p.lane }}" hx-swap="outerHTML" hx-disabled-elt="this"
+                  onclick="genOpenYT('gen-{{ p.lane }}')"
+                  hx-vals='js:{name: genName("gen-{{ p.lane }}"), tracks: genTracks("gen-{{ p.lane }}"), recipe: ""}'>
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5a1 1 0 0 1 1.5-.86l12 7a1 1 0 0 1 0 1.72l-12 7A1 1 0 0 1 7 18.5z"/></svg>Play mix
+          </button>
+        </div>
+      </header>
+      <ol class="starter-tracks">
+        {% for f in p.tracks %}
+        <li class="gen-row starter-track" data-key="{{ f.key }}" data-vid="{{ f.video_id }}"
+            data-title="{{ f.title }}" data-artist="{{ f.artist }}" data-album="{{ f.album }}" data-thumb="{{ f.thumbnail or '' }}"
+            style="--track-delay: {{ loop.index0 * 35 }}ms">
+          <span class="starter-number" aria-hidden="true">{{ loop.index }}</span>
+          <a class="starter-song" href="https://music.youtube.com/watch?v={{ f.video_id|urlencode }}" target="_blank" rel="noopener"
+             aria-label="Play {{ f.title }} on YouTube Music">
+            <span class="starter-thumb"><img src="{{ f.thumbnail or ('https://i.ytimg.com/vi/' ~ (f.video_id|urlencode) ~ '/hqdefault.jpg') }}"
+                 alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()"></span>
+            <span class="starter-meta"><span class="gen-title">{{ f.title }}</span><span class="gen-artist">{{ f.artist }}</span></span>
+          </a>
+        </li>
+        {% endfor %}
+      </ol>
+    </div>
+  </section>
+  {% else %}
+  <span class="sr-only" role="status">Finding something to listen to while we complete setup.</span>
+  {% endif %}
+</div>

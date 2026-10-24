@@ -5,7 +5,7 @@ axis at the two it exists on (SESSION / TRANSIENT).
 import numpy as np
 import pytest
 
-from yt_playlist.rec import embed, graduation, layers, rec_params, scoring, taste_viz, transient
+from yt_playlist.rec import embedding_vectors as embed, graduation, layers, rec_params, scoring, taste_viz, transient
 
 
 def _install_now_modes(store):
@@ -36,10 +36,10 @@ def _seed_jazz(store):
 
 def test_learning_progress_groups_all_evidence_without_reinterpreting_genres(store):
     for i in range(15):
-        store.rec_surface.bump_theme(f"artist:Artist {i:02}", .1 + i * .01, 1.0)
-    store.rec_surface.bump_theme("artist:AC:DC", -.9, 1.0)
-    store.rec_surface.bump_theme("genre:other:alternative metal", .6, 1.0)
-    store.rec_surface.bump_theme("era:1990", 1.8, 1.0)
+        store.rec_signals.bump_theme(f"artist:Artist {i:02}", .1 + i * .01, 1.0)
+    store.rec_signals.bump_theme("artist:AC:DC", -.9, 1.0)
+    store.rec_signals.bump_theme("genre:other:alternative metal", .6, 1.0)
+    store.rec_signals.bump_theme("era:1990", 1.8, 1.0)
     data = taste_viz.learning_progress(store, 1.0)
     artists, genres, eras = data["groups"]
     assert len(artists["rows"]) == 16  # pagination must not discard the rest
@@ -60,7 +60,7 @@ def test_learning_progress_orders_by_latest_evidence_not_strength(store, axis):
     for name, score, updated_at in (("Strong boost", .9, 10), ("Strong reduction", -.9, 20),
                                     ("Small boost", .1, 30), ("Small reduction", -.1, 40),
                                     ("Epoch", .3, 0)):
-        store.rec_surface.bump_theme(f"{axis}:{name}", score, updated_at)
+        store.rec_signals.bump_theme(f"{axis}:{name}", score, updated_at)
 
     def rows():
         return next(group["rows"] for group in taste_viz.learning_progress(store, 100)["groups"]
@@ -69,7 +69,7 @@ def test_learning_progress_orders_by_latest_evidence_not_strength(store, axis):
     assert [row["name"] for row in rows()] == ["Small reduction", "Small boost", "Strong reduction",
                                                "Strong boost", "Epoch"]
     assert [row["updated_at"] for row in rows()] == [40, 30, 20, 10, 0]
-    store.rec_surface.bump_theme(f"{axis}:Strong boost", .001, 50)
+    store.rec_signals.bump_theme(f"{axis}:Strong boost", .001, 50)
     assert rows()[0]["name"] == "Strong boost"
     assert rows()[0]["updated_at"] == 50
 
@@ -191,8 +191,8 @@ def test_listening_comparison_counts_observed_tracks_independently_of_mapping(st
 def test_recent_saved_changes_filters_time_before_limiting(store):
     for at, axis in ((9, "artist:Old"), (10, "artist:Start"), (15, "era:1990"),
                      (19, "genre:other:metal"), (20, "artist:Latest"), (21, "artist:Future")):
-        store.rec_surface.log_graduation(axis, "like", 2, 1.1, 1.1, at)
-    rows = store.rec_surface.recent_graduations(limit=3, since=10, until=20)
+        store.rec_signals.log_graduation(axis, "like", 2, 1.1, 1.1, at)
+    rows = store.rec_signals.recent_graduations(limit=3, since=10, until=20)
     assert [r["axis"] for r in rows] == ["artist:Latest", "genre:other:metal", "era:1990"]
 
 
@@ -285,7 +285,7 @@ def test_lane_provenance_distinguishes_default_from_saved_neutral(store):
 
 
 def test_funnel_reports_threshold(store):
-    store.rec_surface.bump_theme("genre:jazz", 0.6, 1000.0)
+    store.rec_signals.bump_theme("genre:jazz", 0.6, 1000.0)
     payload = taste_viz.model_transparency(store, now=1000.0)
     row = next(r for r in payload["funnel"] if r["facet"] == "genre:jazz")
     assert row["threshold"] == rec_params.THEME_THRESHOLD
@@ -411,7 +411,7 @@ def test_saved_style_portrait_survives_a_content_space_change(store, monkeypatch
 
 
 def test_generation_examples_read_prepared_pools_and_filter_hidden_tracks(store):
-    store.rec_surface.put_proposals("mode_bundles", {"all": {"wheelhouse": [
+    store.rec_proposals.put_proposals("mode_bundles", {"all": {"wheelhouse": [
         {"key": "hidden|artist", "title": "Hidden", "artist": "Artist"},
         {"key": "shown|artist", "title": "Shown", "artist": "Artist"},
     ]}}, now=1.0)
@@ -442,7 +442,7 @@ def _install_tilt_space(store, monkeypatch, session, transient_dir):
     keys = ["t|techno", "j|jazz"]
     V = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
     idx = {k: i for i, k in enumerate(keys)}
-    monkeypatch.setattr(taste_viz.embed, "load_vectors", lambda s: (keys, V, idx))
+    monkeypatch.setattr(taste_viz.vectors, "load_vectors", lambda s: (keys, V, idx))
     monkeypatch.setattr(store.rec_query, "track_genres",
                         lambda ks: {"t|techno": "Techno", "j|jazz": "Jazz"})
     monkeypatch.setattr(taste_viz.layers, "session_tilt", lambda *a: session)

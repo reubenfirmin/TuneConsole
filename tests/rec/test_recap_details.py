@@ -310,4 +310,4 @@ def test_worker_bakes_all_three_screens_and_replaces_overlapping_old_beats(store
     kinds = [b["kind"] for b in payload["story"]["beats"]]
     assert {"new_this_month", "different", "same"} <= set(kinds)
     assert not {"new", "diversity", "revival"} & set(kinds)
-    assert store.rec_surface.get_proposals("trend_rollups")["story"] == payload["story"]
+    assert store.rec_proposals.get_proposals("trend_rollups")["story"] == payload["story"]

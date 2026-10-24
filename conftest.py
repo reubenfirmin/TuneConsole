@@ -1,4 +1,4 @@
-"""Serialize test sessions across agents and checkouts before test collection."""
+"""One test session per machine, with coordinated workers for complete local runs."""
 
 from datetime import datetime, timezone
 import fcntl
@@ -9,8 +9,11 @@ from pathlib import Path
 import shlex
 import sys
 import time
+import uuid
 
 import pytest
+
+pytest_plugins = ["ci_test_shards", "local_test_workers"]
 
 
 # Deliberately independent of checkout, cwd, TMPDIR, and pytest's cache directory.
@@ -44,24 +47,35 @@ def _owner(lock):
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_configure(config):
+    import local_test_workers
+
     wait = config.getoption("test_lock_wait")
     if not math.isfinite(wait) or wait < 0:
         raise pytest.UsageError("--test-lock-wait must be a finite, nonnegative number")
-    if config.getoption("numprocesses", default=0) not in (None, 0):
-        raise pytest.UsageError("Tests must run serially; remove pytest's -n option.")
+    if hasattr(config, "workerinput"):
+        local_test_workers.join_owner(config, _LOCK_PATH)
+        return
+    local_test_workers.validate(config)
 
     lock = _LOCK_PATH.open("a+", encoding="utf-8")
     # Cleanup runs after session teardown, and also when configuration fails.
     config.add_cleanup(lock.close)
     # Forked helpers must not keep the parent's lock alive after it exits.
     os.register_at_fork(after_in_child=lock.close)
+    # Workers keep this barrier shared even if their coordinator is killed.
+    # Admission stays exclusive on the original lock until every worker exits.
+    workers = local_test_workers.workers_lock_path(_LOCK_PATH).open("a+", encoding="utf-8")
+    config.add_cleanup(workers.close)
+    os.register_at_fork(after_in_child=workers.close)
     deadline = time.monotonic() + wait
     announced = False
     while True:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(workers, fcntl.LOCK_EX | fcntl.LOCK_NB)
             break
         except BlockingIOError:
+            fcntl.flock(lock, fcntl.LOCK_UN)
             owner = _owner(lock)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -78,11 +92,15 @@ def pytest_configure(config):
 
     lock.seek(0)
     lock.truncate()
-    json.dump({
+    owner = {
         "pid": os.getpid(),
         "started_at": datetime.now(timezone.utc).isoformat(),
         "cwd": str(Path.cwd()),
         "command": shlex.join([sys.executable, *sys.argv]),
-    }, lock)
+        "nonce": uuid.uuid4().hex,
+        "path": str(_LOCK_PATH),
+    }
+    json.dump(owner, lock)
     lock.write("\n")
     lock.flush()
+    local_test_workers.share_owner(config, workers, owner)

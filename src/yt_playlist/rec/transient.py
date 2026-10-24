@@ -16,7 +16,7 @@ import json
 import numpy as np
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import embed, rec_params
+from yt_playlist.rec import embedding_vectors as vectors, rec_params
 
 # Historical generated radio playlist IDs remain provenance after the deck controller's removal.
 _RADIO_SETTING_KEYS = ("radio_playlist_ytm", "radio_playlist_a_ytm", "radio_playlist_b_ytm")
@@ -51,14 +51,14 @@ def evidence_plays(store, limit):
         playlist played outside the live bridge arrives looking exactly like organic listening.
         Nothing about the row says where it came from - but the SONG says it: if the only reason
         it's in the library is that a generated playlist put it there, playing it says nothing you
-        chose. (store.generated_only_keys, which the embedding baskets already respect.)
+        chose. (rec_eligibility.generated_only_keys, which training baskets already respect.)
 
     Pressing play on a generated playlist is a verdict on the PLAYLIST, not on each track the app
     picked for it. Rating one, or promoting the playlist out of the Generated group, is the
     deliberate act that makes it evidence - the rule generated_only_keys already states: plays don't
     lift the quarantine, promotion does. The user's own signals on those tracks (likes, dislikes,
     skips, steering) flow through their own channels and are untouched."""
-    quarantined = store.rec_query.generated_only_keys()
+    quarantined = store.rec_eligibility.generated_only_keys()
     return [(k, ts) for k, ts in
             store.history.recent_plays_with_ts(limit=limit, exclude_list_ids=radio_list_ids(store))
             if k not in quarantined]
@@ -126,7 +126,7 @@ def facet_leans(store, now) -> dict:
                 continue
             leans[f] = leans.get(f, 0.0) + signed * (len(fk) / n)
 
-    for ts, direction, keys in store.rec_surface.recent_mood_events():
+    for ts, direction, keys in store.rec_signals.recent_mood_events():
         add(keys, direction * decay_weight(now - ts, mood_hl))
     for k, ts in evidence_plays(store, limit):
         add([k], play_w * decay_weight(now - ts, play_hl))
@@ -191,7 +191,7 @@ def centroid_tilt(store, now, V, idx):
     gp = rec_params.get_param
     limit = gp(store, "recent_play_limit")
     skip_hl, skip_w = gp(store, "skip_halflife_d"), gp(store, "skip_transient_w")
-    events = store.rec_surface.recent_mood_events()
+    events = store.rec_signals.recent_mood_events()
     plays = evidence_plays(store, limit)
     likes = store.rec_model.recent_liked_with_ts(limit=limit)
     skips = store.player_events.recent_skips_with_ts(now - 4 * skip_hl * 86400)     # #84: same lookback as facet_leans
@@ -242,7 +242,7 @@ def audio_centroid_tilt(store, now, *, content_vecs=None):
     artist facets or its co-occurrence neighbours. The content-space sibling of `centroid_tilt`: same
     transient stream (mood events, recent plays, recent action-provenance likes), same recency
     weighting, but built from
-    the persisted content vectors (embed.load_content_vectors), which carry the z-scored audio block.
+    the persisted content vectors (embedding_vectors.load_content_vectors), which carry the z-scored audio block.
 
     Returns None when the content model is unbuilt or no recent track has a content vector, so a cold
     or quiet user is exactly as today. Audio is sparse and growing: tracks without a content vector
@@ -254,7 +254,7 @@ def audio_centroid_tilt(store, now, *, content_vecs=None):
     This is the producer only. The scorer applies it (a content-space alignment term parallel to the
     collaborative `_apply_mood`); see the wiring note that ships with this change.
     """
-    _ckeys, CV, cidx = embed.load_content_vectors(store) if content_vecs is None else content_vecs
+    _ckeys, CV, cidx = vectors.load_content_vectors(store) if content_vecs is None else content_vecs
     if CV is None:
         return None
     return centroid_tilt(store, now, CV, cidx)

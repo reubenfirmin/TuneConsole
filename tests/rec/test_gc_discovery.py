@@ -14,7 +14,7 @@ def test_gc_discovery_uses_knob_and_holds_generated(monkeypatch):
     now = 100 * day
     s.discovery.mark_offered("track", ["gen|x", "old|y"], now - 40 * day)
     rec_params.set_param(s, "discovery_gc_days", 30)
-    monkeypatch.setattr(s.rec_query, "generated_track_keys", lambda *a, **k: {"gen|x"})
+    monkeypatch.setattr(s.rec_eligibility, "generated_track_keys", lambda *a, **k: {"gen|x"})
     ctx = SimpleNamespace(store=s, logger=SimpleNamespace(info=lambda *a, **k: None))
     out = discover.gc_discovery(ctx, now)
     keys = {r["identity_key"] for r in s.discovery.get_discovered_tracks()}

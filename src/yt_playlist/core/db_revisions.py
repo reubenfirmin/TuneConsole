@@ -8,7 +8,12 @@ from contextlib import contextmanager
 import sqlite3
 
 
-_KEY_COLUMNS = {"settings": "key", "rec_proposals": "surface", "player_events": "kind"}
+_KEY_COLUMNS = {"settings": "key", "rec_proposals": "surface", "player_events": "kind",
+                "recordings": "identity_key", "youtube_items": "video_id",
+                "catalog_entries": "recording_id", "unresolved_items": "entry_id",
+                "entry_field_choices": "entry_id", "library_memberships": "entry_id",
+                "discovery_memberships": "recording_id", "discovery_sources": "recording_id",
+                "rec_content_pending": "identity_key", "rec_prepared_content": "identity_key"}
 # A declared catalog read consumes every recording field except enrichment's
 # scheduling timestamps. Default/unannotated reads still guard the entire row.
 # Excluding only these fields also guards newly added catalog columns.
@@ -69,9 +74,23 @@ class Revisions:
                                  "DO UPDATE SET revision=revision+1; END")
         conn.commit()
 
-    def capture(self):
-        return {(r[0], r[1]): r[2] for r in self.conn.execute(
-            "SELECT table_name,record_key,revision FROM temp.snapshot_revisions")}
+    def capture(self, dependencies=None):
+        """Read all counters for snapshot validation, or seek only requested dependencies."""
+        if dependencies is None:
+            rows = self.conn.execute(
+                "SELECT table_name,record_key,revision FROM temp.snapshot_revisions")
+        else:
+            dependencies = sorted(set(dependencies))
+            if not dependencies:
+                return {}
+            values = ','.join('(?,?)' for _ in dependencies)
+            rows = self.conn.execute(
+                f"WITH requested(table_name,record_key) AS (VALUES {values}) "
+                "SELECT r.table_name,r.record_key,r.revision FROM requested q "
+                "JOIN temp.snapshot_revisions r "
+                "ON r.table_name=q.table_name AND r.record_key=q.record_key",
+                tuple(value for dependency in dependencies for value in dependency))
+        return {(r[0], r[1]): r[2] for r in rows}
 
 
 class Reads:
@@ -127,12 +146,14 @@ def setting_reads(store, keys):
 
 @contextmanager
 def keyed_reads(store, table, keys):
-    """Track only the consumed records in a keyed settings or prepared-results table."""
+    """Track exact keys; the query must constrain every consumed row to these keys."""
+    if table not in _KEY_COLUMNS:
+        raise ValueError(f"No keyed revision counter for {table}")
     reads = getattr(store, "_snapshot_reads", None)
     if reads is None:
         yield
     else:
-        with reads.records(table, keys):
+        with reads.records(table, tuple(map(str, keys))):
             yield
 
 

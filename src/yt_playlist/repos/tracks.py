@@ -47,7 +47,12 @@ class TrackRepo(Repo):
 
     @synchronized
     def record_item_ratings(self, identity_id, statuses, *, source, now):
-        """A sync confirmation retains the real time/provenance of an unchanged live action."""
+        """Newer observations win; confirmed actions win ties against sync evidence.
+
+        Equal-time sync conflicts retain the existing observation. Equal-time actions are
+        accepted in arrival order. A sync confirmation of an unchanged action retains its
+        original action time/provenance, including when the confirming snapshot is newer.
+        """
         retain_action = ("excluded.source='sync' AND item_ratings.status=excluded.status "
                          "AND item_ratings.source IN ('api','action')")
         with self.conn:
@@ -56,8 +61,25 @@ class TrackRepo(Repo):
                 'ON CONFLICT(identity_id,video_id) DO UPDATE SET '
                 f'source=CASE WHEN {retain_action} THEN item_ratings.source ELSE excluded.source END,'
                 f'observed_at=CASE WHEN {retain_action} THEN item_ratings.observed_at ELSE excluded.observed_at END,'
-                'status=excluded.status',
+                'status=excluded.status '
+                'WHERE excluded.observed_at>item_ratings.observed_at '
+                "OR (excluded.observed_at=item_ratings.observed_at AND excluded.source IN ('api','action'))",
                 [(identity_id, video_id, status, source, now) for video_id, status in statuses.items()])
+
+    @synchronized
+    def retained_rating_statuses(self, identity_id, video_ids, *, newer_than=None):
+        """Read winning exact-upload ratings, including actions absent from an older snapshot."""
+        video_ids = list(video_ids)
+        retained = {}
+        for offset in range(0, len(video_ids), 500):
+            batch = video_ids[offset:offset + 500]
+            retained.update(self.conn.execute('SELECT video_id,status FROM item_ratings '
+                'WHERE identity_id=? AND video_id IN (' + ','.join('?' for _ in batch) + ')',
+                (identity_id,*batch)))
+        if newer_than is not None:
+            retained.update(self.conn.execute('SELECT video_id,status FROM item_ratings '
+                'WHERE identity_id=? AND observed_at>=?', (identity_id,newer_than)))
+        return retained
 
     @synchronized
     def item_rating(self, identity_id, video_id):
@@ -135,6 +157,14 @@ class TrackRepo(Repo):
             "AND thumbnail IS NOT NULL AND thumbnail != '' ORDER BY id DESC LIMIT 1",
             (video_id,)).fetchone()
         return row["thumbnail"] if row else None
+
+    @synchronized
+    def duration_for_video(self, video_id):
+        """Stored length of this exact upload, including tracks outside the library."""
+        row = self.conn.execute(
+            "SELECT duration_s FROM catalog_tracks WHERE video_id=? AND duration_s>0 "
+            "ORDER BY id DESC LIMIT 1", (video_id,)).fetchone()
+        return row["duration_s"] if row else None
 
     @synchronized
     def known_duration(self, title, artist):

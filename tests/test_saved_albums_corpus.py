@@ -1,5 +1,7 @@
 """Saved albums fold their TRACKS into the library on sync, so they count in the taste corpus
 (metadata alone doesn't), fetched incrementally, once per album."""
+import pytest
+
 from yt_playlist.library import sync
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.util.matching import identity_key
@@ -57,3 +59,30 @@ def test_browsing_an_unsaved_album_does_not_prevent_later_library_materializatio
     sync.sync_all(store, {iid: client}, now=1.0)
     assert client.album_calls == 2
     assert store.collection.complete_album_tracklist_ids() == {"MPREb_X"}
+
+
+@pytest.mark.parametrize("incomplete", [(), ("album-3",), tuple(f"album-{i}" for i in range(8))])
+def test_materialization_enumerates_complete_albums_once_and_preserves_failures(store, monkeypatch, incomplete):
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    saved = {f"album-{i}": {"title": f"Album {i}", "artist": "Artist", "thumbnail": None}
+             for i in range(8)}
+    albums = {bid: {"title": meta["title"], "artists": [{"name": "Artist"}],
+                    "trackCount": 2 if bid in incomplete else 1,
+                    "tracks": [{"videoId": bid, "title": bid}]}
+              for bid, meta in saved.items()}
+    bulk = store.collection.complete_album_tracklist_ids
+    bulk_calls = 0
+
+    def initial_complete_ids():
+        nonlocal bulk_calls
+        bulk_calls += 1
+        assert bulk_calls == 1, "Post-fetch confirmation must not enumerate unrelated releases"
+        return bulk()
+
+    monkeypatch.setattr(store.collection, "complete_album_tracklist_ids", initial_complete_ids)
+    result = sync._materialize_album_tracks(store, {iid: FakeClient(albums=albums)}, saved, None)
+    assert result["status"] == ("failed" if len(incomplete) == len(saved) else "partial" if incomplete else "complete")
+    assert result["refreshed"] == len(saved)
+    assert result.get("skipped", 0) == len(incomplete)
+    assert bulk_calls == 1
+    assert bulk() == saved.keys() - set(incomplete)

@@ -1,6 +1,7 @@
 """Live-server fixture for Playwright tests: a real uvicorn server (Playwright needs
 real HTTP + a JS runtime, which TestClient does not provide), seeded with one playlist."""
 import pathlib
+import logging
 import socket
 import threading
 import time
@@ -12,6 +13,24 @@ from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 
 _BROWSER_DIR = pathlib.Path(__file__).parent
+
+
+@pytest.fixture(autouse=True)
+def restore_server_logging():
+    """A live test server's dictConfig must not replace later tests' logging policy."""
+    saved = []
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi"):
+        logger = logging.getLogger(name)
+        saved.append((logger, list(logger.handlers), logger.level, logger.propagate, logger.disabled))
+    yield
+    for logger, handlers, level, propagate, disabled in saved:
+        for handler in logger.handlers:
+            if handler not in handlers:
+                handler.close()
+        logger.handlers = handlers
+        logger.setLevel(level)
+        logger.propagate = propagate
+        logger.disabled = disabled
 
 
 def pytest_collection_modifyitems(items):

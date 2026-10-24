@@ -50,13 +50,16 @@ def test_home_renders_backend_update_card(store, monkeypatch):
     from yt_playlist.web.app import create_app
     from yt_playlist.core import updatecheck
     from tests.conftest import FakeClient
+    from tests.onboarding_support import publish_personal_mix
 
     # The test suite runs from an editable checkout, which is now (correctly) treated as a dev install
     # and never nagged. Pin it to a packaged install so the release-behind card path is exercised.
     monkeypatch.setattr(updatecheck, "is_dev_install", lambda: False)
     store.settings.set_setting("last_sync_at", "1700000000")
     store.settings.set_setting("latest_version_seen", "999.0.0")   # force "behind" regardless of real version
-    c = TestClient(create_app(store, lambda: FakeClient()), base_url="http://127.0.0.1")
+    publish_personal_mix(store, now=1700000001)
+    c = TestClient(create_app(store, lambda: FakeClient(), now_fn=lambda: 1700000001),
+                   base_url="http://127.0.0.1")
     html = c.get("/").text
     assert 'id="update-nudge"' in html
     assert "999.0.0" in html
@@ -67,12 +70,15 @@ def test_home_container_update_links_to_instructions(store, monkeypatch):
     from yt_playlist.web.app import create_app
     from yt_playlist.core import updatecheck
     from tests.conftest import FakeClient
+    from tests.onboarding_support import publish_personal_mix
 
     monkeypatch.setattr(updatecheck, "is_dev_install", lambda: False)
     monkeypatch.setenv("YT_PLAYLIST_CONTAINER", "1")
     store.settings.set_setting("last_sync_at", "1700000000")
     store.settings.set_setting("latest_version_seen", "999.0.0")
-    c = TestClient(create_app(store, lambda: FakeClient()), base_url="http://127.0.0.1")
+    publish_personal_mix(store, now=1700000001)
+    c = TestClient(create_app(store, lambda: FakeClient(), now_fn=lambda: 1700000001),
+                   base_url="http://127.0.0.1")
     html = c.get("/").text
     assert 'href="https://tuneconsole.com/#container-updates"' in html
     assert "Update your container" in html

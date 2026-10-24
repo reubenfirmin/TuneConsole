@@ -2,7 +2,7 @@
 from yt_playlist.providers import deezer
 
 
-def test_enrich_returns_metadata_dict(monkeypatch):
+def test_lookup_returns_metadata_dict(monkeypatch):
     def fake_get_json(url):
         if "/search/track" in url:
             return {"data": [{"id": 42, "title": "Song", "artist": {"name": "Artist"}}]}
@@ -14,32 +14,32 @@ def test_enrich_returns_metadata_dict(monkeypatch):
             return {"id": 99, "label": "Because Music"}
         raise AssertionError(f"unexpected url {url}")
     monkeypatch.setattr(deezer, "_get_json", fake_get_json)
-    feat = deezer.enrich("Song", "Artist")
+    feat = deezer.lookup("Song", "Artist")
     assert feat["bpm"] == 128.0
     assert feat["gain"] == -7.0
     assert feat["popularity"] == 856376
     assert feat["label"] == "Because Music"
 
 
-def test_enrich_treats_zero_bpm_as_unknown(monkeypatch):
+def test_lookup_treats_zero_bpm_as_unknown(monkeypatch):
     def fake_get_json(url):
         if "/search/track" in url:
             return {"data": [{"id": 1, "title": "Song"}]}
         return {"id": 1, "title": "Song", "artist": {"name": "Artist"}, "bpm": 0}
     monkeypatch.setattr(deezer, "_get_json", fake_get_json)
-    assert deezer.enrich("Song", "Artist")["bpm"] is None
+    assert deezer.lookup("Song", "Artist")["bpm"] is None
 
 
-def test_enrich_none_on_no_search_hit(monkeypatch):
+def test_lookup_none_on_no_search_hit(monkeypatch):
     monkeypatch.setattr(deezer, "_get_json", lambda url: {"data": []})
-    assert deezer.enrich("Song", "Artist") == deezer._empty()
+    assert deezer.lookup("Song", "Artist") == deezer._empty(deezer._FIELDS + deezer._EXTRA_FIELDS)
 
 
-def test_enrich_none_on_deezer_error_body(monkeypatch):
+def test_lookup_none_on_deezer_error_body(monkeypatch):
     # Deezer returns HTTP 200 with an {"error": ...} body for quota/invalid requests.
     monkeypatch.setattr(deezer, "_get_json",
                         lambda url: {"error": {"type": "Exception", "message": "quota"}})
-    assert deezer.enrich("Song", "Artist") == deezer._empty()
+    assert deezer.lookup("Song", "Artist") == deezer._empty(deezer._FIELDS + deezer._EXTRA_FIELDS)
 
 
 def test_waterfall_probe_fills_bpm_and_records_evidence(store, monkeypatch):
@@ -55,5 +55,5 @@ def test_waterfall_probe_fills_bpm_and_records_evidence(store, monkeypatch):
                   [{"name": "deezer", "enabled": True}], events.append)
     assert store.tracks.get_track_audio(t1)[0] == 140.0
     assert any(e.get("type") == "done" for e in events)
-    attempt = store.enrichment.enrichment_attempts("song|artist")["deezer"]
+    attempt = store.enrichment_state.enrichment_attempts("song|artist")["deezer"]
     assert attempt["status"] == "found" and attempt["fields"]["bpm"] == 140.0

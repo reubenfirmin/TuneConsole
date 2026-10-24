@@ -42,6 +42,10 @@ def build(ctx) -> APIRouter:
                 return "merged " + ", ".join(f"“{m}”" for m in members) + " (kept all)"
             return f"merge edit on “{kept}”" if kept else "merge edit (updated both)"
         if action.kind == MOVE_IDENTITY:
+            if action.status == "delete_pending":
+                return f"copy of “{params.get('title')}”; source deletion unconfirmed"
+            if action.status == "delete_failed":
+                return f"copy of “{params.get('title')}”; source deletion failed"
             if params.get("partial"):
                 return f"partial copy of “{params.get('title')}”; source kept"
             if params.get("delete_error"):
@@ -51,13 +55,13 @@ def build(ctx) -> APIRouter:
             verb = "moved" if params.get("deleted") else "copied"
             return f"{verb} “{params.get('title')}” to another identity"
         if action.kind == DELETE_EMPTY:
-            return f"deleted empty “{params.get('title')}”"
+            return f"delete empty playlist “{params.get('title')}”"
         if action.kind == REMOVE_LOCAL_PLAYLIST:
             return f"removed empty “{params.get('title')}” from TuneConsole; YouTube unchanged"
         if action.kind == DELETE_PLAYLIST:
-            return f"deleted “{params.get('title')}”"
+            return f"delete playlist “{params.get('title')}”"
         if action.kind == GC_GENERATED:
-            return f"auto-removed unplayed generated playlist “{params.get('title')}”"
+            return f"collect unplayed generated playlist “{params.get('title')}”"
         if action.kind == COPY_PLAYLIST:
             return f"copied “{params.get('source')}” to “{params.get('title')}”"
         if action.kind == COPY_INTO:
@@ -112,6 +116,7 @@ def build(ctx) -> APIRouter:
             steps = recovery.get("steps", [])
             rows.append({"a": a, "desc": _action_desc(a), "undoable": is_undoable(a.kind),
                          "when": _when(a.created_at), "recovery_error": recovery.get("error"),
+                         "deletions": undo.get("deletions", []),
                          "missing_snapshot": missing_snapshot, "copy_ytm": undo.get("new_ytm"),
                          "uncertain": sum(len(e.get("uncertain", [])) for e in additions),
                          "unattempted": sum(len(e.get("unattempted", [])) for e in additions),
@@ -120,6 +125,20 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(request, "actions.html", {
             "rows": rows, "flash": request.query_params.get("flash"),
             "flasherr": request.query_params.get("flasherr")})
+
+    @router.post("/actions/{action_id}/recheck-deletion")
+    def recheck_deletion(action_id: int):
+        try:
+            action = ctx.ops().recheck_deletion(action_id)
+        except ValueError as exc:
+            return RedirectResponse(f"/actions?flasherr={quote(str(exc))}", status_code=303)
+        except Exception:
+            logger.exception("deletion recheck %s failed", action_id)
+            return RedirectResponse("/actions?flasherr=Could%20not%20recheck%20deletion.%20"
+                                    "The%20backup%20is%20saved.", status_code=303)
+        message = ("Deletion confirmed; the backup is ready for Undo." if action.status == "executed"
+                   else "The playlist still exists. No deletion was retried; the backup is saved.")
+        return RedirectResponse(f"/actions?flash={quote(message)}", status_code=303)
 
     @router.post("/undo/{action_id}")
     def undo(action_id: int):

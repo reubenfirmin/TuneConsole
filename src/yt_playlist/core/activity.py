@@ -58,13 +58,21 @@ class Activity:
 
     def close_admission(self, reason="shutdown"):
         with self._condition:
-            if self._accepting or self.closing_reason == "idle":
+            if reason == "shutdown" or self._accepting or self.closing_reason == "idle":
                 self.closing_reason = reason
             self._accepting = False
 
     def resume_idle(self):
         with self._condition:
             if self.closing_reason == "idle":
+                self._accepting = True
+                self.closing_reason = None
+
+    def resume_restart(self):
+        # Abandoning a pending restart must allow new work even while previously
+        # admitted mutations finish. A real shutdown always takes precedence.
+        with self._condition:
+            if self.closing_reason == "restart":
                 self._accepting = True
                 self.closing_reason = None
 
