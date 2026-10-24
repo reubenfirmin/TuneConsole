@@ -5,7 +5,7 @@ import threading
 import pytest
 from yt_playlist.web import radio_session
 from yt_playlist.web.radio_session import PlaylistRadio
-from yt_playlist.web.radio_playlist_io import PlaylistPending
+from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending
 from tests.radio_session_support import poc, play
 
 def test_lost_add_response_is_read_back_without_duplicate_append(poc):
@@ -105,16 +105,103 @@ def test_acknowledged_upload_substitution_is_confirmed_without_merging_recording
     assert c.status()["error"] is None
 
 
-def test_an_unacknowledged_different_tail_is_not_claimed_as_our_substitution(poc):
+@pytest.mark.parametrize("replacement", [False, True], ids=["append", "direction"])
+@pytest.mark.parametrize("resume", ["live", "restart", "conflict"])
+def test_add_receipt_handles_video_and_artist_substitution(poc, replacement, resume):
+    from yt_playlist.web.radio_playlist_tail import RadioPlaylistTail
+    from yt_playlist.web.radio_state import Phase
+
+    c, remote, _, _, pool = poc
+    c.start()
+    requested, accepted = pool[3], pool[30]
+    requested.update(title="Ride (Vince Clarke Remix)", artist="Dubfire & Miss Kittin", duration=326)
+    accepted.update(title=requested["title"], artist="Dubfire", duration=326)
+    if replacement:
+        c.session.edits.begin(RadioPlaylistTail(c.session.tracks, [requested], 0))
+    read, add = remote.get_playlist, remote.add_playlist_items
+
+    def read_substitution(playlist, limit=None):
+        detail = read(playlist, limit)
+        for row in detail["tracks"]:
+            if row["videoId"] == "v31":
+                row.update(title=accepted["title"], artists=[{"name": accepted["artist"]}],
+                           duration_seconds=326)
+        return detail
+
+    def substitute(playlist, ids):
+        if ids != ["v4"]:
+            return add(playlist, ids)
+        remote.adds.append(list(ids))
+        remote.ids.append("v31")
+        remote.fail_read = resume != "live"
+        # The receipt can name the requested ID while readback exposes another
+        # upload and artist credit under the same playlist occurrence handle.
+        return {"status": "STATUS_SUCCEEDED", "playlistEditResults": [
+            {"videoId": "v4", "setVideoId": "set-v31"}]}
+
+    remote.get_playlist, remote.add_playlist_items = read_substitution, substitute
+    if resume == "live":
+        play(c, "v3")
+    else:
+        with pytest.raises(RuntimeError, match="Read response lost"):
+            play(c, "v3")
+        saved = json.loads(c.ctx.store.settings.get_setting("radio_current_session"))
+        receipt = saved["replacement"]["receipt"] if replacement else saved["pending_result"]
+        assert receipt == {"status": "STATUS_SUCCEEDED", "videoId": "v4", "setVideoId": "set-v31"}
+        if resume == "conflict":
+            saved.update(phase=Phase.CONFLICT, halted=True,
+                         error="The playlist was changed elsewhere. Radio stopped to preserve those changes.")
+            c.ctx.store.settings.set_setting("radio_current_session", json.dumps(saved))
+        c = PlaylistRadio(c.ctx)
+        c.join()
+        if resume == "conflict":
+            assert c.session.halted
+            assert c._recover(c.session)
+        play(c, "v3")
+
+    assert remote.ids == ["v1", "v2", "v3", "v31"]
+    assert remote.adds == [["v4"]] and not remote.removes
+    assert c.session.pending is None and c.session.replacement is None
+    assert c.status()["tracks"][-1]["video_id"] == "v31"
+    assert c.status()["tracks"][-1]["key"] != requested["key"]
+    assert c.session.phase == Phase.PLAYING and c.status()["error"] is None
+    assert "v4" in c.session.rejected
+    assert c.session.directions.feedback == {}
+    play(c, "v31")
+    assert remote.adds == [["v4"], ["v5"]]
+    assert c.status()["ahead"] == 1
+
+
+@pytest.mark.parametrize("replacement", [False, True], ids=["append", "direction"])
+@pytest.mark.parametrize("matching_metadata", [False, True])
+def test_an_unacknowledged_different_tail_is_not_claimed_as_our_substitution(poc, replacement, matching_metadata):
+    from yt_playlist.web.radio_playlist_tail import RadioPlaylistTail
+
     c, remote, *_ = poc
     c.start()
+    requested = c.session.candidates.by_video["v4"]
+    requested["duration"] = 326
+    if replacement:
+        c.session.edits.begin(RadioPlaylistTail(c.session.tracks, [requested], 0))
+    read = remote.get_playlist
+
+    def metadata(playlist, limit=None):
+        detail = read(playlist, limit)
+        if matching_metadata:
+            for row in detail["tracks"]:
+                if row["videoId"] == "v31":
+                    row.update(title=requested["title"], artists=[{"name": requested["artist"]}],
+                               duration_seconds=326)
+        return detail
+
     def unrelated_tail(playlist, ids):
         remote.adds.append(list(ids))
         remote.ids.append("v31")
         return {"status": "STATUS_SUCCEEDED", "playlistEditResults": [
             {"videoId": "v31", "setVideoId": "different-handle"}]}
+    remote.get_playlist = metadata
     remote.add_playlist_items = unrelated_tail
-    with pytest.raises(PlaylistPending):
+    with pytest.raises((PlaylistPending, PlaylistChanged)):
         play(c, "v3")
     assert [t["video_id"] for t in c.status()["tracks"]] == ["v1", "v2", "v3"]
     assert remote.ids == ["v1", "v2", "v3", "v31"]

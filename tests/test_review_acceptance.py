@@ -181,7 +181,7 @@ def test_86_boosting_cold_genre_does_not_lower_its_rank(db, monkeypatch):
         db.discovery.upsert_discovered_track(key, key[0], key, key[-1], "", None,
                                    genre, None, "source", 100)
     monkeypatch.setattr(discover.ContentProjection, "fit", classmethod(lambda cls, store: Projection()))
-    monkeypatch.setattr(surfaces, "playlist_taste", lambda store: scoring.PlaylistTaste(
+    monkeypatch.setattr(surfaces, "playlist_taste", lambda store, *, now: scoring.PlaylistTaste(
         ["context"], np.array([[1., 0.]]), np.array([1.])))
     before = [t.key for t in surfaces.cold_candidates(db, 100)]
     assert before == ["one|a", "two|b"]

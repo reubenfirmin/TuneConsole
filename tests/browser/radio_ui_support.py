@@ -59,4 +59,4 @@ def radio_ui(live_app, store, page):
     page.goto(f"{live_app}/#radio")
     expect(page.locator(".radio-seed")).to_have_count(16)
     yield api
-    assert not api.errors
+    assert not api.errors, api.errors

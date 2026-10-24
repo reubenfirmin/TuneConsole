@@ -92,7 +92,7 @@ def test_taste_topics_show_one_group_at_a_time(store, page, monkeypatch, request
         panel = page.locator("#" + button.get_attribute("aria-controls"))
         assert abs(panel.bounding_box()["x"] + panel.bounding_box()["width"] - dimensions["contentRight"]) <= 1
 
-    page.get_by_role("tab", name="Generated playlists", exact=True).click()
+    page.get_by_role("tab", name="Listening choices", exact=True).click()
     generated = page.locator("#taste-generated-panel")
     expect(generated.locator(".generation-recipe")).to_have_count(4)
     expect(generated.locator(".generation-source")).to_have_count(3)
@@ -131,7 +131,7 @@ def test_taste_topics_show_one_group_at_a_time(store, page, monkeypatch, request
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     page.get_by_role("tab", name="Recommendations", exact=True).click()
     recommendations = page.locator("#taste-recommendations-panel")
-    expect(recommendations.locator(".taste-feature-section")).to_have_count(8)
+    expect(recommendations.locator(".taste-feature-section")).to_have_count(9)
     expect(recommendations.locator("details[open]")).to_have_count(0)
     subtabs = page.get_by_role("tablist", name="Recommendation settings", exact=True)
     expect(subtabs.get_by_role("tab")).to_have_count(4)
@@ -149,7 +149,13 @@ def test_taste_topics_show_one_group_at_a_time(store, page, monkeypatch, request
             assert slider.bounding_box()["height"] >= 44
         for reset in recommendations.locator(".knob-reset:visible").all():
             assert reset.bounding_box()["height"] >= 44
-        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), page.evaluate("""() => ({
+            width: innerWidth, scroll: document.documentElement.scrollWidth, x: scrollX,
+            overflow: [...document.querySelectorAll('body *')]
+              .filter(el => !el.closest('.taste-feature-nav') && el.getBoundingClientRect().right > innerWidth
+                            && getComputedStyle(el).display !== 'none')
+              .map(el => ({tag: el.tagName, cls: el.className, text: el.textContent.slice(0, 80),
+                           width: el.getBoundingClientRect().width}))})""")
         if button.inner_text() == "Genres":
             genre_controls = recommendations.locator(".taste-genre-controls")
             assert abs(genre_controls.bounding_box()["x"] + genre_controls.bounding_box()["width"] - dimensions["contentRight"]) <= 1
@@ -268,7 +274,9 @@ def test_feature_settings_select_features_and_preserve_saved_edits(live_app, sto
     page.goto(live_app + "/taste#recommendations/features")
     features = page.locator("#taste-feature-settings")
     navigation = features.get_by_role("tablist", name="Features", exact=True)
-    expect(navigation.get_by_role("tab")).to_have_count(8)
+    expect(navigation.get_by_role("tab")).to_have_count(9)
+    expect(navigation.get_by_role("tab", name="Album menus", exact=True)).to_have_attribute("aria-selected", "true")
+    navigation.get_by_role("tab", name="Home cards", exact=True).click()
     expect(features.locator("details")).to_have_count(0)
     expect(features.locator("#taste-feature-radio")).to_have_count(0)
     # Home keeps track length and the active setup threshold; the two inactive
@@ -330,11 +338,14 @@ def test_feature_settings_select_features_and_preserve_saved_edits(live_app, sto
     expect(navigation.get_by_role("tab", name="Generated playlist cleanup", exact=True)).to_be_focused()
     expect(features.get_by_role("slider")).to_have_count(1)
     page.keyboard.press("Home")
+    expect(navigation.get_by_role("tab", name="Album menus", exact=True)).to_be_focused()
+    page.keyboard.press("ArrowDown" if width >= 1100 else "ArrowRight")
     expect(home_tab).to_be_focused()
     expect(slider).to_have_value("4")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
     page.reload()
+    home_tab.click()
     expect(slider).to_have_value("4")
     with page.expect_response(lambda response: response.url.endswith("/taste/reset-param")):
         home.get_by_role("button", name="Reset Home visits before suggestions refresh to default", exact=True).click()
@@ -345,6 +356,7 @@ def test_feature_settings_select_features_and_preserve_saved_edits(live_app, sto
 @pytest.mark.parametrize("query", ["", "?radio=true", "?radio=1"])
 def test_radio_settings_are_absent_even_with_the_old_opt_in(live_app, page, query):
     page.goto(live_app + "/taste" + query + "#recommendations/features")
+    page.get_by_role("tab", name="Home cards", exact=True).click()
     expect(page.locator("#taste-feature-home")).to_be_visible()
     expect(page.get_by_role("tab", name="On air", exact=True)).to_have_count(0)
     expect(page.locator("#taste-feature-radio, [data-param^=radio_]")).to_have_count(0)
@@ -470,7 +482,7 @@ def test_taste_controls_survive_topic_switches_and_reload(live_app, store, page)
     subtabs.get_by_role("tab", name="Main controls", exact=True).click()
     expect(slider).to_have_value("0.5")
 
-    page.get_by_role("tab", name="Generated playlists", exact=True).click()
+    page.get_by_role("tab", name="Listening choices", exact=True).click()
     source = page.locator("#lane-deep_cut")
     expect(source).to_be_visible()
     with page.expect_response(lambda r: r.url.endswith("/taste/weight") and r.status == 200):
@@ -578,7 +590,7 @@ def test_taste_loads_diagnostics_only_when_opened(live_app, page, height):
     page.get_by_role("tab", name="Taste profile", exact=True).click()
     influence = page.locator("#taste-playlist-influence")
     influence.scroll_into_view_if_needed()
-    expect(influence).to_contain_text("Build the model and play some playlists")
+    expect(influence).to_contain_text("Build the model to see the interests")
     assert requests == ["/taste/recall", "/taste/viz/playlist-influence"]
     page.get_by_role("tab", name="Recent & learning", exact=True).click()
     sound = page.locator("#taste-recent-sound")
@@ -587,7 +599,7 @@ def test_taste_loads_diagnostics_only_when_opened(live_app, page, height):
     assert requests == ["/taste/recall", "/taste/viz/playlist-influence", "/taste/viz/recent-sound"]
     page.get_by_role("tab", name="Taste profile", exact=True).click()
     influence.scroll_into_view_if_needed()
-    expect(influence).to_contain_text("Build the model and play some playlists")
+    expect(influence).to_contain_text("Build the model to see the interests")
     assert requests.count("/taste/viz/playlist-influence") == 1
 
 

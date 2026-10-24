@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from copy import deepcopy
+import json
 import logging
 import threading
 import time
@@ -78,6 +79,28 @@ def test_generation_shares_play_counts_and_facets_across_summaries(store, monkey
     assert len(calls) == 1
 
 
+def test_album_budget_deferral_still_publishes_mixes_with_last_good_album_context(store, monkeypatch):
+    from yt_playlist.core.activity import WorkBudgetExceeded
+    from yt_playlist.rec import album_choices
+    from yt_playlist.rec.worker_tasks import ServingTasks
+    seed(store)
+    albums = {'items': [{'browse_id': 'last-good', 'title': 'Retained album'}],
+              'context': {'model': 'original album prediction'}}
+    store.rec_proposals.put_proposals(album_choices.SURFACE, albums, 999)
+
+    def exhausted(*args):
+        raise WorkBudgetExceeded('Album preparation exceeded its independent budget')
+
+    monkeypatch.setattr(album_choices, 'prepare', exhausted)
+    tasks = ServingTasks(SimpleNamespace(store=store, now_fn=lambda: 1000, client_provider=lambda: {},
+        logger=logging.getLogger(__name__)), lambda name, target, *args, **kwargs: target(*args, **kwargs))
+    assert tasks.home()  # Albums request another attempt through the existing Home backoff.
+    result = store.rec_proposals.get_proposals(home_prepared.SURFACE)
+    assert result['menus'] and result['album_choices'] == albums['items']
+    assert result['album_choice_context'] == albums['context']
+    assert store.rec_proposals.get_proposals(album_choices.SURFACE) == albums
+
+
 def test_preparation_is_bounded_complete_and_records_no_exposure(store, prepared):
     assert len(prepared["menus"]) == home_prepared.MAX_MENUS
     assert all(menu["protos"] for menu in prepared["menus"])
@@ -87,6 +110,21 @@ def test_preparation_is_bounded_complete_and_records_no_exposure(store, prepared
     assert all(t["offered_count"] == 0 for t in store.discovery.get_discovered_tracks())
     assert all(p["recipe"]["experiment_id"] == p["experiment_id"]
                for menu in prepared["menus"] for p in menu["protos"])
+
+
+def test_served_whole_menu_probability_is_recorded_and_frozen(store, prepared):
+    first = home_prepared.cards(store, prepared, 1001, service(store))
+    assignment = first.protos[0]["assignment"]
+    assert sum(row["probability"] for row in assignment["candidates"]) == pytest.approx(1)
+    assert 0 < assignment["probability"] <= 1
+    assert assignment["unit"] == "whole_menu"
+    again = home_prepared.cards(store, prepared, 1002, service(store))
+    assert again.protos[0]["assignment"] == assignment
+    assert [p["experiment_id"] for p in again.protos] == [p["experiment_id"] for p in first.protos]
+    impressions = store.conn.execute("SELECT provenance FROM rec_served_impressions").fetchall()
+    import json
+    live = [json.loads(row[0]) for row in impressions if json.loads(row[0])["policy_kind"] == "live"]
+    assert live and all(row["propensity"] == assignment["probability"] for row in live)
 
 
 def test_missing_candidate_dependencies_keep_last_usable_home(store, prepared):
@@ -280,15 +318,26 @@ def test_previews_and_repeated_fragments_do_not_inflate_exposure(store, prepared
 
 
 def test_hold_window_keeps_the_choice_through_refill_and_new_evidence(store, prepared):
+    prepared['choice_context'] = {'at': 999, 'generation': 'original-context'}
     first = home_prepared.cards(store, prepared, 1000, service(store))
     ids = {p["experiment_id"] for p in first.protos}
     replacement = deepcopy(prepared)
+    replacement['choice_context'] = {'at': 1001, 'generation': 'later-context'}
     for mode in replacement["modes"]:
         mode["size"] = 100000 if mode["mode_id"] not in {p.get("mode_id") for p in first.protos} else 1
     for epoch in range(20, 40):
         store.modes.log_impressions(epoch, [(str(mid), mid) for mid in range(6)], 1001)
     held = home_prepared.cards(store, replacement, 1002, service(store))
     assert {p["experiment_id"] for p in held.protos} == ids
+    # Rebuilding the pool with entirely different menus must not silently reassign
+    # the held decision while retaining the old propensity.
+    replacement['menus'] = [deepcopy(replacement['menus'][0])]
+    for proto in replacement['menus'][0]['protos']:
+        proto['experiment_id'] = 'replacement-' + proto['experiment_id']
+    after_refill = home_prepared.cards(store, replacement, 1003, service(store))
+    assert {p['experiment_id'] for p in after_refill.protos} == ids
+    assert after_refill.protos[0]['assignment'] == first.protos[0]['assignment']
+    assert after_refill.choice_context == first.choice_context == prepared['choice_context']
 
 
 def test_hidden_presync_and_onboarding_menus_are_not_exposures(store, prepared):
@@ -415,7 +464,9 @@ def test_feedback_changes_the_next_choice_and_tracks_can_repeat(store, prepared)
     assert a & b  # Reuse of constituent tracks remains valid.
 
 
-def test_cache_rebuild_and_restart_preserve_evidence_and_experiment_identity(tmp_path):
+def test_cache_rebuild_and_restart_preserve_evidence_and_experiment_identity(tmp_path, monkeypatch):
+    # This checks durable identity, independently of the separately tested worker deadline.
+    monkeypatch.setattr(home_prepared, 'PREPARE_BUDGET_S', 60)
     path = tmp_path / "state.db"
     store = Store(path)
     store.init_schema()
@@ -522,6 +573,25 @@ def test_automatic_refreshes_share_backoff_and_retry_without_another_request(sto
     worker._retry_home()
     assert worker.jobs.has('home')
     worker.shutdown()
+
+
+def test_explicit_result_replaces_held_menu_without_reusing_its_random_assignment(store, prepared):
+    first = home_prepared.cards(store, prepared, 1000, service(store))
+    assert first.protos[0]['assignment']['probability'] > 0
+    explicit = deepcopy(first)
+    explicit.protos[0]['tracks'].reverse()
+    explicit.protos[0]['name'] = 'Explicitly rebuilt mix'
+    home_prepared.remember(store, prepared, explicit, 1001)
+    # A later refill of the disposable pool must not resurrect the previous offer.
+    store.rec_proposals.publish_prepared_home(
+        json.dumps(prepared), 1002, surface='home_tuned')
+    store.conn.commit()
+    again = home_prepared.cards(store, home_prepared.load(store, 1002), 1002, service(store))
+    assert again.protos[0]['name'] == 'Explicitly rebuilt mix'
+    assert again.protos[0]['tracks'] == explicit.protos[0]['tracks']
+    assert [p['tracks'] for p in again.protos[1:]] == [p['tracks'] for p in first.protos[1:]]
+    assert all(p['assignment'] is None for p in again.protos)
+    assert again.choice_context == first.choice_context
 
 
 def test_tuned_result_is_reused_and_expiry_restores_baseline(store, prepared):

@@ -86,7 +86,7 @@ def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatc
     _, vectors, idx = embed.load_vectors(store)
     preferred = vectors[[idx[k] for k in groups[0]]].mean(0)
     preferred /= np.linalg.norm(preferred)
-    monkeypatch.setattr(surfaces, "playlist_taste", lambda s: PlaylistTaste(
+    monkeypatch.setattr(surfaces, "playlist_taste", lambda s, *, now: PlaylistTaste(
         ["Preferred playlist"], preferred[None, :], np.array([1.0])))
 
     _, content, cidx = embed.load_content_vectors(store)

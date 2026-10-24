@@ -220,7 +220,7 @@ def test_taste_listening_readings_have_separate_destinations(store, monkeypatch)
         m.setattr(taste_viz, "centroid_tilt_panel", unexpected)
         influence = client.get("/taste/viz/playlist-influence")
         assert influence.status_code == 200
-        assert "Build the model and play some playlists" in influence.text
+        assert "saved records, playlists and listening choices" in influence.text
 
     profile = client.get("/taste/panels/profile").text
     learning = client.get("/taste/panels/learning").text

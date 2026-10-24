@@ -219,7 +219,11 @@ def test_neon_green_is_reserved_for_explicit_primary_actions():
 
     templates = "\n".join(p.read_text() for p in (WEB / "templates").rglob("*.html"))
     for label in ("Import history", "Create playlist", "Save choices", "Save recipe"):
-        line = next(line for line in templates.splitlines() if label in line)
+        # Classify the exact submit action, not a secondary launcher such as
+        # "Create playlist with song" on the Track screen.
+        line = next(line for line in templates.splitlines()
+                    if re.search(r'>' + re.escape(label) + r'\s*</button>', line)
+                    or ('<button' in line and 'x-text=' in line and f"'{label}'" in line))
         assert "btn-primary" in line, f"primary action is not classified: {line.strip()}"
 
 

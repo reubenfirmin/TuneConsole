@@ -22,7 +22,7 @@ window.playbackStatus = {snapshot:{connected:true,now_playing:{video_id:'one',ti
 const context = vm.createContext({window,document,fetch: (url,options) => {
   calls.push({url,options});
   return url.endsWith('/next') ? new Promise(resolve => {releaseNext=resolve;}) : Promise.resolve({ok:true});
-}});
+}, encodeURIComponent});
 const source = fs.readFileSync('src/yt_playlist/web/static/playback-controls.js','utf8');
 vm.runInContext(source,context); vm.runInContext(source,context);
 const key = (properties={}) => {
@@ -69,9 +69,22 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert(!key().defaultPrevented); handlers.nexttrack(); assert.equal(calls.length,5);
   window.playbackStatus.snapshot = {connected:true,now_playing:null};
   assert(!key().defaultPrevented);
+  // The live card expired after a long pause, but its owned player remains resumable.
+  window.playbackStatus.snapshot.resumable_player = {video_id:'paused/song', title:'Paused song', paused:true};
+  window.dispatchEvent(new Event('bridge-status'));
+  assert.equal(session.playbackState,'paused'); assert.equal(session.metadata.title,'Paused song');
+  assert(key().defaultPrevented); await flush();
+  assert.equal(calls.at(-1).url,'/now-playing/toggle?action=toggle&resume=true&videoId=paused%2Fsong');
+  handlers.play(); await flush();
+  assert.equal(calls.at(-1).url,'/now-playing/toggle?action=play&resume=true&videoId=paused%2Fsong');
+  const resumedCalls=calls.length;
+  handlers.pause(); handlers.nexttrack(); await flush();
+  assert.equal(calls.length,resumedCalls,'expired display cannot skip and pause is idempotent');
+  window.playbackStatus.snapshot.connected=false;
+  assert(!key().defaultPrevented); handlers.play(); assert.equal(calls.length,resumedCalls);
   // Browsers without Media Session retain the keyboard shortcut.
   const plainWindow = new EventTarget(); plainWindow.playbackStatus = window.playbackStatus;
-  vm.runInContext(source,vm.createContext({window:plainWindow,document:new EventTarget(),fetch:()=>{}}));
+  vm.runInContext(source,vm.createContext({window:plainWindow,document:new EventTarget(),fetch:()=>{},encodeURIComponent}));
 })().catch(error => {console.error(error);process.exitCode=1;});
 """
     result = subprocess.run([node,'-e',script],cwd=Path(__file__).resolve().parents[1],

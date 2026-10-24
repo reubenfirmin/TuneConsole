@@ -67,7 +67,7 @@ def test_home_budget_is_counted_once_and_keeps_last_good_collections(store, monk
         raise WorkBudgetExceeded('budget exhausted')
 
     monkeypatch.setattr(home_prepared, '_prepare', exhausted)
-    tasks = ServingTasks(SimpleNamespace(store=store, now_fn=lambda: 1000,
+    tasks = ServingTasks(SimpleNamespace(store=store, now_fn=lambda: 1000, client_provider=lambda: {},
         logger=logging.getLogger('test')), lambda name, target, *args, **kwargs: target(*args, **kwargs))
     caplog.set_level(logging.INFO)
     for attempt in range(30):

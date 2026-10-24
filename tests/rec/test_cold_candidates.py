@@ -16,7 +16,7 @@ class _Proj:
 def _patch(monkeypatch, proj=None):
     proj = _Proj() if proj is None else proj
     monkeypatch.setattr(surfaces, "playlist_taste",
-                        lambda s: PlaylistTaste(["p"], np.array([[1.0, 0.0]]), np.array([1.0])))
+                        lambda s, *, now: PlaylistTaste(["p"], np.array([[1.0, 0.0]]), np.array([1.0])))
     monkeypatch.setattr(discover.ContentProjection, "fit", classmethod(lambda cls, s: proj))
     monkeypatch.setattr(surfaces.vectors, "load_discovered_content_vectors", lambda s, **kw: ([], None, {}))
     # #85 staleness_factor is gone; isolate taste-only ranking by zeroing both tilt producers directly.
@@ -95,7 +95,7 @@ def test_unknown_fit_is_not_mistaken_for_a_better_score(monkeypatch, store):
     monkeypatch.setattr(store.discovery, "get_discovered_tracks", lambda: pool)
     _patch(monkeypatch)
     monkeypatch.setattr(surfaces, "playlist_taste",
-                        lambda s: PlaylistTaste(["p"], np.array([[-1., 0.]]), np.array([1.])))
+                        lambda s, *, now: PlaylistTaste(["p"], np.array([[-1., 0.]]), np.array([1.])))
     assert [t.key for t in surfaces.cold_candidates(store, 0.0)] == ["t|a", "n|c"]
 
 
@@ -103,7 +103,7 @@ def test_no_taste_model_keeps_discoveries(monkeypatch, store):
     pool = [_row("n|c", None), _row("t|a", "techno")]
     monkeypatch.setattr(store.discovery, "get_discovered_tracks", lambda: pool)
     _patch(monkeypatch)
-    monkeypatch.setattr(surfaces, "playlist_taste", lambda s: None)
+    monkeypatch.setattr(surfaces, "playlist_taste", lambda s, *, now: None)
     assert [t.key for t in surfaces.cold_candidates(store, 0.0)] == ["t|a"]
 
 

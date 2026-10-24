@@ -168,14 +168,16 @@ def test_session_mode_mix_passes_radio_exclusion_to_play_events_since(store, mon
     captured = {}
     orig = store.history.play_events_since
 
-    def fake(since_ts, exclude_list_ids=None):
+    def fake(since_ts, exclude_list_ids=None, *, taste_only=False):
         captured["exclude_list_ids"] = exclude_list_ids
-        return orig(since_ts, exclude_list_ids=exclude_list_ids)
+        captured['taste_only'] = taste_only
+        return orig(since_ts, exclude_list_ids=exclude_list_ids, taste_only=taste_only)
     monkeypatch.setattr(store.history, "play_events_since", fake)
 
     layers.session_mode_mix(store, 1000.0)
 
     assert captured["exclude_list_ids"] == ["PLRADIO", "PLRADIO_B"]
+    assert captured['taste_only'] is True
 
 
 def test_stale_mode_centroids_dim_mismatch_reads_as_quiet(store, monkeypatch):

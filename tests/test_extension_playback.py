@@ -10,6 +10,7 @@ import pytest
     "audible", "heartbeat", "pending", "concurrent", "no_music", "leaving", "tab_muted", "media_muted",
     "sole_tab_muted", "sole_media_muted", "sole_zero_volume", "selected_muted",
     "rating_handoff",
+    "paused_resume", "paused_closed", "paused_legacy",
 ])
 def test_playlist_launch_reuses_and_controls_the_playing_tab(scenario):
     node = shutil.which("node")
@@ -74,7 +75,7 @@ const chrome = {
     },
     sendMessage: async (id, msg) => {
       messages.push({id, ...msg});
-      if(msg.type==='sensor-ping')return {ok:true,receiverRevision:7,mainVersion:4,mainRevision:8,mainAgeMs:0};
+      if(msg.type==='sensor-ping')return {ok:true,receiverRevision:scenario==='paused_legacy'?8:9,mainVersion:4,mainRevision:9,mainAgeMs:0};
       if(scenario==='rating_handoff' && msg.type==='rate')
         return {ok:msg.videoId===(id===2?'A':'B'),error:'The playing song changed'};
       return {ok: true};
@@ -97,6 +98,26 @@ const report = async (id, msg) => {
 };
 const next = 'https://music.youtube.com/watch?list=PL_new';
 (async () => {
+  if (scenario.startsWith('paused_')) {
+    browsing.active=false; old.active=true;
+    await report(2,{type:'now-heartbeat',videoId:'paused-song',title:'Paused song',paused:true});
+    old.active=false; browsing.active=true;
+    const command={type:'playpause',action:'play',resumeOnly:true,videoId:'paused-song'};
+    if (scenario==='paused_closed') {
+      tabs=tabs.filter(t=>t.id!==2);
+      for (const listener of chrome.tabs.onRemoved.listeners) listener(2);
+      await playback.drained;
+      assert.equal(frames.at(-1).type,'player-closed');
+    }
+    await sockets[0].onmessage({data:JSON.stringify(command)});
+    await new Promise(resolve=>setImmediate(resolve));
+    const controls=messages.filter(m=>['playpause','player-control'].includes(m.type));
+    if (scenario==='paused_resume') {
+      assert.deepEqual(controls,[{id:2,type:'player-control',action:'play',resumeOnly:true,videoId:'paused-song'}]);
+    } else assert.equal(controls.length,0,'closed or legacy players cannot resume another song');
+    assert.equal(created.length,0); assert.equal(updated.length,0);
+    return;
+  }
   if (scenario.startsWith('sole_') || scenario==='selected_muted') {
     const msg={type:'play',title:'Silent song',videoId:'silent',brandKnown:true,brandId:'brand',
       metadataVerified:true,paused:false,muted:scenario==='sole_media_muted'};
@@ -268,7 +289,9 @@ const context=vm.createContext({URL,Date:class extends Date{static now(){return 
 vm.runInContext(fs.readFileSync('extension/worker/ratings.js','utf8'),context);
 const playback=vm.runInContext('createNativeRatings',context)({
   pickTab:async()=>({id:selected}),
-  sensors:{inject:async id=>injected.push(id),ping:async()=>{
+  sensors:{inject:async id=>injected.push(id),ping:async(id,requireMain,options)=>{
+    assert.equal(requireMain,true);
+    assert.equal(options.nativeRating,true,'native commands require more than connection health');
     if(scenario==='old_receiver')return {ok:false,outdatedReceiver:true,error:'Outdated receiver'};
     return {ok:!(['missing_sensor','missing_receiver'].includes(scenario)&&!injected.length&&
       (scenario==='missing_sensor'||messages.length>0))};

@@ -125,3 +125,33 @@ def test_live_play_and_history_backfill_share_browser_date():
     want = datetime.datetime(2026, 10, 20, 12, tzinfo=datetime.timezone.utc).timestamp()
     assert s.conn.execute("SELECT day_ts FROM listening_days").fetchone()[0] == want
     assert s.history.play_events_since(0)[0]["played_at"] == now
+
+
+def test_selected_album_playback_is_context_evidence_not_organic_track_learning():
+    import json
+    from yt_playlist.rec import choice_evidence, layers
+
+    s = _store(with_brand=True)
+    oid = choice_evidence.issue(s, 'albums', [{'id': 'album', 'keys': ['song|artist']}],
+                                990, context={})
+    choice_evidence.respond(s, oid, 'choice', 991, option_id='album', action_id='chosen')
+    s.settings.set_setting('listening_album_pending', json.dumps({'opportunity_id': oid,
+        'browse': 'album', 'playlist': 'OLAK-album', 'videos': ['v1', 'v2'],
+        'at': 991, 'action_id': 'chosen'}))
+    assert live_plays.handle_play_event(_ctx(s), _msg(playlist='OLAK-album'), 1000)
+    assert s.conn.execute('SELECT is_generated FROM play_events').fetchone()[0] == 1
+    assert layers._plays(s, 0) == []
+    assert choice_evidence.compile_report(s, 1001)['formats']['albums']['starts'] == 1
+    # The first verified account owns the pending queue; another account is not attributed.
+    pending = json.loads(s.settings.get_setting('listening_album_pending'))
+    assert pending['identity_id'] == 1
+    assert choice_evidence.album_playback_context(s, _msg(playlist='OLAK-album'), 1001,
+                                                 identity_id=2) is None
+    assert choice_evidence.album_playback_context(s, _msg(playlist='OLAK-album', videoId='outside'),
+                                                 1001, identity_id=1) is None
+    # Album continuation stays quarantined even though it contains multiple tracks.
+    assert live_plays.handle_play_event(_ctx(s), _msg(playlist='OLAK-album', title='Next', videoId='v2'), 1200)
+    assert layers._plays(s, 0) == []
+    # A later independent direct choice has its own organic evidence.
+    assert live_plays.handle_play_event(_ctx(s), _msg(), 5000)
+    assert [row['identity_key'] for row in layers._plays(s, 0)] == ['song|artist']

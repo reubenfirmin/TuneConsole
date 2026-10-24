@@ -111,7 +111,7 @@ def test_taste_preview_explains_scope_sources_and_two_different_samples(store):
     preview = html.split('id="taste-preview"', 1)[1]
     for text in ("Preview &amp; compare", "Home’s familiar-music mix", "Taste matches",
                  "Deep cuts", "Playlist neighbors", "recent-listening influence and memory",
-                 "Source weights in Generated playlists", "Up to 8 songs", "top 24 picks"):
+                 "Source weights in Listening choices", "Up to 8 songs", "top 24 picks"):
         assert text in preview
     for destination in ("#recommendations/main", "#recommendations/genres", "#recommendations/features",
                         "#learning", "#generated"):

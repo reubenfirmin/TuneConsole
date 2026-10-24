@@ -1,4 +1,4 @@
-"""Album song titles are display-only; play controls route through /play to the deck tab.
+"""Album song titles open track details; play controls route through /play to the deck tab.
 
 Needs a real browser: the behavior under test is playback-controls.js's capture-phase click interceptor, which
 TestClient cannot run.
@@ -54,13 +54,15 @@ def _wire(page, plays):
                                                  route.fulfill(json={"ok": True})))
 
 
-def test_album_song_title_does_not_navigate_or_change_playback(live_album_app, page):
+def test_album_song_title_opens_details_without_changing_playback(live_album_app, page):
     plays = []
     _wire(page, plays)
     page.goto(f"{live_album_app}/album?browse=MPREb_x")
-    expect(page.locator("a.ptitle")).to_have_count(0)
-    page.locator(".ptitle").click()
-    assert page.url == f"{live_album_app}/album?browse=MPREb_x"
+    expect(page.locator("a.ptitle")).to_have_count(1)
+    assert page.locator("a.ptitle").get_attribute("href").startswith("/track/v1?")
+    page.locator("a.ptitle").click()
+    expect(page.get_by_role("heading", name="One", exact=True)).to_be_visible()
+    assert page.url.startswith(f"{live_album_app}/track/v1?")
     assert len(page.context.pages) == 1
     assert plays == []
 

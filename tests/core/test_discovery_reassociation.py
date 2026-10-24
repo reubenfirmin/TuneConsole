@@ -177,7 +177,7 @@ def test_playback_consumers_take_metadata_from_one_available_upload(store):
     for query,kind in [('Z title','songs'),('Artist','tracks_by')]:
         section = next(r for r in s.search.omni_search(query)['sections'] if r['kind']==kind)
         assert [(r['label'],r['href'],r['thumbnail']) for r in section['rows']]==[
-            ('Z title','https://music.youtube.com/watch?v=b','z-cover')]
+            ('Z title','/track/b','z-cover')]
     assert library_sample(s)==[{'video_id':'b','title':'Z title','artist':'Artist','album':'Z release',
                                'thumbnail':'z-cover','key':key}]
     assert s.charts.top_tracks()==[{'title':'Z title','artist':'Artist','video_id':'b','thumbnail':'z-cover','plays':1}]
@@ -197,7 +197,7 @@ def test_scoped_representative_filters_artist_release_and_account_before_selecti
         sections = s.search.omni_search(query)['sections']
         rows = next(section['rows'] for section in sections if section['kind']==kind)
         assert [(r['label'],r['href'],r['thumbnail']) for r in rows]==[
-            ('Second tune','https://music.youtube.com/watch?v=b',None)]
+            ('Second tune','/track/b',None)]
     for field,value in [('artist','Second artist'),('album_browse_id','second')]:
         sql = playable_tracks_sql(f'SELECT * FROM tracks WHERE {field}=?')
         assert [r['video_id'] for r in s.conn.execute(sql,(value,))]==['b']

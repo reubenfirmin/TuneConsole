@@ -43,8 +43,12 @@ def test_stale_snapshot_cannot_replace_a_concurrent_confirmed_action(store, part
         store.playlists.set_playlist_tracks(lm,[tid])
     action = lambda: ratings.record_confirmed(store,owner,'a',confirmed,110)
     result = sync.sync_identity(store,owner,_client(observed,partial=partial,during_read=action),now=100)
-    assert result['resources']['ratings']['status']==('partial' if partial and observed!='INDIFFERENT'
-                                                     else 'skipped' if partial else 'complete')
+    # The confirmed action changed LM while its snapshot was in flight. Even a
+    # fully paginated read must report incomplete evidence after that guard wins.
+    assert result['resources']['ratings']['status']==('skipped' if observed=='INDIFFERENT' else 'partial')
+    liked_snapshot = result['resources']['playlists']['items']['LM']
+    assert liked_snapshot['status']=='partial'
+    assert 'changed locally' in liked_snapshot['message']
     assert store.tracks.item_rating(owner,'a')=={'status':confirmed,'source':'api','observed_at':110}
     key = store.tracks.identity_key_for_video('a')
     assert (key in store.rec_model.recent_liked_keys())==(confirmed=='LIKE')

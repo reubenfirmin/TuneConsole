@@ -588,6 +588,46 @@ def test_now_playing_toggle_returns_ok_false_when_not_connected():
     assert r.json()["ok"] is False
 
 
+@pytest.mark.parametrize("closed", ["player-closed", "bye", "no-tabs", "disconnect"])
+def test_long_paused_player_remains_resumable_after_display_expires(monkeypatch, closed):
+    from types import SimpleNamespace
+    from yt_playlist.web.routes import bridge as route
+
+    clock = [100.0]
+    monkeypatch.setattr(route, "time", SimpleNamespace(monotonic=lambda: clock[0], time=lambda: clock[0]))
+    bridge = Bridge()
+    client = TestClient(_app(bridge))
+    with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
+        ws.send_json({"type": "now-heartbeat", "title": "Paused song", "videoId": "paused-song",
+                      "paused": True, "metadataVerified": True})
+        deadline = time.time() + 2
+        while bridge.resumable_player is None and time.time() < deadline:
+            time.sleep(0.01)
+        assert bridge.resumable_player["video_id"] == "paused-song"
+        clock[0] += 16 * 60
+        status = client.get("/bridge/status").json()
+        assert status["now_playing"] is None
+        assert status["resumable_player"]["video_id"] == "paused-song"
+        response = client.post("/now-playing/toggle?action=play&resume=true&videoId=paused-song")
+        assert response.json() == {"ok": True}
+        assert ws.receive_json() == {"type": "playpause", "action": "play", "resumeOnly": True,
+                                     "videoId": "paused-song"}
+        assert client.post("/now-playing/toggle?resume=true&videoId=other").json()["ok"] is False
+        if closed == "disconnect":
+            bridge.disconnect()
+        else:
+            frame = {"type": closed} if closed == "player-closed" else (
+                {"type": "pevent", "kind": "bye"} if closed == "bye" else
+                {"type": "sensor-health", "ytmTabs": 0})
+            ws.send_json(frame)
+            deadline = time.time() + 2
+            while bridge.resumable_player is not None and time.time() < deadline:
+                time.sleep(0.01)
+        assert bridge.resumable_player is None
+        assert client.get("/bridge/status").json()["resumable_player"] is None
+        assert client.post("/now-playing/toggle?resume=true&videoId=paused-song").json()["ok"] is False
+
+
 @pytest.mark.parametrize("accepted", [True, False])
 def test_next_waits_for_player_acknowledgement(accepted):
     bridge = Bridge()

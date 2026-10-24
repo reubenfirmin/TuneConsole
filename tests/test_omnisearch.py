@@ -39,14 +39,14 @@ def test_artist_pivot_sets_primary_and_sections(store):
     assert "playlists_featuring" in kinds
 
 
-def test_tracks_by_artist_are_external_ytm_links(store):
+def test_tracks_by_artist_link_to_track_details(store):
     _seed(store)
     res = store.search.omni_search("ritmo")
     tracks = next(s for s in res["sections"] if s["kind"] == "tracks_by")
     assert tracks["title"] == "Tracks by Ritmo"
     row = tracks["rows"][0]
-    assert row["external"] is True
-    assert row["href"].startswith("https://music.youtube.com/watch?v=")
+    assert row["external"] is False
+    assert row["href"].startswith("/track/")
 
 
 def test_albums_by_artist_link_to_album_page(store):
@@ -72,6 +72,8 @@ def test_direct_song_title_match_appears_in_songs(store):
     assert res["primary_artist"] is None
     songs = next(s for s in res["sections"] if s["kind"] == "songs")
     assert songs["rows"][0]["label"] == "Ritmo Caliente"
+    assert songs["rows"][0]["href"] == "/track/m1"
+    assert songs["rows"][0]["external"] is False
 
 
 def test_direct_playlist_title_match_appears_in_playlists(store):

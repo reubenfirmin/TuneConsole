@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1] / "packaging"))
 from promote_release import Backend
 import promote_release
-from rehearse_publisher import rehearse
+from rehearse_publisher import cleanup, rehearse
 import release_services
 
 
@@ -28,6 +28,7 @@ class GitHub:
         self.unreachable = False
         self.hidden_reads = 0
         self.hide_created_reads = 0
+        self.listing_lag = 0
         monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
         monkeypatch.setattr("urllib.request.urlopen", self.urlopen)
         self.backend = Backend("owner/repo")
@@ -58,6 +59,8 @@ class GitHub:
             result = self.release
         elif "/releases/assets/" in path:
             return io.BytesIO(self.contents[int(path.rsplit("/", 1)[1])])
+        elif path == "/repos/owner/repo/releases/12":
+            result = self.release
         else:
             assert query["per_page"] == ["100"]
             # Ensure drafts on later pages can be found, not just recent releases.
@@ -68,6 +71,9 @@ class GitHub:
                 result = []
             else:
                 result = [self.release] if self.release else []
+                if self.release and self.listing_lag:
+                    self.listing_lag -= 1
+                    result = []
         return io.BytesIO(json.dumps(result).encode())
 
     def run(self, *args):
@@ -154,6 +160,65 @@ def test_rehearsal_cleans_up_after_interrupted_upload(monkeypatch):
         rehearse(github.backend, "publisher-contract-failure", "b" * 40)
     assert github.release is None
     assert github.requests[-1][0] == "DELETE"
+
+
+def test_created_draft_discovery_recovers_only_after_confirming_the_exact_resource(monkeypatch, capsys):
+    github = GitHub(monkeypatch)
+    github.listing_lag = 2
+    sleeps = []
+    monkeypatch.setattr("rehearse_publisher.time.sleep", sleeps.append)
+    rehearse(github.backend, "publisher-contract-lag", "a" * 40)
+    assert sleeps == [0.25, 0.75]
+    direct = [(method, path) for method, path, _ in github.requests
+              if path == "/repos/owner/repo/releases/12"]
+    assert direct == [("GET", "/repos/owner/repo/releases/12")] * 2 + [
+        ("DELETE", "/repos/owner/repo/releases/12")]
+    assert len(github.commands) == 3
+    output = capsys.readouterr().out
+    assert '"attempt": 3' in output and '"created_id": 12' in output
+    assert "visible by ID" in output and "fixture-token" not in output
+
+
+def test_persistent_discovery_failure_is_bounded_and_cleans_up_by_created_id(monkeypatch):
+    github = GitHub(monkeypatch)
+    github.listing_lag = 10
+    sleeps = []
+    monkeypatch.setattr("rehearse_publisher.time.sleep", sleeps.append)
+    with pytest.raises(RuntimeError, match="lookup failed after three attempts"):
+        rehearse(github.backend, "publisher-contract-invisible", "a" * 40)
+    assert sleeps == [0.25, 0.75]
+    assert github.release is None and github.commands == []
+    assert github.requests[-2:] == [
+        ("GET", "/repos/owner/repo/releases/12", {}),
+        ("DELETE", "/repos/owner/repo/releases/12", {})]
+
+
+def test_lost_create_response_still_cleans_up_the_authenticated_draft(monkeypatch):
+    github = GitHub(monkeypatch)
+    send = github.urlopen
+
+    def lose_reply(request, timeout):
+        result = send(request, timeout)
+        if request.method == "POST":
+            raise urllib.error.URLError("reply lost after creation")
+        return result
+
+    monkeypatch.setattr("urllib.request.urlopen", lose_reply)
+    with pytest.raises(urllib.error.URLError, match="reply lost"):
+        rehearse(github.backend, "publisher-contract-lost-reply", "a" * 40)
+    assert github.release is None and github.commands == []
+    assert github.requests[-1][0] == "DELETE"
+
+
+@pytest.mark.parametrize("change", [{"draft": False}, {"tag_name": "v1.2.3"}, {"id": 99}])
+def test_cleanup_never_deletes_a_changed_or_public_created_release(monkeypatch, change):
+    github = GitHub(monkeypatch)
+    created = {"id": 12, "tag_name": "publisher-contract-test", "draft": True, "assets": []}
+    github.release = {**created, **change}
+    with pytest.raises(RuntimeError, match="identity or draft state differs"):
+        cleanup(github.backend, "publisher-contract-test", created=created)
+    assert github.release is not None
+    assert not any(method == "DELETE" for method, _, _ in github.requests)
 
 
 def test_interrupted_real_staging_resumes_and_published_assets_are_immutable(monkeypatch, tmp_path):

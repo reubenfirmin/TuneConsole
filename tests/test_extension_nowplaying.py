@@ -19,6 +19,7 @@ const messages = [];
 const listeners = {};
 const intervals = [];
 let now = 0;
+let playPauseClicks = 0;
 const video = { paused: true, currentTime: 12, duration: 200 };
 let thumbnail = "https://i.ytimg.com/vi/v1/hqdefault.jpg";
 let likeStatus = "";
@@ -30,6 +31,8 @@ const document = {
   addEventListener() {},
   querySelector(selector) {
     if (selector === "video") return video;
+    if (selector === "ytmusic-player-bar #play-pause-button") return {
+      querySelector: () => null, click() { playPauseClicks++; video.paused = !video.paused; }};
     if (selector === ".title.ytmusic-player-bar") return { textContent: "Exoskeleton (Official)" };
     if (selector === ".byline.ytmusic-player-bar") return { textContent: "GAUPA • Album" };
     if (selector === "img.image.ytmusic-player-bar") return { src: thumbnail };
@@ -58,6 +61,19 @@ const context = {
   console: { log() {}, warn() {} },
 };
 vm.runInNewContext(fs.readFileSync("extension/content.js", "utf8"), context);
+const control = (action, videoId='v1', actualVideo='v1') => {
+  listeners.runtime({type:'player-control',resumeOnly:true,action,videoId}, {}, () => {});
+  const probe=probes.at(-1).__tcSensorProbe;
+  listeners.message({source:window,data:{__tcSensorVersion:4,__tcSensorRevision:8,
+    __tcSensorProbeId:probe.id,__tcNow:{videoId:actualVideo,paused:video.paused}}});
+};
+now=16*60*1000;
+control('play'); assert.equal(playPauseClicks,1); assert.equal(video.paused,false);
+control('play'); assert.equal(playPauseClicks,1,'Play must not toggle an already playing video');
+control('pause'); assert.equal(playPauseClicks,2); assert.equal(video.paused,true);
+control('play','v1','other'); assert.equal(playPauseClicks,2,'a changed video cannot resume from stale state');
+control('toggle'); assert.equal(playPauseClicks,3); assert.equal(video.paused,false);
+video.paused=true; messages.length=0; now=0;
 // A resync can precede the first MAIN tick. Unknown account is presence, never a main-account play.
 video.paused = false;
 listeners.runtime({type: "resync-now"}, {}, () => {});
@@ -240,7 +256,7 @@ listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorProbeI
 assert.equal(health.ok, true);
 assert.equal(health.mainVersion, 4);
 assert.equal(health.mainRevision, 8);
-assert.equal(health.receiverRevision, 7);
+assert.equal(health.receiverRevision, 9);
 assert.equal(health.mainAgeMs, 0);
 assert.equal(health.capture.hasVideo, false);
 assert.equal(health.capture.accountKnown, false);

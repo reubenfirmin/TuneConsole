@@ -4,7 +4,7 @@ import json
 import re
 
 import pytest
-from fastapi.templating import Jinja2Templates
+from tests.template_support import web_templates
 from playwright.sync_api import expect
 from tests.browser.radio_ui_support import radio_ui
 
@@ -313,7 +313,7 @@ def test_new_radio_connection_failure_preserves_session_quietly(page, radio_ui):
 
 def test_history_refreshes_for_native_song_missing_from_saved_queue(page, radio_ui):
     api = radio_ui
-    template = Jinja2Templates(directory='src/yt_playlist/web/templates').get_template('_partials/radio_playlist.html')
+    template = web_templates().get_template('_partials/radio_playlist.html')
     api.state = {**api.ready, 'history': api.tracks[:2], 'history_count': 2}
     api.playlist = template.render(session=api.state, tracks=api.state['history'])
     rows = page.locator('.radio-history tr')
@@ -351,7 +351,7 @@ def test_launcher_highlight_keyboard_and_touch_layout(page, radio_ui, width, tou
         session = page.context.new_cdp_session(page)
         session.send("Emulation.setTouchEmulationEnabled", {"enabled": True})
     seed = page.locator(".radio-seed").first
-    seed.focus()
+    seed.get_by_role('button').focus()
     expect(seed.locator(".radio-seed-info")).to_have_css("opacity", "1")
     expect(seed.locator(".radio-seed-launch")).to_have_css("opacity", "1")
     assert seed.locator(".radio-seed-play").bounding_box()["width"] >= 40
@@ -364,7 +364,7 @@ def test_launcher_highlight_keyboard_and_touch_layout(page, radio_ui, width, tou
         expect(page.locator(".radio-seed").nth(1)).to_have_css("opacity", "1")
         seed.hover()
     page.emulate_media(reduced_motion="reduce")
-    seed.press("Enter")
+    seed.get_by_role('button').press("Enter")
     expect(page.locator(".radio-launch")).to_be_visible()
     expect(page.locator(".radio-launch-node").first).to_have_css("animation-name", "none")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")

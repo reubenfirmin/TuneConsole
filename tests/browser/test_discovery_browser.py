@@ -98,7 +98,9 @@ def test_prepared_songs_are_ready_when_discover_opens(live_app, store, page, wid
     expect(page.get_by_role("heading", name="Songs to discover")).to_be_visible()
     expect(tiles.first).to_be_visible()
     expect(page.get_by_text("Finding new music for you…", exact=True)).to_have_count(0)
-    expect(tiles.first.locator("a")).to_have_attribute("href", "https://music.youtube.com/watch?v=v0")
+    title = tiles.first.locator("a.tile-cover")
+    assert title.get_attribute("href").startswith("/track/v0?")
+    expect(tiles.first.locator("a.tile-play")).to_have_attribute("href", "https://music.youtube.com/watch?v=v0")
     tiles.first.scroll_into_view_if_needed()
     page.wait_for_timeout(1300)
     deltas = [row["offered_count"] - before[row["identity_key"]] for row in store.discovery.get_discovered_tracks()]

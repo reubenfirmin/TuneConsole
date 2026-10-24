@@ -92,7 +92,9 @@ def test_listen_distribution_album(store):
 def test_listen_distribution_playlist_counts_per_membership(store):
     _seed(store)
     # Recent: Alpha x2 + Beta x1 all in Mix -> 3. Old: Gamma x1 in Chill -> 1.
-    assert store.charts.listen_distribution("playlist", since=None) == {"Mix": 3, "Chill": 1}
+    labels = store.charts.playlist_labels()
+    assert {labels[k]: v for k, v in store.charts.listen_distribution("playlist").items()} == {
+        "Mix": 3, "Chill": 1}
 
 
 # --- corpus_distribution -------------------------------------------------------
@@ -125,7 +127,9 @@ def test_corpus_distribution_album(store):
 
 def test_corpus_distribution_playlist_distinct_tracks(store):
     _seed(store)
-    assert store.charts.corpus_distribution("playlist") == {"Mix": 2, "Chill": 1}
+    labels = store.charts.playlist_labels()
+    assert {labels[k]: v for k, v in store.charts.corpus_distribution("playlist").items()} == {
+        "Mix": 2, "Chill": 1}
 
 
 def test_distributions_skip_untagged(store):

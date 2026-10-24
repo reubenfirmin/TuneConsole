@@ -220,14 +220,15 @@ def test_recommendation_controls_are_all_available_and_rendered_once(store):
         html = client.get("/taste/panels/recommendations" + query).text
         panel.feed(html)
         assert panel.details == []
-        assert len(panel.features) == 8
+        assert len(panel.features) == 9
         assert all(f.get("role") == "tabpanel" and f.get("aria-labelledby") == f'{f["id"]}-tab'
                    for f in panel.features)
         for p in rec_params.PARAMS:
             if p.group == "discovery" or p.name in rec_params.SEMANTIC_PARAMS:
                 expected = 0 if p.name.startswith("radio_") else 1
                 assert panel.ids.count(f"param-{p.name}") == expected, p.name
-        assert "radio" not in html.lower()
+        assert 'id="param-radio_' not in html.lower()
+        assert '<option value="radio"' in html  # Remembered format preference includes On air.
         assert 'hx-get="/taste/panels/recommendations"' in client.get("/taste" + query).text
 
 

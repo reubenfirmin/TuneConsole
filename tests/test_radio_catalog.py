@@ -33,6 +33,17 @@ def candidates(store, **tuning):
     return result
 
 
+def test_prepared_pool_reuses_the_accounts_verified_playable_upload(store, seed):
+    owner = store.identities.upsert_identity('Main', 'credential', None, True)
+    actual = {**seed, 'video_id': 'playable', 'duration': 200}
+    store.tracks.upsert_track('playable', seed['title'], seed['artist'], '', 200)
+    store.tracks.remember_playback_alternate(owner, {**seed, 'duration': 200}, actual,
+        evidence={'playlist': 'PL', 'set_video_id': 'owned'}, now=1)
+    c = candidates(store)
+    assert [t['video_id'] for t in c._load('1')] == ['playable']
+    assert c.seed_offer(1)[0]['video_id'] == 'playable'
+
+
 def test_themed_fills_all_four_streams_with_unprepared_catalog_tracks(store, seed, monkeypatch):
     for i in range(30):
         catalog_track(store, f"catalog-{i}")

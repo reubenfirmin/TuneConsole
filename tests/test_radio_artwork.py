@@ -191,3 +191,48 @@ assert.equal(radio.artworkView.moving, false);
     result = subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parents[1],
                             capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_record_clones_fit_available_space_and_rings_resume_the_same_motion():
+    node = shutil.which('node')
+    if node is None:
+        pytest.skip('Node.js is required to exercise radio artwork')
+    script = r"""
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const storage=new Map();
+const context=vm.createContext({cancelAnimationFrame(){},sessionStorage:{
+  getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value)}});
+vm.runInContext(fs.readFileSync('src/yt_playlist/web/static/radio-artwork.js','utf8'),context);
+const artwork=vm.runInContext('radioArtwork()',context);
+artwork.artworkView={playlistId:'one'}; artwork.syncArtworkSession();
+for(const [width,height] of [[1440,250],[1792,450],[390,140],[390,480],[120,60]]) {
+  artwork.drawingSpace={width,historyHeight:height,gapHeight:112};
+  const copies=artwork.recordEchoes;
+  assert(copies.length<=24,'the drawing has a fixed upper cost');
+  if(width>=390) assert(copies.length>0,'available space gains smaller records');
+  for(const [index,copy] of copies.entries()) {
+    assert(copy.x-copy.r>=0 && copy.x+copy.r<=width);
+    assert(copy.y-copy.r>=0 && copy.y+copy.r<=height);
+    assert(!/NaN|Infinity/.test(copy.transform));
+    for(const other of copies.slice(index+1))
+      assert(Math.hypot(copy.x-other.x,copy.y-other.y)>copy.r+other.r,'records remain separated');
+  }
+}
+const composed=[artwork.orbitTransform(0),artwork.orbitTransform(1)];
+artwork.artworkPhase=2;
+const shifted=[artwork.orbitTransform(0),artwork.orbitTransform(1)];
+assert.notDeepEqual(shifted,composed,'both rings change their position and plane');
+artwork.pauseArtworkMotion();
+const resumed=vm.runInContext('radioArtwork()',context);
+resumed.artworkView={playlistId:'one'}; resumed.syncArtworkSession();
+assert.deepEqual([resumed.orbitTransform(0),resumed.orbitTransform(1)],shifted);
+artwork.artworkPhase+=.00001;
+const numbers=value=>value.match(/-?\d+(?:\.\d+)?/g).map(Number);
+for(const [index,before] of shifted.entries()) {
+  const after=numbers(artwork.orbitTransform(index));
+  assert(numbers(before).every((value,i)=>Math.abs(value-after[i])<.01),'ring movement stays continuous');
+}
+"""
+    result = subprocess.run([node, '-e', script], cwd=Path(__file__).resolve().parents[1],
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr

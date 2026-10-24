@@ -1,6 +1,6 @@
 """Radio artwork motion, restored shape and playback history geometry."""
 import pytest
-from fastapi.templating import Jinja2Templates
+from tests.template_support import web_templates
 from playwright.sync_api import expect
 from tests.browser.radio_ui_support import radio_ui
 
@@ -11,7 +11,7 @@ def test_artwork_evolves_slowly_with_reduced_motion_and_pauses_when_hidden(page,
     page.evaluate('''sessionStorage.setItem('radio-artwork', JSON.stringify({
       playlistId: 'PLRADIO', phase: 0, seed: 284,
     }))''')
-    templates = Jinja2Templates(directory='src/yt_playlist/web/templates')
+    templates = web_templates()
     api.playlist = templates.get_template('_partials/radio_playlist.html').render(session=api.ready, tracks=api.tracks)
     api.state = api.ready
     expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
@@ -155,7 +155,7 @@ def test_artwork_evolves_slowly_with_reduced_motion_and_pauses_when_hidden(page,
 
 def test_artwork_resumes_its_saved_shape_after_visiting_another_page(page, radio_ui):
     api = radio_ui
-    templates = Jinja2Templates(directory='src/yt_playlist/web/templates')
+    templates = web_templates()
     api.playlist = templates.get_template('_partials/radio_playlist.html').render(session=api.ready, tracks=api.tracks)
     api.state = api.ready
     expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
@@ -175,29 +175,32 @@ def test_artwork_resumes_its_saved_shape_after_visiting_another_page(page, radio
 def test_record_cover_changes_immediately_when_replaying_history(page, radio_ui):
     api = radio_ui
     api.state = {**api.ready, 'position': 2, 'history_count': 3}
-    templates = Jinja2Templates(directory='src/yt_playlist/web/templates')
+    templates = web_templates()
     api.playlist = templates.get_template('_partials/radio_playlist.html').render(
         session=api.state, tracks=api.tracks)
     expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
     cover = page.locator('.radio-record-cover')
-    expect(cover).to_have_attribute('src', api.tracks[2]['thumbnail'])
-    expect(cover).to_have_js_property('naturalWidth', 300)
+    expect(cover).to_have_attribute('href', api.tracks[2]['thumbnail'])
+    assert page.evaluate('''async url => {
+      const image = new Image(); image.src = url; await image.decode();
+      return image.naturalWidth === 300;
+    }''', api.tracks[2]['thumbnail'])
     page.clock.install()
     requests = []
     page.route('**/play', lambda route: requests.append(route))
     page.locator('.radio-history .pl-play').first.click()
-    expect(cover).to_have_attribute('src', api.tracks[0]['thumbnail'])
+    expect(cover).to_have_attribute('href', api.tracks[0]['thumbnail'])
     assert len(requests) == 1
     requests[0].fulfill(json={'ok': True})
     # The history stays unchanged when native playback returns to an earlier song too.
     page.evaluate('''video => window.dispatchEvent(new CustomEvent('bridge-status', {detail: {
       connected: true, now_playing: {video_id: video, playlist_ytm_id: 'PLRADIO'}
     }}))''', api.tracks[0]['video_id'])
-    expect(cover).to_have_attribute('src', api.tracks[0]['thumbnail'])
+    expect(cover).to_have_attribute('href', api.tracks[0]['thumbnail'])
     page.evaluate('''video => window.dispatchEvent(new CustomEvent('bridge-status', {detail: {
       connected: true, now_playing: {video_id: video, playlist_ytm_id: 'PLRADIO'}
     }}))''', api.tracks[1]['video_id'])
-    expect(cover).to_have_attribute('src', api.tracks[1]['thumbnail'])
+    expect(cover).to_have_attribute('href', api.tracks[1]['thumbnail'])
     expect(page.locator('.radio-history tr')).to_have_count(3)
 
 
@@ -208,7 +211,7 @@ def test_session_history_rises_from_junction_and_queues_preview_without_switchin
     api.ready = {**api.ready, 'directions': [
         {**branch, 'tracks': api.tracks[branch['slot'] + 1:branch['slot'] + 7]}
         for branch in api.ready['directions']]}
-    templates = Jinja2Templates(directory='src/yt_playlist/web/templates')
+    templates = web_templates()
     template = templates.get_template('_partials/radio_playlist.html')
 
     def playing(count):
@@ -247,8 +250,11 @@ def test_session_history_rises_from_junction_and_queues_preview_without_switchin
     assert abs(drawing.bounding_box()['y'] + drawing.bounding_box()['height'] - (junction_box['y'] + junction_box['height'])) < 3
     expect(session.locator('.track-table')).to_have_css('opacity', '1')
     assert '.85' in rows.first.evaluate('el => getComputedStyle(el).backgroundColor')
-    expect(drawing.locator('.radio-record-cover')).to_have_attribute('src', api.tracks[0]['thumbnail'])
-    expect(drawing.locator('.radio-record-cover')).to_have_js_property('naturalWidth', 300)
+    expect(drawing.locator('.radio-record-cover')).to_have_attribute('href', api.tracks[0]['thumbnail'])
+    assert page.evaluate('''async url => {
+      const image = new Image(); image.src = url; await image.decode();
+      return image.naturalWidth === 300;
+    }''', api.tracks[0]['thumbnail'])
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.screenshot(path=f'/tmp/tuneconsole-radio-drawing-{width}.png')
 
@@ -267,16 +273,18 @@ def test_session_history_rises_from_junction_and_queues_preview_without_switchin
     expect(other).to_have_class('radio-direction is-preview')
     page.locator('.radio-menu > summary').focus()
     expect(other).not_to_have_class('radio-direction is-preview')
+    transition = line.evaluate('el => getComputedStyle(el).transitionDuration')
+    assert transition != '0s'
     page.emulate_media(reduced_motion='reduce')
     other.get_by_role('button').focus()
-    expect(line).to_have_css('transition-duration', '0s')
+    expect(line).to_have_css('transition-duration', transition)
     page.locator('.radio-menu > summary').focus()
 
     playing(3)
     expect(rows).to_have_count(3, timeout=6000)
     expect(rows.last).to_have_attribute('aria-current', 'true')
     assert abs(rows.last.bounding_box()['y'] + rows.last.bounding_box()['height'] - (height / 2 - 16)) < 3
-    expect(drawing.locator('.radio-record-cover')).to_have_attribute('src', api.tracks[2]['thumbnail'])
+    expect(drawing.locator('.radio-record-cover')).to_have_attribute('href', api.tracks[2]['thumbnail'])
     playing(12)
     expect(rows).to_have_count(12, timeout=6000)
     expect(rows.last).to_have_attribute('aria-current', 'true')

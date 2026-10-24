@@ -131,7 +131,7 @@ def test_apply_matches_the_rendered_editor_for_every_ordering_mode(merge, store,
         assert web.get(f"/merge?ids={ids}").status_code == 200
         for field, value in (("sort", sort), ("mode", mode)):
             preview = web.post(f"/merge/update?ids={ids}", data={"field": field, "value": value})
-        shown = re.findall(r'href="https://music.youtube.com/watch\?v=([^"]+)"', preview.text)
+        shown = re.findall(r'class="tk-t" href="/track/([^?"/]+)', preview.text)
         assert shown == expected
         response = web.post(f"/merge/apply?ids={ids}")
         assert response.status_code == 200 and response.headers.get("HX-Redirect")

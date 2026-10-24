@@ -7,7 +7,7 @@ The app's own suggestions must not come back to it as evidence of taste, or it t
 what drives the Home "You're into X recently" card.
 """
 from yt_playlist.core.store import Store
-from yt_playlist.rec import rec_params, transient
+from yt_playlist.rec import layers, rec_params, transient
 from yt_playlist.util import genre_map
 from yt_playlist.repos.base import GENERATED_GROUP
 
@@ -103,3 +103,21 @@ def test_evidence_plays_still_drops_radio_provenance():
 
     limit = rec_params.get_param(s, "recent_play_limit")
     assert transient.evidence_plays(s, limit) == []
+
+
+def test_now_and_session_share_generated_playback_quarantine():
+    s = _store()
+    iid, mine, gen = _library(s)
+    tid = _song(s, gen, "v_gen", "Generated", "Machine", "Country")
+    organic = _song(s, mine, "v_own", "Chosen", "Person", "Techno")
+    # Even a song also owned organically must not count when this play's exact source
+    # is generated. Its independent direct play remains eligible.
+    s.playlists.set_playlist_tracks(mine, [tid, organic])
+    s.history.record_play_event(iid, "generated|machine", "v_gen", 1000, playlist_ytm_id="PLGEN")
+    s.history.record_play_event(iid, "chosen|person", "v_own", 1001, playlist_ytm_id="PLMINE")
+    assert [row["identity_key"] for row in layers._plays(s, 0)] == ["chosen|person"]
+    # Retained source policy survives removal of the generated playlist itself.
+    s.playlists.remove_playlist(gen)
+    assert [row["identity_key"] for row in layers._plays(s, 0)] == ["chosen|person"]
+    s.history.record_play_event(iid, "generated|machine", "v_gen", 5000)
+    assert len(layers._plays(s, 0)) == 2

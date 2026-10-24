@@ -85,17 +85,20 @@ def test_album_status_track_links_and_save_from_artist(live_artist_app, page, wi
     base = live_artist_app['base']
     page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(f'{base}/album?browse=MPREb_x')
-    save = page.get_by_role('button', name='Save Album to Library', exact=True)
+    save = page.get_by_role('button', name='Save album to library', exact=True)
     expect(save).to_be_visible()
     expect(save).to_be_in_viewport(ratio=1)
     expect(page.get_by_text('1 of 2 tracks in your library. The album is not saved.', exact=True)).to_be_visible()
     rows = page.locator('.track-table tbody tr.srow')
     expect(rows).to_have_count(2)
-    expect(rows.locator('a.ptitle')).to_have_count(0)
+    expect(rows.locator('a.ptitle')).to_have_count(2)
     expect(rows.locator('.ui-arrow--external')).to_have_count(0)
     expect(rows.locator('a.pl-play')).to_have_count(2)
     expect(rows.locator('a.alink')).to_have_count(2)
     expect(rows.locator('a.alink').last).to_have_attribute('href', '/artist?name=Artist%20X')
+    assert page.locator('.track-table').evaluate('''table =>
+        table.querySelector('thead').getBoundingClientRect().bottom <=
+        table.querySelector('tbody tr').getBoundingClientRect().top + 1''')
     page.screenshot(path=f'/tmp/tuneconsole-album-preview-{width}.png')
     rows.locator('a.alink').first.click()
     expect(page.get_by_role('heading', name='Artist X', exact=True)).to_be_visible()
@@ -106,10 +109,10 @@ def test_album_status_track_links_and_save_from_artist(live_artist_app, page, wi
     page.get_by_role('button', name='Save', exact=True).click()
     expect(page.get_by_role('button', name='Unsave', exact=True)).to_be_visible()
     page.goto(f'{base}/album?browse=MPREb_x')
-    expect(page.get_by_role('button', name='Save Album to Library', exact=True)).to_have_count(0)
-    expect(page.get_by_text('✓ In your library', exact=True)).to_be_visible()
+    expect(page.get_by_role('button', name='Save album to library', exact=True)).to_have_count(0)
+    expect(page.get_by_role('button', name="Remove album from Main's library", exact=True)).to_be_visible()
     expect(page.locator('.track-table tbody tr.srow')).to_have_count(2)
-    expect(page.locator('.track-table a.ptitle')).to_have_count(0)
+    expect(page.locator('.track-table a.ptitle')).to_have_count(2)
     expect(page.locator('.track-table a.alink')).to_have_count(2)
 
 
@@ -123,6 +126,64 @@ def test_unsave_album_flips_to_save_after_reload(live_artist_app, page):
     expect(unsave).to_be_visible()
     unsave.click()
     expect(page.get_by_role("button", name="Save", exact=True)).to_be_visible()      # now unsaved
+
+
+@pytest.mark.parametrize('width', [1440, 390])
+def test_existing_album_page_uses_shared_player_and_library_icons(live_artist_app, page, width):
+    status = {'connected': True, 'now_playing': {
+        'video_id': 'v1', 'title': 'SongA', 'artist': 'Artist X', 'paused': False,
+        'playlist_ytm_id': 'PLAUDIO', 'position': 30, 'duration': 200}}
+    page.route('**/bridge/status', lambda route: route.fulfill(json=status))
+    toggles, starts, errors = [], [], []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+
+    def toggle(route):
+        toggles.append(route.request.url)
+        status['now_playing']['paused'] = not status['now_playing']['paused']
+        route.fulfill(json={'ok': True})
+
+    def start(route):
+        starts.append(route.request.post_data)
+        route.fulfill(status=204)
+
+    page.route('**/now-playing/toggle', toggle)
+    page.route('**/album/play', start)
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.goto(live_artist_app['base'] + '/album?browse=MPREb_x')
+    expect(page.locator('.album-release-hero')).to_be_visible()
+    expect(page.locator('.album-page-head')).to_have_count(0)
+    current = page.locator('.track-table tr.now-playing')
+    expect(current).to_have_attribute('data-vid', 'v1')
+    pause = page.get_by_role('button', name='Pause The Album', exact=True)
+    expect(pause).to_be_visible()
+    pause.click()
+    play = page.get_by_role('button', name='Play The Album', exact=True)
+    expect(play).to_be_visible()
+    play.click()
+    expect(pause).to_be_visible()
+    assert len(toggles) == 2 and not starts
+    status['now_playing'].update(video_id='v2', title='SongB', paused=True, position=5, duration=180)
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(current).to_have_attribute('data-vid', 'v2')
+    progress = page.locator('.global-now-playing').get_by_role('progressbar', name='Track progress')
+    expect(progress).to_have_attribute('value', '5')
+    expect(progress).to_have_attribute('max', '180')
+    # Hearing this album's song in another queue must not pause that other queue.
+    status['now_playing'].update(playlist_ytm_id='another-playlist', paused=False)
+    page.evaluate('window.playbackStatus.refresh()')
+    play.click()
+    assert len(starts) == 1 and len(toggles) == 2
+    expect(page.locator('.pl-actions a[href*="music.youtube.com"]')).to_have_count(0)
+    save = page.get_by_role('button', name='Save album to library', exact=True)
+    expect(save.locator('svg')).to_have_attribute('fill', 'none')
+    save.click()
+    saved = page.get_by_role('button', name="Remove album from Main's library", exact=True)
+    expect(saved).to_have_attribute('aria-pressed', 'true')
+    expect(saved).to_have_class('head-icon album-library on')
+    expect(saved.locator('svg')).to_have_attribute('fill', 'currentColor')
+    assert saved.evaluate('el => getComputedStyle(el).backgroundColor') != 'rgba(0, 0, 0, 0)'
+    page.screenshot(path=f'/tmp/tuneconsole-392-album-{width}.png', full_page=True)
+    assert not errors
 
 
 def test_non_main_album_owner_is_removed_from_collection(live_artist_app, page):

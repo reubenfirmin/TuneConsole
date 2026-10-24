@@ -3,7 +3,7 @@ import json
 
 import pytest
 from fastapi import FastAPI
-from fastapi.templating import Jinja2Templates
+from tests.template_support import web_templates
 from fastapi.testclient import TestClient
 
 from yt_playlist.web.radio_session import PlaylistRadio
@@ -151,7 +151,7 @@ def test_native_transition_during_tail_removal_stays_in_history(poc, monkeypatch
 
     # The history endpoint must load metadata by playback identity, even though
     # v2 no longer has membership in the saved playlist.
-    c.ctx.templates = Jinja2Templates(directory="src/yt_playlist/web/templates")
+    c.ctx.templates = web_templates()
     app = FastAPI()
     app.include_router(radio_routes.build(c.ctx))
     with TestClient(app) as client:

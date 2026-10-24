@@ -6,7 +6,9 @@ import subprocess
 import pytest
 
 
-@pytest.mark.parametrize("scenario", ["transition", "conflicting_bar", "playing", "paused", "continuous_stream"])
+@pytest.mark.parametrize("scenario", [
+    "transition", "conflicting_bar", "playing", "paused", "continuous_stream", "newer_main", "newer_receiver",
+])
 def test_reconnect_preserves_main_identity_and_verification(scenario):
     node = shutil.which("node")
     if node is None:
@@ -45,15 +47,27 @@ const document = {addEventListener() {}, querySelector(selector) {
 let runtime;
 const context = vm.createContext({window, document, navigator:{mediaSession:{metadata:null}}, URL,
   location:{href:'https://music.youtube.com/'}, Date:{now:()=>now}, Intl,
-  chrome:{runtime:{onMessage:{addListener(fn) {runtime=fn;}},sendMessage(msg) {sent.push(msg);}}},
+  chrome:{runtime:{onMessage:{addListener(fn) {runtime=fn;},
+    removeListener(fn) {if(runtime===fn)runtime=null;}},sendMessage(msg) {sent.push(msg);}}},
   setInterval(fn) {intervals.push(fn);return intervals.length;}, clearInterval() {},
   setTimeout() {}, clearTimeout() {}, console:{log() {}, warn() {}},
 });
 const flush = () => { while (queued.length) {const data=queued.shift();
   for (const fn of handlers) fn({source:window,data});} };
-vm.runInContext(fs.readFileSync('extension/content.js','utf8'),context);
-vm.runInContext(fs.readFileSync('extension/nowplaying_main.js','utf8'),context);
+const content = fs.readFileSync('extension/content.js','utf8');
+const main = fs.readFileSync('extension/nowplaying_main.js','utf8');
+vm.runInContext(scenario === 'newer_receiver'
+  ? content.replace('const RECEIVER_REVISION = 8;', 'const RECEIVER_REVISION = 9;') : content, context);
+vm.runInContext(scenario === 'newer_main'
+  ? main.replace('var SENSOR_REVISION = 9;', 'var SENSOR_REVISION = 10;') : main, context);
 flush();
+if (scenario === 'newer_main' || scenario === 'newer_receiver') {
+  const previous = scenario === 'newer_main' ? window.__tcNowPoller : window.__tcBridgeLoaded;
+  vm.runInContext(scenario === 'newer_main' ? main : content, context);
+  assert.equal(scenario === 'newer_main' ? window.__tcNowPoller : window.__tcBridgeLoaded, previous,
+    'reinjection by an older worker must not downgrade a compatible newer sensor');
+  assert.equal(previous.stopped, false);
+}
 sent.length=0;
 runtime({type:'resync-now'},{},()=>{});
 assert(queued.some(msg => msg.__tcSensorProbe), 'reconnect must request a fresh MAIN sample');

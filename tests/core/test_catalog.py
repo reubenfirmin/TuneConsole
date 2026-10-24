@@ -115,7 +115,7 @@ def test_exact_uploads_versions_and_verified_grouping_keep_item_choices_and_like
     s.tracks.set_track_genre(c,'')
     s.tracks.set_track_year(a,'1990')
     s.tracks.set_track_year(c,'2020')
-    s.tracks.associate_youtube_item('c',s.tracks.catalog_subject(a)['recording_id'],source='verified',evidence={'isrc':'independently verified'},now=2)
+    s.tracks.associate_youtube_item('c',s.tracks.catalog_subject(a)['recording_id'],source='verified',evidence={'isrc':'independently verified'},now=2,same_recording=True)
     assert s.tracks.resolve_identity_key(c_key) == s.tracks.catalog_subject(a)['identity_key']
     assert s.playlists.get_playlist_track_ids(pid) == [a,b,c]
     assert s.tracks.get_track_audio(c)[0] == 123

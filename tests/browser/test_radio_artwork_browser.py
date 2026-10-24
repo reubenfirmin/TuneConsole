@@ -1,6 +1,6 @@
 """The composed starting landscape stays ordered at desktop and phone sizes."""
 import pytest
-from fastapi.templating import Jinja2Templates
+from tests.template_support import web_templates
 from playwright.sync_api import expect
 
 from tests.browser.radio_ui_support import radio_ui  # noqa: F401
@@ -9,7 +9,7 @@ from tests.browser.radio_ui_support import radio_ui  # noqa: F401
 @pytest.mark.parametrize('width,height', [(1440, 1000), (1792, 1398), (390, 1000)])
 def test_radio_starts_with_ordered_contours(page, radio_ui, width, height):
     page.set_viewport_size({'width': width, 'height': height})
-    templates = Jinja2Templates(directory='src/yt_playlist/web/templates')
+    templates = web_templates()
     radio_ui.playlist = templates.get_template('_partials/radio_playlist.html').render(
         session=radio_ui.ready, tracks=radio_ui.tracks)
     radio_ui.state = radio_ui.ready
@@ -36,4 +36,6 @@ def test_radio_starts_with_ordered_contours(page, radio_ui, width, height):
     }''')
     for column in samples:
         assert all(lower - upper > 3 for upper, lower in zip(column, column[1:]))
-    page.screenshot(path=f'/tmp/tuneconsole-radio-284-start-{width}.png')
+    expect(page.locator('.radio-record-echo').first).to_be_visible()
+    assert page.locator('.radio-record-echo').count() <= 24
+    page.screenshot(path=f'/tmp/tuneconsole-radio-297-start-{width}.png')

@@ -1,11 +1,30 @@
 """Generated playlists must materialize with track times (#26 follow-up). Recommendation tracks
 arrive without a duration (the rec pipeline doesn't carry one), so create_generated_playlist
 resolves it before saving and applies the Taste Model track-length limit (#44)."""
+import json
+
 import pytest
 
 from yt_playlist.library.playlist_generated import create_generated_playlist
 from yt_playlist.rec import rec_params
 from tests.conftest import FakeClient
+
+
+def test_generated_playlist_retains_acknowledged_occurrence_handles(store):
+    identity = store.identities.upsert_identity('main', 'cred', None, True)
+
+    class ReceiptClient(FakeClient):
+        def add_playlist_items(self, playlist, video_ids, **kwargs):
+            super().add_playlist_items(playlist, video_ids, **kwargs)
+            return {'status': 'STATUS_SUCCEEDED', 'playlistEditResults': [
+                {'videoId': video, 'setVideoId': 'owned-' + video} for video in video_ids]}
+
+    result = create_generated_playlist(store, 'Gen', [
+        {'video_id': 'original', 'title': 'Song', 'artist': 'Artist', 'duration': 200}],
+        ReceiptClient(), 1, identity_id=identity)
+    assert result['added_handles'] == {'original': 'owned-original'}
+    action = store.actions.get_actions()[0]
+    assert json.loads(action.params_json)['added_handles'] == result['added_handles']
 
 
 def test_generated_playlist_reuses_known_duration(store):

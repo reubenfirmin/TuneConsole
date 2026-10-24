@@ -54,7 +54,8 @@ def test_playlist_ticker_artwork_prefers_cover_and_falls_back_to_track_art(store
     store.playlists.set_playlist_tracks(cover, [track])
     store.playlists.set_playlist_tracks(fallback, [track])
 
-    assert store.charts.ticker_thumbnails("playlist") == {"With cover": "/playlist.png", "Track art": "/track.png"}
+    assert store.charts.ticker_thumbnails("playlist") == {
+        f"@playlist:{cover}": "/playlist.png", f"@playlist:{fallback}": "/track.png"}
 
 
 def test_playlist_tracks_detail_marks_liked(store):
@@ -182,6 +183,26 @@ def test_story_artist_songs_follow_structured_collaboration_credits(store):
         'Together', 'Solo'}
     assert store.charts.story_tracks(since=0, artist='Unknown') == []
     assert store.charts.story_tracks(since=0) == []
+
+
+def test_story_examples_deduplicate_displayed_songs_before_limiting(store):
+    iid = store.identities.upsert_identity('me', 'c', None, True)
+    for video, title in [('first', 'Wise One'), ('copy', 'Wise One'),
+                         ('remaster', 'Wise One (2020 Remaster)'),
+                         ('other', 'Giant Steps'), ('live', 'Wise One (Live)')]:
+        entry = store.tracks.upsert_track(video, title, 'John Coltrane', '', 180)
+        store.tracks.set_track_enrichment(entry, 'Free jazz', None)
+    # Repeated exact uploads win the history ranking, yet must not consume every slot.
+    for index, video in enumerate(['first', 'copy', 'remaster', 'other', 'live']):
+        key = store.tracks.identity_key_for_video(video)
+        store.history.import_listening_events(iid, [(key, video, 10 * 86400 - index * 86400)])
+    recordings = store.conn.execute('SELECT COUNT(*) FROM recordings').fetchone()[0]
+    for selection in ({'artist': 'John Coltrane'}, {'genres': ['Free jazz']}):
+        songs = store.charts.story_tracks(since=0, **selection)
+        assert [song['video_id'] for song in songs] == ['first', 'other', 'live']
+        assert store.charts.story_tracks(since=0, limit=0, **selection) == []
+    assert store.conn.execute('SELECT COUNT(*) FROM recordings').fetchone()[0] == recordings == 5
+    assert store.conn.execute('SELECT COUNT(*) FROM play_events').fetchone()[0] == 5
 
 
 def test_story_activity_requires_recent_listening_and_preserves_collaboration_credits(store):

@@ -49,7 +49,7 @@ def test_readiness_explains_initial_wait_pause_cooldown_and_fresh_data(store):
     assert ms.readiness(store, later)["state"] == "paused"
 
 
-def test_candidates_leave_live_model_untouched_until_single_atomic_publication(store, monkeypatch):
+def test_diagnostic_winner_cannot_publish_without_validated_product_outcomes(store, monkeypatch):
     old = [("old|artist", np.array([1, 0], dtype=np.float32).tobytes())]
     store.rec_model.replace_rec_vectors(old)
     store.rec_model.set_weight("genre:jazz", 1.4, now=1)
@@ -67,17 +67,19 @@ def test_candidates_leave_live_model_untouched_until_single_atomic_publication(s
     monkeypatch.setattr(ms, "_build", lambda *a: (["new|artist"], np.ones((1, 64), dtype=np.float32)))
     monkeypatch.setattr(ms, "_forecast", lambda *a: None)
     result = ms.run(store, 1000)
-    assert result["status"] == "applied"
-    assert store.settings.get_setting("rec_dim") == "64"
+    assert result["status"] == "retained"
+    assert result["diagnostic_challenger"] == {"method": "svd", "dim": 64}
+    assert result["promotion_gate"] == "awaiting_validated_product_outcomes"
+    assert result["selected"] == result["previous"]
+    assert store.settings.get_setting("rec_dim") is None
+    assert store.rec_model.get_rec_vectors() == old
     assert len(calls) == 5
     assert store.rec_model.weight_records()["genre:jazz"]["weight"] == 1.4
     assert store.rec_model.recent_liked_keys() == ["liked|artist"]
     run_id = store.model_selection.selection_runs()[0]["id"]
-    assert store.model_selection.restore_model_selection(run_id, 1100)
+    assert not store.model_selection.restore_model_selection(run_id, 1100)
     assert store.rec_model.get_rec_vectors() == old
-    assert store.settings.get_setting("rec_dim") == "48"
-    assert ms.readiness(store, 1200)["state"] == "paused"
-    assert not store.model_selection.restore_model_selection(run_id, 1200)
+    assert store.settings.get_setting("rec_dim") is None
 
 
 def test_failure_during_candidate_fit_preserves_previous_model(store, monkeypatch):

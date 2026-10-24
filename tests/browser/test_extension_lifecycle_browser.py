@@ -30,7 +30,7 @@ HTML = Path(__file__).with_name("fixtures") / "music_player.html"
 
 
 @pytest.fixture
-def installed_bridge(playwright, browser_type_launch_args, tmp_path, store):
+def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, request):
     if shutil.which("openssl") is None:
         pytest.fail("OpenSSL is required for the local Music TLS fixture")
     bridge = Bridge()
@@ -57,6 +57,13 @@ def installed_bridge(playwright, browser_type_launch_args, tmp_path, store):
     shutil.copytree(EXT, extension)
     config = extension / "worker" / "config.js"
     config.write_text(config.read_text().replace(":8765", f":{port}"))
+    bootstrap = getattr(request, "param", "current")
+    if bootstrap != "current":
+        background = extension / "background.js"
+        source = background.read_text().replace("receiverRevision: TC_CONFIG.receiverRevision, ", "")
+        if bootstrap == "legacy_bootstrap":
+            source = source.replace("revision: TC_CONFIG.sensorRevision, ", "")
+        background.write_text(source)
     manifest = extension / "manifest.json"
     data = json.loads(manifest.read_text())
     data["host_permissions"] = [s.replace(":8765", f":{port}") for s in data["host_permissions"]]
@@ -242,6 +249,25 @@ def test_native_rating_waits_for_bound_controls_and_cancels_old_intent(installed
     if settlement == "binding_ready":
         assert rate("LIKE")["ok"]  # Reapplying a confirmed desired state sends no second click.
     assert page.evaluate("fixture.clicks") == (["like"] if settlement == "binding_ready" else [])
+
+
+@pytest.mark.parametrize("installed_bridge", ["legacy_bootstrap", "missing_receiver_option"], indirect=True)
+def test_legacy_bootstrap_reconnects_without_reloading_music(installed_bridge):
+    h = installed_bridge
+    page = _music(h)
+    page.evaluate("window.documentToken = 'same document'")
+    h.eventually(lambda: len(_plays(h)) == 1)
+    h.eventually(lambda: (h.bridge.sensor_health or {}).get("healthy"))
+
+    connection_id = h.bridge._conn_id
+    h.drop_connection()
+    h.eventually(lambda: h.bridge.connected and h.bridge._conn_id != connection_id)
+    h.eventually(lambda: (h.bridge.sensor_health or {}).get("healthy"))
+    h.eventually(lambda: (h.bridge.now_playing or {}).get("video_id") == "first")
+    assert page.evaluate("documentToken") == "same document"
+    assert page.evaluate("!document.querySelector('video').paused")
+    assert len(_plays(h)) == 1
+    assert h.worker.evaluate("tuneConsole.sensors.probe()")["reloadedTabs"] == 0
 
 
 def test_extension_reload_reconnect_and_throttled_main_repair_preserve_playback(installed_bridge):
