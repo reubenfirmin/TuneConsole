@@ -9,8 +9,8 @@ import tempfile
 from promote_release import Backend
 
 
-def cleanup(backend, tag):
-    release = backend.existing(tag)
+def cleanup(backend, tag, *, wait_seconds=0):
+    release = backend.existing(tag, wait_seconds=wait_seconds)
     if release is not None:
         if not release["draft"] or not tag.startswith("publisher-contract-"):
             raise ValueError("Cleanup requires an isolated publisher-contract draft")
@@ -30,7 +30,7 @@ def rehearse(backend, tag, revision):
             "draft": True, "prerelease": True, "make_latest": "false",
             "body": "Isolated publisher contract rehearsal; never publish this draft.",
         })
-        release = backend.existing(tag)
+        release = backend.existing(tag, wait_seconds=10)
         if not release or not release["draft"]:
             raise RuntimeError("Authenticated draft lookup failed")
         with tempfile.TemporaryDirectory(prefix="publisher-contract-") as directory:
@@ -52,7 +52,7 @@ def rehearse(backend, tag, revision):
     finally:
         # Also runs after a lost draft-create response. The workflow repeats this
         # cleanup in an always() step to cover process termination.
-        cleanup(backend, tag)
+        cleanup(backend, tag, wait_seconds=10)
 
 
 if __name__ == "__main__":

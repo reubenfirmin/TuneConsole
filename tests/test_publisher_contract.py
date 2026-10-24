@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import urllib.error
 import urllib.parse
 
@@ -11,6 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "packaging"))
 from promote_release import Backend
+import promote_release
 from rehearse_publisher import rehearse
 import release_services
 
@@ -24,6 +26,8 @@ class GitHub:
         self.next_id = 20
         self.interrupt_upload = False
         self.unreachable = False
+        self.hidden_reads = 0
+        self.hide_created_reads = 0
         monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
         monkeypatch.setattr("urllib.request.urlopen", self.urlopen)
         self.backend = Backend("owner/repo")
@@ -32,6 +36,8 @@ class GitHub:
     def urlopen(self, request, timeout):
         assert timeout == 60
         assert request.get_header("Authorization") == "Bearer fixture-token"
+        if request.method == "GET":
+            assert request.get_header("Cache-control") == "no-cache"
         path = urllib.parse.urlsplit(request.full_url).path
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)
         self.requests.append((request.method, path, query))
@@ -40,6 +46,7 @@ class GitHub:
         if request.method == "POST":
             data = json.loads(request.data)
             self.release = {"id": 12, "tag_name": data["tag_name"], "draft": data["draft"], "assets": []}
+            self.hidden_reads = self.hide_created_reads
             result = self.release
         elif request.method == "DELETE":
             self.release = None
@@ -56,12 +63,20 @@ class GitHub:
             # Ensure drafts on later pages can be found, not just recent releases.
             if query["page"] == ["1"]:
                 result = [{"tag_name": f"v0.0.{n}", "draft": False, "assets": []} for n in range(100)]
+            elif self.hidden_reads:
+                self.hidden_reads -= 1
+                result = []
             else:
                 result = [self.release] if self.release else []
         return io.BytesIO(json.dumps(result).encode())
 
     def run(self, *args):
         self.commands.append(args)
+        if args[:3] == ("gh", "release", "create"):
+            assert self.release is None
+            self.release = {"id": 12, "tag_name": args[3], "draft": True, "assets": []}
+            self.hidden_reads = self.hide_created_reads
+            return ""
         assert args[:3] == ("gh", "release", "upload")
         assert self.release["draft"]
         files = [Path(arg) for arg in args[3:] if Path(arg).is_file()]
@@ -78,6 +93,19 @@ class GitHub:
         return ""
 
 
+@pytest.fixture
+def lookup_clock(monkeypatch):
+    clock = SimpleNamespace(now=0, sleeps=[])
+
+    def sleep(seconds):
+        clock.sleeps.append(seconds)
+        clock.now += seconds
+
+    monkeypatch.setattr(promote_release, "time", SimpleNamespace(
+        monotonic=lambda: clock.now, sleep=sleep))
+    return clock
+
+
 def test_draft_create_lookup_partial_upload_retry_and_cleanup(monkeypatch):
     github = GitHub(monkeypatch)
     rehearse(github.backend, "publisher-contract-test", "a" * 40)
@@ -85,6 +113,38 @@ def test_draft_create_lookup_partial_upload_retry_and_cleanup(monkeypatch):
     assert len(github.commands) == 3  # partial stage, complete stage, idempotent repeat
     assert any(query.get("page") == ["2"] for _, _, query in github.requests)
     assert github.requests[-1][0] == "DELETE"
+
+
+def test_rehearsal_waits_for_created_draft_to_appear_in_listing(monkeypatch, lookup_clock):
+    github = GitHub(monkeypatch)
+    github.hide_created_reads = 3
+    rehearse(github.backend, "publisher-contract-delayed", "a" * 40)
+    assert lookup_clock.sleeps == [1, 1, 1]
+    assert len(github.commands) == 3
+    assert github.release is None
+
+
+def test_real_staging_waits_for_created_draft_before_upload(monkeypatch, tmp_path, lookup_clock):
+    github = GitHub(monkeypatch)
+    github.hide_created_reads = 2
+    (tmp_path / "asset.txt").write_bytes(b"candidate")
+    manifest = {"sha256": {"asset.txt": hashlib.sha256(b"candidate").hexdigest()}}
+    github.backend.stage("v1.2.3", manifest, tmp_path)
+    assert lookup_clock.sleeps == [1, 1]
+    assert [args[2] for args in github.commands] == ["create", "upload"]
+    assert {asset["name"] for asset in github.release["assets"]} == {
+        "asset.txt", "release-manifest.json"}
+
+
+def test_expected_draft_lookup_wait_is_bounded(monkeypatch, lookup_clock):
+    github = GitHub(monkeypatch)
+    github.release = {"id": 12, "tag_name": "v1.2.3", "draft": True, "assets": []}
+    github.hidden_reads = 100
+    assert github.backend.existing("v1.2.3") is None
+    assert lookup_clock.sleeps == []
+    assert github.backend.existing("v1.2.3", wait_seconds=3) is None
+    assert lookup_clock.sleeps == [1, 1, 1]
+    assert github.commands == []
 
 
 def test_rehearsal_cleans_up_after_interrupted_upload(monkeypatch):
@@ -126,7 +186,8 @@ def test_outage_is_not_treated_as_a_missing_release(monkeypatch):
 
 
 @pytest.mark.parametrize("status", [401, 403, 429, 500, 503])
-def test_failed_lookup_is_not_release_absence(monkeypatch, status):
+@pytest.mark.parametrize("wait_seconds", [0, 10])
+def test_failed_lookup_is_not_release_absence(monkeypatch, status, wait_seconds, lookup_clock):
     github = GitHub(monkeypatch)
 
     def fail(request, timeout):
@@ -134,9 +195,10 @@ def test_failed_lookup_is_not_release_absence(monkeypatch, status):
 
     monkeypatch.setattr("urllib.request.urlopen", fail)
     with pytest.raises(urllib.error.HTTPError) as failure:
-        github.backend.existing("v1.2.3")
+        github.backend.existing("v1.2.3", wait_seconds=wait_seconds)
     assert failure.value.code == status
     assert github.commands == []
+    assert lookup_clock.sleeps == []
 
 
 @pytest.mark.parametrize("field,value", [("size", 1), ("digest", "sha256:" + "f" * 64)])

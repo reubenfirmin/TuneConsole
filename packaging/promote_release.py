@@ -200,6 +200,9 @@ class Backend:
                     data=json.dumps(data).encode() if data is not None else None,
                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
                              "Accept": "application/octet-stream" if raw else "application/json"})
+        if not cloudflare and method == "GET":
+            # Release state must be fresh after creating drafts or uploading assets.
+            request.add_header("Cache-Control", "no-cache")
         try:
             with urllib.request.urlopen(request, timeout=self.timeout(60)) as response:
                 content = response.read()
@@ -225,13 +228,21 @@ class Backend:
                 "and retry the exact candidate under the production lock."
             ) from exc
 
-    def existing(self, tag):
-        release = self.api(f"repos/{self.repository}/releases/tags/{urllib.parse.quote(tag, safe='')}")
-        if release is not None:
-            return release
-        # The tag endpoint is not authoritative for drafts. An authenticated,
-        # complete listing must succeed before absence can be established.
-        return next((release for release in self.releases() if release["tag_name"] == tag), None)
+    def existing(self, tag, *, wait_seconds=0):
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            release = self.api(f"repos/{self.repository}/releases/tags/{urllib.parse.quote(tag, safe='')}")
+            if release is not None:
+                return release
+            # The tag endpoint is not authoritative for drafts. An authenticated,
+            # complete listing must succeed before absence can be established.
+            release = next((release for release in self.releases() if release["tag_name"] == tag), None)
+            remaining = deadline - time.monotonic()
+            if release is not None or remaining <= 0:
+                return release
+            # Only callers expecting a just-written release opt into this wait.
+            # Authentication, service and network errors still propagate immediately.
+            time.sleep(min(1, remaining, self.timeout(1)))
 
     def releases(self):
         page = 1
@@ -294,9 +305,12 @@ class Backend:
         if existing is None:
             self.run("gh", "release", "create", tag, "--repo", self.repository, "--verify-tag",
                      "--draft", "--title", tag, "--generate-notes")
+            created = self.existing(tag, wait_seconds=10)
+            if created is None or not created["draft"]:
+                raise ValueError("Created draft release could not be confirmed")
         paths = [str(root / name) for name in manifest["sha256"]] + [str(path)]
         self.run("gh", "release", "upload", tag, "--repo", self.repository, "--clobber", *paths)
-        staged = self.existing(tag)
+        staged = self.existing(tag, wait_seconds=10)
         if staged is None:
             raise ValueError("Uploaded draft release could not be found")
         if not staged["draft"]:
