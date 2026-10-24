@@ -33,8 +33,15 @@ def registry_open(request, operation):
         raise
 
 
+def registry_upload_location(request, response):
+    location = urllib.parse.urljoin(request.full_url, response.headers["Location"])
+    if urllib.parse.urlparse(location)[:2] != ("https", "ghcr.io"):
+        raise ValueError("GHCR returned an unexpected upload origin")
+    return location
+
+
 def registry_permissions(image):
-    """Prove push permission by completing an empty, untagged blob upload."""
+    """Prove push permission by uploading one fixed, untagged two-byte blob."""
     name = image.removeprefix("ghcr.io/")
     if name == image or not name or "@" in name or ":" in name:
         raise ValueError("Expected a GHCR repository without tag or digest")
@@ -51,17 +58,24 @@ def registry_permissions(image):
     with registry_open(request, "upload initiation") as response:
         if response.status != 202:
             raise ValueError("GHCR did not accept a disposable upload")
-        location = urllib.parse.urljoin(request.full_url, response.headers["Location"])
-    if urllib.parse.urlparse(location)[:2] != ("https", "ghcr.io"):
-        raise ValueError("GHCR returned an unexpected upload origin")
-    # GHCR does not implement upload cancellation (DELETE returns 405). Complete
-    # the zero-byte blob instead: one fixed digest, no manifest or image tag.
-    digest = urllib.parse.urlencode({"digest": "sha256:" + hashlib.sha256(b"").hexdigest()})
+        location = registry_upload_location(request, response)
+    # Use the OCI empty JSON payload: zero-byte blobs are not portable. Transfer
+    # it with PATCH before completing the session; GHCR returned 404 when we
+    # attempted to complete an upload without transferring any content first.
+    blob = b"{}"
+    request = urllib.request.Request(location, method="PATCH", data=blob,
+                                     headers={**headers, "Content-Range": "0-1"})
+    with registry_open(request, "blob transfer") as response:
+        if response.status != 202:
+            raise ValueError("GHCR did not accept the blob transfer")
+        # Registries can replace the session URL and its state after each chunk.
+        location = registry_upload_location(request, response)
+    digest = urllib.parse.urlencode({"digest": "sha256:" + hashlib.sha256(blob).hexdigest()})
     location += ("&" if "?" in location else "?") + digest
     request = urllib.request.Request(location, method="PUT", data=b"", headers=headers)
     with registry_open(request, "upload completion") as response:
         if response.status != 201:
-            raise ValueError("GHCR did not complete the empty blob upload")
+            raise ValueError("GHCR did not complete the blob upload")
 
 
 def pages_permissions(backend):
@@ -196,15 +210,20 @@ def verify_public(root, tag, backend):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("preflight", "public"))
-    parser.add_argument("tag")
+    parser.add_argument("operation", choices=("preflight", "registry", "public"))
+    parser.add_argument("tag", nargs="?")
     parser.add_argument("--directory", type=Path, default=Path("candidate"))
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY"))
     parser.add_argument("--rehearsal-tag")
     parser.add_argument("--revision", default=os.environ.get("GITHUB_SHA"))
     args = parser.parse_args()
+    if args.operation != "registry" and not args.tag:
+        parser.error("tag is required for preflight and public verification")
     backend = Backend(args.repository)
-    if args.operation == "preflight":
+    if args.operation == "registry":
+        registry_permissions("ghcr.io/" + backend.repository.lower())
+        report("Verified: GHCR package push / blob completion")
+    elif args.operation == "preflight":
         preflight(backend, args.tag, args.revision, args.rehearsal_tag,
                   stable=classify(args.tag).channel == "stable")
     else:
