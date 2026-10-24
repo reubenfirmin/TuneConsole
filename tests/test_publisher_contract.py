@@ -245,18 +245,19 @@ def test_preflight_reports_exact_failing_service_without_exposing_response(monke
     "https://ghcr.io/v2/owner/repo/blobs/uploads/probe?_state=fixture-secret",
 ])
 @pytest.mark.parametrize("completion_status", [201, 202])
-def test_registry_preflight_completes_untagged_blob_without_unsupported_delete(
+def test_registry_preflight_transfers_blob_and_completes_updated_upload_session(
         monkeypatch, location, completion_status):
     monkeypatch.setenv("GITHUB_ACTOR", "owner")
     monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
     requests = []
+    next_location = "/v2/owner/repo/blobs/uploads/probe-next?_state=updated%2Bstate%2Fvalue"
 
     def respond(request, timeout):
         assert timeout == 30
         requests.append(request)
         response = io.BytesIO(b'{"token":"registry-token"}' if len(requests) == 1 else b"")
-        response.status = 200 if len(requests) == 1 else 202 if len(requests) == 2 else completion_status
-        response.headers = {"Location": location}
+        response.status = {1: 200, 2: 202, 3: 202, 4: completion_status}[len(requests)]
+        response.headers = {"Location": next_location if len(requests) == 3 else location}
         return response
 
     monkeypatch.setattr(release_services.urllib.request, "urlopen", respond)
@@ -265,27 +266,31 @@ def test_registry_preflight_completes_untagged_blob_without_unsupported_delete(
     else:
         with pytest.raises(ValueError, match="did not complete"):
             release_services.registry_permissions("ghcr.io/owner/repo")
-    assert [request.get_method() for request in requests] == ["GET", "POST", "PUT"]
+    assert [request.get_method() for request in requests] == ["GET", "POST", "PATCH", "PUT"]
     assert requests[0].get_header("Authorization").startswith("Basic ")
     assert urllib.parse.parse_qs(urllib.parse.urlsplit(requests[0].full_url).query)["scope"] == [
         "repository:owner/repo:pull,push"]
+    assert requests[2].full_url == urllib.parse.urljoin("https://ghcr.io/", location)
+    assert requests[2].data == b"{}"
+    assert requests[2].get_header("Content-range") == "0-1"
+    assert requests[-1].full_url.startswith("https://ghcr.io" + next_location + "&digest=")
     upload = urllib.parse.urlsplit(requests[-1].full_url)
     assert (upload.scheme, upload.netloc, upload.path) == (
-        "https", "ghcr.io", "/v2/owner/repo/blobs/uploads/probe")
+        "https", "ghcr.io", "/v2/owner/repo/blobs/uploads/probe-next")
     assert urllib.parse.parse_qs(upload.query) == {
-        **({"_state": ["fixture-secret"]} if "_state" in location else {}),
-        "digest": ["sha256:" + hashlib.sha256(b"").hexdigest()],
+        "_state": ["updated+state/value"],
+        "digest": ["sha256:" + hashlib.sha256(b"{}").hexdigest()],
     }
     for request in requests[1:]:
         assert request.get_header("Authorization") == "Bearer registry-token"
         assert request.get_header("Content-type") == "application/octet-stream"
-        assert request.data == b""
+    assert requests[1].data == requests[-1].data == b""
 
 
 @pytest.mark.parametrize("failed_request,operation", [
-    (1, "token request"), (2, "upload initiation"), (3, "upload completion"),
+    (1, "token request"), (2, "upload initiation"), (3, "blob transfer"), (4, "upload completion"),
 ])
-@pytest.mark.parametrize("status", [401, 403, 405, 503])
+@pytest.mark.parametrize("status", [401, 403, 404, 405, 503])
 def test_registry_preflight_names_http_failure_without_upload_url_or_credentials(
         monkeypatch, capsys, failed_request, operation, status):
     monkeypatch.setenv("GITHUB_ACTOR", "owner")
@@ -310,6 +315,48 @@ def test_registry_preflight_names_http_failure_without_upload_url_or_credentials
     assert f"GHCR {operation} (HTTP {status})" in output
     assert not any(secret in output for secret in (
         "credential-do-not-print", "registry-token-do-not-print", "secret-state", "secret-response"))
+
+
+@pytest.mark.parametrize("location_request", [2, 3])
+@pytest.mark.parametrize("location", ["http://ghcr.io/upload", "https://other.example/upload"])
+def test_registry_preflight_never_sends_upload_credentials_to_an_unexpected_origin(
+        monkeypatch, location_request, location):
+    monkeypatch.setenv("GITHUB_ACTOR", "owner")
+    monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
+    requests = []
+
+    def respond(request, timeout):
+        requests.append(request)
+        response = io.BytesIO(b'{"token":"registry-token"}')
+        response.status = 200 if len(requests) == 1 else 202
+        response.headers = {"Location": location if len(requests) == location_request
+                            else "/v2/owner/repo/blobs/uploads/probe"}
+        return response
+
+    monkeypatch.setattr(release_services.urllib.request, "urlopen", respond)
+    with pytest.raises(ValueError, match="unexpected upload origin"):
+        release_services.registry_permissions("ghcr.io/owner/repo")
+    assert len(requests) == location_request
+    assert all(urllib.parse.urlsplit(request.full_url).netloc == "ghcr.io" for request in requests)
+
+
+@pytest.mark.parametrize("failed_request,message", [(2, "disposable upload"), (3, "blob transfer")])
+def test_registry_preflight_rejects_incomplete_upload_stages(monkeypatch, failed_request, message):
+    monkeypatch.setenv("GITHUB_ACTOR", "owner")
+    monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
+    requests = []
+
+    def respond(request, timeout):
+        requests.append(request)
+        response = io.BytesIO(b'{"token":"registry-token"}')
+        response.status = 200 if len(requests) in (1, failed_request) else 202
+        response.headers = {"Location": "/v2/owner/repo/blobs/uploads/probe"}
+        return response
+
+    monkeypatch.setattr(release_services.urllib.request, "urlopen", respond)
+    with pytest.raises(ValueError, match=message):
+        release_services.registry_permissions("ghcr.io/owner/repo")
+    assert len(requests) == failed_request
 
 
 def test_preflight_reports_all_service_failures_and_checks_stable_baseline(monkeypatch, capsys):

@@ -220,10 +220,12 @@ def test_platform_ci_exercises_release_build_and_packaged_smoke_on_both_architec
 def test_publisher_rehearsal_is_trusted_isolated_and_cleans_up_after_failure():
     job = workflow("ci")["jobs"]["publisher-contract"]
     assert job["needs"] == "checks"
-    assert job["permissions"] == {"contents": "write"}
+    assert job["permissions"] == {"contents": "write", "packages": "write"}
     assert "github.ref == 'refs/heads/main'" in job["if"]
     assert "github.event_name == 'push'" in job["if"]
     assert "pull_request" not in job["if"]
+    assert any(step.get("run") == "python3 packaging/release_services.py registry"
+               for step in job["steps"])
     assert job["steps"][-1]["if"] == "always()"
     assert "--cleanup-only" in job["steps"][-1]["run"]
     preflight = workflow("release")["jobs"]["preflight"]
