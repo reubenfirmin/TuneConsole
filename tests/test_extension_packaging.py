@@ -42,7 +42,7 @@ const event = () => ({addListener(fn) { events.push(fn); }});
 const chrome = {
   runtime: {onMessage:event(), onStartup:event(), onInstalled:event()},
   tabs: {query:async () => [{id:7,url:'https://music.youtube.com/'}],
-         sendMessage:async () => ({ok:true,receiverRevision:9,mainVersion:4,mainRevision:9,mainAgeMs:0}),
+         sendMessage:async () => ({ok:true,receiverRevision:10,mainVersion:4,mainRevision:10,mainAgeMs:0}),
          onRemoved:event(), onUpdated:event()},
   alarms: {create() {}, onAlarm:event()},
   scripting: {executeScript:async call => {

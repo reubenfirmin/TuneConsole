@@ -6,7 +6,7 @@ from yt_playlist.rec import (discover, embedding_vectors as embed, home_prepared
                              mode_surfaces, rec_params, surfaces, transient)
 
 
-def test_preparation_reuses_listening_signals_for_all_discovery_families(store, monkeypatch):
+def test_each_preparation_snapshot_reuses_listening_signals_for_all_discovery_families(store, monkeypatch):
     seed(store)
     for index, genre in enumerate(('House', 'Techno', 'Jazz', 'Ambient', 'Trance', 'Classical')):
         store.discovery.upsert_discovered_artist(f'New {index}', 0.5, [], [], None, 1, genre=genre)
@@ -22,8 +22,11 @@ def test_preparation_reuses_listening_signals_for_all_discovery_families(store, 
     payload = home_prepared.prepare(store, 1000)
     assert payload is not None
     assert len(payload['discovery_artists']) == len(payload['discovery_albums']) == 6
-    assert len(calls) == 1
-    assert calls[0].conn is not store.conn
+    # Discovery publishes independently before mix assembly, so it owns its own
+    # bounded snapshot. Both discovery families still share that snapshot's signals.
+    assert len(calls) == 2
+    assert calls[0].conn is not calls[1].conn
+    assert all(reader.conn is not store.conn for reader in calls)
 
 
 @pytest.mark.parametrize('leans', [{}, {'genre:house': 0.8, 'genre:ambient': -0.7}])

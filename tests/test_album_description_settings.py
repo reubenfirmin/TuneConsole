@@ -68,7 +68,7 @@ def test_settings_save_wakes_missing_notes_without_resetting_counts_or_success(s
     assert album_descriptions.settings(store, 1)['requests_today'] == 20
 
 
-def test_home_renders_saved_generated_copy_with_attribution_without_paid_request(store, monkeypatch):
+def test_home_renders_saved_generated_copy_without_provider_label_or_paid_request(store, monkeypatch):
     from yt_playlist.providers import release_notes
     client = _client(store, lambda: {})
     album = {'browse_id': 'record', 'artist': 'Artist', 'title': 'Album', 'score': .9}
@@ -81,7 +81,8 @@ def test_home_renders_saved_generated_copy_with_attribution_without_paid_request
     monkeypatch.setattr(deepseek, 'describe', forbidden)
     monkeypatch.setattr(release_notes, 'fetch', forbidden)
     response = client.get('/home/album-choices')
-    assert response.status_code == 200 and 'AI description · DeepSeek Flash' in response.text
+    assert response.status_code == 200 and 'A saved album description' in response.text
+    assert 'AI description · DeepSeek Flash' not in response.text
     assert '&lt;script&gt;unsafe markup&lt;/script&gt;' in response.text
     assert '<script>unsafe markup</script>' not in response.text
     assert not store.rec_proposals.get_proposals('album_description_usage')

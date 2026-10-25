@@ -128,9 +128,47 @@ def test_open_vibe_tab_resets_when_tuning_expires(live_app, store, page):
     dialog.get_by_role("tab", name="Vibe", exact=True).click()
     dialog.get_by_role("radio", name="Headspace", exact=True).check()
     expect(page.locator("#home-mode-cards")).to_have_attribute("data-vibe", "focus")
-    store.settings.set_setting(mix_tuning.UPDATED_AT_SETTING, str(1 - mix_tuning.TTL_S))
+    store.settings.set_setting(mix_tuning.VIBE_UPDATED_AT_SETTING, str(1 - mix_tuning.TTL_S))
     with page.expect_response("**/home/fingerprint"):
         page.clock.fast_forward(mix_tuning.TTL_S * 1000)
     expect(dialog.get_by_role("radio", name="Take it as it comes", exact=True)).to_be_checked()
     expect(page.locator("#home-mode-cards")).to_have_attribute("data-vibe", "")
     expect(dialog).to_be_visible()
+
+
+def test_vibe_respects_genre_focus_through_clear_and_expiry(live_app, store, page):
+    prepare(store)
+    page.route('https://i.ytimg.com/**', lambda route: route.abort())
+    page.clock.install()
+    page.goto(live_app)
+    page.get_by_role('button', name='Tune these mixes', exact=True).click()
+    dialog = page.get_by_role('dialog', name='Tune these mixes', exact=True)
+    dialog.get_by_role('tab', name='Genre focus', exact=True).click()
+    dialog.get_by_role('checkbox', name='jazz', exact=True).check()
+    with page.expect_response('**/home/mix-genres'):
+        dialog.get_by_role('button', name='Make mixes', exact=True).click()
+    page.get_by_role('button', name='Tune these mixes', exact=True).click()
+    dialog.get_by_role('tab', name='Vibe', exact=True).click()
+    dialog.get_by_role('radio', name='Keep it gentle', exact=True).check()
+    row = page.locator('#home-mode-cards')
+    expect(row).to_have_attribute('data-vibe', 'gentle')
+    assert store.rec_proposals.get_proposals('home_genre_request')['include_genres'] == ['jazz']
+    assert row.locator('[data-genres]').evaluate_all(
+        'els => els.length > 0 && els.every(el => JSON.parse(el.dataset.genres).every(g => g.toLowerCase() === "jazz"))')
+    dialog.get_by_role('tab', name='Genre focus', exact=True).click()
+    expect(dialog.get_by_role('checkbox', name='jazz', exact=True)).to_be_checked()
+    expect(dialog.locator('#home-genre-count')).to_have_text('1 genre in the mix.')
+    dialog.get_by_role('tab', name='Vibe', exact=True).click()
+    dialog.get_by_role('radio', name='Take it as it comes', exact=True).check()
+    expect(row).to_have_attribute('data-vibe', '')
+    assert row.locator('[data-genres]').evaluate_all(
+        'els => els.length > 0 && els.every(el => JSON.parse(el.dataset.genres).every(g => g.toLowerCase() === "jazz"))')
+    dialog.get_by_role('radio', name='Keep it gentle', exact=True).check()
+    expect(row).to_have_attribute('data-vibe', 'gentle')
+    store.rec_model.set_lean('genre:techno', 1.6, 1)
+    store.settings.set_setting(mix_tuning.VIBE_UPDATED_AT_SETTING, str(1 - mix_tuning.TTL_S))
+    with page.expect_response('**/home/fingerprint'):
+        page.clock.fast_forward(mix_tuning.TTL_S * 1000)
+    expect(row).to_have_attribute('data-vibe', '')
+    assert store.rec_model.get_lean('genre:techno') == 1.6
+    assert store.rec_proposals.get_proposals('home_genre_request')['include_genres'] == ['jazz']

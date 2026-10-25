@@ -366,7 +366,8 @@ def test_launcher_highlight_keyboard_and_touch_layout(page, radio_ui, width, tou
     page.emulate_media(reduced_motion="reduce")
     seed.get_by_role('button').press("Enter")
     expect(page.locator(".radio-launch")).to_be_visible()
-    expect(page.locator(".radio-launch-node").first).to_have_css("animation-name", "none")
+    expect(page.locator(".radio-launch-node").first).to_have_css("animation-name", "radio-float")
+    expect(page.locator(".radio-launch-node").first).to_have_css("animation-play-state", "running")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
 

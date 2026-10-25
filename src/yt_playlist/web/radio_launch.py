@@ -204,8 +204,12 @@ class RadioLaunch:
                 or state["playlist"] != playing.get("playlist_ytm_id")
                 or not (state.get("tracks") or state.get("initial_tracks"))):
             return None, False
-        candidates = candidates_factory(self.store, self.now_fn(), state.get("tuning"))
-        return restore(state, clients[identity], identity, candidates), state.get("fingerprint") != candidates.fingerprint
+        candidates = candidates_factory(self.store, self.now_fn(), state.get("tuning"),
+                                        comparison=state.get('comparison'))
+        # A paired session owns its already visible plans across daily cache
+        # publication and restart. Replenish naturally as those plans advance.
+        changed = state.get("fingerprint") != candidates.fingerprint and not state.get('comparison')
+        return restore(state, clients[identity], identity, candidates), changed
 
     def accept(self, s, prepared: PreparedStart):
         """Publish the confirmed initial queue before the coordinator navigates."""
@@ -240,7 +244,7 @@ class RadioLaunch:
         local = next((p for p in self.store.playlists.get_playlists() if p.ytm_playlist_id == playlist), None)
         if local is None or local.identity_id not in clients:
             return None
-        candidates = candidates_factory(self.store, self.now_fn())
+        candidates = candidates_factory(self.store, self.now_fn(), comparison=None)
         candidates.retain([{**t, "key": t["identity_key"]}
                            for t in self.store.charts.playlist_tracks_detail(local.id)])
         ids = [t["videoId"] for t in self.playlists.read(clients[local.identity_id], playlist)]

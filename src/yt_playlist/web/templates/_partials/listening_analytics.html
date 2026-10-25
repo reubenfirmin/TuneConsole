@@ -1,0 +1,140 @@
+<div class="listening-portrait" x-data="listeningAnalytics('{{ analytics_mode }}', '{{ window if analytics_mode == 'charts' else '90d' }}')"
+     :aria-busy="busy" data-listening-analytics>
+  <header class="lp-heading">
+    <div><h2 class="section section-flush">Your listening</h2>
+      <p class="section-note">{% if analytics_mode == 'home' %}Artists, discovery, formats and feedback over time.{% else %}All charts follow the same selection.{% endif %}</p></div>
+    {% if analytics_mode == 'home' %}<a class="lp-explore" href="/charts?view=analytics&amp;window=90d">More in Charts {{ arrow_icon('right') }}</a>{% endif %}
+  </header>
+  <div class="lp-controls">
+    <div class="seg" role="group" aria-label="Listening history window">
+      <template x-for="choice in [{value:'7d',label:'7 days'},{value:'30d',label:'30 days'},{value:'90d',label:'90 days'},{value:'all',label:'All time'}]" :key="choice.value">
+        <button type="button" :class="{on:window === choice.value}" :aria-pressed="window === choice.value"
+                @click="window = choice.value; update()" x-text="choice.label"></button>
+      </template>
+    </div>
+    {% if analytics_mode == 'charts' %}
+    <label>Group by <select x-model="period" @change="update()" aria-label="Time grouping"><option value="day">Day</option><option value="week">Week</option><option value="month">Month</option></select></label>
+    <label>Artist <select x-model="artist" @change="update()" aria-label="Filter artist"><option value="">All artists</option><template x-for="name in result?.options.artists || []" :key="name"><option :value="name" x-text="name"></option></template></select></label>
+    <label>Genre <select x-model="genre" @change="update()" aria-label="Filter genre"><option value="">All genres</option><template x-for="name in result?.options.genres || []" :key="name"><option :value="name" x-text="name"></option></template></select></label>
+    <label>Format <select x-model="format" @change="update()" aria-label="Filter format"><option value="">All formats</option><template x-for="key in ['mixes','albums','radio','liked','other']" :key="key"><option :value="key" x-text="label(key)"></option></template></select></label>
+    <label>Compare <select x-model="overlay" @change="update()" aria-label="Compare listening series"><option value="artist">Artists</option><option value="genre">Genres</option></select></label>
+    <button class="btn-ghost" type="button" x-show="artist || genre || format" @click="clear()">Clear filters</button>
+    {% endif %}
+  </div>
+  <div class="lp-state" role="status" x-show="status !== 'ready'" x-cloak>
+    <p x-text="status === 'error' ? error : status === 'preparing' ? 'Preparing listening charts…' : 'Loading listening history…'"></p>
+    <button type="button" class="btn-ghost" x-show="status === 'error'" @click="load(true)">Try again</button>
+  </div>
+  <template x-if="result">
+  <div>
+    <div class="lp-summary" aria-live="polite">
+      <span><strong x-text="count(result.total.plays)"></strong> recorded plays</span>
+      <span><strong x-text="count(result.total.sightings)"></strong> dated sightings</span>
+      <span><strong x-text="duration(result.total.seconds)"></strong> observed listening</span>
+      <span class="lp-resolution" x-text="'By ' + result.period + ' · UTC'"></span>
+    </div>
+    <p class="lp-empty" x-show="!result.total.plays && !result.total.sightings && !result.total.seconds">No listening recorded in this selection. Try a longer window or clear your filters.</p>
+    <div class="lp-grid">
+      <section class="lp-card lp-tides" aria-label="Artist listening histories">
+        <header class="lp-chart-head"><div><h3 class="section section-flush">Listening history</h3>
+          <p class="section-note">Each row uses the same time and count scales. Select a name to filter.</p></div>
+          <span class="lp-scale" x-show="histories.length" x-text="'0–' + count(scale) + ' ' + result.historyMetric + ' / ' + result.period"></span></header>
+        <div class="seg lp-history-switch" role="group" aria-label="Listening history units" x-show="result.total.sightings">
+          <button type="button" :class="{on:result.historyMetric === 'plays'}" :aria-pressed="result.historyMetric === 'plays'" @click="historyMetric = 'plays'; update()">Recorded plays</button>
+          <button type="button" :class="{on:result.historyMetric === 'sightings'}" :aria-pressed="result.historyMetric === 'sightings'" @click="historyMetric = 'sightings'; update()">Dated sightings</button>
+        </div>
+        <div class="lp-history-head"><span x-text="overlay === 'genre' ? 'Genre' : 'Artist'"></span><div class="lp-time-axis"><template x-for="tick in axis" :key="tick.i"><span :style="{left:tick.x+'%'}" x-text="tick.label"></span></template></div><span x-text="result.historyMetric === 'plays' ? 'Plays' : 'Sightings'"></span></div>
+        <div class="lp-histories" @mouseleave="active = null">
+          <template x-for="row in histories" :key="row.name">
+            <div class="lp-history-row" :style="{'--lp-color':row.color}">
+              <a :href="row.url" x-text="row.name" :title="row.name"></a>
+              <div class="lp-history-plot" tabindex="0" :aria-label="row.name + ', ' + count(row.count) + ' ' + result.historyMetric + '. Use left and right keys for period counts.'"
+                   @mousemove="inspect($event)" @focus="selectPeriod(marks.length-1)" @keydown="inspectKey($event)">
+                <svg viewBox="0 0 600 40" preserveAspectRatio="none" aria-hidden="true"><path class="lp-spark-area" :d="row.area"/><path class="lp-spark-line" :d="row.path"/></svg>
+                <span class="lp-crosshair" x-show="active !== null" :style="{left:(marks.length === 1 ? 50 : active/(marks.length-1)*100)+'%'}"></span>
+                <span class="lp-point-value" x-show="active !== null" x-text="row.values[active] || 0" :style="{left:(marks.length === 1 ? 50 : Math.min(94,active/(marks.length-1)*100))+'%'}"></span>
+              </div>
+              <strong x-text="count(row.count)"></strong>
+            </div>
+          </template>
+        </div>
+        <p class="lp-caption" x-show="!histories.length">No artist or genre information for this selection.</p>
+        <div class="lp-total-row"><span x-text="result.historyMetric === 'plays' ? 'All plays' : 'All sightings'"></span><div class="lp-total-plot" tabindex="0" :aria-label="'All ' + result.historyMetric + ' over time'" @mousemove="inspect($event)" @focus="selectPeriod(marks.length-1)" @keydown="inspectKey($event)">
+          <svg viewBox="0 0 600 170" preserveAspectRatio="none" aria-hidden="true" x-html="totalMarkup"></svg>
+        </div><strong x-text="count(result.total[result.historyMetric])"></strong></div>
+        <p class="lp-readout" aria-live="polite" x-text="detail || 'Hover a history, or use left and right keys, to compare the same period across every row.'"></p>
+        <p class="lp-caption" x-text="histories.length + ' leading ' + (overlay === 'genre' ? 'genres' : 'artists') + ' shown · ' + count(histories.reduce((n,r)=>n+r.count,0)) + ' of ' + count(result.total[result.historyMetric]) + ' ' + result.historyMetric + '. Dated sightings are song/day observations, separate from exact plays.'"></p>
+      </section>
+      <section class="lp-card lp-discovery" aria-label="Discovery rates">
+        <h3 class="section section-flush">Discovery</h3>
+        <p class="section-note">First recorded encounters as a share of plays.</p>
+        <p class="lp-caption" x-show="!result.total.plays">Discovery rates need recorded plays. Dated sightings cannot establish play-by-play rates.</p>
+        <template x-for="curve in discovery" :key="curve.key">
+          <div class="lp-discovery-strip" :class="'lp-new-' + curve.key">
+            <div class="lp-strip-label"><span x-text="curve.name"></span><strong x-text="curve.percent"></strong></div>
+            <svg viewBox="-8 0 616 100" role="img" :aria-label="curve.name + ' discovery rate over time, from 0 to 100 percent'">
+              <path class="lp-reference" d="M0 13H600 M0 81H600"/>
+              <path class="lp-discovery-line" :d="curve.path"/>
+              <g x-html="curve.dotsMarkup"></g>
+              <text class="lp-axis" x="0" y="10">100%</text><text class="lp-axis" x="0" y="97">0%</text>
+            </svg>
+          </div>
+        </template>
+        <div class="lp-time-axis lp-standalone-axis"><template x-for="tick in axis" :key="tick.i"><span :style="{left:tick.x+'%'}" x-text="tick.label"></span></template></div>
+        <p class="lp-caption">Dot size shows the number of plays behind each rate. Gaps have no qualifying plays. “New” is relative to available history, including earlier dated imports. Artist rates exclude missing artist names.</p>
+      </section>
+      <section class="lp-card lp-time" aria-label="Listening formats">
+        <h3 class="section section-flush">Listening formats</h3>
+        <p class="section-note">Observed time and recorded plays, on shared scales.</p>
+        <p class="lp-scale" x-text="result.total.seconds ? '0–' + duration(timeScale) + ' / ' + result.period + ' · filled traces' : 'No elapsed time recorded in this selection'"></p>
+        <div class="lp-format-head"><span>Format</span><span>Time by <span x-text="result.period"></span></span><span>Observed</span></div>
+        <template x-for="row in formatHistories" :key="row.key">
+          <div class="lp-format-row" :class="'lp-' + row.key">
+            <span x-text="label(row.key)"></span>
+            <div class="lp-format-plot" tabindex="0" :aria-label="label(row.key) + ', ' + duration(row.seconds) + ' observed, ' + count(row.plays) + ' plays'" :data-tip="JSON.stringify({title:label(row.key),rows:[{l:'Observed time',v:duration(row.seconds)},{l:'Share of time',v:percent(row.seconds,result.total.seconds)},{l:'Plays',v:count(row.plays)}]})">
+              <svg viewBox="0 0 600 72" preserveAspectRatio="none" aria-hidden="true"><path class="lp-spark-area" :d="row.area"/><path class="lp-spark-line" :d="row.path"/><path class="lp-format-play-line" transform="translate(0 53)" :d="row.playPath"/></svg>
+            </div>
+            <span class="lp-format-value"><b x-text="duration(row.seconds)"></b><small x-text="percent(row.seconds,result.total.seconds)"></small></span>
+          </div>
+        </template>
+        <div class="lp-time-axis lp-format-axis"><template x-for="tick in axis" :key="tick.i"><span :style="{left:tick.x+'%'}" x-text="tick.label"></span></template></div>
+        <p class="lp-caption">Filled traces show elapsed time; the lower traces show plays. Pauses, mute, seeks and missing samples add no time. Imports cannot establish elapsed time or format.</p>
+      </section>
+      <section class="lp-card lp-affection" aria-label="Hearts and skulls">
+        <h3 class="section section-flush">Hearts and skulls</h3>
+        <p class="section-note">Likes at playback, with unknown ratings visible.</p>
+        <div class="lp-feedback-grid">
+          <div>
+            <div class="lp-feedback-stat"><strong x-text="percent(result.total.liked,result.total.rated)"></strong><span>already liked among starts with a known rating</span></div>
+            <svg class="lp-feedback-chart" viewBox="0 0 600 180" role="img" aria-label="Plays over time by rating captured at playback: already liked, not liked, or unknown">
+              <path class="lp-reference" d="M0 158H600"/>
+              <g x-html="feedbackMarkup"></g>
+            </svg>
+            <div class="lp-time-axis lp-standalone-axis"><template x-for="tick in axis" :key="tick.i"><span :style="{left:tick.x+'%'}" x-text="tick.label"></span></template></div>
+            <div class="lp-legend"><span><i class="lp-liked"></i>Already liked</span><span><i class="lp-known"></i>Not liked</span><span><i class="lp-unknown"></i>Unknown</span></div>
+            <p class="lp-caption" x-text="count(result.total.rated) + ' of ' + count(result.total.plays) + ' plays have a rating captured at the start. Later likes do not change it.'"></p>
+          </div>
+          <div class="lp-retained">
+            <template x-for="row in feedbackHistories" :key="row.key">
+              <div class="lp-rating-row" :class="'lp-rating-' + row.key">
+                <div class="lp-strip-label"><span x-text="row.key === 'hearts' ? 'Hearted songs' : 'Skulled songs'"></span><strong x-text="count(row.total)"></strong></div>
+                <svg viewBox="0 0 600 35" preserveAspectRatio="none" role="img" :aria-label="row.key + ', currently retained ratings by first-observed date'"><path class="lp-spark-area" :d="row.area"/><path class="lp-spark-line" :d="row.path"/></svg>
+              </div>
+            </template>
+            <p class="lp-caption">Totals are retained song ratings across all time{% if analytics_mode == 'charts' %}, matching artist and genre filters{% endif %}. Traces show when those ratings were first observed in the selected period. Cleared ratings are absent.</p>
+          </div>
+        </div>
+      </section>
+      {% if analytics_mode == 'charts' %}
+      <section class="lp-card lp-overlays" aria-label="Listening period details">
+        <h3 class="section section-flush">Period details</h3>
+        <div class="lp-period-scroll"><table class="lp-period-table"><thead><tr><th>Period starts (UTC)</th><th>Plays</th><th>Dated sightings</th><th>New songs</th><th>New artists</th><th>Observed time</th></tr></thead><tbody><template x-for="bin in result.series" :key="bin.day"><tr><th x-text="dateLabel(bin.day)"></th><td x-text="count(bin.plays)"></td><td x-text="count(bin.sightings)"></td><td x-text="percent(bin.new_tracks,bin.plays)"></td><td x-text="percent(bin.new_artists,bin.artist_plays)"></td><td x-text="duration(bin.seconds)"></td></tr></template></tbody></table></div>
+      </section>
+      {% endif %}
+    </div>
+    <details class="lp-provenance"><summary>About this data {{ arrow_icon('disclosure') }}</summary>
+      <p>Includes Mix tapes and On air. A dated sighting is a song seen on a day, not an exact play count. Date-unknown imports cannot be placed on a timeline. Dates use UTC; weekly groups start Monday. Longer daily histories are grouped by week or month to keep charts legible. <span x-text="'Prepared ' + new Date(result.builtAt*1000).toLocaleString() + '. Updates while you listen.'"></span></p>
+    </details>
+  </div>
+  </template>
+</div>

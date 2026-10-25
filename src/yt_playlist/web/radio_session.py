@@ -16,7 +16,7 @@ from yt_playlist.core.accounts import client_for
 from yt_playlist.core.work_diagnostics import work_span
 from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.rec.radio_policy import RadioPolicy
-from yt_playlist.rec import radio_tuning
+from yt_playlist.rec import choice_evidence, radio_tuning
 from yt_playlist.web.radio_edits import AppendOperation
 from yt_playlist.web.radio_launch import RadioLaunch
 from yt_playlist.web.radio_listening import RadioListening
@@ -382,7 +382,9 @@ class PlaylistRadio:
                 if not self.ctx.bridge.connected:
                     return {"ok": False, "reason": "Connect the YouTube Music extension first."}
             try:
-                s = self.launch.resolve(RadioCandidates(self.ctx.store, self.ctx.now_fn()), client, identity, day,
+                offered = choice_evidence.opportunity(self.ctx.store, menu_id or self.offer_id) if (menu_id or self.offer_id) else None
+                assignment = {'comparison': offered.get('comparison')} if offered else {}
+                s = self.launch.resolve(RadioCandidates(self.ctx.store, self.ctx.now_fn(), **assignment), client, identity, day,
                     seed_video_id=seed_video_id, playlist_id=playlist_id, menu_id=menu_id or self.offer_id)
             except ValueError as exc:
                 return {"ok": False, "reason": str(exc)}

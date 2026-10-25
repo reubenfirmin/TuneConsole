@@ -117,7 +117,7 @@ def test_fresh_creation_starts_enrichment_and_page_rejoins(store, monkeypatch, r
     only_provider(store, "musicbrainz")
     started, release = threading.Event(), threading.Event()
 
-    def enrich(title, artist):
+    def enrich(title, artist, *, observations=None):
         started.set()
         assert release.wait(timeout=10)
         return "Rock", "1998", None, [], []
@@ -393,8 +393,8 @@ def test_carded_orders_by_recipe_journey(store, monkeypatch):
     """_carded must order the proto by the recipe's journey. Force 'warm_up' and assert the preview
     rises in energy thirds (and still spaces artists / carries genre)."""
     from yt_playlist.rec import home_cards as home
-    from yt_playlist.util import genre_map
-    from yt_playlist.rec import recipes, journeys
+    from tests.musical_support import prepare_profiles
+    from yt_playlist.rec import musical_character, recipes
     from yt_playlist.rec.surfaces import ForYouItem
     store.identities.upsert_identity("main", "cred", None, True)
     # mellow vs intense families, interleaved so source order is NOT already sorted.
@@ -405,8 +405,10 @@ def test_carded_orders_by_recipe_journey(store, monkeypatch):
     for i, (genre, artist) in enumerate(spec):
         tid = store.tracks.upsert_track(f"v{i}", f"S{i}", artist, "", None, 1)
         store.tracks.set_track_genre(tid, genre)
+        store.tracks.set_track_audio(tid, energy=0 if artist == "Calm" else 1)
         items.append(ForYouItem(f"S{i}", artist, "", f"v{i}", None, 1, "r",
                                 identity_key(f"S{i}", artist), "comfort"))
+    prepare_profiles(store)
     monkeypatch.setattr(recipes, "roll_recipe",
                         lambda *a, **k: {"facets": {}, "journey": "warm_up", "dj": {"seed": 1}})
 
@@ -414,7 +416,8 @@ def test_carded_orders_by_recipe_journey(store, monkeypatch):
 
     out = card["tracks"]
     assert card["recipe"]["journey"] == "warm_up"
-    e = [genre_map.energy(t.genre) for t in out]
+    profiles = musical_character.load(store, [t.key for t in out])
+    e = [musical_character.intensity({'musical': profiles[t.key]}) for t in out]
     thirds = [sum(e[:4]) / 4, sum(e[4:8]) / 4, sum(e[8:]) / 4]
     assert thirds[0] < thirds[1] < thirds[2]               # warm_up rises across ALL thirds (shuffle ~17%)
     assert all(getattr(t, "genre", "") for t in out)        # genres still attached

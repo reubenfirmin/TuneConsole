@@ -45,6 +45,7 @@
   <div class="fp-tab-panel" id="fp-mixes-panel" role="tabpanel" aria-labelledby="fp-mixes-tab"
        x-show="tab === 'mixes'">
     <div class="fp-intro"><h2>What are we playing?</h2><p>Pick a few favorites, mix them together, or let a shuffle surprise you.</p></div>
+    <p class="section-note" x-show="vibe" x-cloak>Your vibe finds matching music within your chosen genres.</p>
     <form id="home-mix-form" class="fp-mix-form"
           hx-post="/home/mix-genres" hx-target="#home-mode-cards" hx-swap="outerHTML"
           hx-disabled-elt="#home-mix-fields, #home-make-mixes"
@@ -105,13 +106,13 @@
     </form>
     <p id="home-vibe-status" class="fp-feedback" role="status">Pick a vibe. Your mixes update right away.</p>
     <details class="fp-vibe-explainer"><summary>{{ arrow_icon('disclosure') }} What shapes a vibe?</summary>
-      <p>Tempo, energy, danceability, mood, acoustic character, instrumentalness, and loudness, where available. Genre energy helps fill the gaps. More audio detail means a closer match.</p>
+      <p>Intensity, tempo, groove, mood, acoustic character, and instrumentalness, where available. Genre and artist descriptions provide weaker clues. Missing details stay uncertain.</p>
       <ul>{% for key, preset in (vibe_presets|default({})).items() %}<li><strong>{{ preset.label }}:</strong> {{ preset.signals }}</li>{% endfor %}</ul>
     </details>
   </div>
   <div class="fp-tab-panel" id="fp-preferences-panel" role="tabpanel" aria-labelledby="fp-preferences-tab"
        x-show="tab === 'preferences'" x-cloak>
-  <div class="fp-intro"><h2>A little more you.</h2><p>These dials and your vibe work together. If Genre focus is set to Funk only, turning up Techno won’t add Techno.</p></div>
+  <div class="fp-intro"><h2>A little more you.</h2><p>A selected vibe leads the musical style. Genre focus sets which genres it can explore.</p></div>
   {# Genre variety is a single dial; per-genre and era weights live below. #}
   <div class="fp-preference-card">
     <div class="fp-preference-heading"><strong>How wide shall we wander?</strong><span>Genre variety</span></div>

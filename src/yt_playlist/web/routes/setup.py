@@ -101,7 +101,8 @@ def build(ctx) -> APIRouter:
     def _enrichment_panel(request):
         return templates.TemplateResponse(request, "_partials/enrichment_panel.html", {
             "enrichment": enrichment.load_config(store),
-            "lastfm_configured": lastfm.api_key(store) is not None})
+            "lastfm_configured": lastfm.api_key(store) is not None,
+            'deepseek': album_descriptions.settings(store, ctx.now_fn())})
 
     @router.post("/setup/enrichment")
     async def setup_enrichment(request: Request):

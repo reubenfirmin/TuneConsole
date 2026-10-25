@@ -452,3 +452,73 @@ def test_preflight_reports_all_service_failures_and_checks_stable_baseline(monke
         assert service in str(failure.value)
     output = capsys.readouterr().out
     assert "HTTP 403" in output and "secret" not in output
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+def test_public_downloads_use_an_anonymous_identified_request(monkeypatch, streamed):
+    payload = b"signed repository metadata" * 50000
+    monkeypatch.setenv("GITHUB_TOKEN", "do-not-send")
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "do-not-send")
+    requests = []
+
+    def urlopen(request, timeout):
+        requests.append(request)
+        assert timeout == 30
+        assert request.get_method() == "GET"
+        assert request.data is None
+        assert dict(request.header_items()) == {"User-agent": release_services.PUBLIC_USER_AGENT}
+        # Model the public CDN denying urllib's default Python user agent.
+        assert not request.get_header("User-agent").startswith("Python-urllib/")
+        return io.BytesIO(payload)
+
+    monkeypatch.setattr(release_services.urllib.request, "urlopen", urlopen)
+    url = "https://repo.tuneconsole.com/summary"
+    if streamed:
+        release_services.public_download(url, hashlib.sha256(payload).hexdigest())
+        with pytest.raises(ValueError, match="checksum differs"):
+            release_services.public_download(url, "0" * 64)
+    else:
+        assert release_services.public_bytes(url) == payload
+    assert requests
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("status", [403, 404, 503, None])
+def test_public_failure_reports_operation_and_status_without_remote_secrets(monkeypatch, streamed, status):
+    import traceback
+
+    url = "https://do-not-print-user:do-not-print-password@repo.tuneconsole.com/summary?token=do-not-print-query#secret"
+
+    def denied(request, timeout):
+        if status is None:
+            raise urllib.error.URLError("do-not-print-reason")
+        raise urllib.error.HTTPError(request.full_url, status, "do-not-print-reason",
+                                     {"Secret": "do-not-print-header"}, io.BytesIO(b"do-not-print-body"))
+
+    monkeypatch.setattr(release_services.urllib.request, "urlopen", denied)
+    with pytest.raises(release_services.PublicVerificationError) as failure:
+        if streamed:
+            release_services.public_download(url, "0" * 64)
+        else:
+            release_services.public_bytes(url)
+    output = "".join(traceback.format_exception(failure.value))
+    assert "Public download GET https://repo.tuneconsole.com/summary" in output
+    if status is not None:
+        assert f"HTTP {status}" in output
+    else:
+        assert "failed" in output
+    assert "do-not-print" not in output
+
+
+@pytest.mark.parametrize("changed", ["summary", "summary.sig"])
+def test_public_flatpak_rejects_candidate_hash_mismatch_before_trusting_remote(monkeypatch, tmp_path, changed):
+    checksums = {name: hashlib.sha256(name.encode()).hexdigest() for name in ("summary", "summary.sig")}
+    monkeypatch.setattr(release_services, "public_bytes",
+                        lambda url: b"altered" if url.endswith(changed) else url.rsplit("/", 1)[-1].encode())
+
+    def no_remote(*args, **kwargs):
+        pytest.fail("Do not configure a remote before candidate hashes match")
+
+    monkeypatch.setattr(release_services.subprocess, "run", no_remote)
+    with pytest.raises(ValueError, match=f"Public Flatpak {changed} differs from signed candidate"):
+        release_services.verify_flatpak(tmp_path, "1.2.3", checksums, {})

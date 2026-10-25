@@ -5,6 +5,8 @@
 <link rel="stylesheet" href="/static/generating.css?v={{ asset_v }}">
 <link rel="stylesheet" href="/static/radio.css?v={{ asset_v }}">
 <link rel="stylesheet" href="/static/album-choices.css?v={{ asset_v }}">
+<link rel="stylesheet" href="/static/listening-editorial.css?v={{ asset_v }}">
+<script src="/static/listening-editorial.js?v={{ asset_v }}"></script>
 <script src="/static/radio-artwork.js?v={{ asset_v }}"></script>
 <script src="/static/radio.js?v={{ asset_v }}"></script>
 <script src="/static/album-choices.js?v={{ asset_v }}"></script>
@@ -103,6 +105,10 @@
               @click="go('recent')">Into recently</button>
       <button type="button" role="tab" :class="{ on: panel === 'discover' }" :aria-selected="panel === 'discover'"
               @click="go('discover')">Discover</button>
+      {% if listening_edition.available %}
+      <button type="button" role="tab" :class="{ on: panel === 'portrait' }" :aria-selected="panel === 'portrait'"
+              @click="go('portrait')">Charts</button>
+      {% endif %}
       {% endif %}
       {% if has_notices %}
       <button type="button" role="tab" :class="{ on: panel === 'notices' }" :aria-selected="panel === 'notices'"
@@ -142,6 +148,11 @@
     <section class="dash-panel dash-async" data-dash="discover" role="tabpanel" x-show="panel === 'discover'" x-cloak>
       {% include "_partials/home_discovery.html" %}
     </section>
+    {% if listening_edition.available %}
+    <section class="dash-panel" data-dash="portrait" role="tabpanel" aria-label="Your listening" x-show="panel === 'portrait'" x-cloak>
+      {% include "_partials/listening_editorial.html" %}
+    </section>
+    {% endif %}
     {% if muted_count %}
     <p class="section-note muted-note" x-show="panel === 'directions'" x-cloak>
       Hiding {{ muted_count }} muted artist{{ 's' if muted_count != 1 }} based on your feedback -

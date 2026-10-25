@@ -1,24 +1,33 @@
 {% extends "base.html" %}{% from "_macros.html" import library_icon %}{% from "_partials/ticker.html" import ticker_chart %}
 {% from "_partials/song_menu_button.html" import song_menu %}
-{% block title %}Charts · TuneConsole{% endblock %}{% block page_class %}page-charts{% endblock %}{% block body %}
+{% block title %}Charts · TuneConsole{% endblock %}{% block page_class %}page-charts{% endblock %}
+{% block page_styles %}
+<link rel="stylesheet" href="/static/listening-analytics.css?v={{ asset_v }}">
+<script src="/static/listening-analytics.js?v={{ asset_v }}"></script>
+{% endblock %}
+{% block body %}
 {% set window_names = {'all': 'all recorded history', '90d': 'the last 90 days', '30d': 'the last 30 days', '7d': 'the last 7 days'} %}
 {% set requested_view = request.query_params.get('view', 'songs') %}
-{% set chart_view = requested_view if requested_view in ['songs', 'artists', 'genres', 'years', 'albums', 'playlists'] else 'songs' %}
-<div class="chart-shell" x-data="{ view: '{{ chart_view }}', keyOpen: false }">
+{% set chart_view = requested_view if requested_view in ['analytics', 'songs', 'artists', 'genres', 'years', 'albums', 'playlists'] else 'songs' %}
+<div class="chart-shell" x-data="{ view: '{{ chart_view }}', keyOpen: false, analyticsOnly: {{ analytics_only|default(false)|tojson }},
+  loadRankings() { if (this.analyticsOnly) location.href = '/charts?' + new URLSearchParams({window: new URLSearchParams(location.search).get('window') || '{{ window }}', view: this.view}); } }">
 <div class="page-head library-page-head">
   <div class="library-page-title">{{ library_icon('charts') }}<h1>Charts</h1></div>
-  <p>Ranked by plays captured in your sync history (how often each song turns up in recently-played).
-     The more you sync, the richer this gets.</p>
+  <p x-show="view === 'analytics'" x-cloak>Listening activity, discovery, formats and feedback.</p>
+  <p x-show="view !== 'analytics'">Ranked by listening days in your recorded history. Repeated plays on the same day count once.</p>
   <div class="library-head-actions card--toolbar toolbar">
     <span class="seg chart-views" aria-label="Chart view">
-      <button type="button" :class="{ on: view === 'songs' }" @click="view = 'songs'">Top songs</button>
-      <button type="button" :class="{ on: view === 'artists' }" @click="view = 'artists'">Artists</button>
-      <button type="button" :class="{ on: view === 'genres' }" @click="view = 'genres'">Genres</button>
-      <button type="button" :class="{ on: view === 'years' }" @click="view = 'years'">Years</button>
-      <button type="button" :class="{ on: view === 'albums' }" @click="view = 'albums'">Albums</button>
-      <button type="button" :class="{ on: view === 'playlists' }" @click="view = 'playlists'">Playlists</button>
+      <button type="button" :class="{ on: view === 'songs' }" @click="view = 'songs'; loadRankings()">Top songs</button>
+      <button type="button" :class="{ on: view === 'artists' }" @click="view = 'artists'; loadRankings()">Artists</button>
+      <button type="button" :class="{ on: view === 'genres' }" @click="view = 'genres'; loadRankings()">Genres</button>
+      <button type="button" :class="{ on: view === 'years' }" @click="view = 'years'; loadRankings()">Years</button>
+      <button type="button" :class="{ on: view === 'albums' }" @click="view = 'albums'; loadRankings()">Albums</button>
+      <button type="button" :class="{ on: view === 'playlists' }" @click="view = 'playlists'; loadRankings()">Playlists</button>
+      {% if listening_available or chart_view == 'analytics' %}
+      <button type="button" :class="{ on: view === 'analytics' }" @click="view = 'analytics'">Listening analytics</button>
+      {% endif %}
     </span>
-    <span class="chart-context-actions">
+    <span class="chart-context-actions" x-show="view !== 'analytics'">
       <span class="chart-context-label">History</span>
       <span class="seg chart-window" title="Limit to plays in this window of your sync history">
         <a :href="'/charts?window=all&amp;view=' + view" class="{{ 'on' if window == 'all' }}">All time</a>
@@ -30,6 +39,10 @@
     </span>
   </div>
 </div>
+
+  <section x-show="view === 'analytics'" x-cloak aria-label="Listening analytics">
+    {% with analytics_mode='charts' %}{% include "_partials/listening_analytics.html" %}{% endwith %}
+  </section>
 
   <template x-teleport="body">
     <div class="modal-backdrop" x-show="keyOpen" x-cloak x-transition.opacity

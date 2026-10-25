@@ -5,7 +5,7 @@
 // classifies skips/completions/sessions from the raw stream.
 (function () {
   var SENSOR_VERSION = 4;
-  var SENSOR_REVISION = 9; // Implementation changes can replace a compatible, healthy sensor.
+  var SENSOR_REVISION = 10; // Implementation changes can replace a compatible, healthy sensor.
   var previous = window.__tcNowPoller;
   if (previous && previous.version === SENSOR_VERSION && Number.isSafeInteger(previous.revision) &&
       previous.revision >= SENSOR_REVISION && !previous.stopped &&
@@ -277,6 +277,7 @@
                            __tcSensorProbeId: probeId,
                            __tcNow: { title: meta.title, artist: meta.artist, thumbnail: meta.thumbnail,
                                       metadataVerified: meta.verified,
+                                      videoVerified: !!info.videoId,
                                       videoId: info.videoId, playlist: info.playlist,
                                       // Each presence heartbeat anchors the app's local progress clock.
                                       position: info.position,

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from yt_playlist.rec import embedding_training as embed, model_selection as ms
+from yt_playlist.rec import embedding_training as embed, model_selection as ms, model_setup
 from tests import model_support
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.util.matching import identity_key
@@ -64,12 +64,12 @@ def test_diagnostic_winner_cannot_publish_without_validated_product_outcomes(sto
         return [_outcomes(25 if setup["dim"] == 64 else 5)] * 2
 
     monkeypatch.setattr(ms, "_evaluate", evaluate)
-    monkeypatch.setattr(ms, "_build", lambda *a: (["new|artist"], np.ones((1, 64), dtype=np.float32)))
+    monkeypatch.setattr(model_setup, "build", lambda *a: pytest.fail("diagnostic fitted a serving model"))
     monkeypatch.setattr(ms, "_forecast", lambda *a: None)
     result = ms.run(store, 1000)
     assert result["status"] == "retained"
     assert result["diagnostic_challenger"] == {"method": "svd", "dim": 64}
-    assert result["promotion_gate"] == "awaiting_validated_product_outcomes"
+    assert result["promotion_gate"] == "diagnostic_only"
     assert result["selected"] == result["previous"]
     assert store.settings.get_setting("rec_dim") is None
     assert store.rec_model.get_rec_vectors() == old
@@ -186,13 +186,17 @@ def test_real_history_drives_automatic_comparison_without_manual_action(store, m
             [key for keys in all_keys for key in keys[period * 5:period * 5 + 5]], source_timezone="UTC")
     store.settings.set_setting("rec_dim", "4")
     model_support.build_track_model(store)
-    monkeypatch.setattr(ms, "CONFIGS", [("svd", 4), ("svd", 8)])
+    monkeypatch.setattr(model_setup, "CONFIGS", [("svd", 4), ("svd", 8)])
     now = 31 * ms.DAY
     assert ms.readiness(store, now)["state"] == "ready"
     result = ms.maintain(store, now)
-    assert result["status"] in ("applied", "retained")
-    assert result["baseline"]["trials"] >= 50
-    assert result["baseline"]["windows"] >= 2
+    assert result['status'] == 'running', result
+    assert result['kind'] == 'product' and result['phase'] == 'observing'
+    assert result['challenger'] == {'method': 'svd', 'dim': 8}
+    from yt_playlist.rec import product_comparison
+    trial = product_comparison.state(store)
+    assert trial['decision_at'] > trial['exposure_until'] > now
+    assert trial['previous'] == {'method': 'svd', 'dim': 4}
     assert store.rec_model.rec_vectors_count() == 160
     assert ms.maintain(store, now + 1) is None
     assert len(store.model_selection.selection_runs()) == 1

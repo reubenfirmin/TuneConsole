@@ -13,7 +13,7 @@ import re
 import urllib.parse
 import urllib.request
 
-from yt_playlist.providers import credentials, genres, transport
+from yt_playlist.providers import credentials, descriptive_tags, genres, transport
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter
 from yt_playlist.util import net
 from yt_playlist.util.matching import normalize, recording_title
@@ -50,13 +50,14 @@ def reset() -> None:
 def probe(track, store=None, tok=None) -> EnrichmentResult:
     """Read-only lookup: genre & year from Discogs releases."""
     tok = tok or token(store)
-    genre, year = enrich(track["title"], track["artist"], tok)
+    observations = []
+    genre, year = enrich(track["title"], track["artist"], tok, observations=observations)
     fields = {}
     if genre:
         fields["genre"] = genre
     if year:
         fields["year"] = year
-    return EnrichmentResult("discogs", fields)
+    return EnrichmentResult("discogs", fields, tuple(observations))
 
 
 def _pace(tok):
@@ -117,7 +118,7 @@ def _has_track(tracklist, artists, wanted_title, wanted_artist):
     return False
 
 
-def enrich(title, artist, tok=None):
+def enrich(title, artist, tok=None, *, observations=None):
     """Return (genre, year) from Discogs, or (None, None). Either may be None."""
     query = " ".join(x for x in (artist, title) if x).strip()
     try:
@@ -126,6 +127,13 @@ def enrich(title, artist, tok=None):
         logger.warning("Discogs search failed for %r / %r: %s", title, artist, e)
         return (None, None)
     genre = None
+    for result in results:
+        tags = [{'name': value, 'kind': field} for field in ('style', 'genre')
+                for value in result.get(field) or []]
+        descriptive_tags.retain(observations, scope='release', entity_id=result.get('id'), tags=tags,
+            source_path='database/search:style+genre',
+            match_evidence={'method': 'matched_release_or_tracklist',
+                            'input_title': title, 'input_artist': artist, 'release_title': result.get('title')})
     for r in results:                          # first match whose style/genre is a known genre
         genre = genres.pick_genre((r.get("style") or []) + (r.get("genre") or []))
         if genre:

@@ -12,6 +12,7 @@ class Job(StrEnum):
     BUNDLES = "bundles"
     TRENDS = "trends"
     CLEANUP = "cleanup"
+    ANALYTICS = "analytics"
     CONTENT = "content"
     HOME = "home"
     ARTWORK = "artwork"
@@ -71,7 +72,7 @@ class PendingJobs:
     @property
     def visible(self):
         """Analytics alone does not show the model-refreshing indicator."""
-        return any(job not in {Job.MEASUREMENT, Job.CHOICES} for job in self.pending)
+        return any(job not in {Job.MEASUREMENT, Job.CHOICES, Job.ANALYTICS} for job in self.pending)
 
     @property
     def measurements(self):
@@ -98,8 +99,21 @@ class PendingJobs:
             self.pending[job] = True
         return True
 
-    def take_measurements(self):
-        return self.pending.pop(Job.MEASUREMENT, deque())
+    def take_measurements(self, *, limit=None):
+        """Detach a small FIFO batch; cancellation can still take every pinned reader."""
+        if limit is None:
+            return self.pending.pop(Job.MEASUREMENT, deque())
+        offers = self.pending.get(Job.MEASUREMENT, deque())
+        batch, units = [], 0
+        while offers:
+            size = getattr(offers[0], 'work_units', 1)
+            if batch and units + size > limit:
+                break
+            batch.append(offers.popleft())
+            units += size
+        if not offers:
+            self.pending.pop(Job.MEASUREMENT, None)
+        return batch
 
     def drain(self):
         """Detach one ordered pass. Arrivals during execution belong to the next pass.

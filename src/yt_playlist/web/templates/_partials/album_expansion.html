@@ -2,18 +2,8 @@
 {% include '_partials/album_tracks.html' %}
 <div class="album-inline-tools">
   {% include '_partials/album_controls.html' %}
-  <a href="/album?browse={{ browse_id|urlencode }}{% if opportunity_id %}&amp;opportunity={{ opportunity_id }}{% endif %}">Album page</a>
 </div>
 {% else %}
 <p class="section-note">The tracklist couldn’t be loaded.</p>
 <button class="btn-ghost" hx-get="/album/inline?browse={{ browse_id|urlencode }}&amp;opportunity={{ opportunity_id or '' }}" hx-target="closest .album-inline" hx-swap="innerHTML">Try again</button>
 {% endif %}
-<form class="album-inline-feedback" hx-post="/album/feedback" hx-swap="none" x-data='{ feedback: {{ album_feedback|tojson }} }'
-      @htmx:after-request="if ($event.detail.successful) feedback = $event.detail.requestConfig.parameters.kind">
-  <input type="hidden" name="browse_id" value="{{ browse_id }}">
-  <input type="hidden" name="opportunity_id" value="{{ opportunity_id or '' }}">
-  <button name="kind" value="more" :aria-pressed="feedback === 'more'">More like this</button>
-  <button name="kind" value="known" :aria-pressed="feedback === 'known'">Already know it</button>
-  <button name="kind" value="reject" :aria-pressed="feedback === 'reject'">Not for me</button>
-  <button name="kind" value="clear" x-show="feedback && feedback !== 'clear'" x-cloak>Clear feedback</button>
-</form>

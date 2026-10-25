@@ -35,6 +35,16 @@ def load(store, now, schedule=lambda: None):
         payload = None
     if payload is None or now - payload['built_at'] >= MAX_AGE_S:
         schedule()
+    from yt_playlist.rec import product_comparison
+    from yt_playlist.rec.home_cards import _epoch
+    epoch = _epoch(store, 'album_choices')
+    held = store.rec_proposals.get_proposals('model_album_assignment') or {}
+    previous = held.get('comparison') if held.get('epoch') == epoch else None
+    paired, comparison = product_comparison.prepared(store, 'albums', epoch, now, existing=previous)
+    if paired:
+        payload = {**paired, 'context': {**paired['context'], 'comparison': comparison}}
+        if comparison != previous:
+            store.rec_proposals.put_proposals('model_album_assignment', {'epoch': epoch, 'comparison': comparison}, now)
     return payload
 
 
@@ -57,7 +67,7 @@ def prepare_cached(store, now):
                         'context': choice_evidence.freeze_context(reader,
                             choice_evidence.model_context(reader, now, facet_leans=leans))}
 
-            payload = reader.memoized_read(('album-choices', 4, int(now // MAX_AGE_S)), calculate)
+            payload = reader.memoized_read(('album-choices', 5, int(now // MAX_AGE_S)), calculate)
             encoded = json.dumps(payload, separators=(',', ':'))
             if not snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(
                     encoded, payload['built_at'], surface=SURFACE),
@@ -121,7 +131,7 @@ def _rationale(album, context, similarities, basis):
         if source.get('kind') == 'album':
             # A saved or imported record is a taste input, but does not prove
             # that the listener knows it. References need repeat listening.
-            if source.get('return_days', 0) < 2:
+            if source.get('return_weight', 0) <= 0:
                 continue
             artist, separator, title = context.titles[index].partition(' · ')
             own |= bool(separator and normalize(artist) == normalize(album.get('artist'))
@@ -136,7 +146,9 @@ def _rationale(album, context, similarities, basis):
         if kind == 'playlist':
             text = f'A possible fit for your “{title}” playlist.'
         elif kind == 'album':
-            text = f'A possible fit with your repeat listening to “{title}”.'
+            text = (f'A possible fit with tracks you keep returning to on “{title}”.'
+                    if source['return_coverage'] < 1 else
+                    f'A possible fit with your repeat listening to “{title}”.')
         elif kind in {'albums', 'mixes', 'radio'}:
             name = {'albums': 'Long play', 'mixes': 'Mix tapes', 'radio': 'On air'}[kind]
             text = f'A possible fit with the music you’ve chosen in {name}.'
@@ -203,8 +215,7 @@ def prepare(store, now, discoveries):
         return []
     values, interests, bases, spaces, affinities, rationales = {}, {}, {}, {}, {}, {}
     content_positions = [i for i, feature in enumerate(features) if feature is not None] if taste else []
-    collab_positions = [i for i, feature in enumerate(collab_features)
-                        if feature is not None and i not in content_positions] if collab_taste else []
+    collab_positions = [i for i, feature in enumerate(collab_features) if feature is not None] if collab_taste else []
     for positions, feature_rows, context, evidence, lookup, basis in (
             (content_positions, features, taste, matrix, index,
              embedding_vectors.content_space_id(store, snapshot=snapshot)),
@@ -228,6 +239,10 @@ def prepare(store, now, discoveries):
                                       * posterior.get(modes[mid]['mode_id'], 0) for mid in nearest])
         fit = context.centroids @ candidates_matrix.T
         for local, i in enumerate(positions):
+            if i in values:
+                weight = rec_params.get_param(store, 'album_collab_weight')
+                values[i] = (1 - weight) * values[i] + weight * float(scores[local])
+                continue  # Content coordinates still explain and diversify this release.
             values[i], interests[i], bases[i], spaces[i] = float(scores[local]), int(fit[:, local].argmax()), basis, feature_rows[i]
             affinities[i] = float(fit[:, local].max())
             rationales[i] = _rationale(ranked[i], context, fit[:, local], basis)

@@ -14,10 +14,10 @@ def library_size(store) -> int:
     return store.rec_query.tracks_total()
 
 
-def _setup_complete(*, imported, has_library, mixes_ready) -> bool:
+def _setup_complete(*, imported, has_library, mixes_ready, albums_ready=False) -> bool:
     # Sparse accounts can receive useful prepared offers before modes can be fit.
     # An empty imported account has no library preparation left to wait for.
-    return imported and (mixes_ready or not has_library)
+    return imported and (mixes_ready or albums_ready or not has_library)
 
 
 def arrival_status(store, now=None) -> dict:
@@ -37,8 +37,9 @@ def arrival_status(store, now=None) -> dict:
         discoveries = reader.conn.execute("SELECT COUNT(*) FROM rec_discovered_content_vectors").fetchone()[0]
         imported = reader.settings.get_setting("last_sync_at") is not None
         mixes_ready = prepared_mixes_ready(reader, now)
+        albums_ready = prepared_albums_ready(reader, now)
         complete = _setup_complete(imported=imported, has_library=coverage["total"] > 0,
-                                   mixes_ready=mixes_ready)
+                                   mixes_ready=mixes_ready, albums_ready=albums_ready)
         phase = "ready" if complete else "import" if not imported else "learn"
         return {"songs": songs, "playlists": len(reader.playlists.get_playlists()),
                 "albums": len(reader.collection.get_saved_albums()),
@@ -48,7 +49,16 @@ def arrival_status(store, now=None) -> dict:
                 "setup": {"complete": complete, "phase": phase, "imported": imported,
                           "analyzed": coverage["processed"], "total": coverage["total"],
                           "genres": coverage["genre"], "model_tracks": model_tracks,
-                          "modes": modes, "mixes_ready": mixes_ready, "discoveries": discoveries}}
+                          "modes": modes, "mixes_ready": mixes_ready, "albums_ready": albums_ready,
+                          "offers_ready": mixes_ready or albums_ready, "discoveries": discoveries}}
+
+
+def prepared_albums_ready(store, now=None) -> bool:
+    """Album listeners can graduate independently of prepared mixes and fitted modes."""
+    import time
+    from yt_playlist.rec import album_choices
+    payload = album_choices.load(store, time.time() if now is None else now)
+    return bool(payload and album_choices.eligible(store, payload['items'], now))
 
 
 def prepared_mixes_ready(store, now=None) -> bool:
@@ -77,7 +87,8 @@ def initial_setup_pending(store, now=None) -> bool:
     """Keep setup until import and usable offers arrive, independently of modes."""
     return not _setup_complete(
         imported=store.settings.get_setting("last_sync_at") is not None,
-        has_library=library_size(store) > 0, mixes_ready=prepared_mixes_ready(store, now))
+        has_library=library_size(store) > 0, mixes_ready=prepared_mixes_ready(store, now),
+        albums_ready=prepared_albums_ready(store, now))
 
 
 def cleanup_count(store) -> int:
@@ -108,7 +119,7 @@ def onboarding_active(store, now) -> bool:
         return False
     if not _has_synced(store):
         return False
-    if _taste_ready(store) or prepared_mixes_ready(store, now):
+    if _taste_ready(store) or prepared_mixes_ready(store, now) or prepared_albums_ready(store, now):
         return False
     if feedback_count(store) >= rec_params.get_param(store, "onboard_feedback_min"):
         return False

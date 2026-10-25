@@ -80,29 +80,56 @@ def _with_albums(store, taste, matrix, index):
     base = rec_params.get_param(store, "album_saved_weight")
     returns = rec_params.get_param(store, "album_return_weight")
     feedback = json.loads(store.settings.get_setting("album_feedback") or "{}")
+    confirmed = (store.rec_proposals.get_proposals('choice_interests') or {}).get('album_track_days', {})
     for album in store.collection.taste_album_contexts(
-            include_browse={browse for browse, item in feedback.items() if item["kind"] == "more"}):
+            include_browse=set(confirmed) | {browse for browse, item in feedback.items() if item["kind"] == "more"}):
         judgment = feedback.get(album["browse"], {}).get("kind")
         if judgment == "reject":
             continue
         rows = [index[k] for k in album["keys"] if k in index]
         if not rows:
             continue
-        center = matrix[rows].mean(0)
-        norm = np.linalg.norm(center)
-        if norm == 0:
-            continue
-        weight = base * bool(album["saved"]) + returns * math.log1p(max(0, album["return_days"] - 1))
+        whole = matrix[rows].mean(0)
+        whole_norm = np.linalg.norm(whole)
+        saved_weight = base * bool(album["saved"]) if whole_norm else 0.
+        # Average per-track log return days over the full release, including unheard
+        # and unmodeled tracks in the denominator. Never pool different songs' days
+        # into invented returns. Whole-record repeats retain length-neutral support.
+        # Organic history and deliberate queue observations can overlap. Taking
+        # the stronger per-track day count avoids counting either source twice;
+        # mixed-source days without a shared calendar remain conservative.
+        track_days = {key: max(count, confirmed.get(album['browse'], {}).get(key, 0))
+                      for key, count in album['track_days'].items()}
+        repeated = [(index[key], math.log(count)) for key, count in track_days.items()
+                    if count >= 2 and key in index] if album["tracklist_complete"] else []
+        return_weight = 0.
+        center = saved_weight * whole / whole_norm if whole_norm else np.zeros(matrix.shape[1])
+        if repeated:
+            repeated_rows, strengths = zip(*repeated)
+            heard = np.average(matrix[list(repeated_rows)], axis=0, weights=strengths)
+            heard_norm = np.linalg.norm(heard)
+            if heard_norm:
+                return_weight = returns * sum(strengths) / len(album["keys"])
+                center = center + return_weight * heard / heard_norm
+        weight = saved_weight + return_weight
         if judgment == "more":
+            # This is an explicit release judgment, so its geometry can include
+            # the full record even when organic returns cover only a few favorites.
+            center = whole
             weight = max(1., weight) * rec_params.get_param(store, "album_feedback_weight")
-        if weight <= 0:
+        norm = np.linalg.norm(center)
+        if weight <= 0 or norm == 0:
             continue
         titles.append(f"{album['artist']} · {album['title']}")
         cents.append(center / norm)
         weights.append(weight)
         pids.append(None)
         contexts.append({"kind": "album", "id": album["id"], "browse": album["browse"],
-                         "saved": bool(album["saved"]), "return_days": album["return_days"],
+                         "saved": bool(album["saved"]), "return_days": max(track_days.values(), default=0),
+                         "return_coverage": (sum(count >= 2 for count in track_days.values()) / len(album['keys'])
+                                             if album['tracklist_complete'] else None),
+                         "return_weight": return_weight,
+                         "tracklist_complete": album["tracklist_complete"],
                          "feedback": judgment,
                          "modeled_tracks": len(rows), "known_tracks": len(album["keys"])})
     if not titles:

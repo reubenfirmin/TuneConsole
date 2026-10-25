@@ -8,7 +8,7 @@ import pytest
 
 @pytest.mark.parametrize("scenario", [
     "audible", "heartbeat", "pending", "concurrent", "no_music", "leaving", "tab_muted", "media_muted",
-    "sole_tab_muted", "sole_media_muted", "sole_zero_volume", "selected_muted",
+    "sole_tab_muted", "sole_media_muted", "sole_zero_volume", "selected_muted", "native_upload",
     "rating_handoff",
     "paused_resume", "paused_closed", "paused_legacy",
 ])
@@ -30,7 +30,7 @@ const browsing = {id: 3, url: 'https://music.youtube.com/', active: true, lastAc
 if (scenario === 'tab_muted') Object.assign(browsing, {audible: true, mutedInfo: {muted: true}});
 if (scenario === 'media_muted') browsing.audible = true;
 let tabs = [app, old, browsing];
-if (scenario.startsWith('sole_')) tabs=[app,old];
+if (scenario.startsWith('sole_') || scenario==='native_upload') tabs=[app,old];
 if (['sole_tab_muted','selected_muted'].includes(scenario)) old.mutedInfo={muted:true};
 if (scenario==='selected_muted') {old.active=true;browsing.active=false;}
 if (scenario === 'pending') {
@@ -116,6 +116,25 @@ const next = 'https://music.youtube.com/watch?list=PL_new';
       assert.deepEqual(controls,[{id:2,type:'player-control',action:'play',resumeOnly:true,videoId:'paused-song'}]);
     } else assert.equal(controls.length,0,'closed or legacy players cannot resume another song');
     assert.equal(created.length,0); assert.equal(updated.length,0);
+    return;
+  }
+  if (scenario==='native_upload') {
+    await report(2,{type:'play',title:'Uploader title',videoId:'native-known',
+      metadataVerified:false,videoVerified:true,brandKnown:true,brandId:'brand-A',paused:false});
+    assert.equal(frames.at(-1).type,'play');
+    assert.equal(frames.at(-1).metadataVerified,false);
+    assert.equal(frames.at(-1).videoVerified,true);
+    assert.equal(frames.at(-1).brandKnown,true);
+    old.mutedInfo={muted:true};
+    await report(2,{type:'play',title:'Next native title',videoId:'native-next',
+      metadataVerified:false,videoVerified:true,brandKnown:true,brandId:'brand-A',paused:false});
+    assert.equal(frames.at(-1).type,'now-heartbeat');
+    old.mutedInfo={muted:false};
+    await report(2,{type:'now-heartbeat',title:'Next native title',videoId:'native-next',
+      metadataVerified:false,videoVerified:true,brandKnown:true,brandId:'brand-A',paused:false});
+    assert.equal(frames.at(-1).type,'play');
+    assert.equal(frames.at(-1).videoVerified,true);
+    assert.equal(frames.at(-1).metadataVerified,false);
     return;
   }
   if (scenario.startsWith('sole_') || scenario==='selected_muted') {

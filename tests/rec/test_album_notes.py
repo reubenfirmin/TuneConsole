@@ -14,6 +14,7 @@ def healthy_providers(monkeypatch):
     monkeypatch.setattr(discogs, 'tripped', lambda: False)
     monkeypatch.setattr(album_editorial, 'lookup', lambda *args: None)
     monkeypatch.setattr(deepseek, 'api_key', lambda *args: None)
+    monkeypatch.setattr(wikipedia, 'fetch_artwork', lambda *args: None)
 
 
 def release():
@@ -134,7 +135,7 @@ def test_previous_metadata_cache_gets_prose_without_waiting_seven_days(store, mo
     album_notes.prepare(store, 2, [ALBUM])
     note = album_notes.read(store, ALBUM)
     assert note['description']['text'] == 'Album prose.'
-    assert note['editorial_version'] == 6
+    assert note['editorial_version'] == 7
     store.rec_proposals.request_album_notes([ALBUM], 3)
     assert not store.rec_proposals.get_proposals('album_note_requests')
 
@@ -220,7 +221,48 @@ def test_upgraded_copy_preserves_existing_art_and_previous_prose_on_outage(store
     album_notes.prepare(store, 2, [ALBUM])
     note = album_notes.read(store, ALBUM)
     assert note['description'] == description and note['artwork'] == art
-    assert note['editorial_version'] == 6 and note['retry_at'] == 3602
+    assert note['editorial_version'] == 7 and note['retry_at'] == 3602
+
+
+def test_missing_artist_search_art_uses_public_photograph_without_biography(store, monkeypatch):
+    from types import SimpleNamespace
+    art = {'url': 'https://upload.wikimedia.org/portrait.jpg',
+           'source_url': 'https://commons.wikimedia.org/wiki/File:Portrait.jpg',
+           'kind': 'artist', 'credit': 'Robert Hood · Photographer · CC BY-SA 4.0'}
+    album = {**ALBUM, 'artist': 'Robert Hood'}
+    store.rec_proposals.publish_album_note(album['browse_id'], {
+        'editorial_version': 6, 'retry_at': 999999}, 1)
+    monkeypatch.setattr(release_notes, 'fetch', lambda *args: {'evidence': [], 'retry': False})
+    monkeypatch.setattr(wikipedia, 'fetch_artwork', lambda artist: art if artist == 'Robert Hood' else None)
+    def unavailable(*args, **kwargs):
+        raise OSError('catalogue offline')
+    client = SimpleNamespace(search=unavailable, get_album=unavailable)
+    album_notes.prepare(store, 2, [album], client=client)
+    note = album_notes.read(store, album)
+    assert note['artwork'] == art
+    assert not note.get('artist_note') and not note.get('description')
+    assert note['editorial_version'] == 7
+    evidence = store.rec_ledger.evidence().get('artifact', note['evidence'])
+    assert {'provider': 'album_artwork', 'response': art} in evidence['sources']
+
+
+def test_thumbnail_upgrade_retains_art_during_outage_and_retries(store, monkeypatch):
+    old = {'url': 'https://example.com/small.jpg', 'source_url': 'https://music.youtube.com/channel/UCartist',
+           'kind': 'artist', 'credit': 'Artist'}
+    store.rec_proposals.publish_album_note(ALBUM['browse_id'], {
+        'editorial_version': 6, 'retry_at': 999999, 'artwork': old}, 1)
+    monkeypatch.setattr(release_notes, 'fetch', lambda *args: {'evidence': [], 'retry': False})
+    def unavailable(*args):
+        raise wikipedia.LookupUnavailable('offline')
+    monkeypatch.setattr(wikipedia, 'fetch_artwork', unavailable)
+    album_notes.prepare(store, 2, [ALBUM])
+    assert album_notes.read(store, ALBUM)['artwork'] == old
+    assert album_notes.read(store, ALBUM)['retry_at'] == 3602
+    upgraded = {**old, 'url': 'https://upload.wikimedia.org/1200px-photo.jpg',
+                'source_url': 'https://commons.wikimedia.org/wiki/File:Photo.jpg'}
+    monkeypatch.setattr(wikipedia, 'fetch_artwork', lambda *args: upgraded)
+    album_notes.prepare(store, 3602, [ALBUM])
+    assert album_notes.read(store, ALBUM)['artwork'] == upgraded
 
 
 def test_hand_written_cache_is_excluded_and_worker_gets_automatic_copy(store, monkeypatch):

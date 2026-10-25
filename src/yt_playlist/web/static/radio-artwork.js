@@ -29,6 +29,8 @@ function radioArtwork() {
     artworkPhase: 0, artworkSeed: 0, artworkRhythms: rhythms(0), artworkPlaylistId: null,
     artworkFrame: null, artworkRunning: false,
     queueCenters: {},
+    junctionX: null, junctionForkX: null, junctionTarget: null, junctionFrame: null,
+    junctionVelocity: 0, junctionForkVelocity: 0,
     junctionHub: {x: 500, y: 56, rx: 45, ry: 40, insetX: 4, insetY: 4},
     drawingSpace: {width: 1200, historyHeight: 340, gapHeight: 112},
     fieldHub: {x: 0, y: 0, r: 0},
@@ -39,9 +41,11 @@ function radioArtwork() {
       document.addEventListener('visibilitychange', this._artworkChanged);
       window.addEventListener('pagehide', this._artworkLeaving);
       window.addEventListener('pageshow', this._artworkChanged);
+      this.$watch?.('artworkView.connectedSlot', () => this.moveJunction());
     },
     destroyArtwork() {
       this.pauseArtworkMotion();
+      cancelAnimationFrame(this.junctionFrame);
       document.removeEventListener('visibilitychange', this._artworkChanged);
       window.removeEventListener('pagehide', this._artworkLeaving);
       window.removeEventListener('pageshow', this._artworkChanged);
@@ -187,6 +191,7 @@ function radioArtwork() {
         centers[queue.dataset.slot] = (rect.left + rect.width / 2 - bounds.left) / bounds.width * 1000;
       });
       this.queueCenters = centers;
+      this.moveJunction();
       const playlist = this.$refs.playlist;
       const headerHeight = playlist?.querySelector('thead')?.getBoundingClientRect().height || 0;
       if (playlist) this.drawingSpace = {
@@ -238,7 +243,9 @@ function radioArtwork() {
         const parent = pending.shift();
         if (parent.depth >= 4) continue;
         for (const angle of [0, -.7, .7, Math.PI]) {
-          const r = parent.r * (angle === 0 || angle === Math.PI ? .46 : .31);
+          // The main disc sits near the left edge. Its left-hand copy needs
+          // extra clearance for the entire sweep on narrow history panels.
+          const r = parent.r * (angle === 0 ? .46 : angle === Math.PI ? .4 : .31);
           if (r < 14) continue;
           const distance = parent.r + r + 10;
           const copy = {x: parent.x + Math.cos(angle) * distance,
@@ -285,13 +292,50 @@ function radioArtwork() {
       return `M0 0H${width}V${historyHeight + gapHeight}H0Z M${cx - w} ${cy} ` +
         `a${w} ${h} 0 1 0 ${w * 2} 0 a${w} ${h} 0 1 0 ${-w * 2} 0Z`;
     },
+    moveJunction() {
+      const slot = this.artworkView.connectedSlot;
+      const target = this.queueCenters[slot] ?? (slot + .5) * 1000 / this.artworkView.directionCount;
+      this.junctionTarget = target;
+      if (this.junctionX === null) {
+        this.junctionX = this.junctionForkX = target;
+        return;
+      }
+      if (this.junctionFrame !== null || (Math.abs(this.junctionX - target) < .001
+          && Math.abs(this.junctionForkX - target) < .001)) return;
+      let previous = performance.now();
+      const frame = now => {
+        // The stem leads and the shoulders follow, like a ribbon pulled sideways.
+        // Keep momentum on a reversal, and integrate small steps after a slow frame.
+        let elapsed = Math.min(64, now - previous) / 1000;
+        previous = now;
+        while (elapsed > 0) {
+          const dt = Math.min(elapsed, 1 / 120);
+          this.junctionVelocity += ((this.junctionTarget - this.junctionX) * 180
+            - this.junctionVelocity * 24) * dt;
+          this.junctionX += this.junctionVelocity * dt;
+          this.junctionForkVelocity += ((this.junctionX - this.junctionForkX) * 140
+            - this.junctionForkVelocity * 21) * dt;
+          this.junctionForkX += this.junctionForkVelocity * dt;
+          elapsed -= dt;
+        }
+        if (Math.abs(this.junctionForkX - this.junctionTarget) < .02
+            && Math.abs(this.junctionX - this.junctionTarget) < .02
+            && Math.abs(this.junctionVelocity) + Math.abs(this.junctionForkVelocity) < .1) {
+          this.junctionX = this.junctionForkX = this.junctionTarget;
+          this.junctionVelocity = this.junctionForkVelocity = 0;
+          this.junctionFrame = null;
+        } else this.junctionFrame = requestAnimationFrame(frame);
+      };
+      this.junctionFrame = requestAnimationFrame(frame);
+    },
     junctionStyle(slot, detail = false) {
-      const x = Math.round(this.queueCenters[slot] ?? (slot + .5) * 1000 / this.artworkView.directionCount);
+      const target = this.queueCenters[slot] ?? (slot + .5) * 1000 / this.artworkView.directionCount;
+      const x = slot === this.artworkView.connectedSlot ? this.junctionX ?? target : target;
       // Keep both table attachments fixed as the fork moves between streams.
       const left = 40, right = 960;
       const {x: cx, y: cy, rx, ry, insetX, insetY} = this.junctionHub;
-      const half = 18, clearance = rx + half + insetX;
-      const fork = Math.abs(x - cx) < clearance ? cx + (x < cx ? -1 : 1) * clearance : x;
+      const half = 18;
+      const fork = slot === this.artworkView.connectedSlot ? this.junctionForkX ?? x : x;
       const midpoint = (a, b) => a.map((value, i) => (value + b[i]) / 2);
       const split = points => {
         const a = midpoint(points[0], points[1]), b = midpoint(points[1], points[2]);
@@ -301,65 +345,91 @@ function radioArtwork() {
       };
       const arm = (start, end, depth, shoulder, radiusX, radiusY) => {
         const points = [[start, 8], [start, shoulder], [end, 22], [end, depth]];
-        let crosses = false;
-        for (let i = 1; i < 32; i++) {
-          const t = i / 32, u = 1 - t;
-          const at = [0, 1].map(axis => u ** 3 * points[0][axis] + 3 * u ** 2 * t * points[1][axis]
-            + 3 * u * t ** 2 * points[2][axis] + t ** 3 * points[3][axis]);
-          if (((at[0] - cx) / radiusX) ** 2 + ((at[1] - cy) / radiusY) ** 2 < 1) {
-            crosses = true;
-            break;
-          }
-        }
-        if (crosses) {
-          const direction = Math.sign(start - cx), s = Math.SQRT1_2;
-          const k = 4 / 3 * Math.tan(Math.PI / 16), top = cy - radiusY;
-          const entry = [cx + direction * radiusX * s, cy - radiusY * s];
-          const exit = [cx - direction * radiusX * s, cy - radiusY * s];
-          // Two circular eighth-turns follow the control's upper rim. Tangent
-          // joins keep this bend local instead of lifting the entire Y arm.
-          return [points[0], points[1],
-            [entry[0] + direction * radiusX * .3, entry[1] + radiusY * .3], entry,
-            [entry[0] - direction * k * s * radiusX, entry[1] - k * s * radiusY],
-            [cx + direction * k * radiusX, top], [cx, top],
-            [cx - direction * k * radiusX, top],
-            [exit[0] + direction * k * s * radiusX, exit[1] - k * s * radiusY], exit,
-            [exit[0] - direction * radiusX * .3, exit[1] + radiusY * .3], points[2], points[3]];
-        }
-        // Split a clear arm without changing its original curve. Every route
-        // has matching commands, so hover previews can still morph smoothly.
         const segments = split(points).flatMap(split);
-        return [points[0], ...segments.flatMap(segment => segment.slice(1))];
+        return {points: [points[0], ...segments.flatMap(segment => segment.slice(1))],
+          side: Math.sign(start - cx), radiusX, radiusY};
       };
-      const trace = (points, reverse = false, move = 'M') => {
+      const trace = (route, reverse = false, move = 'M') => {
+        const {points, side, radiusX, radiusY} = route;
         const p = reverse ? [...points].reverse() : points;
         let path = reverse ? `${move}${p[0].join(' ')}` : `${move}${p[0][0]} -3 L${p[0].join(' ')}`;
         for (let i = 1; i < p.length; i += 3) path += ` C${p.slice(i, i + 3).flat().join(' ')}`;
         if (reverse) path += ` L${p[p.length - 1][0]} -3`;
-        return path;
+        return this.bendJunction(path, cx, cy, radiusX, radiusY, side);
       };
-      // Preserve the natural Y. Only an arm that approaches the control gets
-      // an upper arc; an arm on the other side of the page keeps its own course.
+      // Each shoulder stays on its own side of the control and joins below it.
+      // That continuous route cannot flip sides when the moving fork crosses
+      // the control's center, including during a rapid reversal.
       let path;
       if (detail) {
-        const flowLeft = arm(left + 12, fork - 6, 82, 36, rx - insetX / 2, ry - insetY / 2);
-        const flowRight = arm(right - 12, fork + 6, 82, 36, rx - insetX / 2, ry - insetY / 2);
+        const depth = Math.max(82, cy + ry - insetY / 2 + 4);
+        const flowLeft = arm(left + 12, fork - 6, depth, 36, rx - insetX / 2, ry - insetY / 2);
+        const flowRight = arm(right - 12, fork + 6, depth, 36, rx - insetX / 2, ry - insetY / 2);
         // One circuit: descend through the left arm and return up the right.
         // Both turnarounds sit just outside the viewport, keeping the visible
         // dots inside the Y while preserving a continuous route during previews.
         path = trace(flowLeft) + ` C${fork - 6} 104 ${x - 6} 104 ${x - 6} 112 ` +
           `C${x - 6} 120 ${x + 6} 120 ${x + 6} 112 ` +
-          `C${x + 6} 104 ${fork + 6} 104 ${fork + 6} 82 ` + trace(flowRight, true, 'L') + ' Z';
+          `C${x + 6} 104 ${fork + 6} 104 ${fork + 6} ${depth} ` + trace(flowRight, true, 'L') + ' Z';
       } else {
-        const outerLeft = arm(left, fork - half, 82, 48, rx, ry);
-        const outerRight = arm(right, fork + half, 82, 48, rx, ry);
-        const innerLeft = arm(left + 24, fork, 68, 26, rx - insetX, ry - insetY);
-        const innerRight = arm(right - 24, fork, 68, 26, rx - insetX, ry - insetY);
+        const outerDepth = Math.max(82, cy + ry + 4);
+        const innerDepth = Math.max(68, cy + ry - insetY + 1);
+        const outerLeft = arm(left, fork - half, outerDepth, 48, rx, ry);
+        const outerRight = arm(right, fork + half, outerDepth, 48, rx, ry);
+        const innerLeft = arm(left + 24, fork, innerDepth, 26, rx - insetX, ry - insetY);
+        const innerRight = arm(right - 24, fork, innerDepth, 26, rx - insetX, ry - insetY);
         path = trace(outerLeft) + ` C${fork - half} 104 ${x - half} 104 ${x - half} 112 L${x + half} 112 ` +
-          `C${x + half} 104 ${fork + half} 104 ${fork + half} 82 ` + trace(outerRight, true, 'L') + ' ' +
+          `C${x + half} 104 ${fork + half} 104 ${fork + half} ${outerDepth} ` + trace(outerRight, true, 'L') + ' ' +
           trace(innerRight, false, 'L') + ' ' + trace(innerLeft, true, 'L') + ' Z';
       }
       return `d: path("${path}")`;
+    },
+    bendJunction(path, cx, cy, rx, ry, side) {
+      const tokens = path.match(/[MLCZ]|-?\d+(?:\.\d+)?(?:e[-+]?\d+)?/gi);
+      let i = 0, point, origin, previous, output = '';
+      const coordinates = p => `${(cx + p[0] * rx).toFixed(3)} ${(cy + p[1] * ry).toFixed(3)}`;
+      const append = (p, move = false) => {
+        let q = [(p[0] - cx) / rx, (p[1] - cy) / ry];
+        if (Math.abs(q[1]) < 1.002) {
+          const edge = Math.sqrt(1.002 ** 2 - q[1] ** 2);
+          q[0] = side * Math.max(side * q[0], edge);
+        }
+        const length = Math.hypot(...q);
+        if (length < 1.002) q = length < .00001 ? [0, -1.002] : q.map(v => v * 1.002 / length);
+        if (!move && previous) {
+          const delta = q.map((v, axis) => v - previous[axis]);
+          const norm = delta[0] ** 2 + delta[1] ** 2;
+          const t = norm ? Math.max(0, Math.min(1, -(previous[0] * delta[0] + previous[1] * delta[1]) / norm)) : 0;
+          if (Math.hypot(previous[0] + t * delta[0], previous[1] + t * delta[1]) < 1.001) {
+            const a = Math.atan2(previous[1], previous[0]), b = Math.atan2(q[1], q[0]);
+            const turn = Math.atan2(Math.sin(b - a), Math.cos(b - a));
+            const entry = [Math.cos(a) * 1.002, Math.sin(a) * 1.002];
+            const exit = [Math.cos(b) * 1.002, Math.sin(b) * 1.002];
+            output += ` L${coordinates(entry)} A${rx * 1.002} ${ry * 1.002} 0 0 ${turn > 0 ? 1 : 0} ${coordinates(exit)}`;
+          }
+        }
+        output += `${move ? ' ' + path[0] : ' L'}${coordinates(q)}`;
+        previous = q;
+      };
+      while (i < tokens.length) {
+        const command = tokens[i++];
+        if (command === 'Z') { append(origin); output += ' Z'; continue; }
+        const next = () => [+tokens[i++], +tokens[i++]];
+        if (command === 'M' || command === 'L') {
+          point = next();
+          if (command === 'M') origin = point;
+          append(point, command === 'M');
+        } else if (command === 'C') {
+          const start = point, a = next(), b = next(), end = next();
+          for (let sample = 1; sample <= 12; sample++) {
+            const t = sample / 12, u = 1 - t;
+            append([0, 1].map(axis => u ** 3 * start[axis] + 3 * u ** 2 * t * a[axis]
+              + 3 * u * t ** 2 * b[axis] + t ** 3 * end[axis]));
+          }
+          point = end;
+        }
+      }
+      return output.trim();
     },
     get junctionClearance() {
       const {x, y, rx, ry, insetX, insetY} = this.junctionHub;

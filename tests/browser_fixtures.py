@@ -1,5 +1,8 @@
-"""Live-server fixture for Playwright tests: a real uvicorn server (Playwright needs
-real HTTP + a JS runtime, which TestClient does not provide), seeded with one playlist."""
+"""Shared browser fixtures registered once for mixed paths and node selectors.
+
+Pytest can collect more than one Directory node for tests/browser in a mixed
+selection. Plugin fixtures remain visible to every such node.
+"""
 import pathlib
 import logging
 import socket
@@ -7,17 +10,16 @@ import threading
 import time
 
 import pytest
-import uvicorn
 
-from yt_playlist.web.app import create_app
-from tests.conftest import FakeClient
-
-_BROWSER_DIR = pathlib.Path(__file__).parent
+_BROWSER_DIR = pathlib.Path(__file__).parent / 'browser'
 
 
 @pytest.fixture(autouse=True)
-def restore_server_logging():
+def restore_server_logging(request):
     """A live test server's dictConfig must not replace later tests' logging policy."""
+    if _BROWSER_DIR not in request.node.path.parents:
+        yield
+        return
     saved = []
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi"):
         logger = logging.getLogger(name)
@@ -38,8 +40,8 @@ def pytest_collection_modifyitems(items):
     `-m 'not browser'` (pyproject addopts) deselects it. Browser tests need Playwright's `page` fixture,
     which isn't installed in the default test env. Run them explicitly with `-m browser`.
 
-    NOTE: a subdirectory conftest's collection hook still receives the WHOLE session's items, so we
-    must scope to this directory ourselves. Otherwise we'd mark (and deselect) the entire suite."""
+    The plugin receives the whole session's items, so marking is scoped to this
+    directory; ordinary tests in mixed selections keep their existing markers."""
     for item in items:
         if _BROWSER_DIR in item.path.parents:
             item.add_marker("browser")
@@ -55,6 +57,10 @@ def _free_port():
 
 @pytest.fixture
 def live_app(store):
+    import uvicorn
+    from yt_playlist.web.app import create_app
+    from tests.conftest import FakeClient
+
     iid = store.identities.upsert_identity("main", "cred", None, True)
     store.playlists.upsert_playlist(iid, "PLZ", "Old Mix", 3, "h", 0.0)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)

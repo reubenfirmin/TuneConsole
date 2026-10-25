@@ -354,14 +354,14 @@ class PlaylistRepo(Repo):
 
     @synchronized
     def home_preview(self, playlist_id):
-        """Current metadata and five current members for a prepared Home tile."""
+        """Current metadata and all current members in playlist order for Home."""
         row = self.conn.execute('SELECT * FROM playlists WHERE id=?', (playlist_id,)).fetchone()
         if (not row or not row['track_count'] or self.is_quarantined_playlist(row['scope_ref'])):
             return None
         tracks = [dict(r) for r in self.conn.execute(
-            'SELECT t.identity_key key,t.title,t.artist,t.video_id,t.thumbnail FROM playlist_items p '
-            'JOIN catalog_tracks t ON t.video_id=p.video_id WHERE p.playlist_id=? '
-            'ORDER BY p.video_id LIMIT 5', (playlist_id,))]
+            'SELECT t.identity_key key,t.title,t.artist,t.video_id,t.thumbnail FROM playlist_tracks p '
+            'JOIN catalog_tracks t ON t.id=p.track_id WHERE p.playlist_id=? '
+            'ORDER BY p.position', (playlist_id,))]
         if not tracks:
             return None
         return {'id': row['id'], 'ytm': row['ytm_playlist_id'], 'title': row['title'],

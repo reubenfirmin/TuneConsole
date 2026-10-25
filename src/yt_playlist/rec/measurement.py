@@ -9,7 +9,7 @@ import logging
 import uuid
 from copy import deepcopy
 
-from yt_playlist.rec import choice_bandit, embedding_vectors as vectors, rec_params, scoring, transient
+from yt_playlist.rec import choice_bandit, embedding_vectors as vectors, home_vibe, musical_character, rec_params, scoring, transient
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.repos.base import synchronized
 from yt_playlist.util import genre_map
@@ -84,12 +84,14 @@ def _serving_policy(store, now, ranker):
         "recent_skips": store.player_events.recent_skips_with_ts(now - 4 * params["skip_halflife_d"] * 86400),
         "radio_lists": transient.radio_list_ids(store),
         "home": {"vibe": store.settings.get_setting("home_mix_vibe"),
+                 "vibe_at": store.settings.get_setting('home_mix_vibe_updated_at'),
                  "tuning_at": store.settings.get_setting("home_mix_tuning_updated_at"),
                  "genre_request": store.rec_proposals.get_proposals("home_genre_request")},
         "modes": {"definitions": [{k: v for k, v in m.items() if k != "centroid"}
                                    for m in store.modes.list_modes()],
                   "offered": store.modes.impression_counts(), "picks": store.modes.pick_counts(),
                   "response_evidence": choice_bandit.stats(store, now)},
+        "musical": {'profile_version': musical_character.VERSION, 'vibe_policy': home_vibe.VERSION},
         "models": store.memoized_read("serving-model-identities", lambda: _model_identities(store)),
     }
     raw = json.dumps(configuration, sort_keys=True, separators=(",", ":"))

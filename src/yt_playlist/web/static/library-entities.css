@@ -152,7 +152,7 @@
   gap: clamp(1.25rem, 3.5vw, 2.75rem);
   align-items: stretch;
 }
-:is(.page-playlist, .page-album) .release-hero {
+:is(.page-playlist, .page-album, .page-track) .release-hero {
   display: flex;
   position: relative;
   isolation: isolate;
@@ -164,7 +164,7 @@
   border-block: 0;
   background: linear-gradient(120deg, var(--surface-raised), var(--surface-inset));
 }
-:is(.page-playlist, .page-album) .release-hero::before {
+:is(.page-playlist, .page-album, .page-track) .release-hero::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -175,10 +175,10 @@
     color-mix(in srgb, var(--shadow-ink) 28%, transparent) 100%);
   pointer-events: none;
 }
-:is(.page-playlist, .page-album) .release-hero::after {
+:is(.page-playlist, .page-album, .page-track) .release-hero::after {
   content: none;
 }
-:is(.page-playlist, .page-album) .release-hero .pl-art {
+:is(.page-playlist, .page-album, .page-track) .release-hero .pl-art {
   position: absolute;
   inset: 0;
   z-index: 0;
@@ -191,7 +191,7 @@
   border-radius: 0;
   box-shadow: none;
 }
-:is(.page-playlist, .page-album) .release-hero .pl-art img {
+:is(.page-playlist, .page-album, .page-track) .release-hero .pl-art img {
   object-fit: cover;
   object-position: center 42%;
   filter: saturate(.82) contrast(1.04) brightness(.72);
@@ -211,14 +211,14 @@
   height: 100%;
   transform: none;
 }
-:is(.page-playlist, .page-album) .release-hero .pl-headmain {
+:is(.page-playlist, .page-album, .page-track) .release-hero .pl-headmain {
   position: relative;
   z-index: 2;
   width: min(54rem, calc(100% - 3rem));
   justify-content: flex-end;
   padding: 0;
 }
-:is(.page-playlist, .page-album) .release-hero h1 {
+:is(.page-playlist, .page-album, .page-track) .release-hero h1 {
   color: var(--light-source);
   text-shadow: 0 2px 18px var(--shadow-ink);
 }
@@ -327,10 +327,10 @@
   .library-hero h1 {
     font-size: clamp(2.25rem, 11vw, 3.5rem);
   }
-  :is(.page-playlist, .page-album) .release-hero {
+  :is(.page-playlist, .page-album, .page-track) .release-hero {
     min-height: 13rem;
   }
-  :is(.page-playlist, .page-album) .release-hero .pl-headmain {
+  :is(.page-playlist, .page-album, .page-track) .release-hero .pl-headmain {
     width: 100%;
   }
 }

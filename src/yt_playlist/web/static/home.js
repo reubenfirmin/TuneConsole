@@ -1,6 +1,8 @@
 function onboardingArrival() {
   return {
     songs: 0, playlists: 0, albums: 0, covers: [], outcome: null, statusError: '',
+    // Import progress belongs to this view, separate from Home's SSE attachment.
+    running: false,
     imported: false, analyzed: 0, total: 0, genres: 0, model_tracks: 0, modes: 0, discoveries: 0,
     _timer: null, _disposed: false,
     applyArrival(data) {
@@ -10,7 +12,8 @@ function onboardingArrival() {
       // Keep arrived covers in place rather than reshuffling the graphic on each poll.
       this.covers = [...new Set([...this.covers, ...data.covers])].slice(0, 6);
       this.statusError = '';
-      if (data.setup?.complete && data.setup.mixes_ready && !this._openingHome) {
+      if (data.setup?.complete && (data.setup.offers_ready || data.setup.mixes_ready || data.setup.albums_ready)
+          && !this._openingHome) {
         this._openingHome = true;
         // Replace only Home once complete offers exist. The shared player and setup
         // details stay mounted, and navigating elsewhere never brings the user back.
@@ -82,6 +85,7 @@ function homeStatus() {
     init() {
       if (this._initialized) return;
       this._initialized = true;
+      this.$el.closest('main.page-home')?.classList.toggle('page-setup', !!this.$el.querySelector('#onboarding-feed'));
       window.playbackStatus.start();
       if (window.playbackStatus.snapshot) this.applyBridgeStatus(window.playbackStatus.snapshot);
       // Watch completion without surfacing routine background retries as user actions.

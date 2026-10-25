@@ -31,6 +31,7 @@ def build(ctx, views):
             store.rec_proposals.put_proposals("home_genre_request", {
                 "epoch": _epoch(store, "cards"),
                 "avoid_genres": sorted({genre_map.family(g) for g in genres}),
+                **({'held_by_vibe': True} if store.settings.get_setting(home_vibe.SETTING) else {}),
             }, now)
         return views.cards_safe(request, now)
 
@@ -46,6 +47,7 @@ def build(ctx, views):
             store.rec_ledger.refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
             store.rec_proposals.put_proposals("home_genre_request", {
                 "epoch": _epoch(store, "cards"), "include_genres": sorted(set(genres)),
+                **({'held_by_vibe': True} if store.settings.get_setting(home_vibe.SETTING) else {}),
             }, now)
         return views.cards_safe(request, now)
 
@@ -55,7 +57,7 @@ def build(ctx, views):
         if vibe and vibe not in home_vibe.PRESETS:
             return Response(status_code=400)
         now = now_fn()
-        with mix_tuning.adjusting(store, now):
+        with mix_tuning.adjusting_vibe(store, now):
             if vibe:
                 store.settings.set_setting(home_vibe.SETTING, vibe)
             else:

@@ -2,6 +2,60 @@ import pytest
 from tests.test_mode_cards_route import prepare_home
 
 
+@pytest.mark.parametrize("width", [1440, 390])
+def test_revisit_full_playlist_and_track_playback(live_app, store, page, width):
+    from playwright.sync_api import expect
+
+    tracks = [store.tracks.upsert_track(
+        f"quiet-{15-i}", f"Quiet song {i}", "Quiet artist", None, 180,
+        thumbnail="/static/onboarding-albums.png") for i in range(15)]
+    playlist = store.playlists.upsert_playlist(1, "quiet-list", "Quiet mix", 15, None, 1,
+                                              thumbnail='/static/onboarding-albums.png')
+    store.playlists.set_playlist_tracks(playlist, tracks)
+    long_tracks = [store.tracks.upsert_track(
+        f"long-quiet-{i}", f"Long quiet song {i}", 'Another artist', None, 180,
+        thumbnail='/static/onboarding-mixes.png') for i in range(77)]
+    long_playlist = store.playlists.upsert_playlist(1, 'long-quiet-list', '90s clubbing', 77, None, 1,
+                                                   thumbnail='/static/onboarding-mixes.png')
+    store.playlists.set_playlist_tracks(long_playlist, long_tracks)
+    store.settings.set_setting("last_sync_at", "1")
+    store.settings.set_setting("onboard_dismissed", "1")
+    prepare_home(store, 1)
+    plays = []
+
+    def play(route):
+        plays.append(route.request.post_data_json["url"])
+        route.fulfill(json={"ok": True})
+
+    page.route("**/play", play)
+    page.route("**/bridge/status", lambda route: route.fulfill(json={"connected": True}))
+    page.set_viewport_size({"width": width, "height": 1000})
+    page.goto(f"{live_app}/")
+    page.get_by_role("tab", name="Revisit", exact=True).click()
+    section = page.locator("#rediscover")
+    expect(section).to_be_visible()
+    rows = section.get_by_role("table", name="Quiet mix tracks").locator("tbody tr")
+    expect(rows).to_have_count(15)
+    assert rows.locator(".ptitle").all_text_contents() == [f"Quiet song {i}" for i in range(15)]
+    expect(rows.locator(".pl-thumb")).to_have_count(15)
+    expect(section.get_by_role('table', name='90s clubbing tracks').locator('tbody tr')).to_have_count(77)
+    expect(section.get_by_text('mostly never played')).to_have_count(0)
+    expect(section.get_by_text('rarely played', exact=False)).to_have_count(2)
+    expect(section.locator('.redis-sleeve img')).to_have_count(2)
+    assert section.locator('.redis-sleeve img').evaluate_all('images => images.every(img => img.complete && img.naturalWidth > 0)')
+    card = rows.locator('xpath=ancestor::div[contains(@class,"redis-card")]')
+    play_button = card.get_by_role('link', name='Play Quiet mix', exact=True)
+    assert play_button.bounding_box()['y'] < rows.first.bounding_box()['y']
+    if width == 1440:
+        cards = section.locator('.redis-card').all()
+        assert min(c.bounding_box()['height'] for c in cards) < max(c.bounding_box()['height'] for c in cards) / 2
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    section.screenshot(path=f"/tmp/tuneconsole-407-revisit-{width}.png")
+    play_button.click()
+    rows.first.locator(".pl-play").click()
+    assert plays == ['https://music.youtube.com/playlist?list=quiet-list', "https://music.youtube.com/watch?v=quiet-15&list=quiet-list"]
+
+
 @pytest.fixture
 def expiring_pool_jobs(monkeypatch):
     from yt_playlist.web import app as webapp
@@ -231,14 +285,18 @@ def test_two_ready_mixes_show_clickable_skeletons_for_the_missing_slots(live_app
 
 
 def test_home_is_landing_with_status_and_sections(live_app, page):
+    from playwright.sync_api import expect
+
     page.goto(f"{live_app}/")
     # Home is the default tab. Syncing is automatic in the background now, so there is no manual
     # sync button. On this live_app (no extension, never synced) the landing is the
-    # welcome screen; the feed and the freshness line wait for a first sync.
+    # format picker; the feed and the freshness line wait for a first sync.
     assert page.get_by_role("button", name="Full sync").count() == 0
     assert page.get_by_role("button", name="Sync plays").count() == 0
-    assert page.get_by_role("heading", name="Welcome to TuneConsole").is_visible()
-    assert page.get_by_role("link", name="Get the extension").is_visible()
+    expect(page.get_by_role('heading', name='How do you like to listen?')).to_be_visible()
+    page.get_by_role('button', name='Start with Mix tapes').click()
+    expect(page.get_by_role("heading", name="Welcome to TuneConsole")).to_be_visible()
+    expect(page.get_by_role("link", name="Get the extension")).to_be_visible()
     assert page.get_by_text("Library synced").count() == 0     # no awkward "not yet" line anymore
 
 

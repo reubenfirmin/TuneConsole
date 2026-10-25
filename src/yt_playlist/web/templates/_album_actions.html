@@ -1,21 +1,40 @@
 {% macro library_bookmark(saved) -%}
 <svg viewBox="0 0 24 24" width="22" height="22" fill="{{ 'currentColor' if saved else 'none' }}" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M5 3h14v19l-7-4-7 4z"/></svg>
 {%- endmacro %}
-{% macro album_save_control(browse_id, saved, owners=[], icons=false, opportunity_id=none) %}
-{% if saved %}
-  {% for owner in owners %}
-    {% if owner.identity_id is not none %}
+{% macro album_unsave_action(browse_id, owner, icons=false, choose=false) %}
+  {% if owner.identity_id is not none %}
     <form hx-post="/collection/unsave-album" hx-swap="none" hx-disabled-elt="find button" class="inline">
       <input type="hidden" name="browse_id" value="{{ browse_id }}">
       <input type="hidden" name="identity_id" value="{{ owner.identity_id }}">
       <button type="submit" class="{{ 'head-icon album-library on' if icons else 'btn-ghost btn-sm' }}"
               {% if not owner.active %}disabled{% endif %}
               {% if icons %}aria-label="Remove album from {{ owner.label }}'s library" aria-pressed="true"{% endif %}
-              title="{% if owner.active %}Remove from {{ owner.label }}'s YouTube library{% else %}Reconnect {{ owner.label }} to remove this album{% endif %}">{% if icons %}{{ library_bookmark(true) }}{% elif owners|length > 1 %}Unsave from {{ owner.label }}{% else %}Unsave{% endif %}</button>
-      {% if not icons and owners|length == 1 %}<span class="muted">{{ owner.label }}</span>{% endif %}
+              title="{% if owner.active %}Remove from {{ owner.label }}'s YouTube library{% else %}Reconnect {{ owner.label }} to remove this album{% endif %}">{% if icons %}{{ library_bookmark(true) }}{% elif choose %}Unsave from {{ owner.label }}{% else %}Unsave{% endif %}</button>
     </form>
-    {% else %}{% if icons %}<button type="button" class="head-icon album-library on" disabled aria-label="Album is in your library" title="In your library. Sync accounts to confirm ownership.">{{ library_bookmark(true) }}</button>{% else %}<span class="muted">Sync accounts to confirm ownership</span>{% endif %}{% endif %}
-  {% else %}{% if icons %}<button type="button" class="head-icon album-library on" disabled aria-label="Album is in your library" title="In your library. Sync accounts to confirm ownership.">{{ library_bookmark(true) }}</button>{% else %}<span class="muted">Sync accounts to confirm ownership</span>{% endif %}{% endfor %}
+  {% else %}
+    {% if icons %}<button type="button" class="head-icon album-library on" disabled aria-label="Album is in your library" title="In your library. Sync accounts to confirm ownership.">{{ library_bookmark(true) }}</button>{% else %}<span class="muted">Sync accounts to confirm ownership</span>{% endif %}
+  {% endif %}
+{% endmacro %}
+{% macro album_save_control(browse_id, saved, owners=[], icons=false, opportunity_id=none) %}
+{% if saved %}
+  {% if owners|length != 1 or owners[0].identity_id is none %}
+  <div class="inline" x-data="{}">
+    <button type="button" class="{{ 'head-icon album-library on' if icons else 'btn-ghost btn-sm' }}"
+            @click="$refs.owners.showModal()" title="Remove album from library"
+            {% if icons %}aria-label="Remove album from library" aria-pressed="true"{% endif %}>{% if icons %}{{ library_bookmark(true) }}{% else %}Unsave{% endif %}</button>
+    <dialog class="modal shared-confirmation album-library-dialog" x-ref="owners" aria-label="Unsave album"
+            @htmx:after-request="$refs.owners.close()">
+      <h3>Unsave album</h3>
+      <p>Choose the account to remove this album from.</p>
+      <div class="album-owner-actions">
+        {% for owner in owners %}{{ album_unsave_action(browse_id, owner, choose=true) }}{% endfor %}
+      </div>
+      <div class="modal-actions"><button type="button" class="btn-ghost" @click="$refs.owners.close()">Cancel</button></div>
+    </dialog>
+  </div>
+  {% else %}
+    {{ album_unsave_action(browse_id, owners[0] if owners else {'identity_id': none}, icons) }}
+  {% endif %}
 {% else %}
   <form hx-post="/collection/save-album" hx-swap="none" hx-disabled-elt="find button" class="inline">
     <input type="hidden" name="browse_id" value="{{ browse_id }}">

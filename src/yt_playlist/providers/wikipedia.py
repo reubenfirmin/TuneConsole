@@ -10,6 +10,7 @@ import unicodedata
 import urllib.parse
 import urllib.request
 import urllib.error
+from html import unescape
 
 from yt_playlist.providers.base import LookupUnavailable, RateLimiter
 from yt_playlist.providers import transport
@@ -139,4 +140,52 @@ def fetch_summary(kind, display):
         }
     if failed:
         raise LookupUnavailable("Wikipedia summaries unavailable")
+    return None
+
+
+def fetch_artwork(display):
+    """Resolve a musician's lead image and its file attribution, without biography copy.
+
+    Require a matching musician article and original file identity; unrelated
+    people, disambiguation pages and unattributed files cannot become scenery.
+    """
+    try:
+        for title in _search_titles('artist', display):
+            if not matches_subject('artist', display, title):
+                continue
+            summary = _summary(title)
+            if (summary.get('type') != 'standard'
+                    or not matches_subject('artist', display, summary.get('title') or title)):
+                continue
+            context = summary.get('description') or summary.get('extract') or ''
+            if not re.search(r'\b(musician|musical|band|singer|songwriter|dj|composer|rapper|'
+                             r'guitarist|bassist|drummer|pianist|vocalist|orchestra|'
+                             r'music producer|record producer)\b', context, re.I):
+                continue
+            original = summary.get('originalimage') or {}
+            url = original.get('source') or ''
+            parsed = urllib.parse.urlsplit(url)
+            if parsed.scheme != 'https' or parsed.hostname != 'upload.wikimedia.org':
+                continue
+            filename = urllib.parse.unquote(parsed.path.rsplit('/', 1)[-1])
+            params = {'action': 'query', 'format': 'json', 'prop': 'imageinfo',
+                      'titles': 'File:' + filename, 'iiprop': 'url|extmetadata', 'iiurlwidth': '1200'}
+            data = _get_json(_SEARCH + '?' + urllib.parse.urlencode(params))
+            for page in data['query']['pages'].values():
+                for info in page.get('imageinfo') or []:
+                    meta = info.get('extmetadata') or {}
+                    def plain(key):
+                        return ' '.join(unescape(re.sub('<[^>]+>', '',
+                            (meta.get(key) or {}).get('value') or '')).split())
+                    author, license_name = plain('Artist'), plain('LicenseShortName')
+                    source = info.get('descriptionurl') or ''
+                    image = info.get('thumburl') or info.get('url') or ''
+                    nonfree = (meta.get('NonFree') or {}).get('value')
+                    if (author and license_name and str(nonfree).casefold() not in ('true', '1')
+                            and 'fair use' not in license_name.casefold() and source.startswith('https://')
+                            and image.startswith('https://upload.wikimedia.org/')):
+                        return {'url': image, 'source_url': source, 'kind': 'artist',
+                                'credit': f'{display} · {author} · {license_name}'}
+    except Exception as exc:
+        raise LookupUnavailable('Wikipedia artwork unavailable') from exc
     return None

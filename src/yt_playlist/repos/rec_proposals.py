@@ -89,7 +89,7 @@ class RecProposalsRepo(Repo):
         for album in albums:
             browse = album['browse_id']
             cached = cache.get(browse, {})
-            if ((cached.get('editorial_version') != 6 or cached.get('retry_at', 0) <= now) and album.get('artist')
+            if ((cached.get('editorial_version') != 7 or cached.get('retry_at', 0) <= now) and album.get('artist')
                     and album.get('title')):
                 queued[browse] = {key: album.get(key) for key in ('browse_id', 'artist', 'title', 'year', 'thumbnail')}
         self.put_proposals('album_note_requests', dict(list(queued.items())[-24:]), now)
@@ -151,6 +151,16 @@ class RecProposalsRepo(Repo):
         payload = self._proposal_json(surface)
         # Large disposable collections are decoded after releasing the serving connection.
         return json.loads(payload) if payload is not None else None
+
+    @synchronized
+    def has_proposals(self, surface):
+        """Check dependency presence without reading or decoding a large display pool."""
+        from yt_playlist.core.db_revisions import keyed_reads
+
+        with keyed_reads(self._store, 'rec_proposals', (surface,)):
+            return self.conn.execute(
+                "SELECT 1 FROM rec_proposals WHERE surface=? AND payload NOT IN ('null','{}')",
+                (surface,)).fetchone() is not None
 
     @synchronized
     def _proposal_json(self, surface):

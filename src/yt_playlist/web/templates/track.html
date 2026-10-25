@@ -6,30 +6,34 @@
 <article class="track-detail" x-data='trackDetails({{ track.video_id|tojson }}, {{ rating|tojson }})'
          @track-like-changed.window="ratingChanged($event.detail)"
          @song-metadata-updated.window="if ($event.detail.videoId === videoId) location.reload()">
-  <div class="track-detail-layout">
-  <aside class="track-art-column">
+  <header class="artist-head pl-head library-hero release-hero track-release-hero">
+    <span class="pl-art">
     <img class="track-detail-art" src="{{ cover|default(track.thumbnail) }}" data-fallback="{{ track.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="if(this.src !== new URL(this.dataset.fallback, location.href).href) this.src = this.dataset.fallback; else this.style.visibility='hidden'">
-    {% if track.album or track.album_browse %}
-    <section class="track-album" aria-labelledby="track-album-title">
-      <h2 id="track-album-title">From the album</h2>
-      {% if track.album_browse %}
-        <a class="track-album-name" href="/album?browse={{ track.album_browse|urlencode }}">{{ track.album or 'Open album' }}</a>
-        {% if is_upload %}<p class="muted">In your uploaded collection</p>
-        {% elif saved %}<p class="muted">Saved to collection</p>
-        {% else %}<form hx-post="/collection/save-album" hx-swap="none"><input type="hidden" name="browse_id" value="{{ track.album_browse }}"><button class="btn-ghost track-text-action" type="submit">Save album to collection</button></form>{% endif %}
-      {% else %}<p class="track-album-name">{{ track.album }}</p>{% endif %}
-    </section>
-    {% endif %}
-  </aside>
-  <div class="track-detail-main">
-  <header class="track-detail-head">
+    </span>
+    <div class="pl-headmain">
     <div class="track-detail-heading">
       {% if track.artist %}<a class="track-detail-artist" href="/artist?name={{ track.artist|urlencode }}">{{ track.artist }}</a>{% endif %}
       <h1>{{ track.title }}</h1>
+      {% if track.album or track.album_browse %}
+      <div class="track-album">
+        <span class="muted">From the album</span>
+        {% if track.album_browse %}
+          <a class="track-album-name" href="/album?browse={{ track.album_browse|urlencode }}">{{ track.album or 'Open album' }}</a>
+          {% if is_upload %}<span class="track-album-status muted">In your uploaded collection</span>
+          {% elif saved %}<span class="track-album-status muted">Saved to collection</span>
+          {% else %}<form hx-post="/collection/save-album" hx-swap="none"><input type="hidden" name="browse_id" value="{{ track.album_browse }}"><button class="btn-ghost track-text-action" type="submit">Save album to collection</button></form>{% endif %}
+        {% else %}<span class="track-album-name">{{ track.album }}</span>{% endif %}
+      </div>
+      {% endif %}
+    </div>
       <div class="track-detail-actions">
-        <a class="btn btn-primary track-play" href="https://music.youtube.com/watch?v={{ track.video_id|urlencode }}" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M7 3v18l15-9z"/></svg>Play on YouTube Music</a>
-        <button type="button" class="btn-ghost" @click="rate('LIKE')" :aria-pressed="status === 'LIKE'" :disabled="busy">Like</button>
-        <button type="button" class="btn-ghost" @click="rate('DISLIKE')" :aria-pressed="status === 'DISLIKE'" :disabled="busy">Dislike</button>
+        <a class="track-icon track-play" href="https://music.youtube.com/watch?v={{ track.video_id|urlencode }}" target="_blank" rel="noopener" aria-label="Play on YouTube Music" title="Play on YouTube Music"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M7 3v18l15-9z"/></svg></a>
+        <button type="button" class="track-icon track-heart" @click="rate('LIKE')" :aria-pressed="status === 'LIKE'" :disabled="busy" :aria-busy="busy" aria-label="Like" title="Like">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+        </button>
+        <button type="button" class="track-icon track-skull" @click="rate('DISLIKE')" :aria-pressed="status === 'DISLIKE'" :disabled="busy" :aria-busy="busy" aria-label="Dislike" title="Dislike">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C7.58 2 4 5.58 4 10c0 2.4 1.06 4.55 2.73 6.02.17.15.27.36.27.59V19c0 .55.45 1 1 1h.5v.5a1 1 0 1 0 2 0V20h1v.5a1 1 0 1 0 2 0V20h.5c.55 0 1-.45 1-1v-2.39c0-.23.1-.44.27-.59A7.99 7.99 0 0 0 20 10c0-4.42-3.58-8-8-8ZM9 8.5A1.5 1.5 0 1 0 9 11.5 1.5 1.5 0 0 0 9 8.5Zm6 0A1.5 1.5 0 1 0 15 11.5 1.5 1.5 0 0 0 15 8.5Z"/></svg>
+        </button>
         {{ song_menu(track, {"refresh_on_save": true}) }}
       </div>
       <p class="track-detail-error" role="alert" x-show="error" x-text="error" x-cloak></p>
@@ -48,11 +52,13 @@
       {% if track.energy is defined and track.energy is not none %}<div><dt>Energy</dt><dd>{{ '%.0f'|format(track.energy * 100) }}%</dd></div>{% endif %}
       {% if track.danceability is defined and track.danceability is not none %}<div><dt>Danceability</dt><dd>{{ '%.0f'|format(track.danceability * 100) }}%</dd></div>{% endif %}
     </dl>
+    {% include '_partials/track_musical_evidence.html' %}
   </section>
+  <div class="track-library-context">
     <section class="track-detail-section" aria-labelledby="track-playlists-title">
-      <div class="track-section-head"><h2 id="track-playlists-title">In playlists</h2></div>
+      <div class="track-section-head"><h2 id="track-playlists-title">In playlists{% if track.playlists %} <span class="count">{{ track.playlists|length }}</span>{% endif %}</h2></div>
       {% if track.playlists %}<ul class="track-memberships">{% for playlist in track.playlists %}
-        <li><a href="/playlist/{{ playlist.id }}">{{ playlist.title }}</a><span class="muted">{{ playlist.identity }}</span></li>
+        <li><a href="/playlist/{{ playlist.id }}">{{ playlist.title }}</a></li>
       {% endfor %}</ul>{% else %}<p class="muted">This upload is not in any synced playlists.</p>{% endif %}
       <div class="track-detail-actions">
         <button type="button" class="btn-ghost track-text-action" data-song='{{ track|tojson }}' data-song-action="create" data-song-context='{"refresh_on_save":true}'>Create playlist with song</button>
@@ -67,26 +73,7 @@
     {% endfor %}</ul>
   </section>
   {% endif %}
-  <section class="track-detail-section" aria-labelledby="track-ledger-title">
-    <h2 id="track-ledger-title">Play ledger</h2>
-    {% if ledger %}<p class="track-ledger-note muted">Exact plays and history observations across your accounts. History observations do not establish an exact play time or count.</p>{% endif %}
-    {% if ledger %}<ol class="track-ledger">{% for row in ledger %}
-      <li>
-        <div class="track-ledger-time">{% if row.kind == 'play' %}<time datetime="{{ row.at_iso }}">{{ row.at_label }}</time>{% elif row.precision == 'calendar_day' %}{{ row.day or 'Day unavailable' }}{% else %}Play time unknown{% endif %}
-          <strong>{{ 'Played' if row.kind == 'play' else 'History observation' }}</strong></div>
-        <div><span>{{ row.identity }}</span><span class="muted">{{ row.source or 'Unknown source' }}{% if row.is_generated %} · Generated queue{% endif %}</span>
-          {% if row.kind == 'observation' %}<small class="muted">Last observed <time datetime="{{ row.at_iso }}">{{ row.at_label }}</time></small>{% endif %}
-          {% if row.kind == 'observation' and row.timezone %}<small class="muted">Calendar: {{ row.timezone }}</small>{% endif %}
-          {% if row.video_id and row.video_id != track.video_id %}<small class="muted">Another upload of this recording</small>{% endif %}
-        </div>
-      </li>
-    {% endfor %}</ol>{% else %}<p class="muted">No listening evidence recorded{% if page %} on this page{% endif %}.</p>{% endif %}
-    {% if page or more %}<nav class="track-ledger-pages" aria-label="Play ledger pages">
-      {% if page %}<a href="{{ request.url.include_query_params(page=page-1) }}">Newer entries</a>{% endif %}
-      {% if more %}<a href="{{ request.url.include_query_params(page=page+1) }}">Older entries</a>{% endif %}
-    </nav>{% endif %}
-  </section>
   </div>
-  </div>
+  {% include '_partials/track_history.html' %}
 </article>
 {% endblock %}

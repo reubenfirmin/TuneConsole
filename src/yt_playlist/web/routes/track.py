@@ -9,10 +9,28 @@ from yt_playlist.library.album_fetch import is_upload_album
 from yt_playlist.library.ratings import main_rating
 from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.thumbnails import best_thumb, detail_thumb
+from yt_playlist.web.musical_evidence import describe
 
 
 def build(ctx):
     router = APIRouter()
+
+    def history_context(video_id, page, track=None):
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', video_id):
+            raise HTTPException(404, 'Track not found')
+        track = track or ctx.store.tracks.track_detail(video_id)
+        ledger, more = ctx.store.tracks.track_play_ledger(track['recording_id'], page=page) if track else ([], False)
+        for row in ledger:
+            at = datetime.fromtimestamp(row['sort_at'], timezone.utc)
+            row['at_iso'] = at.isoformat()
+            row['at_label'] = at.strftime('%Y-%m-%d %H:%M UTC')
+        return {'track': track or {'video_id': video_id}, 'ledger': ledger, 'more': more, 'page': page}
+
+    @router.get('/track/{video_id}/history')
+    def track_history(request: Request, video_id: str, page: int = Query(0, ge=0, le=100000)):
+        # Poll local listening evidence only. Opening a preview or pressing Play cannot create it.
+        return ctx.templates.TemplateResponse(request, '_partials/track_history.html',
+                                              history_context(video_id, page))
 
     # Register this after the existing /track/... literal and action routes.
     @router.get('/track/{video_id}')
@@ -44,16 +62,16 @@ def build(ctx):
         track['title'] = track.get('title') or 'Unknown track'
         track['thumbnail'] = track.get('thumbnail') or f'https://i.ytimg.com/vi/{video_id}/hqdefault.jpg'
         rating = main_rating(ctx.store, video_id)
-        ledger, more = ctx.store.tracks.track_play_ledger(track['recording_id'], page=page) if known else ([], False)
-        for row in ledger:
-            at = datetime.fromtimestamp(row['sort_at'], timezone.utc)
-            row['at_iso'] = at.isoformat()
-            row['at_label'] = at.strftime('%Y-%m-%d %H:%M UTC')
+        history = history_context(video_id, page, track if known else None)
         browse = track.get('album_browse')
+        profile = ctx.store.musical_profiles.by_keys([track['identity_key']]).get(track['identity_key']) if known else None
+        sources, truncated = ctx.store.musical_profiles.provenance_sources(
+            track['identity_key'], profile.get('source_versions', [])) if profile else ([], False)
         return ctx.templates.TemplateResponse(request, 'track.html', {
             'track': track, 'cover': detail_thumb(track['thumbnail']),
             'known': known, 'rating': rating['status'] if rating else 'INDIFFERENT',
-            'ledger': ledger, 'more': more, 'page': page,
+            'ledger': history['ledger'], 'more': history['more'], 'page': page,
+            'musical': describe(profile, sources, truncated=truncated),
             'saved': bool(browse and browse in ctx.store.collection.saved_album_ids()),
             'is_upload': bool(browse and is_upload_album(browse)),
         })

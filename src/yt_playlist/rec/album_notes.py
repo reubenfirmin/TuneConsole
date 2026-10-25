@@ -6,7 +6,7 @@ bounded display projection and a coalesced queue, with no schema changes.
 import logging
 
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded, check_cancellable_work
-from yt_playlist.providers import release_notes, album_editorial
+from yt_playlist.providers import release_notes, album_editorial, wikipedia
 from yt_playlist.rec import album_descriptions
 from yt_playlist.providers.discogs import _artist_key
 from yt_playlist.library.album_fetch import fetch_album
@@ -101,7 +101,7 @@ def prepare(store, now, albums=(), *, client=None, now_fn=None):
     album = next(iter(queued.values()))
     browse = album['browse_id']
     cached = _release_only((store.rec_proposals.get_proposals('album_notes') or {}).get(browse, {}))
-    if cached.get('editorial_version') == 6 and cached.get('retry_at', 0) > now:
+    if cached.get('editorial_version') == 7 and cached.get('retry_at', 0) > now:
         store.rec_proposals.publish_album_note(browse, cached, now)
         return len(queued) > 1
     result = release_notes.fetch(album, store)
@@ -126,7 +126,21 @@ def prepare(store, now, albums=(), *, client=None, now_fn=None):
             _LOG.debug('Album metadata deferred for %s', browse, exc_info=True)
     editorial = album_editorial.lookup(album)
     result['artwork'] = (editorial or {}).get('artwork') or cached.get('artwork')
+    # Upgrade old search-result thumbnails as well as confirmed misses. Keep
+    # the previous photograph if the public file lookup is unavailable.
+    search_art = 'music.youtube.com/channel/' in (result['artwork'] or {}).get('source_url', '')
+    if (not (editorial or {}).get('artwork') and (not result['artwork'] or search_art)
+            and album['artist'].casefold() not in {'various', 'various artists'}):
+        try:
+            result['artwork'] = wikipedia.fetch_artwork(album['artist']) or result['artwork']
+        except (WorkClosing, WorkBudgetExceeded):
+            raise
+        except Exception:
+            result['retry'] = True
+            _LOG.debug('Public artist photograph upgrade deferred for %s', browse, exc_info=True)
     if not result['artwork']:
+        # Independent attempts: a public-provider outage must not suppress a
+        # catalogue photograph, and a search miss must not erase retained art.
         try:
             result['artwork'] = _artist_artwork(client, album)
         except (WorkClosing, WorkBudgetExceeded):
@@ -144,7 +158,7 @@ def prepare(store, now, albums=(), *, client=None, now_fn=None):
     retry_at = now + (3600 if retry else 7 * 86400)
     if not description and generation.get('retry_at', 0) > now:
         retry_at = min(retry_at, generation['retry_at'])
-    note = _release_only({**cached, **result, 'editorial_version': 6, 'at': now,
+    note = _release_only({**cached, **result, 'editorial_version': 7, 'at': now,
                          'retry_at': retry_at})
     fields = ('rating', 'label', 'track_count', 'links', 'description', 'review', 'artwork')
     retained = False

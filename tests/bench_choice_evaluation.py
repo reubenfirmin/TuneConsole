@@ -12,10 +12,88 @@ import resource
 import sys
 import time
 
+import pytest
+
 from tests.bench_svd_background import _backup_library, _saved_library_source
 from yt_playlist.core.numerics import limit_native_threads
 from yt_playlist.core.store import Store
 from yt_playlist.rec import album_choices, choice_evidence, model_selection as selection
+
+
+def test_saved_library_production_comparison_preparation(tmp_path, monkeypatch):
+    """Exercise production candidate and serving preparation on a read-only backup."""
+    from yt_playlist.rec import comparison_preparation, model_setup, product_comparison
+    backup = tmp_path / 'library.db'
+    report = _backup_library(_saved_library_source(), backup)
+    limit_native_threads()
+    store = Store(backup)
+    store.init_schema()
+    try:
+        # These resets affect only the disposable copy, never the source library.
+        store.settings.set_setting('rec_selection_paused', '0')
+        store.conn.execute("DELETE FROM rec_proposals WHERE surface='model_live_comparison'")
+        store.conn.commit()
+        previous = store.rec_model.get_rec_vectors()
+        now, started = time.time(), time.monotonic()
+        async def exercise():
+            task = asyncio.create_task(asyncio.to_thread(selection.maintain, store, now))
+            lag, reads = [], []
+            while not task.done():
+                due = time.monotonic() + .05
+                await asyncio.sleep(.05)
+                lag.append(max(0, time.monotonic() - due))
+                read_at = time.monotonic()
+                await asyncio.to_thread(store.rec_model.rec_vectors_count)
+                reads.append(time.monotonic() - read_at)
+            report.update(event_loop_samples=len(lag), event_loop_max_ms=max(lag, default=0) * 1000,
+                          concurrent_read_samples=len(reads), concurrent_read_max_ms=max(reads, default=0) * 1000)
+            return await task
+        result = asyncio.run(exercise())
+        report['wall_seconds'] = time.monotonic() - started
+        report['result'] = result
+        print(json.dumps({'preparation': result}), flush=True)
+        assert result and result['status'] == 'running' and result['phase'] == 'observing', report
+        assert previous == store.rec_model.get_rec_vectors()
+        current = product_comparison.state(store)
+        report['projected_bytes'] = sum(len(row[0]) for row in store.conn.execute(
+            "SELECT payload FROM rec_proposals WHERE surface LIKE ?", (f"model_pair:{current['run_id']}:%",)))
+        report['evidence_bytes'] = sum(path.stat().st_size for path in store.rec_ledger.evidence().directory.glob('*/*/*.json'))
+        report['coverage'], pairs = {}, {}
+        for arm in ('incumbent', 'challenger'):
+            report['coverage'][arm], pairs[arm] = {}, {}
+            for format in product_comparison.FORMATS:
+                data = store.rec_proposals.get_proposals(product_comparison.pair_surface(current['run_id'], arm, format))['data']
+                pairs[arm][format] = data
+                report['coverage'][arm][format] = (len(data['menus']) if format == 'mixes' else len(data['items'])
+                    if format == 'albums' else sum(map(len, data['bundles'].get('_radio', {}).get('members', {}).values())))
+        report['observed'] = product_comparison.measure(store, current, now)['overall']['days']
+        old, new = pairs['incumbent'], pairs['challenger']
+        mix_tracks = lambda data: [[[t['key'] for t in proto['tracks']] for proto in menu['protos']]
+                                  for menu in data['menus']]
+        old_scores = {row['browse_id']: row['score'] for row in old['albums']['items']}
+        report['actual_serving_changes'] = {
+            'mix_menus': sum(a != b for a, b in zip(mix_tracks(old['mixes']), mix_tracks(new['mixes']))),
+            'album_order': [r['browse_id'] for r in old['albums']['items']] != [r['browse_id'] for r in new['albums']['items']],
+            'album_scores': sum(old_scores.get(row['browse_id']) != row['score'] for row in new['albums']['items']),
+            'radio_ranked_clusters': sum(keys != new['radio']['bundles']['_radio']['members'].get(mid)
+                for mid, keys in old['radio']['bundles']['_radio']['members'].items())}
+        # Daily refresh uses both original vector snapshots with fresh shared
+        # inputs, without resetting assignment, uncertainty or the fixed horizon.
+        monkeypatch.setattr(model_setup, 'build', lambda *a: pytest.fail('daily refresh refitted a model'))
+        started = time.monotonic()
+        comparison_preparation.maintain(store, now + product_comparison.DAY)
+        report['daily_refresh_seconds'] = time.monotonic() - started
+        refreshed = product_comparison.state(store)
+        assert refreshed['prepared_at'] == now + product_comparison.DAY, refreshed
+        assert refreshed['generation'] == current['generation']
+        assert refreshed['decision_at'] == current['decision_at']
+        assert store.rec_model.get_rec_vectors() == previous
+        report['daily_refresh_timings'] = store.model_selection.selection_run(current['run_id'])['preparation_timings']
+        destination = tmp_path / 'production-comparison.json'
+        destination.write_text(json.dumps(report, indent=2) + '\n')
+        print(json.dumps({'report': str(destination), **report}), flush=True)
+    finally:
+        store.conn.close()
 
 
 def test_saved_library_album_menu_frontier(tmp_path):

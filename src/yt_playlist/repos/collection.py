@@ -21,19 +21,22 @@ _COMPLETE_ALBUM_TRACKLISTS = (
 class CollectionRepo(Repo):
     @synchronized
     def taste_album_contexts(self, *, include_browse=()):
-        """Stable release contexts; return days count once regardless of album length/accounts.
+        """Stable releases with distinct listening days for each recording.
 
-        Listening days already exclude known generated playback. Album membership supplies
-        geometry, not an independent endorsement for every song on a saved record.
+        Only a complete fetched tracklist supplies a coverage denominator. Repeated
+        occurrences/uploads and overlapping accounts cannot multiply a track's days.
+        Listening days already exclude known generated playback.
         """
         rows = self.conn.execute(
             "SELECT a.id,a.title,a.artist,p.provider_id browse,a.year,a.genre,a.thumbnail,"
+            "at.id occurrence,at.is_full,f.complete,f.expected_track_count,"
             "COALESCE(r.identity_key,er.identity_key,at.legacy_track_key) key,"
             "EXISTS(SELECT 1 FROM album_library_memberships m WHERE m.album_id=a.id) saved "
             "FROM albums a JOIN album_tracks at ON at.album_id=a.id "
             "LEFT JOIN catalog_entries e ON e.id=at.entry_id "
             "LEFT JOIN recordings er ON er.id=e.recording_id "
             "LEFT JOIN recordings r ON r.id=at.recording_id "
+            "LEFT JOIN album_fetch_state f ON f.album_id=a.id "
             "JOIN album_provider_ids p ON p.album_id=a.id AND p.provider='youtube'").fetchall()
         days = {}
         for row in self.conn.execute("SELECT DISTINCT identity_key,day FROM listening_days"):
@@ -41,13 +44,21 @@ class CollectionRepo(Repo):
         albums = {}
         for row in rows:
             album = albums.setdefault(row["id"], {k: row[k] for k in
-                ("id", "title", "artist", "browse", "year", "genre", "thumbnail", "saved")})
-            album.setdefault("keys", set()).add(row["key"])
-            album.setdefault("days", set()).update(days.get(row["key"], ()))
+                ("id", "title", "artist", "browse", "year", "genre", "thumbnail", "saved",
+                 "complete", "expected_track_count")})
+            album.setdefault("tracks", {})[row["occurrence"]] = (row["key"], row["is_full"])
         result = []
         for album in albums.values():
-            album["keys"] = sorted(k for k in album["keys"] if k)
-            album["return_days"] = len(album.pop("days"))
+            tracks = album.pop("tracks").values()
+            full = [key for key, is_full in tracks if is_full]
+            fetched, expected = album.pop("complete"), album.pop("expected_track_count")
+            album["tracklist_complete"] = bool(fetched and full and all(full) and expected == len(full))
+            album["keys"] = sorted(set(full if album["tracklist_complete"] else
+                                       (key for key, _ in tracks if key)))
+            album["track_days"] = {key: len(days.get(key, ())) for key in album["keys"]}
+            album["return_days"] = max(album["track_days"].values(), default=0)
+            album["return_coverage"] = (sum(count >= 2 for count in album["track_days"].values())
+                / len(album["keys"]) if album["tracklist_complete"] else None)
             if album["saved"] or album["return_days"] >= 2 or album["browse"] in include_browse:
                 result.append(album)
         return sorted(result, key=lambda a: a["id"])
@@ -383,11 +394,11 @@ class CollectionRepo(Repo):
 
     @synchronized
     def artist_albums(self, artist, browse_id=None):
+        aid = artist_catalog.lookup(self.conn,artist)
         if browse_id:
             row = self.conn.execute("SELECT artist_id FROM artist_provider_ids WHERE provider='youtube' AND provider_id=?", (browse_id,)).fetchone()
-            aid = row[0] if row else None
-        else:
-            aid = artist_catalog.lookup(self.conn,artist)
+            if row:
+                aid = row[0]
         if aid is None:
             return []
         plays, collection = self._play_counts(), {}

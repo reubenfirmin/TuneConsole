@@ -4,6 +4,57 @@ from tests.template_support import web_templates
 from playwright.sync_api import expect
 from tests.browser.radio_ui_support import radio_ui
 
+
+def _junction_snapshot(session):
+    """Measure the rendered routes, independently of their animation mechanism."""
+    return session.evaluate('''session => {
+      const control = session.querySelector('.radio-tune').getBoundingClientRect();
+      const cx = control.x + control.width / 2, cy = control.y + control.height / 2;
+      const paths = ['line', 'flow'].map(name => {
+        const path = session.querySelector('.radio-junction-' + name);
+        const matrix = path.getScreenCTM(), length = path.getTotalLength();
+        const count = Math.ceil(length);
+        const points = Array.from({length: count + 1}, (_, i) =>
+          path.getPointAtLength(length * i / count));
+        const stem = points.filter(point => point.y >= 111.9);
+        const stemX = (Math.min(...stem.map(p => p.x)) + Math.max(...stem.map(p => p.x))) / 2;
+        // Include half the stroke and a two-pixel gap around the circular control.
+        const gap = 2 + parseFloat(getComputedStyle(path).strokeWidth) / 2;
+        const clearance = Math.min(...points.map(point => {
+          const screen = point.matrixTransform(matrix);
+          return Math.hypot((screen.x - cx) / (control.width / 2 + gap),
+            (screen.y - cy) / (control.height / 2 + gap));
+        }));
+        return {d: getComputedStyle(path).d,
+          stemX: new DOMPoint(stemX, 112).matrixTransform(matrix).x, clearance};
+      });
+      return {control: {x: control.x, y: control.y, width: control.width, height: control.height}, paths};
+    }''')
+
+
+def _assert_junction_motion(page, session, initial, target_x):
+    frames = [initial]
+    for _ in range(20):
+        page.clock.run_for(32)
+        frames.append(_junction_snapshot(session))
+    page.clock.run_for(1500)
+    final = _junction_snapshot(session)
+    for frame in [*frames, final]:
+        assert frame['control'] == initial['control'], 'The tuning control must stay fixed'
+        for path in frame['paths']:
+            assert path['clearance'] >= 1, f'Junction enters the tuning control: {path}'
+    for index, name in enumerate(('outline', 'dotted route')):
+        start = initial['paths'][index]['stemX']
+        end = final['paths'][index]['stemX']
+        assert abs(end - target_x) < 2, f'{name} must arrive at the previewed queue'
+        assert abs(end - start) > 20, f'{name} must move visibly'
+        positions = [frame['paths'][index]['stemX'] for frame in frames[1:]]
+        low, high = sorted((start, end))
+        intermediate = {round(x, 1) for x in positions if low + 2 < x < high - 2}
+        assert len(intermediate) >= 3, f'{name} must move through multiple intermediate positions'
+        assert len({frame['paths'][index]['d'] for frame in frames}) >= 4
+
+
 def test_artwork_evolves_slowly_with_reduced_motion_and_pauses_when_hidden(page, radio_ui):
     api = radio_ui
     page.clock.install()
@@ -258,27 +309,46 @@ def test_session_history_rises_from_junction_and_queues_preview_without_switchin
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.screenshot(path=f'/tmp/tuneconsole-radio-drawing-{width}.png')
 
-    line = session.locator('.radio-junction-line')
-    original = line.evaluate('el => getComputedStyle(el).d')
     other = session.locator('.radio-direction').nth(1)
-    other.hover()
-    expect(other).to_have_class('radio-direction is-preview')
-    page.wait_for_function('(original) => getComputedStyle(document.querySelector(".radio-junction-line")).d !== original', arg=original)
-    line.evaluate('el => Promise.all(el.getAnimations().map(animation => animation.finished))')
-    expect(session.locator('.radio-direction.is-active')).to_have_attribute('data-slot', '0')
-    assert session.locator('.radio-direction').nth(0).evaluate('el => getComputedStyle(el).borderColor') != other.evaluate('el => getComputedStyle(el).borderColor')
-    page.screenshot(path=f'/tmp/tuneconsole-radio-session-{width}.png')
+    # Scroll the phone's queue into view before measuring either endpoint.
+    other.scroll_into_view_if_needed()
     page.mouse.move(0, 0)
-    other.get_by_role('button').focus()
-    expect(other).to_have_class('radio-direction is-preview')
-    page.locator('.radio-menu > summary').focus()
-    expect(other).not_to_have_class('radio-direction is-preview')
-    transition = line.evaluate('el => getComputedStyle(el).transitionDuration')
-    assert transition != '0s'
-    page.emulate_media(reduced_motion='reduce')
-    other.get_by_role('button').focus()
-    expect(line).to_have_css('transition-duration', transition)
-    page.locator('.radio-menu > summary').focus()
+    page.clock.install()
+    page.clock.pause_at(page.evaluate('Date.now() / 1000') + .1)
+    page.clock.run_for(2000)
+    selections = []
+
+    def record_selection(route):
+        selections.append(route.request.post_data)
+        route.fulfill(json={'ok': False})
+
+    page.route('**/radio/select', record_selection)
+    active = session.locator('.radio-direction.is-active')
+    for preference in ('no-preference', 'reduce'):
+        page.emulate_media(reduced_motion=preference)
+        initial = _junction_snapshot(session)
+        if preference == 'no-preference':
+            other.hover(force=True)
+        else:
+            other.get_by_role('button').focus()
+        expect(other).to_have_class('radio-direction is-preview')
+        box = other.bounding_box()
+        _assert_junction_motion(page, session, initial, box['x'] + box['width'] / 2)
+        expect(active).to_have_attribute('data-slot', '0')
+        expect(active.get_by_role('button')).to_have_attribute('aria-pressed', 'true')
+        expect(other.get_by_role('button')).to_have_attribute('aria-pressed', 'false')
+        assert active.evaluate('el => getComputedStyle(el).borderColor') != other.evaluate('el => getComputedStyle(el).borderColor')
+        assert selections == [], 'Hover and focus must not switch the playing stream'
+        page.screenshot(path=f'/tmp/tuneconsole-radio-session-{width}-{preference}.png')
+        preview = _junction_snapshot(session)
+        page.mouse.move(0, 0)
+        page.locator('.radio-menu > summary').focus()
+        expect(other).not_to_have_class('radio-direction is-preview')
+        box = active.bounding_box()
+        _assert_junction_motion(page, session, preview, box['x'] + box['width'] / 2)
+        expect(active).to_have_attribute('data-slot', '0')
+        assert selections == []
+    page.clock.resume()
 
     playing(3)
     expect(rows).to_have_count(3, timeout=6000)

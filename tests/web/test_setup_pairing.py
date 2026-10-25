@@ -32,7 +32,8 @@ def test_bridge_status_reports_connection():
     client = TestClient(app)
     assert client.get("/bridge/status").json() == {"connected": False, "now_playing": None,
                                                    "sensor_health": None,
-                                                   "radio": False, "radio_ready": False}
+                                                   "radio": False, "radio_ready": False,
+                                                   "resumable_player": None}
 
 
 def test_bridge_status_true_while_extension_connected():
@@ -45,7 +46,8 @@ def test_bridge_status_true_while_extension_connected():
     with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}):
         assert client.get("/bridge/status").json() == {"connected": True, "now_playing": None,
                                                        "sensor_health": None,
-                                                       "radio": False, "radio_ready": False}
+                                                       "radio": False, "radio_ready": False,
+                                                       "resumable_player": None}
 
 
 def test_extension_connect_marks_bridge_paired():

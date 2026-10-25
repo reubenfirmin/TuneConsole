@@ -11,7 +11,7 @@ def bind(store, identity_id, playlist, video, opportunity, option, now):
     if identity_id is None or not playlist or not video:
         return
     try:
-        offer = store.rec_ledger.evidence().get('opportunity', opportunity)
+        offer = choice_evidence.opportunity(store, opportunity)
         if not offer or str(option) not in {str(row['id']) for row in offer['options']}:
             return
         store.rec_ledger.bind_choice_playback(identity_id, playlist, video, opportunity, option,

@@ -65,6 +65,7 @@ def encode(s: Session) -> str:
         **operation_values(s.edits.active), "initial_tracks": s.initial_tracks,
         "initial_handles": s.initial_handles,
         "tuning": s.candidates.tuning, "recent_states": s.edits.recent_states,
+        'comparison': getattr(s.candidates, 'comparison', None),
         "requested_direction": s.requested_direction, "choices": s.choices, "rejected": sorted(s.rejected),
         "stopped": s.stopped_by_user, "halted": s.halted, "error": s.error,
         "directions": {"active": directions.active, "slots": directions.slots,

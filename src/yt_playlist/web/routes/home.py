@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Request
 
 from yt_playlist.core import updatecheck
-from yt_playlist.rec import actions, home_prepared, onboarding, rec_params
+from yt_playlist.rec import actions, home_preferences, home_prepared, onboarding, rec_params
 from yt_playlist.rec.home_cards import _epoch
 from yt_playlist.rec.trend_statistics import last_complete_month
 from yt_playlist.web.routes import home_board, home_discovery, home_generation, home_onboarding, home_tuning
@@ -27,6 +27,7 @@ def build(ctx) -> APIRouter:
 
     @router.get("/")
     def home_page(request: Request):
+        from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
         now = now_fn()
         dao = store.rec_ledger
         for card in ROTATING_CARDS:   # one tick per genuine Home visit -> per-card rotation advances
@@ -65,14 +66,22 @@ def build(ctx) -> APIRouter:
         collections = home_prepared.collections(store, views.prepared(now, request), now)
         views.queue_artist_images(collections, now)
         feed = views.feed_context(request, now)
+        if (store.settings.get_setting('last_sync_at') is None
+                and not store.settings.get_setting('onboard_listening_format')
+                and not store.settings.get_setting('home_format')):
+            store.settings.set_setting('onboard_format_pending', '1')
+        albums_ready = onboarding.prepared_albums_ready(store, now)
         # Imported likes, dismissal and fitted modes are not complete listening offers.
         # Returning Home during setup must retain the same useful first-run screen.
-        getting_started = (not feed["protos"] and
-                           (onboarding.initial_setup_pending(store, now) or onboarding.onboarding_active(store, now)))
+        getting_started = (home_preferences.choice_pending(store) or
+                           (not feed['protos'] and not albums_ready and
+                            (onboarding.initial_setup_pending(store, now) or onboarding.onboarding_active(store, now))))
         return templates.TemplateResponse(request, "home.html", {
-            "home_default_panel": {"albums": "album-choices", "mixes": "directions", "radio": "radio",
-                "both": store.settings.get_setting("home_last_panel") or "directions"}.get(
-                    store.settings.get_setting("home_format"), "directions"),
+            'listening_edition': ListeningAnalyticsRepo(store).prepared('listening_edition') or {},
+            'home_default_panel': home_preferences.default_panel(store,
+                albums_ready=albums_ready, mixes_ready=bool(feed['protos'])),
+            'onboard_format': store.settings.get_setting('onboard_listening_format'),
+            'onboard_format_pending': home_preferences.choice_pending(store),
             "radio_bootstrap": radio_bootstrap,
             "radio_tracks": radio_tracks,
             "actions": actions.take_action(store, now, ctx.auth_expired),
@@ -108,6 +117,28 @@ def build(ctx) -> APIRouter:
             "discovery_busy": views.busy(),
             **feed,
         })
+
+    @router.post('/home/listening-impressions')
+    async def listening_impressions(request: Request):
+        from fastapi.responses import Response
+        from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
+        try:
+            body = await request.json()
+        except ValueError:
+            return Response(status_code=400)
+        edition = ListeningAnalyticsRepo(store).prepared('listening_edition') or {}
+        if not isinstance(body, dict) or body.get('edition') != edition.get('id'):
+            return Response(status_code=204)
+        ids = body.get('stories', [])
+        if not isinstance(ids, list) or len(ids) > 4 or any(not isinstance(s, str) for s in ids):
+            return Response(status_code=400)
+        known = {s['id'] for s in edition.get('stories', [])}
+        signatures = known.intersection(ids)
+        capture = getattr(store, 'choice_capture', None)
+        if signatures and capture is not None:
+            capture.enqueue('listening editorial exposure', ListeningAnalyticsRepo(store).record_impressions,
+                            signatures, now_fn())
+        return Response(status_code=204)
 
     @router.get("/privacy")
     def privacy(request: Request):

@@ -29,6 +29,32 @@ def no_fit(*args, **kwargs):
     raise AssertionError('Preference or clock changes must reuse the completed model')
 
 
+@pytest.mark.parametrize('projection', ['vibe', 'profile'])
+def test_projection_upgrade_refreshes_legacy_pools_on_worker_without_refitting(store, monkeypatch, projection):
+    from yt_playlist.rec import home_vibe, musical_character
+
+    library(store)
+    vectors = store.rec_model.get_rec_vectors()
+    bundles = store.rec_proposals.get_proposals('mode_bundles')
+    # An older installation can have a valid ordinary pool and a current
+    # preference stamp, without the projection required by the new controls.
+    bundles.pop('_vibes')
+    store.rec_proposals.put_proposals('mode_bundles', bundles, 2000)
+    assert not candidate_refresh.due(store, 2000)
+    module = home_vibe if projection == 'vibe' else musical_character
+    monkeypatch.setattr(module, 'VERSION', module.VERSION + '-upgrade')
+    monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
+    assert candidate_refresh.due(store, 2000)
+
+    assert mode_surfaces.prepare_bundles(store, 2000) is not None
+    refreshed = store.rec_proposals.get_proposals('mode_bundles')['_vibes']
+    assert refreshed['version'] == home_vibe.VERSION
+    assert refreshed['profile_version'] == musical_character.VERSION
+    assert refreshed['pools']['gentle']['explore']
+    assert not candidate_refresh.due(store, 2001)
+    assert store.rec_model.get_rec_vectors() == vectors
+
+
 def test_genre_edits_reset_and_restore_update_scores_and_served_provenance(store, monkeypatch):
     key = library(store)
     original = candidate(store, key)

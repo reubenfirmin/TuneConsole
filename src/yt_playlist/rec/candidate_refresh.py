@@ -2,7 +2,7 @@
 import hashlib
 import json
 
-from yt_playlist.rec import choice_learning, rec_params
+from yt_playlist.rec import choice_learning, home_vibe, musical_character, rec_params
 
 DECAY_TICK_S = 3600
 
@@ -15,6 +15,8 @@ def ranking_configuration(store):
     ranking work; model fitting has its own narrower configuration contract.
     """
     return {'records': store.rec_model.weight_records(),
+            'vibe_version': home_vibe.VERSION,
+            'musical_profile_version': musical_character.VERSION,
             'params': {spec.name: rec_params.get_param(store, spec.name)
                        for spec in rec_params.PARAMS}}
 

@@ -5,7 +5,7 @@ import zlib
 from collections import Counter
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import arc_energy, journeys, rec_params, transient
+from yt_playlist.rec import arc_energy, journeys, musical_character, rec_params, transient
 from yt_playlist.rec.ordering import _field
 from yt_playlist.rec.taste_analysis import era_distribution, taste_breadth
 
@@ -207,7 +207,7 @@ def cluster_recipe(store, keep_keys, seed_labels=(), allow_families=(), journey=
     genres, decades = dao.track_genres(keys), dao.track_decades(keys)
     lastp, plays = dao.track_last_played(keys), store.rec_query.play_counts()
     meta = store.rec_query.tracks_by_keys(keys)
-    arc = arc_energy.arc_energies(keys, genres, dao.track_audio_features())   # real-audio energy (#37)
+    arc = arc_energy.arc_energies(keys, musical_character.load(store, keys))
     fam_count, era_count = {}, {}
     for k in keys:
         if k in genres:
@@ -230,13 +230,14 @@ def cluster_recipe(store, keep_keys, seed_labels=(), allow_families=(), journey=
     def feat(k):
         g = genres.get(k, "")
         return {"artist": (meta.get(k) or {}).get("artist", ""), "genre": g,
-                "energy": arc.get(k, genre_map.energy(g)), "decade": decades.get(k),
+                "energy": arc.get(k, .5), "decade": decades.get(k),
                 "plays": plays.get(k, 0), "recency": lastp.get(k, 0.0)}
 
     order = journeys.journey_order(keys, journey, seed, feat)
     recipe = {"model": "cluster", "facets": facets, "journey": journey,
               "params": {"seeds": list(seed_labels), "genre_whitelist": list(allow_families)},
-              "dj": {"stickiness": 0.0, "seed": seed}, "weights": {}}
+              "dj": {"stickiness": 0.0, "seed": seed}, "weights": {},
+              "musical_version": musical_character.VERSION}
     return recipe, order
 
 

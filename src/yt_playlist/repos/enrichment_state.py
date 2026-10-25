@@ -5,12 +5,52 @@ reselects genre and clears its job in that transaction; metadata policy lives in
 """
 import json
 import time
+from contextlib import contextmanager
 
-from yt_playlist.core import catalog, metadata
+from yt_playlist.core import catalog, metadata, metadata_observations
 from yt_playlist.repos.base import Repo, synchronized
 
 
 class EnrichmentStateRepo(Repo):
+    @contextmanager
+    def subject_guard(self, entry_id, recording_id):
+        """Publish a complete result/attempt before another thread can reassociate its entry.
+
+        Provider requests run outside this scope. Nested repository operations
+        share the serving lock; no network call may run while it is held.
+        """
+        with self._lock:
+            entry_id = catalog.resolve_entry(self.conn, entry_id)
+            subject = self.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry_id,)).fetchone()
+            if subject is None or subject[0] != recording_id:
+                raise metadata_observations.SubjectChanged('Enrichment catalog subject changed during lookup')
+            yield
+
+    @synchronized
+    def record_metadata_observations(self, entry_id, provider, observations, *, run_id, now=None,
+                                     expected_recording_id=None):
+        """Retain source observations without applying them as catalog overrides."""
+        entry_id = catalog.resolve_entry(self.conn, entry_id)
+        with self.conn:
+            metadata_observations.record(self.conn, entry_id, provider, observations,
+                                         run_id=run_id, now=time.time() if now is None else now,
+                                         expected_recording_id=expected_recording_id)
+
+    @synchronized
+    def metadata_observations(self, identity_key, *, after_id=0, limit=100):
+        """One recording's evidence in bounded, restartable ID order; legacy rows stay separate."""
+        if type(limit) is not int or not 1 <= limit <= 512:
+            raise ValueError('Observation page size must be between 1 and 512')
+        if type(after_id) is not int or after_id < 0:
+            raise ValueError('Invalid observation cursor')
+        key = catalog.resolve_key(self.conn, identity_key)
+        rows = self.conn.execute(
+            'SELECT f.* FROM metadata_findings f WHERE f.recording_id='
+            '(SELECT id FROM recordings WHERE identity_key=?) AND f.id>? '
+            'AND f.provenance_json IS NOT NULL ORDER BY f.id LIMIT ?', (key, after_id, limit))
+        return [{**dict(row), 'value': json.loads(row['value_json']),
+                 'provenance': json.loads(row['provenance_json'])} for row in rows]
+
     @synchronized
     def record_enrichment_attempt(self, identity_key, provider, fields, *, retry=False, now=None,
                                   video_id=None, error="", cooldown=False, retry_after=0, providers=()):

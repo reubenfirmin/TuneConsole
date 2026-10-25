@@ -17,7 +17,7 @@ from yt_playlist.core.activity import WorkClosing, check_stopping
 from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.core.work_diagnostics import work_span
 from yt_playlist.rec import (embedding_vectors as vectors, experiments, home_themes, home_vibe, layers, mode_eval, rec_params, surfaces,
-                             taste_modes, transient, measurement, negative)
+                             taste_modes, transient, measurement, negative, vibe_pools)
 from yt_playlist.util import genre_map
 from yt_playlist.rec.eligibility import home_exclusions
 
@@ -130,18 +130,32 @@ def _calculate_bundles(store, now, policies):
                      for name, pool in pools.items()}
         if not any(all_pools.values()):
             return {}, []
-        return {"all": all_pools, "_meta": {"full_pools": True,
-                "unmodeled": True, "comfort_pool": len(pools["comfort"])}}, all_pools["fresh"]
+        payload = {"all": all_pools, "_meta": {"full_pools": True,
+                   "unmodeled": True, "comfort_pool": len(pools["comfort"])}}
+        vibe_pools.prepare(store, payload, now, policies)
+        return payload, payload['all']['fresh']
     mode_ids = [m["mode_id"] for m in modes]
     C = np.stack([m["centroid"].astype(np.float64) for m in modes])
     lkeys, LV, lidx = vectors.load_content_vectors(store, snapshot=snapshot)
     dkeys, DV, didx = vectors.load_discovered_content_vectors(store, snapshot=snapshot)
+    # Radio replenishes from complete style membership, independently of the
+    # finite, ranked Home card pools. Persist only keys; playback hydrates one
+    # bounded lookahead and never scans the library's vector matrix.
+    radio_members = {str(mid): [] for mid in mode_ids}
+    for key in dict.fromkeys([*lkeys, *dkeys]):
+        check_stopping()
+        mid = _nearest_mode(key, mode_ids, C, lidx, LV, didx, DV)
+        if mid is not None:
+            radio_members[str(mid)].append(key)
     cap = int(rec_params.get_param(store, "modes_cand_per_mode"))
     # Rank through the library before bucketing. A global top-400 cutoff can leave a substantial
     # genre with only six candidates even when the library contains hundreds of matching songs.
     lim = max(len(lkeys), int(rec_params.get_param(store, "modes_pool_limit")))
     pools = _rank_pools(store, now, lim)
     payload = {str(mid): {} for mid in mode_ids}
+    payload['_radio'] = {'generation': snapshot['generation'],
+                         'space': vectors.content_space_id(store, snapshot=snapshot),
+                         'members': radio_members}
     for surf, pool in pools.items():
         buckets = _bucket_pool(pool, mode_ids, C, lidx, LV, didx, DV, cap)
         for mid in mode_ids:
@@ -195,6 +209,7 @@ def _calculate_bundles(store, now, policies):
         payload["_ppr"] = {}
     # Supersede the last on-demand pool too, so explicit-genre Fresh previews use the worker's
     # latest metadata/ranking rather than keeping an older clicked job's snapshot forever.
+    vibe_pools.prepare(store, payload, now, policies)
     return payload, payload.get("all", {}).get("fresh", [])
 
 
@@ -383,7 +398,8 @@ def _assembly_inputs(store, now, preparation):
     """Reuse eligibility and resolved pools only inside one private preparation snapshot."""
     if preparation is not None and 'assembly' in preparation:
         return preparation['assembly']
-    bundles = store.rec_proposals.get_proposals('mode_bundles') or {}
+    bundles = (preparation['bundles'] if preparation is not None and 'bundles' in preparation
+               else store.rec_proposals.get_proposals('mode_bundles') or {})
     keys = {d['key'] for bucket in bundles.values() if isinstance(bucket, dict)
             for items in bucket.values() if isinstance(items, list)
             for d in items if isinstance(d, dict) and d.get('key')}
@@ -413,6 +429,10 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=(), mod
     the assigned mode's bucket is not), TEMPORAL rotates into the 4th slot so the row stays at four,
     rather than dropping to three. Returns [] when there are no bundles/modes (caller falls back to
     legacy cards)."""
+    preset = preparation['vibe_rank'].preset if preparation is not None else home_vibe.current(store, now)
+    if preset:
+        return vibe_pools.assemble(store, now, preset, epoch,
+                                   include_genres=include_genres, avoid_genres=avoid_genres)
     inputs = _assembly_inputs(store, now, preparation)
     bundles, modes = inputs['bundles'], inputs['modes']
     if not bundles or not modes:

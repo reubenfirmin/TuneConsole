@@ -5,7 +5,7 @@
   {% if albums %}
   <div class="album-editorial">
     {% for a in albums %}
-    <article class="album-choice" aria-labelledby="album-story-title-{{ loop.index }}"
+    <article class="album-choice album-choice--{{ loop.cycle('panorama', 'reverse', 'inset') }}" aria-labelledby="album-story-title-{{ loop.index }}"
              x-data="{ expanded: false }" data-classification="{{ a.classification }}"
              {% if opportunity_id %}data-choice-opportunity="{{ opportunity_id }}" data-choice-option="{{ a.browse_id }}"{% endif %}>
       <div class="album-sleeve">

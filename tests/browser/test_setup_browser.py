@@ -67,7 +67,7 @@ def test_setup_tab_deep_link_opens_enrichment(live_setup_app, page):
 def test_album_description_settings_save_pause_and_remove_without_exposing_key(live_setup_app, page, width):
     page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(f'{live_setup_app}/setup?tab=enrichment')
-    panel = page.get_by_role('region', name='Album descriptions', exact=True)
+    panel = page.get_by_role('region', name='DeepSeek', exact=True)
     key = panel.get_by_label('Connect DeepSeek', exact=True)
     expect(key).to_have_attribute('type', 'text')
     key.fill('sk-test-0123456789')
@@ -82,22 +82,30 @@ def test_album_description_settings_save_pause_and_remove_without_exposing_key(l
     panel.get_by_role('button', name='Save key', exact=True).click()
     expect(key).to_be_hidden()
     panel.get_by_label('Maximum requests per day', exact=True).fill('8')
-    panel.get_by_role('button', name='Save', exact=True).click()
+    panel.get_by_label('Maximum requests per day', exact=True).blur()
     expect(panel.get_by_role('status')).to_have_text('Album description settings saved.')
     expect(panel.get_by_label('Connect DeepSeek', exact=True)).to_have_value('')
     assert 'sk-test-0123456789' not in page.content()
     assert 'sk-replacement-0123456789' not in page.content()
-    panel.get_by_label('Generate missing album descriptions', exact=True).uncheck()
     with page.expect_response('**/settings/deepseek') as saved:
-        panel.get_by_role('button', name='Save', exact=True).click()
+        panel.locator('.provider-toggle').click()
     assert saved.value.ok
+    expect(panel.get_by_role('switch', name='Enable DeepSeek', exact=True)).not_to_be_checked()
     expect(panel.get_by_role('status')).to_have_text('Album description settings saved.')
     page.reload()
-    panel = page.get_by_role('region', name='Album descriptions', exact=True)
-    expect(panel.get_by_label('Generate missing album descriptions', exact=True)).not_to_be_checked()
+    panel = page.get_by_role('region', name='DeepSeek', exact=True)
+    expect(panel.get_by_role('switch', name='Enable DeepSeek', exact=True)).not_to_be_checked()
     expect(panel.get_by_label('Maximum requests per day', exact=True)).to_have_value('8')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    panel.screenshot(path=f'/tmp/tuneconsole-deepseek-settings-{width}.png')
+    # The whole provider list must align, not just the isolated new control.
+    page.screenshot(path=f'/tmp/tuneconsole-deepseek-settings-{width}.png', full_page=True)
+    lastfm = page.locator('.provider-card[data-name="lastfm"]')
+    for selector in ('.provider-icon', '.provider-heading', '.provider-toggle', '.provider-key'):
+        assert abs(lastfm.locator(selector).bounding_box()['x'] - panel.locator(selector).bounding_box()['x']) < 2
+    expect(panel.get_by_role('button', name='Save', exact=True)).to_have_count(0)
+    assert panel.get_by_label('Maximum requests per day').evaluate(
+        "el => getComputedStyle(el).backgroundColor") == page.locator('#lastfm-api-key').evaluate(
+        "el => getComputedStyle(el).backgroundColor")
     panel.get_by_role('button', name='Remove key', exact=True).click()
     expect(panel.get_by_role('status')).to_contain_text('saved key removed')
     expect(panel.get_by_role('button', name='Remove key', exact=True)).to_be_hidden()

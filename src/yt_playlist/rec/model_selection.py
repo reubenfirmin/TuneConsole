@@ -11,21 +11,14 @@ from datetime import datetime, timezone
 import numpy as np
 
 from yt_playlist.rec import embedding_training as training, eval_recs
+from yt_playlist.rec.model_setup import CONFIGS, MIN_HISTORY_DAYS, MIN_TRACKS, current_setup
 
 DAY = 86400
-MIN_HISTORY_DAYS = 14
-MIN_TRACKS = 100
 MIN_TRIALS = 50
 MIN_WINDOWS = 2
 RECHECK_DAYS = 28
 MIN_FRESH_TRACKS = 30
-CONFIGS = [("svd", 48), ("svd", 64), ("svd", 96), ("svd", 128), ("item2vec", 64)]
 METHODS = {"svd": "Playlist patterns (SVD)", "item2vec": "Track co-occurrence (Item2Vec)"}
-
-
-def current_setup(store):
-    return {"method": store.settings.get_setting("rec_embed_method") or "svd",
-            "dim": int(store.settings.get_setting("rec_dim") or training.DIM)}
 
 
 def _tracked_run(store, latest):
@@ -50,12 +43,12 @@ def readiness(store, now):
     checks = [{"label": "Listening history", "value": min(int(days), MIN_HISTORY_DAYS), "total": MIN_HISTORY_DAYS,
                "unit": "days"},
               {"label": "Modeled tracks", "value": min(tracks, MIN_TRACKS), "total": MIN_TRACKS, "unit": "tracks"}]
-    if last and last["status"] == "running":
-        return {"state": "running", "reason": last.get("progress", "Comparing model setups."), "checks": checks}
     if store.settings.get_setting("rec_selection_restore"):
         return {"state": "restoring", "reason": "Restoring the previous model after the current update finishes.", "checks": checks}
     if store.settings.get_setting("rec_selection_paused") == "1":
-        return {"state": "paused", "reason": "Automatic selection is paused after restoring your previous model.", "checks": checks}
+        return {"state": "paused", "reason": "Automatic selection is paused. Your current model and regular training continue.", "checks": checks}
+    if last and last["status"] == "running":
+        return {"state": "running", "reason": last.get("progress", "Comparing model setups."), "checks": checks}
     if days < MIN_HISTORY_DAYS or tracks < MIN_TRACKS:
         return {"state": "waiting", "reason": "Another comparison needs at least 14 days of history and 100 modeled tracks." if last else "Waiting for enough listening history and modeled tracks to make a useful comparison.",
                 "checks": checks}
@@ -162,12 +155,6 @@ def _paired(previous, candidate, alternatives):
             "p": p, "reason": "Clear improvement" if promote else "No reliable improvement" if enough else "Not enough comparable test tracks"}
 
 
-def _build(store, setup):
-    return training.build_vectors_from_baskets(
-        store.rec_evidence.rec_baskets(), dim=setup["dim"], method=setup["method"],
-        weights=training.cooc_weights(store.rec_query.play_counts()) if store.settings.get_setting("rec_cooc_weighting") == "1" else None)
-
-
 def _forecast(store, previous, selected, now):
     """Save both top-20 predictions on the same candidate universe, before observing outcomes."""
     with store.read_snapshot() as snapshot:
@@ -192,6 +179,8 @@ def update_followup(store, now, *, now_fn=None):
     run = _tracked_run(store, runs[0] if runs else None)
     if not run or run["status"] not in ("applied", "retained", "restored"):
         return
+    if run.get('kind') == 'product':
+        return  # Product decisions have their own observed serving comparison.
     forecasts = store.model_selection.model_forecasts(run["id"])
     end = min(now, run.get("restored_at", now), run.get("ended_at", now))
     total = old_hits = new_hits = excluded = 0
@@ -263,9 +252,9 @@ def run(store, now, *, now_fn=None):
                 # quality of the menus actually served, or an album-format benefit.
                 result.update(status="retained", comparison=best,
                     diagnostic_challenger={k: best[k] for k in ("method", "dim")},
-                    promotion_gate="awaiting_validated_product_outcomes",
-                    reason="A setup improved first-play prediction. Your current model was kept: "
-                           "promotion requires validated listening-choice evidence.")
+                    promotion_gate="diagnostic_only",
+                    reason="A setup improved first-play prediction. This diagnostic keeps the current model. "
+                           "Automatic selection compares observed choices and listening.")
             else:
                 result.update(status="retained", comparison=baseline_check,
                               reason="No alternative showed a reliable improvement. Your current setup was kept.")
@@ -284,13 +273,19 @@ def run(store, now, *, now_fn=None):
 
 def maintain(store, now, *, now_fn=None):
     update_followup(store, now, now_fn=now_fn)
-    if readiness(store, now)["state"] == "ready":
-        return run(store, now, now_fn=now_fn)
+    from yt_playlist.rec import comparison_preparation
+    return comparison_preparation.maintain(store, now)
 
 
 def recover_interrupted(store):
     for run in store.model_selection.selection_runs(limit=1):
         if run["status"] == "running":
+            if run.get('kind') == 'product':
+                # Observing is durable work, not an interrupted fit. Preparation
+                # is also safe to retry because it never replaces live vectors.
+                from yt_playlist.rec import product_comparison
+                if product_comparison.state(store).get('run_id') == run['id']:
+                    continue
             run.update(status="failed", reason="The app stopped during the comparison. Your current model was kept.")
             store.model_selection.save_selection(run["id"], run)
 
@@ -312,7 +307,7 @@ def view(store, now, *, limit=6):
         run["date"] = date(run["ran_at"])
         if run.get("restored_at"):
             run["restored_date"] = date(run["restored_at"])
-        for key in ("previous", "selected"):
+        for key in ("previous", "selected", *(['challenger'] if run.get('challenger') else [])):
             setup = run[key]
             setup["label"] = f"{METHODS.get(setup['method'], setup['method'])}, {setup['dim']} features"
         followup = run.get("followup", {})
@@ -332,7 +327,17 @@ def view(store, now, *, limit=6):
         run["followup"] = followup
     if state.get("next_at"):
         state["next_date"] = date(state["next_at"])
-    return {**state, "runs": runs, "last": displayed or latest, "latest": latest,
+    from yt_playlist.rec import product_comparison
+    live = product_comparison.state(store)
+    live['report'] = store.rec_proposals.get_proposals('model_live_report') or live.get('report')
+    if live.get('decision_at'):
+        live['decision_date'] = date(live['decision_at'])
+    if live.get('phase') in ('preparing', 'observing') and state['state'] not in ('restoring', 'paused'):
+        state.update(state='running', reason='Comparing complete recommendation menus and observed listening.')
+    elif live.get('retry_at') and state['state'] not in ('restoring', 'paused'):
+        state.update(state='waiting', reason=live.get('reason', 'Collecting listening before the next comparison.'),
+                     next_date=date(live['retry_at']))
+    return {**state, "runs": runs, "last": displayed or latest, "latest": latest, 'product': live if live.get('run_id') else {},
             "current": current_setup(store), "min_trials": MIN_TRIALS, "min_windows": MIN_WINDOWS,
             "restore_id": store.settings.get_setting("rec_selection_active_run"),
             "version": f"{latest['id'] if latest else 0}:{latest['status'] if latest else 'waiting'}:{store.rec_model.rec_vectors_count()}:{current_setup(store)['dim']}:{state['state']}"}

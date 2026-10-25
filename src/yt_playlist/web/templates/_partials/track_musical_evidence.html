@@ -1,0 +1,28 @@
+<details class="track-musical-evidence">
+  <summary>Musical character <span class="muted">{{ musical.known }} of {{ musical.total }} signals</span></summary>
+  <p>Used by On Air and Mix Tapes. Signals are estimates; model predictions and genre hints have not been validated by listening.</p>
+  <dl class="track-musical-signals">
+    {% for row in musical.rows %}<div data-musical-signal="{{ row.name }}">
+      <dt>{{ row.label }}</dt>
+      <dd>{{ row.description }}{% if row.limited %} <span class="muted">· Limited evidence</span>{% endif %}
+        {% if row.basis %}<small>{{ row.basis }}</small>{% endif %}
+        {% if row.conflict %}<small>Sources disagree.</small>{% endif %}
+      </dd>
+    </div>{% endfor %}
+  </dl>
+  {% if musical.sources %}
+  <details class="track-musical-sources"><summary>Source observations</summary>
+    <p>Native model outputs describe their classifier result, not confidence that the recording matches. Lookup methods have not been manually verified.</p>
+    {% for source in musical.sources %}<div class="track-musical-source">
+      <strong>{{ source.provider }} · {{ source.scope }}</strong>
+      <ul>{% for observation in source.observations %}<li>
+        {{ observation.field }}: {{ observation.value }}{% if observation.unit %} ({{ observation.unit }}){% endif %}
+        <small>{{ observation.kind }} · {{ observation.match }}</small>
+        {% if observation.model %}<small>Model: {{ observation.model }}</small>{% endif %}
+        {% if observation.provider_version %}<small>Provider version: {{ observation.provider_version }}</small>{% endif %}
+      </li>{% endfor %}</ul>
+    </div>{% endfor %}
+  </details>
+  {% endif %}
+  {% if musical.truncated %}<p>Some source details are unavailable or awaiting refresh.</p>{% endif %}
+</details>

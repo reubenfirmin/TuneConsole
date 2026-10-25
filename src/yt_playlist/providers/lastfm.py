@@ -14,8 +14,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from yt_playlist.providers import credentials, genres, transport
-from yt_playlist.util.matching import is_remix
+from yt_playlist.providers import credentials, descriptive_tags, genres, transport
+from yt_playlist.util.matching import is_remix, normalize, recording_title
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter
 from yt_playlist.util import net
 
@@ -59,13 +59,14 @@ def probe(track, store=None, key=None) -> EnrichmentResult:
     key = key or api_key(store)
     if not key:
         return EnrichmentResult("lastfm", {})
-    genre, year = enrich(track["title"], track["artist"], key)
+    observations = []
+    genre, year = enrich(track["title"], track["artist"], key, observations=observations)
     fields = {}
     if genre:
         fields["genre"] = genre
     if year:
         fields["year"] = year
-    return EnrichmentResult("lastfm", fields)
+    return EnrichmentResult("lastfm", fields, tuple(observations))
 
 
 def _get(params, *, timeout=_HTTP_TIMEOUT_S):
@@ -148,6 +149,11 @@ def _tag_names(payload):
     return [t.get("name", "") for t in tags if t.get("name")]
 
 
+def _tags(payload):
+    tags = ((payload or {}).get('toptags') or {}).get('tag') or []
+    return [tags] if isinstance(tags, dict) else tags
+
+
 def _year_from_tags(names):
     """Last.fm tags often include the release year (e.g. '1979'). Return the first plausible one."""
     for name in names:
@@ -171,7 +177,7 @@ def artist_genre(artist, key):
         return None
 
 
-def enrich(title, artist, key):
+def enrich(title, artist, key, *, observations=None):
     """Return (genre, year) from Last.fm. One track.getInfo gives the tags (genre, via the whitelist)
     and the canonical page URL; the release year is read off that page's metadata (Last.fm exposes it
     as primary metadata, not in the API). Genre falls back to artist tags; year to a year-like tag."""
@@ -182,12 +188,26 @@ def enrich(title, artist, key):
         logger.warning("Last.fm getInfo failed for %r / %r: %s", title, artist, e)
         return (None, None)
     track = (info or {}).get("track") or {}
+    credit = track.get('artist') or {}
+    credit = credit if isinstance(credit, dict) else {'name': credit}
+    match = {'method': 'name_query', 'input_title': title, 'input_artist': artist,
+             'returned_title': track.get('name'), 'returned_artist': credit.get('name'),
+             'title_artist_match': bool(recording_title(track.get('name')) == recording_title(title)
+                                       and normalize(credit.get('name')) == normalize(artist)
+                                       and normalize(artist))}
+    descriptive_tags.retain(observations, scope='recording',
+        entity_id=track.get('mbid') or track.get('url'), tags=_tags(track),
+        source_path='track.getinfo:track.toptags', match_evidence=match)
     track_tags = _tag_names(track)   # _tag_names guards the single-tag-as-dict case the API returns
     genre = genres.pick_genre(track_tags)
     if not genre and artist and not is_remix(title):
         try:
-            genre = genres.pick_genre(_tag_names(
-                _get({"method": "artist.gettoptags", "artist": artist, **common})))
+            artist_tags = _get({"method": "artist.gettoptags", "artist": artist, **common})
+            genre = genres.pick_genre(_tag_names(artist_tags))
+            if match['title_artist_match']:
+                descriptive_tags.retain(observations, scope='artist',
+                    entity_id=credit.get('mbid') or credit.get('url'), tags=_tags(artist_tags),
+                    source_path='artist.gettoptags:toptags', match_evidence=match)
         except Exception as e:  # noqa: BLE001
             logger.warning("Last.fm artist tags failed for %r: %s", artist, e)
     # Cheapest source first: the tags are already in hand, so a year tag costs nothing. Only when

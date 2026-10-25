@@ -4,6 +4,10 @@ from yt_playlist.util import genre_map
 
 
 def prepare(store, now, parameters):
+    if home_vibe.current(store, now):
+        # A clicked fallback uses the same complete worker inputs as the main
+        # menu. Its consumer must not get stuck waiting on an unrelated cache.
+        return mode_surfaces.prepare_bundles(store, now)
     lane = parameters["lane"]
     keys = store.rec_query.library_keys()
     if lane == "temporal":
@@ -17,13 +21,21 @@ def prepare(store, now, parameters):
         # Filter after ranking the whole library, rather than a small global head that may
         # contain none of the requested genres. This work runs in the clicked background job.
         tracks = [mode_surfaces._item_dict(t) for t in scorer(store, now, limit=max(300, len(keys)))]
-    tracks = home_themes.matching_genres(store, tracks, include=parameters["include_genres"],
-                                        avoid=parameters["avoid_genres"])
+    if not home_vibe.current(store, now):
+        tracks = home_themes.matching_genres(store, tracks, include=parameters["include_genres"],
+                                            avoid=parameters["avoid_genres"])
     tracks = measurement.stamp_pool(store, tracks, now, lane)
     store.rec_proposals.put_proposals(f"home_pool:{lane}", {"parameters": parameters, "tracks": tracks}, now)
 
 
 def pick(store, now, parameters, exclude_keys=()):
+    if preset := home_vibe.current(store, now):
+        from yt_playlist.rec import vibe_pools
+        lane = parameters['lane']
+        if lane == 'temporal':
+            lane = f"temporal:{parameters['epoch'] % 3}"
+        return vibe_pools.pick(store, now, preset, lane, exclude_keys,
+                               include_genres=parameters['include_genres'], avoid_genres=parameters['avoid_genres'])
     cached = store.rec_proposals.get_proposals(f"home_pool:{parameters['lane']}") or {}
     if cached.get("parameters") != parameters:
         return []

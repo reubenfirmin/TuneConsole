@@ -36,17 +36,27 @@ class RadioDirections:
     def _allowed(self, track):
         return track["video_id"] not in self.blocked
 
+    def _genres(self, history, *, current=None):
+        theme = getattr(self.candidates, 'tuning', {}).get('theme', .5)
+        if getattr(self.candidates, 'cluster_members', None):
+            theme = .5  # Prepared style coordinates own navigation in indexed streams.
+        return GenrePolicy(theme, history, current=current)
+
     def continue_sequence(self, history, prefix, anchor, excluded):
         """Extend an unsent branch using the current candidate and feedback policy."""
         current = history[-1] if history else anchor
-        genres = GenrePolicy(getattr(self.candidates, "tuning", {}).get("theme", .5), history, current=current)
+        genres = self._genres(history, current=current)
         proposal = [t for t in prefix if genres.allows(t)]
+        intensity_active = getattr(self.candidates, 'tuning', {}).get('energy', .5) != .5
+        destination = proposal[-1] if proposal and intensity_active else anchor
         while len(proposal) < DEPTH:
-            pick = self.candidates.next_track(history + proposal, target=anchor,
+            pick = self.candidates.next_track(history + proposal, target=destination,
                 feedback=self.feedback, excluded=set(excluded) | self.blocked | self.retired, current=current)
             if pick is None:
                 break
             proposal.append(pick)
+            if intensity_active:
+                destination = pick
         return proposal
 
     @staticmethod
@@ -90,7 +100,7 @@ class RadioDirections:
         played = {t["video_id"] for t in history}
         active = self.slots[self.active]
         anchor = active["anchor"] if active else self.seed
-        genres = GenrePolicy(getattr(self.candidates, "tuning", {}).get("theme", .5), history)
+        genres = self._genres(history)
         if genres.pinned and history:
             anchor = history[-1]
         old = active["tracks"] if active else []
@@ -108,7 +118,7 @@ class RadioDirections:
             self.slots[self.active] = self._proposal(anchor, proposal, transition)
             changed = True
         used = played | self.retired | {t["video_id"] for t in proposal}
-        anchors = [anchor]
+        anchors = [self.slots[self.active]['anchor']]
         for slot in range(4):
             if slot == self.active:
                 continue
@@ -152,6 +162,8 @@ class RadioDirections:
         return changed
 
     def _proposal(self, anchor, tracks, transition):
+        if tracks and getattr(self.candidates, 'tuning', {}).get('energy', .5) != .5:
+            anchor = tracks[-1]
         label, artists = self._label(tracks, anchor)
         cluster = self.candidates.cluster_for(anchor)
         label = self.candidates.modes.get(cluster, {}).get("label") or label

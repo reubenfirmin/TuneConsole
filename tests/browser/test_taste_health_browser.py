@@ -8,6 +8,38 @@ from playwright.sync_api import expect
 
 from yt_playlist.rec import autotune_run, eval_recs, scorecard
 
+
+@pytest.mark.parametrize('width', [1440, 390])
+def test_production_comparison_reports_formats_and_pause_without_overflow(live_app, store, page, width, tmp_path):
+    from tests.rec.test_product_comparison import favorable
+    from yt_playlist.rec import product_comparison as product
+    current = {'phase': 'observing', 'attempt': 1, 'seed': 'balanced', 'policy': dict(product.POLICY),
+        'alpha': .025, 'previous': {'method': 'svd', 'dim': 48},
+        'challenger': {'method': 'svd', 'dim': 64}, 'generation': 'serving',
+        'started_at': 0, 'exposure_until': 28 * product.DAY, 'decision_at': 29 * product.DAY,
+        'constraints': product.constraints(store)}
+    current['run_id'] = store.model_selection.start_selection(0, {'kind': 'product', 'ran_at': 0,
+        'status': 'running', 'phase': 'observing', 'previous': current['previous'],
+        'selected': current['previous'], 'challenger': current['challenger'], 'grid': []})
+    store.rec_proposals.put_proposals(product.SURFACE, current, 0)
+    store.rec_proposals.put_proposals('model_live_report', favorable(store, current), current['decision_at'])
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.goto(live_app + '/taste#health')
+    table = page.get_by_role('table', name='Observed choices and listening by format and setup')
+    expect(table).to_be_visible()
+    expect(table.get_by_role('row')).to_have_count(7)
+    expect(page.get_by_text('Observed days:', exact=False)).to_be_visible()
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.locator('#autotune-status').screenshot(path=str(tmp_path / f'production-comparison-{width}.png'))
+    page.get_by_role('button', name='Pause automatic selection', exact=True).click()
+    expect(page.get_by_role('button', name='Resume automatic selection', exact=True)).to_be_visible()
+    page.get_by_role('button', name='Resume automatic selection', exact=True).click()
+    expect(page.get_by_role('button', name='Pause automatic selection', exact=True)).to_be_visible()
+    page.get_by_role('link', name='History and test details', exact=True).click()
+    expect(page.get_by_text('Challenger: Playlist patterns (SVD), 64 features.', exact=True)).to_be_visible()
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+
+
 @pytest.mark.parametrize("width", [1920, 1440, 1024, 390, 320])
 def test_model_health_groups_results_and_explains_tuning(live_app, store, page, monkeypatch, width, tmp_path):
     iid = store.identities.get_identities()[0].id

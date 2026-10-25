@@ -12,6 +12,29 @@
 
 /* The first experience uses the space beside the rail, like the full Taste workspace. */
 .setup-home { max-width: 82rem; margin-inline: auto; }
+.listening-format { padding-block: clamp(1rem, 3vw, 3rem); }
+.listening-format h1 { margin: 0 0 1rem; font-size: clamp(2rem, 4vw, 3.5rem);
+  line-height: 1.1; letter-spacing: -.035em; text-wrap: balance; }
+.listening-format > p { max-width: 58ch; color: var(--dim); line-height: 1.6; }
+.listening-format-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: clamp(1rem, 2vw, 2rem); margin-block: 2rem; }
+.listening-format-options form { min-width: 0; }
+.listening-format-option { display: flex; flex-direction: column; width: 100%; height: 100%; padding: 0;
+  overflow: hidden; text-align: left; color: var(--text); background: var(--surface-inset);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm); cursor: pointer;
+  transition: border-color .2s, transform .2s; animation: starter-arrive .65s ease both; }
+.listening-format-option:hover { border-color: var(--accent); transform: translateY(-.25rem); }
+.listening-format-option:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
+.listening-format-option img { display: block; width: 100%; height: auto; aspect-ratio: 3 / 2; object-fit: cover; }
+.listening-format-copy { display: grid; gap: .75rem; padding: clamp(1.25rem, 2vw, 2rem); }
+.listening-format-copy strong { display: flex; align-items: center; justify-content: space-between;
+  gap: .75rem; font-size: var(--type-xl); }
+.listening-format-copy .ui-arrow { width: 1.5rem; height: 1.5rem; flex: none; }
+.listening-format-copy > span { color: var(--dim); line-height: 1.6; }
+.listening-format-note { font-size: var(--type-ui); }
+@media (max-width: 48rem) {
+  .listening-format-options { grid-template-columns: minmax(0, 1fr); }
+}
 .arrival { position: relative; isolation: isolate; display: flex; align-items: center;
   min-height: clamp(27rem, 37vw, 36rem); overflow: hidden; text-align: left;
   border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-inset); }
@@ -77,10 +100,6 @@
   .starter-context { font-size: var(--type-xs); }
   .starter-play { font-size: var(--type-ui); padding-inline: .8rem; }
 }
-@media (prefers-reduced-motion: reduce) {
-  .arrival-copy, .starter-mix, .page-home .starter-track, .arrival.is-importing .arrival-illustration { animation: none; }
-}
-
 /* Home nudge banner: icon, text, and dismiss as three columns so the copy never wraps under the
    icon. Violet-tinted to match the recommendation theme. */
 .home-nudge {

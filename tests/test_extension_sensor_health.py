@@ -23,10 +23,10 @@ const scenario = process.argv[1];
 const event = () => ({addListener() {}, removeListener() {}});
 const injections = [], probes = [], frames = [], sockets = [], reloads = [];
 let contentReady = scenario !== 'missing_receiver';
-let receiverRevision = scenario === 'old_receiver' ? undefined : scenario === 'old_receiver_revision' ? 6 : 9;
-let mainRevision = scenario === 'old_main_revision' ? 7 : 9;
-if (scenario === 'newer_main_revision') mainRevision = 10;
-if (scenario === 'newer_receiver_revision') receiverRevision = 10;
+let receiverRevision = scenario === 'old_receiver' ? undefined : scenario === 'old_receiver_revision' ? 6 : 10;
+let mainRevision = scenario === 'old_main_revision' ? 7 : 10;
+if (scenario === 'newer_main_revision') mainRevision = 11;
+if (scenario === 'newer_receiver_revision') receiverRevision = 11;
 if (scenario === 'upgrade_unavailable') receiverRevision = 6;
 let mainVersion = scenario === 'old_version' ? 3
   : ['missing_main', 'partial_injection', 'missing_receiver'].includes(scenario) ? null : 4;
@@ -60,12 +60,12 @@ const chrome = {
     if (scenario === 'upgrade_unavailable') throw Error('Could not inject an update');
     if (call.files.includes('content.js')) {
       contentReady = true;
-      if (scenario !== 'old_receiver') receiverRevision = 9;
+      if (scenario !== 'old_receiver') receiverRevision = 10;
     }
     if (call.files.includes('nowplaying_main.js')) {
       if (scenario === 'partial_injection') throw Error('MAIN injection failed');
       mainVersion = 4;
-      mainRevision = 9;
+      mainRevision = 10;
       mainAgeMs = 0;
     }
     if (scenario === 'missing_observer' && call.files.includes('observer_main.js'))
@@ -92,10 +92,10 @@ sockets[0].readyState = Socket.OPEN;
   assert.equal(report.reinjectedTabs, current || failed || scenario === 'upgrade_unavailable' ? 0 : 1);
   assert.equal(frames.at(-1).type, 'sensor-health');
   assert.equal(frames.at(-1).healthy, report.healthy);
-  assert.equal(report.versions[0].mainRevision, scenario === 'newer_main_revision' ? 10 : 9);
+  assert.equal(report.versions[0].mainRevision, scenario === 'newer_main_revision' ? 11 : 10);
   assert.equal(report.versions[0].receiverRevision,
-    scenario === 'old_receiver' ? null : scenario === 'newer_receiver_revision' ? 10 :
-      scenario === 'upgrade_unavailable' ? 6 : 9);
+    scenario === 'old_receiver' ? null : scenario === 'newer_receiver_revision' ? 11 :
+      scenario === 'upgrade_unavailable' ? 6 : 10);
   assert.equal(report.versions[0].capture.metadataVerified, false,
     'healthy transport must not hide an ineligible exact-play producer');
   assert.equal(probes.at(-1).main, true);

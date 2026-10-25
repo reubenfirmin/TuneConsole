@@ -2,8 +2,9 @@
 
 
 class ServingTasks:
-    def __init__(self, ctx, stage):
+    def __init__(self, ctx, stage, *, checkpoint=None):
         self.ctx, self.stage = ctx, stage
+        self.checkpoint = checkpoint
 
     def ratings(self):
         from yt_playlist.library import ratings
@@ -51,11 +52,14 @@ class ServingTasks:
         self.stage("artist images", discover.repair_artist_images, self.ctx, artist_ids, self.ctx.now_fn())
 
     def choices(self):
-        from yt_playlist.rec import choice_evidence, model_selection
+        from yt_playlist.rec import choice_evidence, comparison_preparation, model_selection
         now = self.ctx.now_fn()
+        self.stage('model comparison storage', self.ctx.store.model_selection.maintain_selection, now)
         self.stage("daily listening choices", choice_evidence.daily, self.ctx.store, now)
         self.stage("daily model forecasts", model_selection.update_followup, self.ctx.store,
                    now, now_fn=self.ctx.now_fn)
+        self.stage('daily model decision', comparison_preparation.maintain, self.ctx.store, now,
+                   checkpoint=self.checkpoint)
 
     def stories(self):
         from yt_playlist.rec import into_recently

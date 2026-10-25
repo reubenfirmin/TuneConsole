@@ -359,7 +359,8 @@ class ChartsRepo(Repo):
         aid = artists.lookup(self.conn,artist)
         if browse_id:
             ref = self.conn.execute("SELECT artist_id FROM artist_provider_ids WHERE provider='youtube' AND provider_id=?", (browse_id,)).fetchone()
-            aid = ref[0] if ref else None
+            if ref:
+                aid = ref[0]
         artist_filter = 'EXISTS (SELECT 1 FROM track_artists ta WHERE ta.entry_id=t.id AND ta.artist_id=?)'
         params = [aid]
         eligible = playable_tracks_sql(f'SELECT t.* FROM tracks t WHERE {artist_filter}')

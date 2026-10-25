@@ -7,6 +7,84 @@ from tests.test_song_actions import SONG, songs  # noqa: F401 - shared fixture
 from yt_playlist.web.track_links import track_url
 
 
+def test_musical_evidence_uses_saved_profiles_without_foreground_preparation(songs, monkeypatch):
+    from tests.musical_support import prepare_profiles
+    from yt_playlist.providers.base import MetadataObservation
+    from yt_playlist.rec import musical_profiles
+    store = songs['store']
+    tid = store.tracks.track_ids_for_videos(['owned-song'])['owned-song']
+    store.enrichment_state.record_metadata_observations(tid, 'acousticbrainz', [MetadataObservation(
+        'mood_aggressive', .9, 'recording', 'recording-one', 'prediction', unit='probability',
+        model_version={'name': 'mood-aggressive', 'version': '1'}, provider_version='native-v1',
+        match_evidence={'method': 'supplied_recording_mbid'})], run_id='one', now=10)
+    prepare_profiles(store)
+    key = store.tracks.identity_key_for_video('owned-song')
+    def unexpected(*args, **kwargs):
+        pytest.fail('The track page must only read prepared musical evidence')
+    monkeypatch.setattr(musical_profiles, 'source_profile', unexpected)
+    monkeypatch.setattr(musical_profiles, 'resolve', unexpected)
+    monkeypatch.setattr(songs['main'], 'get_song', unexpected)
+    before = store.conn.total_changes
+    body = songs['http'].get('/track/owned-song').text
+    evidence = body.split('class="track-musical-evidence"')[1].split('</section>')[0]
+    assert 'Used by On Air and Mix Tapes' in evidence
+    assert 'Model prediction' in evidence and 'AcousticBrainz (recording)' in evidence
+    assert 'mood aggressive: 0.9 (probability)' in evidence
+    assert 'native-v1' in evidence and 'mood-aggressive' in evidence
+    assert 'Recording ID lookup' in evidence and 'not been manually verified' in evidence
+    assert 'Unknown' in evidence and 'confidence that the recording matches' in evidence
+    assert store.conn.total_changes == before
+    profile = store.musical_profiles.by_keys([key])[key]
+    # A source cache can advance before the recording resolver gets its next turn.
+    # Its new observations must not be attributed to the older recording result.
+    with store.conn:
+        store.conn.execute("UPDATE rec_musical_source_profiles SET digest='newer-source'")
+    body = songs['http'].get('/track/owned-song').text
+    assert 'Some source details are unavailable or awaiting refresh.' in body
+    assert 'mood aggressive: 0.9 (probability)' not in body
+    assert store.musical_profiles.by_keys([key])[key] == profile
+
+
+def test_musical_evidence_distinguishes_legacy_hints_corrections_and_unknowns(songs):
+    from tests.musical_support import prepare_profiles
+    from yt_playlist.core import catalog
+    store = songs['store']
+    tid = store.tracks.track_ids_for_videos(['owned-song'])['owned-song']
+    with store.conn:
+        store.conn.execute("UPDATE recordings SET genre='Ambient',danceability=.8 WHERE id=("
+                           'SELECT recording_id FROM catalog_entries WHERE id=?)', (tid,))
+        catalog.choose_field(store.conn, tid, 'energy', .9)
+        catalog.choose_field(store.conn, tid, 'mood_happy', None)
+    prepare_profiles(store)
+    body = songs['http'].get('/track/owned-song').text
+    intensity = body.split('data-musical-signal="intensity"')[1].split('</dd>')[0]
+    groove = body.split('data-musical-signal="groove"')[1].split('</dd>')[0]
+    relaxed = body.split('data-musical-signal="relaxed"')[1].split('</dd>')[0]
+    happiness = body.split('data-musical-signal="happiness"')[1].split('</dd>')[0]
+    assert 'High' in intensity and 'Your correction' in intensity and 'Genre hint' not in intensity
+    assert 'Legacy metadata' in groove and 'Limited evidence' in groove
+    assert 'Genre hint' in relaxed and 'Limited evidence' in relaxed
+    assert 'Unavailable after corrections' in happiness and 'Your correction' in happiness
+
+
+def test_musical_source_details_are_bounded(songs):
+    from tests.musical_support import prepare_profiles
+    from yt_playlist.providers.base import MetadataObservation
+    store = songs['store']
+    tid = store.tracks.track_ids_for_videos(['owned-song'])['owned-song']
+    for i in range(3):
+        store.enrichment_state.record_metadata_observations(tid, f'provider-{i}', [MetadataObservation(
+            'mood_relaxed', .9, 'recording', 'same-recording', 'prediction')], run_id=str(i), now=10)
+    prepare_profiles(store)
+    key = store.tracks.identity_key_for_video('owned-song')
+    digests = store.musical_profiles.by_keys([key])[key]['source_versions']
+    sources, truncated = store.musical_profiles.provenance_sources(key, digests, limit=1)
+    assert len(sources) == 1 and truncated
+    sources, truncated = store.musical_profiles.provenance_sources(key, digests, max_bytes=1)
+    assert sources == [] and truncated
+    assert store.musical_profiles.provenance_sources(key, []) == ([], False)
+
+
 def test_track_metadata_and_playlist_membership_use_exact_upload(songs):
     store = songs['store']
     owned = store.tracks.track_ids_for_videos(['owned-song'])['owned-song']
@@ -22,7 +100,7 @@ def test_track_metadata_and_playlist_membership_use_exact_upload(songs):
     assert 'Source mix' in memberships and 'Offline mix' in memberships
     assert 'Evening mix' not in memberships
     assert 'Artist &amp; Friends' in body
-    assert 'Play ledger' in body and 'No listening evidence recorded' in body
+    assert 'Listening history' in body and 'No listening evidence recorded' in body
 
 
 def test_discovery_preview_retains_metadata_without_saving(songs, monkeypatch):
@@ -116,6 +194,28 @@ def test_ledger_keeps_unknown_history_precision_and_paginates(songs):
 @pytest.mark.parametrize('page', ['-1', 'bad', '100001'])
 def test_ledger_rejects_invalid_pagination(songs, page):
     assert songs['http'].get('/track/owned-song', params={'page': page}).status_code == 422
+    assert songs['http'].get('/track/owned-song/history', params={'page': page}).status_code == 422
+
+
+def test_history_refresh_is_read_only_local_and_keeps_full_page_pagination(songs, monkeypatch):
+    store = songs['store']
+    def unexpected(*args):
+        pytest.fail('History refresh must never fetch metadata or persist a play')
+    monkeypatch.setattr(songs['main'], 'get_song', unexpected)
+    before = store.conn.total_changes
+    assert 'No listening evidence recorded' in songs['http'].get('/track/unknown/history').text
+    assert store.conn.total_changes == before
+    track = store.tracks.track_detail('owned-song')
+    for n in range(51):
+        store.history.record_play_event(songs['main_id'], track['identity_key'], 'owned-song',
+                                        1700000000 + n * 10000, source_timezone='UTC')
+    before = store.conn.total_changes
+    response = songs['http'].get('/track/owned-song/history')
+    assert response.status_code == 200
+    assert response.text.count('<strong>Played</strong>') == 50
+    assert 'href="/track/owned-song?page=1"' in response.text
+    assert 'hx-get="/track/owned-song/history?page=0"' in response.text
+    assert '<html' not in response.text and store.conn.total_changes == before
 
 
 def test_saved_album_and_song_titles_link_to_details(songs):

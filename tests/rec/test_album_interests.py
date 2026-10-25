@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from tests import model_support
-from yt_playlist.rec import album_choices, embedding_vectors, rec_params, scoring, taste_viz
+from yt_playlist.rec import album_choices, choice_evidence, embedding_vectors, rec_params, scoring, taste_viz
 from yt_playlist.rec.taste_context import PlaylistTaste
 
 
@@ -74,15 +74,183 @@ def test_album_reason_excludes_unheard_records_and_other_editions_of_itself():
         artist + ' · Global Underground #42: Patrice Bäumel - Berlin/Unmixed',
         'Kenobix · Hypnotic Reviere', 'Known artist · Known record'], np.eye(3), np.ones(3) / 3)
     taste.sources = [
-        {'kind': 'album', 'browse': 'unmixed', 'return_days': 20},
+        {'kind': 'album', 'browse': 'unmixed', 'return_days': 20, 'return_weight': 1., 'return_coverage': 1.},
         {'kind': 'album', 'browse': 'unheard', 'saved': True, 'return_days': 0},
-        {'kind': 'album', 'browse': 'known', 'return_days': 4}]
+        {'kind': 'album', 'browse': 'known', 'return_days': 4, 'return_weight': 1., 'return_coverage': 1.}]
     album = {'browse_id': 'mixed', 'artist': artist,
              'title': 'Global Underground #42: Patrice Bäumel - Berlin (DJ Mix)'}
     reason = album_choices._rationale(album, taste, np.array([1., .9, .7]), 'content:test')
     assert reason['source']['browse'] == 'known'
     assert reason['text'] == 'A possible fit with your repeat listening to “Known artist · Known record”.'
     assert album_choices._rationale(album, taste, np.array([1., .9, 0.]), 'content:test') is None
+
+
+def test_album_returns_scale_from_one_favorite_to_several_to_the_whole_record_in_both_spaces(store):
+    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    cases = [('one', 12, 1), ('five', 12, 5), ('whole', 12, 12), ('short', 6, 6), ('long', 24, 24)]
+    vectors = []
+    for browse, size, played in cases:
+        keys = album(store, browse, browse.title(), 'Techno', size)
+        store.collection.cache_album_tracklist(browse, browse.title(), browse.title(), None, keys)
+        vectors.extend((key, np.array([1., 0.], dtype=np.float32).tobytes()) for key in keys)
+        store.history.import_listening_events(iid, [
+            (key, None, 1_700_000_000 + day * 86400) for day in range(3) for key in keys[:played]],
+            source_timezone='UTC')
+    anchor = album(store, 'anchor', 'Anchor', 'Folk', 2)
+    vectors.extend((key, np.array([0., 1.], dtype=np.float32).tobytes()) for key in anchor)
+    store.rec_model.replace_rec_vectors(vectors)
+    model_support.build_content_model(store)
+    for taste in (scoring.playlist_taste(store), scoring.content_taste(store)):
+        weights = {source['browse']: weight for source, weight in zip(taste.sources, taste.weights)}
+        boosts = {browse: weights[browse] / weights['anchor'] - 1 for browse, _, _ in cases}
+        assert 0 < boosts['one'] < boosts['five'] < boosts['whole']
+        assert boosts['five'] == pytest.approx(5 * boosts['one'])
+        assert boosts['whole'] == pytest.approx(12 * boosts['one'])
+        assert boosts['short'] == pytest.approx(boosts['whole'])
+        assert boosts['long'] == pytest.approx(boosts['whole'])
+    # Corrections remove their return support, keeping the separate saved seeds.
+    store.history.remove_listening_source('takeout', iid)
+    for taste in (scoring.playlist_taste(store), scoring.content_taste(store)):
+        assert taste.weights == pytest.approx(np.full(6, 1 / 6))
+        assert all(source['return_weight'] == 0 for source in taste.sources)
+
+
+def test_partial_album_returns_focus_on_heard_tracks_without_shrinking_the_denominator(store):
+    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    keys = album(store, 'record', 'Record', None, 12)
+    store.collection.cache_album_tracklist('record', 'Record', 'Record', None, keys)
+    store.collection.remove_saved_album('record')
+    # Ten tracks have no model features; they still belong in the denominator.
+    store.rec_model.replace_rec_vectors([
+        (keys[0], np.array([1., 0.], dtype=np.float32).tobytes()),
+        (keys[1], np.array([0., 1.], dtype=np.float32).tobytes())])
+    store.history.import_listening_events(iid, [
+        (keys[0], None, 1_700_000_000 + day * 86400) for day in range(3)], source_timezone='UTC')
+    taste = scoring.playlist_taste(store)
+    source = taste.sources[0]
+    assert source['return_coverage'] == pytest.approx(1 / 12)
+    assert source['return_weight'] == pytest.approx(np.log(3) / 12)
+    assert (source['modeled_tracks'], source['known_tracks']) == (2, 12)
+    assert taste.centroids[0] == pytest.approx([1., 0.])
+    assert taste.score_all(np.eye(2))[0] > taste.score_all(np.eye(2))[1]
+    reason = album_choices._rationale({'browse_id': 'different'}, taste, np.array([1.]), 'collaborative')
+    assert reason['text'] == 'A possible fit with tracks you keep returning to on “Record · Record”.'
+    # Explicit release feedback can deliberately support the full record.
+    album_choices.set_feedback(store, 'record', 'more', 1_700_300_000)
+    assert scoring.playlist_taste(store).centroids[0] == pytest.approx(np.ones(2) / np.sqrt(2))
+
+
+@pytest.mark.parametrize('tracklist', ['missing', 'truncated', 'unresolved', 'empty'])
+def test_unknown_album_coverage_keeps_saved_support_without_guessing_a_return_boost(store, tracklist):
+    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    keys = album(store, 'record', 'Record', 'Techno', 6)
+    if tracklist != 'missing':
+        store.collection.cache_album_tracklist('record', 'Record', 'Record', None,
+                                               [] if tracklist == 'empty' else keys)
+        aid = store.collection.album_id('record')
+        if tracklist == 'truncated':
+            store.conn.execute('DELETE FROM album_tracks WHERE album_id=? AND id=(SELECT MAX(id) '
+                               'FROM album_tracks WHERE album_id=?)', (aid, aid))
+        elif tracklist == 'unresolved':
+            store.conn.execute('UPDATE album_tracks SET entry_id=NULL,recording_id=NULL,legacy_track_key=? '
+                               'WHERE album_id=? AND id=(SELECT MAX(id) FROM album_tracks WHERE album_id=?)',
+                               ('', aid, aid))
+        store.conn.commit()
+    store.history.import_listening_events(iid, [
+        (key, None, 1_700_000_000 + day * 86400) for day in range(3) for key in keys], source_timezone='UTC')
+    store.rec_model.replace_rec_vectors([
+        (key, np.array([1., 0.], dtype=np.float32).tobytes()) for key in keys])
+    model_support.build_content_model(store)
+    context = store.collection.taste_album_contexts()[0]
+    assert context['tracklist_complete'] is False and context['return_coverage'] is None
+    for taste in (scoring.playlist_taste(store), scoring.content_taste(store)):
+        assert taste.sources[0]['saved'] and taste.sources[0]['return_weight'] == 0
+        assert album_choices._rationale({'browse_id': 'different'}, taste, np.array([1.]), 'test') is None
+
+
+def test_album_returns_do_not_pool_different_songs_days_or_count_generated_and_duplicate_plays(store):
+    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    other = store.identities.upsert_identity('other', 'cred', None, False)
+    keys = album(store, 'record', 'Record', 'Techno', 6)
+    # Repeating a recording within the tracklist cannot enlarge its coverage share.
+    entries = [{'entry_id': row[0]} for row in store.conn.execute(
+        'SELECT entry_id FROM album_tracks WHERE album_id=? ORDER BY id', (store.collection.album_id('record'),))]
+    store.collection.cache_album_tracklist('record', 'Record', 'Record', None, [], entries=entries + entries[:1])
+    start = 1_700_000_000
+    store.history.import_listening_events(iid, [
+        (key, None, start + day * 86400) for day, key in enumerate(keys)], source_timezone='UTC')
+    context = store.collection.taste_album_contexts()[0]
+    assert context['return_days'] == 1 and context['return_coverage'] == 0
+    for account in (iid, other):
+        store.history.import_listening_events(account, [
+            (keys[0], None, start + 7 * 86400 + replay * 60) for replay in range(20)], source_timezone='UTC')
+    for key in keys[1:]:
+        store.history.record_play_event(iid, key, None, start + 8 * 86400,
+                                        context_choice=True, source_timezone='UTC')
+    context = store.collection.taste_album_contexts()[0]
+    assert context['tracklist_complete'] and len(context['keys']) == 6
+    assert context['return_days'] == 2
+    assert context['track_days'] == {key: 2 if key == keys[0] else 1 for key in keys}
+    assert context['return_coverage'] == pytest.approx(1 / 6)
+
+
+@pytest.mark.parametrize('played', [1, 5, 12])
+def test_confirmed_album_queue_returns_use_track_coverage_and_corrections_without_organic_leakage(store, played):
+    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    keys = album(store, 'record', 'Record', 'Techno', 12)
+    anchor = album(store, 'anchor', 'Anchor', 'Folk', 2)
+    store.collection.cache_album_tracklist('record', 'Record', 'Record', None, keys)
+    store.rec_model.replace_rec_vectors([
+        (key, np.array([1., 0.], dtype=np.float32).tobytes()) for key in keys]
+        + [(key, np.array([0., 1.], dtype=np.float32).tobytes()) for key in anchor])
+    model_support.build_content_model(store)
+    start = 1_700_000_000
+    tracks = [{'key': key, 'video_id': f'record-{index}'} for index, key in enumerate(keys)]
+    unchosen = choice_evidence.issue(store, 'albums', [{'id': 'record', 'tracks': tracks}], start - 100,
+                                     context={}, opportunity_id='unchosen')
+    choice_evidence.respond(store, unchosen, 'start', start - 90, option_id='record',
+                            details={'video_id': tracks[0]['video_id']})
+    for day in range(2):
+        at = start + day * 86400
+        oid = choice_evidence.issue(store, 'albums', [{'id': 'record', 'tracks': tracks}], at, context={},
+                                    opportunity_id=f'return-{day}')
+        choice_evidence.respond(store, oid, 'choice', at + 1, option_id='record')
+        for index, track in enumerate(tracks[:played]):
+            now = at + 10 + index
+            store.history.record_play_event(iid, track['key'], track['video_id'], now,
+                                            context_choice=True, source_timezone='UTC')
+            choice_evidence.respond(store, oid, 'start', now, option_id='record',
+                                    action_id=f'start-{day}-{index}', details={'video_id': track['video_id']})
+        choice_evidence.respond(store, oid, 'start', at + 30, option_id='record',
+                                action_id=f'wrong-{day}', details={'video_id': 'unrelated'})
+    # Continuing the old queue on another day is not a fresh deliberate return.
+    choice_evidence.respond(store, oid, 'start', start + 2 * 86400, option_id='record',
+                            action_id='continuation', details={'video_id': tracks[0]['video_id']})
+    failed = choice_evidence.issue(store, 'albums', [{'id': 'record', 'tracks': tracks}], start + 2 * 86400,
+                                   context={}, opportunity_id='failed')
+    choice_evidence.respond(store, failed, 'choice', start + 2 * 86400 + 1, option_id='record')
+    choice_evidence.respond(store, failed, 'start', start + 2 * 86400 + 2, option_id='record',
+                            details={'video_id': 'unrelated'})
+    now = start + 3 * 86400
+    choice_evidence.compile_report(store, now)
+    assert not any(store.collection.taste_album_contexts()[0]['track_days'].values())
+    def check():
+        for taste in (scoring.playlist_taste(store), scoring.content_taste(store)):
+            source = next(row for row in taste.sources if row.get('browse') == 'record')
+            assert source['return_coverage'] == pytest.approx(played / 12)
+            assert source['return_weight'] == pytest.approx(played / 12 * np.log(2))
+    check()
+    # Independent history on the same days must not double the album signal.
+    store.history.import_listening_events(iid, [(key, None, start + day * 86400 + 3600)
+        for day in range(2) for key in keys[:played]], source_timezone='UTC')
+    check()
+    store.history.remove_listening_source('takeout', iid)
+    choice_evidence.respond(store, oid, 'withdraw', now + 1,
+                            details={'action_id': f'{oid}:choice:record'})
+    choice_evidence.compile_report(store, now + 2)
+    for taste in (scoring.playlist_taste(store), scoring.content_taste(store)):
+        source = next(row for row in taste.sources if row.get('browse') == 'record')
+        assert source['return_coverage'] == 0 and source['return_weight'] == 0
 
 
 def test_album_feedback_changes_only_the_declared_release_and_is_reversible(store):

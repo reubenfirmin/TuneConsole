@@ -15,6 +15,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Protocol
 from yt_playlist.util import genre_catalog
+from yt_playlist.core.metadata_observations import MetadataObservation
 
 
 class LookupUnavailable(Exception):
@@ -25,6 +26,7 @@ class LookupUnavailable(Exception):
 class EnrichmentResult:
     provider: str                       # "musicbrainz"
     fields: dict = field(default_factory=dict)   # only non-empty findings: {"genre": "Rock", ...}
+    observations: tuple[MetadataObservation, ...] = ()
 
 
 class Provider(Protocol):

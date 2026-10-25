@@ -30,6 +30,13 @@ def test_album_tab_visibility_and_remembered_default(live_app, store, page, widt
         'acquisition': 'automatic'}, 'rating': {
         'value': 4.3, 'count': 28, 'scale': 5, 'source': 'Discogs community',
         'url': 'https://www.discogs.com/release/123'}, 'retry_at': 1000}, 1)
+    for index in range(1, 4):
+        store.rec_proposals.publish_album_note(f'album-{index}', {'artwork': {
+            'url': f'https://album-images.test/scene-{index}.svg',
+            'source_url': 'https://example.com/photographer', 'kind': 'artist',
+            'credit': f'Artist {index} · Photographer · CC BY-SA 4.0'}, 'retry_at': 1000}, 1)
+    page.route('https://album-images.test/*', lambda route: route.fulfill(
+        content_type='image/svg+xml', body='''<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800"><defs><linearGradient id="g"><stop stop-color="#214653"/><stop offset="1" stop-color="#a67c57"/></linearGradient></defs><path fill="url(#g)" d="M0 0h1200v800H0z"/><circle cx="600" cy="260" r="130" fill="#c3ab8f"/><path d="M290 800v-120a310 310 0 0 1 620 0v120" fill="#253b42"/></svg>'''))
     store.rec_proposals.put_proposals("album_prepared", {'items': albums, 'context': {}, 'built_at': 1}, 1)
     page.set_viewport_size({"width": width, "height": 1100})
     page.goto(live_app + "/")
@@ -45,6 +52,7 @@ def test_album_tab_visibility_and_remembered_default(live_app, store, page, widt
     assert any(row['kind'] == 'visible' and row['option_id'].startswith('album-')
                for row in store.rec_ledger.evidence().records('response'))
     expect(page.locator(".album-choice")).to_have_count(4)
+    expect(page.locator('.album-story-scene img')).to_have_count(3)
     expect(page.locator('.album-choice-play svg:visible')).to_have_count(4)
     expect(page.locator('.album-choice-play')).to_have_text(['', '', '', ''])
     expect(page.locator('.album-choice-facts .gtag')).to_have_count(4)
@@ -68,6 +76,9 @@ def test_album_tab_visibility_and_remembered_default(live_app, store, page, widt
         return {left:box.left, top:box.top, right:box.right, bottom:box.bottom};
     })""")
     assert all(frames[i]['bottom'] <= frames[i + 1]['top'] for i in range(3))
+    if width > 1000:
+        assert page.locator('.album-choice--reverse .album-sleeve').bounding_box()['x'] > page.locator('.album-choice--reverse .album-story-copy').bounding_box()['x']
+        assert page.locator('.album-choice--inset .album-story-scene').bounding_box()['width'] < 160
     covers = page.locator('.album-choice-art').evaluate_all('nodes => nodes.map(el => el.getBoundingClientRect().width)')
     assert max(covers) - min(covers) < 1
     fonts = page.locator('.album-choice-title').evaluate_all('nodes => nodes.map(el => getComputedStyle(el).fontSize)')
@@ -86,6 +97,10 @@ def test_album_tab_visibility_and_remembered_default(live_app, store, page, widt
     card.locator('.album-choice-art').click()
     expect(card.locator('.album-inline .track-table tbody tr.srow')).to_have_count(2)
     expect(card.locator('.album-inline')).to_be_visible()
+    expect(card.locator('.album-inline .album-library')).to_have_count(1)
+    expect(card.locator('.album-inline').get_by_role('button', name='Save album to library', exact=True)).to_be_visible()
+    expect(card.locator('.album-inline-feedback')).to_have_count(0)
+    expect(card.get_by_role('link', name='Album page', exact=True)).to_have_count(0)
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     assert card.locator('.track-table').evaluate('''table =>
         Math.max(...[...table.querySelectorAll('thead th')].map(th => th.getBoundingClientRect().bottom)) <=

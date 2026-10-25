@@ -13,7 +13,10 @@ _KEY_COLUMNS = {"settings": "key", "rec_proposals": "surface", "player_events": 
                 "catalog_entries": "recording_id", "unresolved_items": "entry_id",
                 "entry_field_choices": "entry_id", "library_memberships": "entry_id",
                 "discovery_memberships": "recording_id", "discovery_sources": "recording_id",
-                "rec_content_pending": "identity_key", "rec_prepared_content": "identity_key"}
+                "rec_content_pending": "identity_key", "rec_prepared_content": "identity_key",
+                "rec_musical_sources": "source_key", "rec_musical_links": ("source_key", "recording_id"),
+                "rec_musical_pending": "source_key", "rec_musical_source_profiles": "source_key",
+                "rec_musical_profiles": "identity_key"}
 # A declared catalog read consumes every recording field except enrichment's
 # scheduling timestamps. Default/unannotated reads still guard the entire row.
 # Excluding only these fields also guards newly added catalog columns.
@@ -49,7 +52,10 @@ class Revisions:
             for operation in ("INSERT", "UPDATE", "DELETE"):
                 keys = ["''"]
                 if name in _KEY_COLUMNS:
-                    keys.extend(f"'key:' || {side}.{_identifier(_KEY_COLUMNS[name])}" for side in
+                    columns_for_keys = _KEY_COLUMNS[name]
+                    if isinstance(columns_for_keys, str):
+                        columns_for_keys = (columns_for_keys,)
+                    keys.extend(f"'key:' || {side}.{_identifier(column)}" for column in columns_for_keys for side in
                                 (("OLD", "NEW") if operation == "UPDATE" else
                                  ("OLD",) if operation == "DELETE" else ("NEW",)))
                 writes = "".join(
@@ -79,18 +85,21 @@ class Revisions:
         if dependencies is None:
             rows = self.conn.execute(
                 "SELECT table_name,record_key,revision FROM temp.snapshot_revisions")
+            return {(r[0], r[1]): r[2] for r in rows}
         else:
             dependencies = sorted(set(dependencies))
-            if not dependencies:
-                return {}
-            values = ','.join('(?,?)' for _ in dependencies)
-            rows = self.conn.execute(
-                f"WITH requested(table_name,record_key) AS (VALUES {values}) "
-                "SELECT r.table_name,r.record_key,r.revision FROM requested q "
-                "JOIN temp.snapshot_revisions r "
-                "ON r.table_name=q.table_name AND r.record_key=q.record_key",
-                tuple(value for dependency in dependencies for value in dependency))
-        return {(r[0], r[1]): r[2] for r in rows}
+            result = {}
+            for start in range(0, len(dependencies), 400):
+                batch = dependencies[start:start + 400]
+                values = ','.join('(?,?)' for _ in batch)
+                rows = self.conn.execute(
+                    f"WITH requested(table_name,record_key) AS (VALUES {values}) "
+                    "SELECT r.table_name,r.record_key,r.revision FROM requested q "
+                    "JOIN temp.snapshot_revisions r "
+                    "ON r.table_name=q.table_name AND r.record_key=q.record_key",
+                    tuple(value for dependency in batch for value in dependency))
+                result.update(((r[0], r[1]), r[2]) for r in rows)
+            return result
 
 
 class Reads:

@@ -80,6 +80,31 @@
 .page-artist .artist-album-columns .album-playlists-col { width: 6rem; }
 .page-artist .artist-album-columns .album-plays-col { width: 5rem; }
 .page-artist .artist-album-columns .album-save-col { width: 6rem; }
+.page-artist .artist-tracks-table { table-layout: fixed; }
+.page-artist .artist-tracks-table td { overflow-wrap: anywhere; }
+.page-artist .artist-track-columns .track-art-col { width: 3.75rem; }
+.page-artist .artist-track-columns .track-liked-col { width: 2rem; }
+.page-artist .artist-track-columns .track-plays-col { width: 4.5rem; }
+.page-artist .artist-track-columns .track-length-col { width: 5rem; }
+.page-artist .artist-track-columns .track-menu-col { width: 2.75rem; }
+@media (max-width: 720px) {
+  .page-artist .artist-tracks-table :is(th, td):nth-child(2),
+  .page-artist .artist-tracks-table :is(th, td):nth-child(4),
+  .page-artist .artist-tracks-table :is(th, td):nth-child(6),
+  .page-artist .artist-tracks-table :is(th, td):nth-child(7),
+  .page-artist .artist-track-columns :is(.track-liked-col, .track-album-col, .track-plays-col, .track-length-col) { display: none; }
+  .page-artist .artist-tracks-table :is(th, td) { padding-inline: .3rem; }
+  .page-artist .artist-album-table :is(th, td):nth-child(4),
+  .page-artist .artist-album-table :is(th, td):nth-child(5),
+  .page-artist .artist-album-table :is(th, td):nth-child(6),
+  .page-artist .artist-album-columns :is(.album-songs-col, .album-playlists-col, .album-plays-col) { display: none; }
+  .page-artist .artist-album-columns .album-art-col { width: 3.75rem; }
+  .page-artist .artist-album-columns .album-year-col { width: 3.5rem; }
+  .page-artist .artist-album-columns .album-save-col { width: 5rem; }
+  .page-artist .artist-album-table td { overflow-wrap: anywhere; }
+  .page-artist .artist-album-table :is(th, td) { padding-inline: .3rem; }
+  .page-artist .artist-album-table button { white-space: nowrap; }
+}
 .page-playlist .library-table-card {
   border-block: 0;
 }

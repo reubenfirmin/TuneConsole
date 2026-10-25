@@ -11,7 +11,7 @@ from yt_playlist.library.live_plays import handle_play_event
 
 
 @pytest.mark.parametrize("scenario", [
-    "organic", "generated", "wrong_title", "wrong_artist", "missing_artist", "stale_target",
+    "organic", "generated", "known_title_variant", "wrong_title", "wrong_artist", "missing_artist", "stale_target",
     "conflicting_targets", "conflicting_bar", "unknown_account", "ambiguous_account",
     "paused", "muted", "tab_muted",
 ])
@@ -53,7 +53,8 @@ const document={addEventListener(){},querySelector(selector){
     getPlaylistId:()=> 'PL_current'};
   // This is the observed live layout: no element/controller data and no watch link.
   if(selector==='ytmusic-player-bar')return {getAttribute:()=>''};
-  if(selector==='.title.ytmusic-player-bar')return {textContent:scenario==='wrong_title'?'Previous song':title()};
+  if(selector==='.title.ytmusic-player-bar')return {textContent:scenario==='wrong_title'?'Previous song':
+    scenario==='known_title_variant'?title()+' (Album Mix)':title()};
   if(selector==='.byline.ytmusic-player-bar')return {
     textContent:scenario==='missing_artist'?'':scenario==='wrong_artist'?'Previous artist':'Artist'};
   if(selector==='img.image.ytmusic-player-bar')return {src:scenario==='conflicting_bar'
@@ -96,15 +97,19 @@ for(const fn of polls)fn();flush();
     if scenario == "generated":
         store.playlists.set_playlist_group("PL_current", "Generated")
         store.playlists.mark_generated_playlist("PL_current")
+    if scenario == 'known_title_variant':
+        for video, title in [('current', 'Song'), ('next', 'Next song')]:
+            store.tracks.upsert_track(video, title, 'Artist', '', 200)
     ctx = SimpleNamespace(store=store)
     plays = [frame for frame in frames if frame["type"] == "play"]
     for index, frame in enumerate(plays):
         handle_play_event(ctx, frame, 1000.0 + index * 300)
 
     events = store.history.play_events_since(0)
-    if scenario in {"organic", "generated"}:
+    if scenario in {"organic", "generated", "known_title_variant"}:
         assert [frame["videoId"] for frame in plays] == ["current", "next"]
-        assert all(frame["metadataVerified"] is True and frame["brandId"] == "brand-A" for frame in plays)
+        assert all(frame['videoVerified'] is True and frame["brandId"] == "brand-A" for frame in plays)
+        assert all(frame['metadataVerified'] is (scenario != 'known_title_variant') for frame in plays)
         assert [event["video_id"] for event in events] == ["current", "next"]
         assert [event["played_at"] for event in events] == [1000.0, 1300.0]
         assert all(event["identity_id"] == iid and event["playlist_ytm_id"] == "PL_current" for event in events)
@@ -114,8 +119,10 @@ for(const fn of polls)fn();flush();
     else:
         assert events == []
         assert store.settings.get_setting("last_plays_sync_at") is None
-        if scenario != "ambiguous_account":
-            assert plays == []
         if scenario in {"wrong_title", "wrong_artist", "missing_artist", "stale_target",
                         "conflicting_targets", "conflicting_bar"}:
             assert all(frame["metadataVerified"] is False for frame in frames)
+            assert all(frame['videoVerified'] is True for frame in plays)
+            assert store.tracks.identity_key_for_video('current') is None
+        elif scenario != 'ambiguous_account':
+            assert plays == []

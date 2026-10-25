@@ -187,6 +187,32 @@ for (const detail of [false, true])
   assert.doesNotMatch(radio.junctionStyle(1, detail), /NaN|Infinity/);
 radio.destroyed = true;
 assert.equal(radio.artworkView.moving, false);
+
+const ribbon = vm.runInContext('radioArtwork()', context);
+ribbon.artworkView = {connectedSlot: 1, directionCount: 4};
+ribbon.moveJunction();
+const left = ribbon.junctionX;
+ribbon.artworkView.connectedSlot = 2;
+ribbon.moveJunction();
+for (let i = 0; i < 8; i++) tick(16);
+assert(ribbon.junctionX > ribbon.junctionForkX + 10,
+  'the stem leads the upper curves instead of moving as a rigid fork');
+const turning = ribbon.junctionX, velocity = ribbon.junctionVelocity;
+ribbon.artworkView.connectedSlot = 1;
+ribbon.moveJunction();
+assert.equal(ribbon.junctionX, turning, 'a quick reversal cannot teleport the stem');
+assert.equal(ribbon.junctionVelocity, velocity, 'retargeting preserves momentum');
+assert.equal(frames.size, 1, 'retargeting uses the existing animation');
+tick(16);
+assert(ribbon.junctionX > turning, 'the ribbon eases through its change of direction');
+for (let i = 0; i < 180; i++) {
+  tick(16);
+  assert(ribbon.junctionX > left - 8 && ribbon.junctionX < 633,
+    'the ribbon stays close to its queues during a reversal');
+}
+assert.equal(ribbon.junctionX, left);
+assert.equal(ribbon.junctionForkX, left);
+assert.equal(frames.size, 0, 'the motion stops scheduling frames after it settles');
 """
     result = subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parents[1],
                             capture_output=True, text=True, timeout=20)
@@ -205,12 +231,12 @@ const context=vm.createContext({cancelAnimationFrame(){},sessionStorage:{
 vm.runInContext(fs.readFileSync('src/yt_playlist/web/static/radio-artwork.js','utf8'),context);
 const artwork=vm.runInContext('radioArtwork()',context);
 artwork.artworkView={playlistId:'one'}; artwork.syncArtworkSession();
-for(const [width,height] of [[1440,250],[1792,450],[390,140],[390,480],[120,60]]) {
+for(const [width,height] of [[1440,250],[1792,450],[390,140],[390,480],[342,340],[120,60]]) {
   artwork.drawingSpace={width,historyHeight:height,gapHeight:112};
   artwork.artworkPhase=0;
   const starting=artwork.recordEchoes;
   assert(starting.length<=24,'the drawing has a fixed upper cost');
-  if(width>=390) assert(starting.length>0,'available space gains smaller records');
+  if(width>=300) assert(starting.length>0,'available space gains smaller records');
   for(const phase of [0,.2,1,2,7,1000]) {
     artwork.artworkPhase=phase;
     const copies=artwork.recordEchoes;
@@ -225,7 +251,7 @@ for(const [width,height] of [[1440,250],[1792,450],[390,140],[390,480],[120,60]]
   }
   artwork.artworkPhase=2;
   const moved=artwork.recordEchoes;
-  if(width>=390) assert(moved.some((copy,i)=>Math.hypot(copy.x-starting[i].x,copy.y-starting[i].y)>1),
+  if(width>=300) assert(moved.some((copy,i)=>Math.hypot(copy.x-starting[i].x,copy.y-starting[i].y)>1),
     'smaller records orbit the main record');
   artwork.artworkPhase+=.00001;
   assert(artwork.recordEchoes.every((copy,i)=>Math.hypot(copy.x-moved[i].x,copy.y-moved[i].y)<.01),

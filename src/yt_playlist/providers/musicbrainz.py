@@ -16,7 +16,7 @@ from time import monotonic
 from yt_playlist.util import net
 from yt_playlist.util.matching import is_remix, normalize, recording_title
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter
-from yt_playlist.providers import genres, transport
+from yt_playlist.providers import descriptive_tags, genres, transport
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,9 @@ def reset() -> None:
 def probe(track, store=None) -> EnrichmentResult:
     """Read-only lookup: genre, year, the recording MBID (which keys AcousticBrainz), and the
     candidate release MBIDs (which key Cover Art Archive). All from the one search."""
-    genre, year, mbid, release_ids, isrcs = enrich_full(track["title"], track["artist"])
+    observations = []
+    genre, year, mbid, release_ids, isrcs = enrich_full(track["title"], track["artist"],
+                                                    observations=observations)
     fields = {}
     if genre:
         fields["genre"] = genre
@@ -50,7 +52,7 @@ def probe(track, store=None) -> EnrichmentResult:
         fields["mb_release_ids"] = release_ids
     if isrcs:
         fields["isrc"] = isrcs
-    return EnrichmentResult("musicbrainz", fields)
+    return EnrichmentResult("musicbrainz", fields, tuple(observations))
 
 _API = "https://musicbrainz.org/ws/2"
 # MusicBrainz blocks requests without a meaningful UA; identify the app + a contact.
@@ -138,7 +140,7 @@ _artist_genre_cache = OrderedDict()
 _artist_lookup_lock = Lock()
 
 
-def _artist_genre(mbid):
+def _artist_genre(mbid, *, observations=None, match_evidence=None):
     """Artist-level genre (MusicBrainz keeps most genre data on artists, not recordings).
 
     Re-enrichment shares fresh raw evidence: tagged responses live for a day, empty responses
@@ -153,6 +155,7 @@ def _artist_genre(mbid):
         cached = _artist_genre_cache.pop(mbid, None)
         if cached is not None and monotonic() < cached[1]:
             _artist_genre_cache[mbid] = cached
+            _retain_tags(observations, cached[0], 'artist', mbid, match_evidence)
             return _top_label(cached[0])
         try:
             art = _get(f"artist/{mbid}", {"inc": "genres+tags", "fmt": "json"})
@@ -166,7 +169,14 @@ def _artist_genre(mbid):
         _artist_genre_cache[mbid] = (art, monotonic() + ttl)
         while len(_artist_genre_cache) > _ARTIST_CACHE_SIZE:
             _artist_genre_cache.popitem(last=False)
+        _retain_tags(observations, art, 'artist', mbid, match_evidence)
         return genre
+
+
+def _retain_tags(observations, data, scope, mbid, match):
+    tags = [{**tag, 'kind': field} for field in ('genres', 'tags') for tag in data.get(field) or []]
+    descriptive_tags.retain(observations, scope=scope, entity_id=mbid, tags=tags,
+        source_path=f'{scope}/{mbid}:genres+tags', match_evidence=match or {})
 
 
 _PARENS = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
@@ -248,19 +258,19 @@ def _release_ids(recordings):
     return ids
 
 
-def enrich_full(title, artist):
+def enrich_full(title, artist, *, observations=None):
     """(genre, year, mb_recording_id, release_ids, isrcs) from one recording search.
 
     release_ids keys Cover Art Archive (which is keyed by release, not recording). It rides along
     here rather than in its own function so the cover fallback costs no extra search, and so this
     stays the single seam where MusicBrainz touches the network."""
     recs = _recording_search(title, artist)
-    genre, year = _genre_year(recs, title=title)
+    genre, year = _genre_year(recs, title=title, observations=observations)
     return (genre, year, (recs[0].get("id") if recs else None), _release_ids(recs),
             (recs[0].get("isrcs") or []) if recs else [])
 
 
-def _genre_year(recordings, *, title=""):
+def _genre_year(recordings, *, title="", observations=None):
     """Derive (genre, year) from a recordings list (best match first), or (None, None) if empty."""
     if not recordings:
         return (None, None)
@@ -271,16 +281,19 @@ def _genre_year(recordings, *, title=""):
     artist_mbid = (first.get("artist") or {}).get("id") if isinstance(first, dict) else None
     genre = None
     mbid = rec.get("id")
+    match = {'method': 'title_artist_match', 'recording_mbid': mbid,
+             'search_score': rec.get('score')}
     if mbid:
         try:
             full = _get(f"recording/{mbid}", {"inc": "genres+tags+releases+isrcs", "fmt": "json"})
             rec["isrcs"] = full.get("isrcs") or rec.get("isrcs") or []
+            _retain_tags(observations, full, 'recording', mbid, match)
             genre = _top_label(full)
             year = year or _earliest_year([full])
         except Exception as e:  # noqa: BLE001
             logger.debug("MB lookup failed for %s: %s", mbid, e)
     if not genre and not is_remix(title or rec.get("title")):
-        genre = _artist_genre(artist_mbid)
+        genre = _artist_genre(artist_mbid, observations=observations, match_evidence=match)
     return (genre, year)
 
 

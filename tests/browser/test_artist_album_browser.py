@@ -23,6 +23,28 @@ from tests.conftest import FakeClient
 pytestmark = pytest.mark.browser
 
 
+@pytest.mark.parametrize('inline', [False, True])
+def test_album_play_counts_update_from_confirmed_listening(live_artist_app, page, inline):
+    from types import SimpleNamespace
+    from yt_playlist.library import live_plays
+    app = live_artist_app
+    page.goto(app['base'] + '/album?browse=MPREb_x')
+    if inline:
+        page.evaluate("""async () => {
+          const response = await fetch('/album/inline?browse=MPREb_x');
+          document.querySelector('main').innerHTML = await response.text();
+          document.dispatchEvent(new CustomEvent('htmx:afterSwap'));
+        }""")
+    row = page.locator('tr[data-vid="v2"]')
+    expect(row.locator('.track-plays')).to_have_text('')
+    assert live_plays.handle_play_event(SimpleNamespace(store=app['store']), {
+        'type': 'play', 'videoId': 'v2', 'title': 'SongB', 'artist': 'Artist X',
+        'metadataVerified': True, 'brandId': '', 'playlist': ''}, 1000)
+    expect(row.locator('.track-plays')).to_have_text('1', timeout=6000)
+    expect(row).to_have_attribute('data-plays', '1')
+    assert not app['store'].collection.saved_album_ids()
+
+
 class AlbumClient(FakeClient):
     """FakeClient that can resolve + rate an album (what save/unsave-album needs)."""
     def __init__(self, **kw):
@@ -129,6 +151,32 @@ def test_unsave_album_flips_to_save_after_reload(live_artist_app, page):
 
 
 @pytest.mark.parametrize('width', [1440, 390])
+def test_artist_multi_account_unsave_keeps_choices_in_modal(live_artist_app, page, width):
+    state = live_artist_app
+    for identity in (None, state['iid'], state['other']):
+        state['store'].collection.add_saved_album(
+            {'browse': 'MPREb_x', 'title': 'The Album', 'artist': 'Artist X', 'year': '2001'},
+            identity_id=identity)
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.goto(f"{state['base']}/artist?name=Artist%20X")
+    unsave = page.get_by_role('button', name='Unsave', exact=True)
+    expect(unsave).to_be_visible()
+    dialog = page.get_by_role('dialog', name='Unsave album')
+    expect(dialog).not_to_be_visible()
+    expect(page.locator('form[hx-post="/collection/unsave-album"]:visible')).to_have_count(0)
+    assert page.locator('.artist-album-table tbody tr').bounding_box()['height'] < 100
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=f'/tmp/tuneconsole-409-artist-{width}.png', full_page=True)
+    unsave.click()
+    expect(dialog).to_be_visible()
+    expect(dialog.get_by_text('Sync accounts to confirm ownership', exact=True)).to_be_visible()
+    dialog.get_by_role('button', name='Unsave from Other', exact=True).click()
+    expect(page.get_by_role('button', name='Unsave', exact=True)).to_be_visible()
+    assert state['clients'][state['other']].rated == [('PLAUDIO', 'INDIFFERENT')]
+    assert state['clients'][state['iid']].rated == []
+
+
+@pytest.mark.parametrize('width', [1440, 390])
 def test_existing_album_page_uses_shared_player_and_library_icons(live_artist_app, page, width):
     status = {'connected': True, 'now_playing': {
         'video_id': 'v1', 'title': 'SongA', 'artist': 'Artist X', 'paused': False,
@@ -186,31 +234,71 @@ def test_existing_album_page_uses_shared_player_and_library_icons(live_artist_ap
     assert not errors
 
 
-def test_non_main_album_owner_is_removed_from_collection(live_artist_app, page):
+@pytest.mark.parametrize('width', [1440, 390])
+def test_non_main_album_owner_is_removed_from_collection(live_artist_app, page, width):
     app = live_artist_app
     app['store'].collection.add_saved_album({
         'browse': 'MPREb_x', 'title': 'The Album', 'artist': 'Artist X'}, identity_id=app['other'])
+    page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(f"{app['base']}/albums")
     expect(page.get_by_role('button', name='Unsave', exact=True)).to_be_visible()
-    expect(page.get_by_text('Other', exact=True)).to_be_visible()
+    expect(page.get_by_role('button', name='Unsave', exact=True)).to_have_attribute(
+        'title', "Remove from Other's YouTube library")
     page.get_by_role('button', name='Unsave', exact=True).click()
     expect(page.get_by_text('No saved albums found in your YouTube library.')).to_be_visible()
     assert app['clients'][app['iid']].rated == []
     assert app['clients'][app['other']].rated == [('PLAUDIO', 'INDIFFERENT')]
 
 
-def test_multiple_owners_offer_explicit_account_actions(live_artist_app, page):
+@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('path', ['/artist?name=Artist%20X', '/albums', '/album?browse=MPREb_x'])
+def test_multiple_owners_choose_one_account_from_a_single_control(live_artist_app, page, width, path):
     app = live_artist_app
     for owner in (app['iid'], app['other']):
         app['store'].collection.add_saved_album({
             'browse': 'MPREb_x', 'title': 'The Album', 'artist': 'Artist X'}, identity_id=owner)
-    page.goto(f"{app['base']}/artist?name=Artist%20X")
-    expect(page.get_by_role('button', name='Unsave from Main', exact=True)).to_be_visible()
-    page.get_by_role('button', name='Unsave from Other', exact=True).click()
-    expect(page.get_by_role('button', name='Unsave', exact=True)).to_be_visible()
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.goto(app['base'] + path)
+    control = page.get_by_role('button', name='Remove album from library' if path.startswith('/album?') else 'Unsave', exact=True)
+    expect(control).to_have_count(1)
+    expect(control).to_be_visible()
+    dialog = page.get_by_role('dialog', name='Unsave album', exact=True)
+    expect(dialog).to_be_hidden()
+    document_width = page.evaluate('document.documentElement.scrollWidth')
+    control.click()
+    expect(dialog).to_be_visible()
+    expect(dialog.get_by_role('button', name='Unsave from Main', exact=True)).to_be_focused()
+    expect(dialog).to_be_in_viewport(ratio=1)
+    # Opening the chooser must not widen the host table or its document.
+    assert page.evaluate('document.documentElement.scrollWidth') == document_width
+    if path != '/albums':
+        page.screenshot(path=f'/tmp/tuneconsole-408-account-choice-{width}.png')
+    page.keyboard.press('Escape')
+    expect(dialog).to_be_hidden()
+    expect(control).to_be_focused()
+    assert all(client.rated == [] for client in app['clients'].values())
+    control.click()
+    dialog.get_by_role('button', name='Cancel', exact=True).click()
+    expect(dialog).to_be_hidden()
+    if width == 390 and path.startswith('/album?'):
+        other_client = app['clients'].pop(app['other'])
+        control.click()
+        dialog.get_by_role('button', name='Unsave from Other', exact=True).click()
+        expect(dialog).to_be_hidden()
+        expect(page.get_by_text('The required account is not connected', exact=True)).to_be_visible()
+        assert app['store'].collection.get_saved_albums(identity_id=app['other'])
+        assert app['store'].collection.get_saved_albums(identity_id=app['iid'])
+        assert app['clients'][app['iid']].rated == []
+        app['clients'][app['other']] = other_client
+    control.click()
+    dialog.get_by_role('button', name='Unsave from Other', exact=True).click()
+    remaining = page.get_by_role('button', name="Remove album from Main's library" if path.startswith('/album?') else 'Unsave', exact=True)
+    expect(remaining).to_be_visible()
+    expect(page.get_by_role('dialog', name='Unsave album', exact=True)).to_have_count(0)
     assert app['store'].collection.get_saved_albums(identity_id=app['other']) == []
     assert app['store'].collection.get_saved_albums(identity_id=app['iid'])
     assert app['clients'][app['iid']].rated == []
+    assert app['clients'][app['other']].rated == [('PLAUDIO', 'INDIFFERENT')]
 
 
 def test_unavailable_album_owner_shows_error_and_retains_membership(live_artist_app, page):

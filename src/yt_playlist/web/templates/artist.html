@@ -35,9 +35,13 @@
 </div>
 
 <h2 class="section">Tracks in your library <span class="count">{{ songs|length }}</span></h2>
-<p class="section-note">Distinct tracks credited to {{ artist }} across your synced playlists and saved albums. Plays counts listens to each track, not playlist starts.</p>
+<p class="section-note">From your synced playlists and saved albums.</p>
 <div class="card library-table-card">
-  <table x-data="rowSort()">
+  <table class="artist-tracks-table" x-data="rowSort()">
+    <colgroup class="artist-track-columns">
+      <col class="track-art-col"><col class="track-liked-col"><col><col class="track-album-col"><col>
+      <col class="track-plays-col"><col class="track-length-col"><col class="track-menu-col">
+    </colgroup>
     <thead><tr>
       <th class="col-thumb"></th>
       <th class="col-kind"></th>
@@ -75,11 +79,11 @@
   </table>
 </div>
 
-{% if collection %}
-<h2 class="section">Albums represented in your library <span class="count">{{ collection|length }}</span></h2>
-<p class="section-note">Includes albums with tracks in your playlists. Track counts show songs in your library; the Saved column shows whether the whole album is saved.</p>
+{% if albums %}
+<h2 class="section">Albums <span class="count">{{ albums|length }}</span></h2>
+<p class="section-note">Saved albums, albums in your playlists, and other releases by {{ artist }}.</p>
 <div class="card library-table-card">
-  <table x-data="rowSort()">
+  <table class="artist-album-table" aria-label="Albums by {{ artist }}" x-data="{ ...rowSort(), key: 'year', dir: -1 }">
     <colgroup class="artist-album-columns">
       <col class="album-art-col"><col class="album-title-col"><col class="album-year-col">
       <col class="album-songs-col"><col class="album-playlists-col"><col class="album-plays-col">
@@ -95,7 +99,7 @@
       <th class="sorth text-end" tabindex="0" role="button" @click="sortBy('saved')" @keydown.enter.space.prevent="sortBy('saved')">Saved{{ sort_indicator('saved') }}</th>
     </tr></thead>
     <tbody x-ref="body">
-    {% for al in collection %}
+    {% for al in albums %}
       <tr class="srow" data-album="{{ al.album|lower }}" data-year="{{ al.year or 0 }}"
           data-songs="{{ al.songs }}" data-pls="{{ al.n_pls }}" data-plays="{{ al.plays }}"
           data-saved="{{ '1' if al.saved else '0' }}">
@@ -113,37 +117,4 @@
 </div>
 {% endif %}
 
-{% if yt_albums %}
-<h2 class="section">More albums on YouTube <span class="count">{{ yt_albums|length }}</span></h2>
-<p class="section-note">Albums not already shown in your collection. Save any to your YouTube library.</p>
-<div class="card library-table-card">
-  <table x-data="rowSort()">
-    <colgroup class="artist-album-columns">
-      <col class="album-art-col"><col class="album-title-col"><col class="album-year-col">
-      <col class="album-songs-col"><col class="album-playlists-col"><col class="album-plays-col">
-      <col class="album-save-col">
-    </colgroup>
-    <thead><tr>
-      <th class="col-avatar"></th>
-      <th class="sorth" tabindex="0" role="button" @click="sortBy('album')" @keydown.enter.space.prevent="sortBy('album')">Album{{ sort_indicator('album') }}</th>
-      <th class="sorth num" tabindex="0" role="button" @click="sortBy('year')" @keydown.enter.space.prevent="sortBy('year')">Year{{ sort_indicator('year') }}</th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-    </tr></thead>
-    <tbody x-ref="body">
-    {% for al in yt_albums %}
-      <tr class="srow" data-album="{{ al.title|lower }}" data-year="{{ al.year or 0 }}">
-        <td>{% if al.thumbnail %}<img class="album-thumb art-album" src="{{ al.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
-        <td>{% if al.browse_id %}<a class="ptitle" href="/album?browse={{ al.browse_id }}">{{ al.title }}</a>{% else %}<span class="ptitle">{{ al.title }}</span>{% endif %}</td>
-        <td class="num mono">{{ al.year or '' }}</td>
-        <td colspan="3"></td>
-        <td class="text-end">{% if al.browse_id %}{{ album_save_control(al.browse_id, al.saved, saved_owners.get(al.browse_id, [])) }}{% endif %}</td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-</div>
-{% endif %}
 {% endblock %}

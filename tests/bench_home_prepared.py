@@ -15,7 +15,7 @@ import pytest
 
 from yt_playlist.core.numerics import limit_native_threads
 from yt_playlist.core.store import Store
-from yt_playlist.rec import home_prepared
+from yt_playlist.rec import choice_evidence, home_prepared
 
 
 def test_repeated_preparation_publishes_on_saved_library(tmp_path, caplog):
@@ -41,6 +41,9 @@ def test_repeated_preparation_publishes_on_saved_library(tmp_path, caplog):
             store.rec_proposals.put_proposals(surface, None, now)
         choice = store.rec_proposals.get_proposals('home_choice')
         impressions = store.modes.impression_counts()
+        # Production captures shared model context before starting either Home
+        # surface's bounded assembly. Exercise that same worker boundary here.
+        assert choice_evidence.prepare_context(store, now)
         for _ in range(3):
             started, cpu = time.monotonic(), time.thread_time()
             payload = home_prepared.prepare(store, now)

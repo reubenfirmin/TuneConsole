@@ -8,7 +8,7 @@ dependencies = [
     # Major-capped: the egress guard (yt_playlist.egress) patches the requests/urllib
     # contract, not ytmusicapi internals, so the security guarantee survives upgrades —
     # but we cap the major for reproducibility and to review breaking changes deliberately.
-    "ytmusicapi>=1.12,<2",
+    "ytmusicapi>=1.12.3,<2",
     # Direct dependency for the extension bridge's guarded HTTP transport.
     "requests>=2.31,<3",
     "fastapi>=0.110",

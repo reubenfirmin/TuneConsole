@@ -11,7 +11,7 @@
   {% if s.runs %}
   <div class="table-scroll"><table class="autotune-grid" aria-label="Model selection history">
     <thead><tr><th scope="col">Date</th><th scope="col">Decision</th><th scope="col">Setup</th><th scope="col">Later listening</th></tr></thead>
-    <tbody>{% for r in s.runs %}<tr><th scope="row"><a href="#selection-run-{{ r.id }}">{{ r.date }}</a></th><td>{{ outcomes[r.status] }}</td><td>{{ r.previous.label if r.status == 'restored' else r.selected.label }}</td><td>{% if r.followup.trials %}{{ '%+.1f'|format((r.followup.score - r.followup.previous_score) * 100) }} percentage points · {{ r.followup.trials }} tracks{% else %}No later measurements{% endif %}</td></tr>{% endfor %}</tbody>
+    <tbody>{% for r in s.runs %}<tr><th scope="row"><a href="#selection-run-{{ r.id }}">{{ r.date }}</a></th><td>{{ outcomes[r.status] }}</td><td>{{ r.previous.label if r.status == 'restored' else r.selected.label }}</td><td>{% if r.monitoring %}{{ r.monitoring.status|title }} · observational{% elif r.followup.trials %}{{ '%+.1f'|format((r.followup.score - r.followup.previous_score) * 100) }} percentage points · {{ r.followup.trials }} tracks{% else %}No later measurements{% endif %}</td></tr>{% endfor %}</tbody>
   </table></div>
   {% else %}<p>No automatic comparisons have run yet.</p>{% endif %}
 
@@ -22,8 +22,23 @@
       <div><dt>Before comparison</dt><dd>{{ r.previous.label }}</dd></div>
       <div><dt>{{ 'Setup tried' if r.status == 'restored' else 'After comparison' }}</dt><dd>{{ r.selected.label }}</dd></div>
     </dl>
+    {% if r.challenger %}<p class="section-note">Challenger: {{ r.challenger.label }}.</p>{% endif %}
     {% if r.restored_date %}<p class="section-note">Previous setup restored on {{ r.restored_date }}. Later-listening measurements stopped at restoration.</p>{% endif %}
     {% if r.baseline %}<p class="section-note">{{ r.baseline.trials }} usable test tracks across {{ r.baseline.windows }} periods. A comparison needs at least {{ s.min_trials }} tracks across {{ s.min_windows }} periods.</p>{% endif %}
+    {% if r.product_report %}
+    <p>Controlled menus and Radio episodes: {{ r.product_report.overall.days.incumbent }} observed days with the current setup,
+      {{ r.product_report.overall.days.challenger }} with the challenger.
+      {% if r.product_report.overall.interval %}Difference {{ '%+.1f'|format(r.product_report.overall.difference * 100) }} points,
+      uncertainty {{ '%+.1f'|format(r.product_report.overall.interval[0] * 100) }} to {{ '%+.1f'|format(r.product_report.overall.interval[1] * 100) }} points.{% endif %}
+      Unknown endings are excluded and reported separately.</p>
+    <div class="table-scroll"><table class="autotune-grid" aria-label="Listening outcomes by format">
+      <thead><tr><th>Format / setup</th><th>Visible</th><th>Observed</th><th>Unknown</th></tr></thead>
+      <tbody>{% for format, row in r.product_report.formats.items() %}{% for arm, counts in row.arms.items() %}
+        <tr><th>{{ {'mixes': 'Mix tapes', 'albums': 'Albums', 'radio': 'On air'}[format] }} / {{ arm }}</th>
+          <td>{{ counts.visible|default(0) }}</td><td>{{ counts.observed|default(0) }}</td><td>{{ counts.unknown|default(0) }}</td></tr>
+      {% endfor %}{% endfor %}</tbody>
+    </table></div>
+    {% endif %}
     {% if r.comparison and r.comparison.eligible %}<p>Original test: {{ '%.1f'|format(r.comparison.previous_score * 100) }}% prediction matches for the previous setup; {{ '%.1f'|format(r.comparison.score * 100) }}% for the selected setup, across {{ r.comparison.trials }} tracks.</p>{% endif %}
     {% if r.grid %}
     <h3>Tested setups</h3>
@@ -38,6 +53,10 @@
       <thead><tr><th scope="col">Through</th><th scope="col">Tracks measured</th><th scope="col">Previous setup</th><th scope="col">Selected setup</th></tr></thead>
       <tbody>{% for p in r.followup.points %}<tr><th scope="row">{{ p.date }}</th><td>{{ p.trials }}</td><td>{{ '%.1f'|format(p.previous_score * 100) }}%</td><td>{{ '%.1f'|format(p.score * 100) }}%</td></tr>{% endfor %}</tbody>
     </table></div>
+    {% elif r.monitoring %}<p class="section-note">Later listening: {{ r.monitoring.status }}.
+      {{ r.monitoring.explanation }}
+      {% if r.monitoring.comparison.interval %}Difference {{ '%+.1f'|format(r.monitoring.comparison.difference * 100) }} points;
+      uncertainty {{ '%+.1f'|format(r.monitoring.comparison.interval[0] * 100) }} to {{ '%+.1f'|format(r.monitoring.comparison.interval[1] * 100) }} points.{% endif %}</p>
     {% elif r.status in ['applied', 'retained', 'restored'] %}<p class="section-note">No later measurements yet.</p>{% endif %}
   </section>
   {% endfor %}
@@ -45,8 +64,8 @@
   <section class="selection-report" aria-labelledby="selection-method-title">
     <h2 id="selection-method-title">How the comparison works</h2>
     <div class="selection-explanation">
-      <div><h3>Choosing a setup</h3><p>We predict which unplayed tracks in your library you’ll listen to later. After 14 days of history and 100 modeled tracks, each setup picks 20 tracks using only library and listening data from before a test period. We then check which tracks you actually played for the first time during that period. Later playlist edits are excluded.</p><p>A switch needs at least {{ s.min_trials }} comparable tracks across {{ s.min_windows }} periods, improvement in at least two periods, no worse period, and a paired statistical check adjusted for the number of alternatives. Small or uncertain differences keep the current setup.</p></div>
-      <div><h3>Checking later listening</h3><p>After selection, we save both setups’ lists of 20 predictions before new plays happen, then check them against your later listening. A score of 40% means 4 of 10 eligible tracks you went on to play were on that setup’s list. Only tracks both models knew, with no earlier play in your saved history, count.</p><p>Forecasts refresh during model updates, at most once a day. Plays only from app-generated playlists are excluded. Prediction accuracy doesn’t measure a change in enjoyment.</p></div>
+      <div><h3>Choosing a setup</h3><p>After 14 days of history and 100 modeled tracks, the worker prepares a challenger with the same library, taste inputs and serving pipeline. Complete recommendation menus and Radio episodes keep their assigned setup. New windows share a random assignment for each UTC day.</p><p>A decision follows 28 days of exposure and one day for outcomes. It needs observed days in both setups, adequate observation coverage, a supported useful improvement, and separate checks for each used format. Correlated tracks stay within their episode and day. Uncertain comparisons keep the current model. Repeated attempts use a shared error budget.</p></div>
+      <div><h3>Checking later listening</h3><p>Visibility, choice, playback start and observed completion remain separate. Missing endings stay unknown. After a switch, weekly checks report coverage and sustained observed declines, with an option to restore the exact previous model. Later monitoring is observational.</p><p>Earlier first-play forecasts remain available as representation diagnostics. They do not establish whether a recommendation menu improved.</p></div>
     </div>
   </section>
 

@@ -22,11 +22,11 @@
   <form hx-post="/home/format" hx-trigger="change" hx-swap="none">
     <label for="taste-home-format">Start Home with</label>
     <select id="taste-home-format" name="format">
-      {% for value, label in [('mixes','Mix tapes'), ('albums','Albums'), ('radio','On air'), ('both','My last listening tab')] %}
+      {% for value, label in [('auto','Follow my listening'), ('mixes','Mix tapes'), ('albums','Long play'), ('radio','On air'), ('both','My last listening tab')] %}
       <option value="{{ value }}" {{ 'selected' if home_format == value }}>{{ label }}</option>
       {% endfor %}
     </select>
-    <p class="section-note">A remembered navigation preference. All formats use your shared musical interests. Default: Mix tapes.</p>
+    <p class="section-note">Follow my listening starts with your onboarding choice and adapts after you choose and play a format on three separate days. Currently: {{ home_format_label }}. Choose a specific tab to keep it fixed. All formats share your musical interests.</p>
   </form>
   <h2 id="taste-intro-context-title">How your picks take shape</h2>
   <p>TuneConsole combines several signals: track similarity, relationships between artists, and information about genre, era, and sound. Your playlists, listening history, and feedback help it work out which music fits your taste. Recent activity can shift that balance toward what you’re enjoying now.</p>

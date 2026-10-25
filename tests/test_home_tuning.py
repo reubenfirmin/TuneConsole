@@ -19,9 +19,10 @@ def assert_cleared(store):
     assert store.rec_model.get_leans() == {}
     assert store.rec_model.hidden_facets() == set()
     assert rec_params.get_param(store, "breadth_bias") == 0
-    assert store.rec_proposals.get_proposals("home_genre_request") == {}
+    assert not store.rec_proposals.get_proposals("home_genre_request")
     assert store.settings.get_setting("home_mix_vibe") is None
     assert store.settings.get_setting(mix_tuning.UPDATED_AT_SETTING) is None
+    assert store.settings.get_setting(mix_tuning.VIBE_UPDATED_AT_SETTING) is None
 
 
 def test_clear_resets_genre_selections_and_all_biases_together(store):
@@ -66,7 +67,8 @@ def test_every_control_expires_at_four_hours_without_reads_extending_it(store, p
     clock[0] += mix_tuning.TTL_S - 1
     response = client.get("/home/cards")
     assert float(response.headers["X-Mix-Tuning-Remaining"]) == 1
-    assert store.settings.get_setting(mix_tuning.UPDATED_AT_SETTING) == "1000.0"
+    deadline = mix_tuning.VIBE_UPDATED_AT_SETTING if path == '/home/vibe' else mix_tuning.UPDATED_AT_SETTING
+    assert store.settings.get_setting(deadline) == "1000.0"
     # A new client still sees the persisted expiry, rather than starting a new browser timer.
     clock[0] += 1
     response = client_at(store, clock).get("/home/fingerprint")
@@ -92,6 +94,42 @@ def test_last_adjustment_extends_window_and_new_session_drops_expired_choices(st
     assert store.rec_model.get_leans() == {}
     assert store.rec_proposals.get_proposals("home_genre_request") == {}
     assert rec_params.get_param(store, "breadth_bias") == .5
+    assert mix_tuning.remaining(store, clock[0]) == mix_tuning.TTL_S
+
+
+def test_vibe_expiry_restores_still_active_genre_controls_without_resetting_them(store):
+    from yt_playlist.rec import home_vibe
+    seed_genres(store)
+    clock = [1000.0]
+    client = client_at(store, clock)
+    client.post('/home/vibe', data={'vibe': 'gentle'})
+    clock[0] += 3600
+    client.post('/home/mix-genres', data={'genres': 'jazz'})
+    client.post('/home/steer', data={'axis': 'genre:techno', 'weight': '2'})
+    clock[0] = 1000 + mix_tuning.TTL_S
+    client.get('/home/fingerprint')
+    assert not home_vibe.current(store, clock[0])
+    assert store.rec_model.get_lean('genre:techno') == 2
+    assert store.rec_proposals.get_proposals('home_genre_request')['include_genres'] == ['jazz']
+    assert mix_tuning.remaining(store, clock[0]) == 3600
+
+
+def test_ordinary_expiry_keeps_a_newer_vibe_and_clearing_vibe_keeps_newer_controls(store):
+    clock = [1000.0]
+    client = client_at(store, clock)
+    client.post('/home/steer', data={'axis': 'genre:jazz', 'weight': '2'})
+    clock[0] += 3600
+    client.post('/home/vibe', data={'vibe': 'move'})
+    clock[0] = 1000 + mix_tuning.TTL_S
+    client.get('/home/cards')
+    assert not store.rec_model.get_leans()
+    assert store.settings.get_setting('home_mix_vibe') == 'move'
+    assert mix_tuning.remaining(store, clock[0]) == 3600
+    client.post('/home/breadth', data={'breadth_bias': '.8'})
+    deadline = store.settings.get_setting(mix_tuning.UPDATED_AT_SETTING)
+    client.post('/home/vibe', data={'vibe': ''})
+    assert rec_params.get_param(store, 'breadth_bias') == .8
+    assert store.settings.get_setting(mix_tuning.UPDATED_AT_SETTING) == deadline
     assert mix_tuning.remaining(store, clock[0]) == mix_tuning.TTL_S
 
 

@@ -10,6 +10,37 @@ from yt_playlist.repos.base import Repo, synchronized
 
 class ModelSelectionRepo(Repo):
     @synchronized
+    def maintain_selection(self, now):
+        """Bound disposable pair/forecast storage, preserving live and held versions."""
+        keep = {str(row[0]) for row in self.conn.execute(
+            'SELECT id FROM rec_model_selection_runs ORDER BY id DESC LIMIT 12')}
+        for key in ('rec_selection_active_run', 'rec_selection_display_run', 'rec_selection_live_run'):
+            value = self._store.settings.get_setting(key)
+            if value:
+                keep.add(str(value))
+        raw = self._store.settings.get_setting('radio_current_session')
+        try:
+            radio = json.loads(raw) if raw else {}
+            if not radio.get('stopped') and (radio.get('comparison') or {}).get('run_id'):
+                keep.add(str(radio['comparison']['run_id']))
+        except (TypeError, ValueError):
+            pass
+        for surface in ('home_choice', 'model_album_assignment'):
+            held = self._store.rec_proposals.get_proposals(surface) or {}
+            assigned = held.get('comparison') or (held.get('choice_context') or {}).get('comparison') or {}
+            if assigned.get('run_id'):
+                keep.add(str(assigned['run_id']))
+        pairs = [row[0] for row in self.conn.execute("SELECT surface FROM rec_proposals WHERE surface LIKE 'model_pair:%'")]
+        with self.conn:
+            for surface in pairs:
+                if surface.split(':')[1] not in keep:
+                    self.conn.execute('DELETE FROM rec_proposals WHERE surface=?', (surface,))
+            qs = ','.join('?' for _ in keep) or 'NULL'
+            self.conn.execute(f'DELETE FROM rec_model_previous_vectors WHERE run_id NOT IN ({qs})', tuple(keep))
+            self.conn.execute(f'DELETE FROM rec_model_forecasts WHERE run_id NOT IN ({qs}) AND made_at<?',
+                              (*keep, now - 180 * 86400))
+
+    @synchronized
     def selection_runs(self, limit=6):
         return [{"id": r["id"], **json.loads(r["result_json"])} for r in self.conn.execute(
             "SELECT id, result_json FROM rec_model_selection_runs ORDER BY id DESC LIMIT ?", (limit,))]
@@ -78,6 +109,9 @@ class ModelSelectionRepo(Repo):
             self.conn.execute("DELETE FROM rec_vectors")
             self.conn.execute("INSERT INTO rec_vectors SELECT identity_key,vec FROM rec_model_previous_vectors WHERE run_id=?",
                               (run_id,))
+            self.conn.execute("DELETE FROM rec_proposals WHERE surface IN "
+                "('home_prepared','home_tuned','home_choice','album_prepared','mode_bundles','fresh_pool',"
+                "'model_live_comparison','model_album_assignment','model_listening_monitor','model_live_report') OR surface LIKE 'model_pair:%'")
             self.conn.executemany("INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)", [
                 ("rec_embed_method", result["previous"]["method"]),
                 ("rec_dim", str(result["previous"]["dim"])),
@@ -90,6 +124,9 @@ class ModelSelectionRepo(Repo):
             if latest["id"] != run_id:
                 last = json.loads(latest["result_json"])
                 last["ended_at"] = now
+                if last.get('kind') == 'product' and last.get('status') == 'running':
+                    last.update(status='retained', phase='complete',
+                                reason='Comparison ended when the previous model was restored.')
                 self.conn.execute("UPDATE rec_model_selection_runs SET result_json=? WHERE id=?",
                                   (json.dumps(last), latest["id"]))
         return True

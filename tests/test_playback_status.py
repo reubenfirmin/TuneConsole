@@ -32,7 +32,8 @@ function row(vid) {
 let rows = [row('one'), row('two')];
 document.readyState = 'loading';
 document.body = new EventTarget();
-document.getElementById = id => id === 'home' && homePage ? {} : null;
+const homeElement = {closest: () => null, querySelector: () => null};
+document.getElementById = id => id === 'home' && homePage ? homeElement : null;
 document.querySelectorAll = selector => selector === 'tr[data-vid]' ? rows : [];
 document.querySelector = selector => selector === 'tr[data-vid]' ? rows[0] :
   rows.find(r => selector === 'tr[data-vid="' + r.vid + '"]') || null;
@@ -70,6 +71,7 @@ const first = mountDock();
 let home;
 if (homePage) {
   home = vm.runInContext('homeStatus()', context);
+  home.$el = homeElement;
   window.addEventListener('bridge-status', e => home.applyBridgeStatus(e.detail));
   home.init(); home.init();
 }

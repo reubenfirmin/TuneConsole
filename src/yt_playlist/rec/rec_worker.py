@@ -43,13 +43,15 @@ class RecWorker:
         from yt_playlist.rec.maintenance import Projections
         self.projections = Projections(ctx.store, ctx.now_fn, ctx.logger, accepting=self._accepting,
                                        schedule=self._schedule_projections, execute=self._stage)
-        self.tasks = ServingTasks(ctx, self._stage)
+        self.tasks = ServingTasks(ctx, self._stage, checkpoint=self._flush_measurements)
         from yt_playlist.rec.progressive import Preparation
         self.preparation = Preparation(ctx.store)
         from yt_playlist.rec.model_refresh import FitCache
         self._fit_cache = FitCache()
         if self.enabled:
             ctx.store.background_measurement = self.enqueue_measurement
+            from yt_playlist.rec.choice_capture import CaptureQueue
+            ctx.store.choice_capture = CaptureQueue(self.enqueue_measurement)
 
     def start_ticker(self):
         """Start the periodic background daemons (idempotent): the budgeted discovery scan (so the
@@ -200,7 +202,7 @@ class RecWorker:
 
     def _flush_measurements(self):
         with self._lock:
-            offers = self.jobs.take_measurements()
+            offers = self.jobs.take_measurements(limit=8)
         try:
             for offer in offers:
                 try:
@@ -208,6 +210,10 @@ class RecWorker:
                           cancellable_work(self._stop.is_set), work_span("rec: serving measurement")):
                         check_stopping()
                         offer.run()
+                except WorkClosing:
+                    raise
+                except Exception:
+                    self.ctx.logger.warning('Listening capture failed: surface=%s', offer.surface, exc_info=True)
                 finally:
                     offer.close()
         finally:
@@ -289,13 +295,13 @@ class RecWorker:
         return self._schedule(full=False, **dict.fromkeys(kinds, True))
 
     def _schedule(self, *, full, modes=False, keys=(), ratings=False, trends=False, cleanup=False, bundles=False, home=False,
-                  stories=False, artist_images=(), prepare=False, choices=False):
+                  stories=False, artist_images=(), prepare=False, choices=False, analytics=False):
         with self._lock:
             if not self._accepting():
                 return False
             requested = {Job.FULL: full, Job.MODES: modes, Job.RATINGS: ratings, Job.PREPARE: prepare, Job.TRENDS: trends,
                          Job.CLEANUP: cleanup, Job.BUNDLES: bundles, Job.HOME: home, Job.STORIES: stories,
-                         Job.ARTWORK: artist_images, Job.CONTENT: keys, Job.CHOICES: choices}
+                         Job.ARTWORK: artist_images, Job.CONTENT: keys, Job.CHOICES: choices, Job.ANALYTICS: analytics}
             for job, payload in requested.items():
                 if payload:
                     self.jobs.merge(job, payload)
@@ -350,7 +356,7 @@ class RecWorker:
                     self._running = False
                     return
                 batch = self.jobs.drain()
-                self._model_active = bool(batch)
+                self._model_active = any(job not in {Job.MEASUREMENT, Job.CHOICES, Job.ANALYTICS} for job in batch)
             full, modes = Job.FULL in batch, Job.MODES in batch
             if full and time.monotonic() < self.jobs.retry[Job.FULL].retry_at:
                 # Keep the intent for the ticker without delaying ratings/serving jobs.
@@ -394,6 +400,9 @@ class RecWorker:
             if Job.CLEANUP in batch:
                 with self.model_lock:
                     self.projections.run('cleanup')
+            if Job.ANALYTICS in batch:
+                with self.model_lock:
+                    self.projections.run('analytics')
             if keys:
                 try:
                     self.ctx.store.rec_refresh.enqueue()
@@ -421,7 +430,10 @@ class RecWorker:
                 state.started(time.monotonic())
                 try:
                     with self.model_lock:
+                        active = self.ctx.store.settings.get_setting('rec_selection_active_run')
                         self.tasks.choices()
+                        if active != self.ctx.store.settings.get_setting('rec_selection_active_run'):
+                            self._schedule(full=False, bundles=True, home=True)
                     state.succeeded()
                 except WorkClosing:
                     raise

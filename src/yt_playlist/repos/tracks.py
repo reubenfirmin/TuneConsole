@@ -163,6 +163,18 @@ class TrackRepo(Repo):
                         # Preserve action order even with a coarse/frozen clock.
                         observed_at = max(now, nextafter(unban[0], inf))
                 observations.append((identity_id, video_id, status, source, observed_at))
+                # Native player readouts also use source='action', but hydration
+                # is not proof of a button press. Only confirmed commands qualify.
+                if source == 'api':
+                    previous = self.conn.execute(
+                        'SELECT status,observed_at FROM item_ratings WHERE identity_id=? AND video_id=?',
+                        (identity_id, video_id)).fetchone()
+                    if (previous is None or previous['observed_at'] <= observed_at) and (
+                            previous is None or previous['status'] != status):
+                        self.conn.execute('INSERT INTO listening_rating_actions '
+                            '(identity_id,video_id,previous_status,status,source,at) VALUES (?,?,?,?,?,?)',
+                            (identity_id, video_id, previous['status'] if previous else None,
+                             status, source, observed_at))
             self.conn.executemany(
                 'INSERT INTO item_ratings VALUES (?,?,?,?,?) '
                 'ON CONFLICT(identity_id,video_id) DO UPDATE SET '

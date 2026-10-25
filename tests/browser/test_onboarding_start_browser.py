@@ -18,6 +18,61 @@ def live_initial_sync(monkeypatch, request):
     return request.getfixturevalue("live_app"), job
 
 
+@pytest.mark.parametrize('width,already_ready', [(320, False), (1280, False), (1280, True)])
+def test_album_first_onboarding_preserves_player_and_opens_ready_albums(live_app, store, page, width, already_ready):
+    from tests.onboarding_support import publish_personal_album
+
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.route('**/bridge/status', lambda route: route.fulfill(json={
+        'connected': True, 'now_playing': {'video_id': 'listening', 'title': 'Still playing',
+                                          'artist': 'Artist', 'paused': False}}))
+    page.route('https://i.ytimg.com/**', lambda route: route.abort())
+    errors, navigations = [], []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto(live_app)
+    page.on('framenavigated', lambda frame: navigations.append(frame.url) if frame == page.main_frame else None)
+    expect(page.get_by_role('heading', name='How do you like to listen?')).to_be_visible()
+    expect(page.locator('.listening-format-option')).to_have_count(3)
+    expect(page.locator('.global-now-playing')).to_contain_text('Still playing')
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.locator('.listening-format-options').evaluate('''el => Promise.all(
+        el.getAnimations({subtree: true}).map(animation => animation.finished))''')
+    page.screenshot(path=f'/tmp/tuneconsole-format-picker-{width}.png', full_page=True)
+    page.evaluate('window.firstDocument = document; window.firstPlayer = document.querySelector(".global-now-playing")')
+
+    def finish_import():
+        store.settings.set_setting('last_sync_at', '1')
+        publish_personal_album(store, now=1)
+
+    if already_ready:
+        finish_import()
+        # A completed shared status poll must not discard an unanswered picker.
+        page.evaluate('''async () => {
+            const data = await (await fetch('/home/onboard/status')).json();
+            window.setupStatus.snapshot = data;
+            window.dispatchEvent(new CustomEvent('setup-status', {detail: data}));
+        }''')
+        expect(page.locator('#listening-format-title')).to_be_visible()
+    page.get_by_role('button', name='Start with Long play').click()
+    if not already_ready:
+        expect(page.locator('.arrival-intro')).to_contain_text('next favorite records')
+        expect(page.locator('#listening-format-title')).to_have_count(0)
+        finish_import()
+    expect(page.get_by_role('tab', name='Long play', exact=True)).to_have_attribute('aria-selected', 'true', timeout=6500)
+    expect(page.locator('.album-choice')).to_have_count(1)
+    expect(page.locator('.album-choice-title')).to_contain_text('Your next record')
+    expect(page.locator('#onboarding-feed')).to_have_count(0)
+    expect(page.locator('main.page-setup')).to_have_count(0)
+    assert page.evaluate('firstDocument === document && firstPlayer === document.querySelector(".global-now-playing")')
+    assert store.settings.get_setting('onboard_listening_format') == 'albums'
+    assert store.rec_proposals.get_proposals('home_prepared') is None
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.goto(live_app)
+    expect(page.get_by_role('tab', name='Long play', exact=True)).to_have_attribute('aria-selected', 'true')
+    assert navigations == [live_app + '/']
+    assert errors == []
+
+
 def test_successful_initial_sync_preserves_document_player_and_details(live_initial_sync, store, page):
     from tests.conftest import seed_catalog_track
     from tests.onboarding_support import publish_personal_mix
@@ -32,13 +87,15 @@ def test_successful_initial_sync_preserves_document_player_and_details(live_init
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.goto(base)
     page.on("framenavigated", lambda frame: navigations.append(frame.url) if frame == page.main_frame else None)
+    page.get_by_role('button', name='Start with Mix tapes').click()
+    expect(page.locator('#arrival-title')).to_be_visible()
     expect(page.locator("#onboarding-feed")).to_be_visible()
     player = page.locator(".global-now-playing")
     expect(player).to_be_visible()
     page.wait_for_function("""() => {
         const home = Alpine.$data(document.querySelector('#home'));
         return home.running && home._job !== null;
-    }""")
+    }""", timeout=6500)
     page.locator(".setup-banner").get_by_role("button", name="Details").click()
     details = page.get_by_role("dialog")
     expect(details).to_be_visible()
@@ -113,6 +170,7 @@ def test_first_mix_arrives_before_full_sync(live_app, store, page, width):
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.goto(live_app)
+    page.get_by_role('button', name='Start with Mix tapes').click()
     expect(page.locator("#arrival-title")).to_have_text("Getting to know your music")
     expect(page.locator("#arrival-title")).to_be_visible()
     expect(page.locator("#takeout-nag")).to_have_count(0)
@@ -230,6 +288,7 @@ def test_extension_setup_and_live_import_details(live_app, page):
     page.route("**/home/onboard/status", lambda route: route.fulfill(json=status))
     page.route("**/sync/recent", lambda route: route.fulfill(json=log))
     page.goto(live_app)
+    page.get_by_role('button', name='Start with Mix tapes').click()
     install = page.get_by_role("link", name="Get the extension")
     expect(install).to_be_visible()
     expect(page.get_by_role("link", name="YouTube Music", exact=True)).to_be_visible()

@@ -57,9 +57,9 @@ const flush = () => { while (queued.length) {const data=queued.shift();
 const content = fs.readFileSync('extension/content.js','utf8');
 const main = fs.readFileSync('extension/nowplaying_main.js','utf8');
 vm.runInContext(scenario === 'newer_receiver'
-  ? content.replace('const RECEIVER_REVISION = 8;', 'const RECEIVER_REVISION = 9;') : content, context);
+  ? content.replace('const RECEIVER_REVISION = 10;', 'const RECEIVER_REVISION = 11;') : content, context);
 vm.runInContext(scenario === 'newer_main'
-  ? main.replace('var SENSOR_REVISION = 9;', 'var SENSOR_REVISION = 10;') : main, context);
+  ? main.replace('var SENSOR_REVISION = 10;', 'var SENSOR_REVISION = 11;') : main, context);
 flush();
 if (scenario === 'newer_main' || scenario === 'newer_receiver') {
   const previous = scenario === 'newer_main' ? window.__tcNowPoller : window.__tcBridgeLoaded;
@@ -77,20 +77,21 @@ assert.equal(latest.videoId,'current', 'MAIN player identity must win over the o
 assert.equal(latest.position,20, 'reconnect carries a fresh interpolation anchor');
 assert.equal(latest.duration,null,'the app supplies the known track length');
 if (['transition','conflicting_bar'].includes(scenario)) {
-  assert.equal(latest.type,'now-heartbeat');
+  assert.equal(latest.type,'play');
+  assert.equal(latest.videoVerified,true);
   assert.equal(latest.metadataVerified,false);
-  assert.equal(sent.filter(msg => msg.type==='play').length,0);
+  assert.equal(sent.filter(msg => msg.type==='play').length,1);
   now += 6000;
   intervals[0](); // DOM-only fallback cannot promote the explicitly unverified sample.
   flush();
-  assert.equal(sent.filter(msg => msg.type==='play').length,0);
+  assert.equal(sent.filter(msg => msg.type==='play').length,1);
   barId=imageId='current';
   intervals[1](); flush();
   const plays=sent.filter(msg => msg.type==='play');
-  assert.equal(plays.length,1);
-  assert.equal(plays[0].videoId,'current');
-  assert.equal(plays[0].artist,'Recording artist');
-  assert.equal(plays[0].metadataVerified,true);
+  assert.equal(plays.length,2);
+  assert.equal(plays[1].videoId,'current');
+  assert.equal(plays[1].artist,'Recording artist');
+  assert.equal(plays[1].metadataVerified,true);
 } else {
   assert.equal(latest.metadataVerified,true);
   assert.equal(latest.paused,scenario==='paused');

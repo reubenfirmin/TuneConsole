@@ -222,6 +222,19 @@ Repository assembly uses one signed summary rather than architecture-filtered su
 indexes, allowing a fresh verifier to fetch both AppStream branches. After refreshing
 each branch, verification checks its catalog's newest release and architecture-specific
 bundle; `remote-ls` alone can omit a non-host architecture's display version.
+Anonymous Python downloads identify themselves as `TuneConsole-release-verifier/1`;
+Cloudflare denies the default `Python-urllib` user agent with HTTP 403. Failures
+identify the public GET target and HTTP status without response bodies or URL credentials.
+To check an already published Flatpak repository without changing production channels,
+use its trusted retained `release-manifest.json` under the shared test lock:
+
+```sh
+TUNECONSOLE_PUBLIC_RELEASE_MANIFEST=/path/to/release-manifest.json \
+  uv run pytest -s tests/bench_public_flatpak.py
+```
+
+This also checks the repository descriptor against the retained hash before importing
+its embedded GPG key, then verifies both signed architecture catalogs in temporary user state.
 The workflow summary records each verified download and channel. A failure here
 leaves the published release immutable; retry verification with the same candidates
 through the coordinator instead of deleting or replacing public assets.

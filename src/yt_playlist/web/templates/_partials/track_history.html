@@ -1,0 +1,21 @@
+<section id="track-history" class="track-detail-section" aria-labelledby="track-ledger-title"
+         hx-get="/track/{{ track.video_id|urlencode }}/history?page={{ page }}"
+         hx-trigger="every 2s [document.visibilityState === 'visible']" hx-swap="outerHTML">
+  <h2 id="track-ledger-title">Listening history</h2>
+  {% if ledger %}<p class="track-ledger-note muted">Exact plays and history observations. History observations do not establish an exact play time or count.</p>{% endif %}
+  {% if ledger %}<ol class="track-ledger">{% for row in ledger %}
+    <li>
+      <div class="track-ledger-time">{% if row.kind == 'play' %}<time datetime="{{ row.at_iso }}">{{ row.at_label }}</time>{% elif row.precision == 'calendar_day' %}{{ row.day or 'Day unavailable' }}{% else %}Play time unknown{% endif %}
+        <strong>{{ 'Played' if row.kind == 'play' else 'History observation' }}</strong></div>
+      <div><span class="muted">{{ row.source or 'Unknown source' }}{% if row.is_generated %} · Generated queue{% endif %}</span>
+        {% if row.kind == 'observation' %}<small class="muted">Last observed <time datetime="{{ row.at_iso }}">{{ row.at_label }}</time></small>{% endif %}
+        {% if row.kind == 'observation' and row.timezone %}<small class="muted">Calendar: {{ row.timezone }}</small>{% endif %}
+        {% if row.video_id and row.video_id != track.video_id %}<small class="muted">Another upload of this recording</small>{% endif %}
+      </div>
+    </li>
+  {% endfor %}</ol>{% else %}<p class="muted">No listening evidence recorded{% if page %} on this page{% endif %}.</p>{% endif %}
+  {% if page or more %}<nav class="track-ledger-pages" aria-label="Listening history pages">
+    {% if page %}<a href="/track/{{ track.video_id|urlencode }}?page={{ page-1 }}">Newer entries</a>{% endif %}
+    {% if more %}<a href="/track/{{ track.video_id|urlencode }}?page={{ page+1 }}">Older entries</a>{% endif %}
+  </nav>{% endif %}
+</section>

@@ -141,7 +141,10 @@ def build(ctx) -> APIRouter:
         return _settings_sections([
             ("album-menus", "Album menus", "teal",
              "Standing defaults for Home Albums. The Albums tuner overrides them for four hours and does not change lasting taste. "
-             f"Current genre filter: {genres}.", [("", ("album_menu_",))]),
+             f"Current genre filter: {genres}.", [
+                 ("Menu choices", ("album_menu_",)),
+                 ("Album fit", ("album_collab_",)),
+             ]),
             ("home", "Home cards", "teal",
              "Choose how often Home changes and how much variety fits on each card. Limits that are too strict can leave fewer suggestions available.", [
                  ("Refresh & preparation", ("erosion_", "candidate_", "modes_pool_", "modes_cand_")),
@@ -307,7 +310,9 @@ def build(ctx) -> APIRouter:
                     "lane_min": rec_params.LANE_MIN, "lane_max": rec_params.LANE_MAX,
                     "lane_default": rec_params.LANE_DEFAULT, "lane_step": 0.05}
         elif panel == "recommendations":
-            data = {**_recommendation_context(), "home_format": store.settings.get_setting("home_format") or "mixes"}
+            from yt_playlist.rec import home_preferences
+            data = {**_recommendation_context(), 'home_format': store.settings.get_setting('home_format') or 'auto',
+                    'home_format_label': home_preferences.LABELS[home_preferences.default_format(store)]}
         elif panel == "learning":
             data = {"learning": taste_viz.learning_progress(store, ctx.now()),
                     "learning_sections": _learning_sections()}
@@ -550,6 +555,12 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=409, detail="There is no model selection to restore.")
         store.settings.set_setting("rec_selection_paused", "1")
         store.settings.set_setting("rec_selection_restore", run_id)
+        ctx.rec_worker.trigger()
+        return _autotune_status(request)
+
+    @router.post("/taste/model-selection/pause")
+    def pause_model_selection(request: Request):
+        store.settings.set_setting("rec_selection_paused", "1")
         ctx.rec_worker.trigger()
         return _autotune_status(request)
 

@@ -47,6 +47,40 @@ def test_unverified_metadata_does_not_write_track_history_or_rating():
     assert live_plays.handle_play_event(_ctx(s), _msg(metadataVerified=True), 1001) is True
 
 
+def test_native_upload_proof_records_known_song_without_importing_unverified_credits_or_rating():
+    s = _store()
+    video = 'FDuJmIOtT7I'
+    title = "Most Precious Love (DF's Future 3000 Extended Mix) (feat. Barbara Tucker)"
+    s.tracks.upsert_track(video, title, 'Blaze', 'Most Precious Love', 480)
+    before = s.tracks.track_detail(video)
+    msg = _msg(videoId=video, title='An uploader title', artist='Uploader channel',
+               metadataVerified=False, videoVerified=True, likeStatus='DISLIKE')
+    assert live_plays.handle_play_event(_ctx(s), msg, 1000)
+    assert s.tracks.track_detail(video) == before
+    evidence, more = s.tracks.track_play_ledger(before['recording_id'])
+    assert not more and len(evidence) == 1 and evidence[0]['kind'] == 'play'
+    assert s.history.play_events_since(0)[0]['identity_key'] == before['identity_key']
+    assert not s.rec_model.disliked_identity_keys()
+    assert s.tracks.item_rating(1, video) is None
+    # Hydrated credits can follow without manufacturing a second play.
+    assert not live_plays.handle_play_event(_ctx(s), _msg(videoId=video, title=title, artist='Blaze',
+                                                        metadataVerified=True), 1001)
+    assert len(s.history.play_events_since(0)) == 1
+
+
+@pytest.mark.parametrize('overrides', [
+    {'videoVerified': False}, {'videoId': 'unknown'}, {'brandKnown': False},
+    {'brandId': 'unknown'}, {'muted': True}, {'tabMuted': True}, {'paused': True}, {'volume': 0},
+])
+def test_unverified_native_play_requires_known_upload_account_and_audible_playback(overrides):
+    s = _store()
+    s.tracks.upsert_track('v1', 'Canonical title', 'Canonical artist', '', 180)
+    msg = _msg(**{'metadataVerified': False, 'videoVerified': True, **overrides})
+    assert not live_plays.handle_play_event(_ctx(s), msg, 1000)
+    assert not s.history.play_events_since(0)
+    assert s.tracks.identity_key_for_video('unknown') is None
+
+
 @pytest.mark.parametrize("silent", [{"muted": True}, {"tabMuted": True}, {"volume": 0}, {"paused": True}])
 def test_silent_play_does_not_write_but_unmute_records_once(silent):
     s = _store()

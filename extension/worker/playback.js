@@ -221,7 +221,7 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
         muted: !!msg.muted || msg.volume === 0});
       const pending = pendingPlays.get(srcTabId);
       if (msg.type === "now-heartbeat" && !msg.paused && !msg.muted && !owner.mutedInfo?.muted &&
-          msg.brandKnown && msg.metadataVerified !== false && pending &&
+          msg.brandKnown && (msg.metadataVerified !== false || msg.videoVerified === true) && pending &&
           msg.videoId === pending.videoId && msg.brandId === pending.brandId) {
         msg = Object.assign({}, pending, msg, {type: "play"});
       }
@@ -242,15 +242,17 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
     if (msg.type === "play") {
       const delivered = send({type: "play", title: msg.title, artist: msg.artist,
         metadataVerified: msg.metadataVerified !== false,
+        videoVerified: msg.videoVerified === true,
         thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
         playlist: msg.playlist || "", albumBrowseId: msg.albumBrowseId || "",
         position: msg.position, duration: msg.duration,
-        brandId: msg.brandId || "", paused: !!msg.paused, muted: !!msg.muted,
+        brandId: msg.brandId || "", brandKnown: msg.brandKnown, paused: !!msg.paused, muted: !!msg.muted,
         tabMuted: !!msg.tabMuted, timeZone: msg.timeZone});
       if (delivered) pendingPlays.delete(srcTabId);
     } else if (msg.type === "now-heartbeat") {
       send({type: "now-heartbeat", title: msg.title, artist: msg.artist,
         metadataVerified: msg.metadataVerified !== false,
+        videoVerified: msg.videoVerified === true,
         thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
         playlist: msg.playlist || "", albumBrowseId: msg.albumBrowseId || "", paused: !!msg.paused,
         position: msg.position, duration: msg.duration,

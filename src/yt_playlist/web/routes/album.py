@@ -68,6 +68,17 @@ def build(ctx) -> APIRouter:
                         'artist': ', '.join(x.get('name', '') for x in t.get('artists') or []),
                         'duration': t.get('duration')} for t in a.get('tracks') or []]}
 
+    @router.get('/album/track-plays')
+    def track_plays(request: Request):
+        # Local listening evidence only. Polling must never fetch an album or
+        # count a click/heartbeat as a play, and works for unsaved releases too.
+        videos = list(dict.fromkeys(filter(None, request.query_params.get('videos', '').split(','))))
+        if len(videos) > 500 or any(len(video) > 128 for video in videos):
+            raise HTTPException(400, 'Too many track IDs')
+        known = {row['video_id']: row['plays'] for row in store.charts.video_tracks_detail(videos)}
+        return JSONResponse({'plays': {video: known.get(video, 0) for video in videos}},
+                            headers={'Cache-Control': 'no-store'})
+
     @router.get('/album/inline')
     def album_inline(request: Request, browse: str, opportunity: str = ''):
         """Opening a record fetches its tracks without leaving the held Home menu."""
@@ -125,7 +136,8 @@ def build(ctx) -> APIRouter:
         # upload while retaining the full fetched sequence and keeping library ownership intact.
         table_tracks = tracks if album else []
         if album and not in_library:
-            known = {t['video_id']: t for t in library_tracks}
+            known = {t['video_id']: t for t in store.charts.video_tracks_detail(
+                [t['video_id'] for t in album.get('tracks') or [] if t.get('video_id')])}
             table_tracks = [{
                 **known.get(t.get('video_id'), {}),
                 'video_id': t.get('video_id') or '', 'title': t.get('title') or '',

@@ -40,7 +40,7 @@ def build(ctx, views):
         form = await request.form()
         preference, panel = form.get("format"), form.get("panel")
         if preference is not None:
-            if preference not in {"albums", "mixes", "radio", "both"}:
+            if preference not in {"auto", "albums", "mixes", "radio", "both"}:
                 return Response(status_code=400)
             store.settings.set_setting("home_format", preference)
         if panel in {"album-choices", "directions", "radio"}:
@@ -93,7 +93,8 @@ def build(ctx, views):
 
     def rotate_album_choices(previous=''):
         now = now_fn()
-        held = store.rec_ledger.evidence().get('opportunity', previous) if previous and len(previous) <= 64 else None
+        choice_evidence.close_window(store, 'albums', now)
+        held = choice_evidence.opportunity(store, previous) if previous and len(previous) <= 64 else None
         if held and held.get('format') == 'albums':
             ids = [item['browse_id'] for item in held['options']]
         else:
@@ -138,7 +139,7 @@ def build(ctx, views):
         prepared = album_choices.load(store, now_fn()) or {}
         albums = prepared.get('items', [])
         if opportunity and len(opportunity) <= 64:
-            held = store.rec_ledger.evidence().get('opportunity', opportunity)
+            held = choice_evidence.opportunity(store, opportunity)
             if held and held.get('format') == 'albums':
                 albums = held.get('options', []) + albums
         album = next((row for row in albums if row.get('browse_id') == browse), None)

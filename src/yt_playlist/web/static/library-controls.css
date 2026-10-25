@@ -141,5 +141,6 @@ tr.rowdel td { text-decoration: line-through; }
   .head-tools { flex-basis: 100%; }
   .album-index th:nth-child(4), .album-index td:nth-child(4),
   .album-index th:nth-child(5), .album-index td:nth-child(5) { display: none; }
+  .album-index :is(th, td).album-save { display: table-cell; }
 }
 

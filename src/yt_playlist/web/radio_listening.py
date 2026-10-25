@@ -9,7 +9,8 @@ import logging
 import time
 from uuid import uuid4
 
-from yt_playlist.rec import choice_evidence, choice_outcomes, measurement
+from yt_playlist.rec import choice_evidence, choice_outcomes, measurement, musical_character
+from yt_playlist.rec.radio_candidates import POLICY_VERSION
 from yt_playlist.web.radio_playback import PlaybackObservation, PlaybackRequest, PlaybackUnavailable
 from yt_playlist.web.radio_playlist_io import PlaylistPending
 from yt_playlist.web.radio_state import selected_slot
@@ -157,30 +158,33 @@ class RadioListening:
 
     def seed_offer(self, candidates):
         tracks, menu_id = candidates.seed_offer(), uuid4().hex
+        tracks = [{**track, 'serving_context': {**track.get('serving_context', {}),
+                   'ordering_ranker': POLICY_VERSION, **musical_character.provenance(track)}} for track in tracks]
         measurement.record_recommendations(self.store, 'radio_seed', tracks,
             self.now_fn(), request_id=menu_id, ranker='radio-seed',
             provenance={'menu_id': menu_id, 'fingerprint': candidates.fingerprint,
                         'choice_unit': 'radio_session'})
-        self.store.settings.set_setting('radio_seed_offer', json.dumps({'tracks': tracks, 'menu_id': menu_id}))
-        context = (self.store.rec_proposals.get_proposals("home_prepared") or {}).get("choice_context", {})
+        self.store.settings.set_setting('radio_seed_offer', json.dumps({'tracks': tracks, 'menu_id': menu_id,
+            'comparison': getattr(candidates, 'comparison', None)}))
+        context = getattr(candidates, 'choice_context', None) or (self.store.rec_proposals.get_proposals("home_prepared") or {}).get("choice_context", {})
         choice_evidence.safe_issue(self.store, "radio", [{"id": t["video_id"], "position": i + 1,
             "tracks": [t], "mode_id": t.get("_radio_mode"), "intent": "seed",
             "score": getattr(candidates, "prior", {}).get(t.get("_radio_mode"), {}).get(t["key"])}
             for i, t in enumerate(tracks)], self.now_fn(), opportunity_id=menu_id,
-            context={**context, "radio": {"fingerprint": candidates.fingerprint, "tuning": candidates.tuning}})
+            context={**context, "radio": {"fingerprint": candidates.fingerprint, "tuning": candidates.tuning,
+                                        'ordering_ranker': POLICY_VERSION, 'musical_policy': musical_character.VERSION}})
         return tracks, menu_id
 
     def capture_menu(self, s):
         menu_id = s.directions.menu_id
-        if self.store.rec_ledger.evidence().get("opportunity", menu_id) is not None:
-            return
         branches = s.directions.public([])
-        context = (self.store.rec_proposals.get_proposals("home_prepared") or {}).get("choice_context", {})
+        context = getattr(s.candidates, 'choice_context', None) or (self.store.rec_proposals.get_proposals("home_prepared") or {}).get("choice_context", {})
         choice_evidence.safe_issue(self.store, "radio", [{"id": branch["id"],
             "position": branch["slot"] + 1, "active": branch["active"], "tracks": branch["tracks"],
             "mode_id": (branch["tracks"] or [{}])[0].get("_radio_mode"), "intent": "direction"}
-            for branch in branches], self.now_fn(), opportunity_id=menu_id, episode_id=s.episode_id,
+            for branch in branches], self.now_fn(), opportunity_id=menu_id, episode_id=s.episode_id, reuse=True,
             context={**context, "radio": {"fingerprint": s.candidates.fingerprint, "tuning": s.candidates.tuning,
+                'ordering_ranker': POLICY_VERSION, 'musical_policy': musical_character.VERSION,
                 "now": s.candidates.now_posterior, "now_sampled_at": s.candidates.now_sampled_at,
                 "history": [t["key"] for t in s.heard]}})
 
@@ -232,7 +236,8 @@ class RadioListening:
         self.capture_menu(s)
         choice_evidence.safe_respond(self.store, menu_id, "visible", self.now_fn(),
                                     visible=[branch["id"] for branch in branches])
-        items = [{**track, "lane": branch["id"], "serving_context": {
+        items = [{**track, "lane": branch["id"], "serving_context": {**track.get('serving_context', {}),
+            'ordering_ranker': POLICY_VERSION, **musical_character.provenance(track),
             "proposal_id": branch["id"], "slot": branch["slot"],
             "sequence_position": index + 1, "active": branch["active"]}}
             for branch in branches for index, track in enumerate(branch["tracks"])]

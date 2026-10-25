@@ -12,7 +12,7 @@
     <div class="btn-row">
       <input id="{{ name }}-api-key" type="text" x-model="val" placeholder="API key"
              autocomplete="off" spellcheck="false" autocapitalize="none"
-             aria-describedby="{{ name }}-key-help" @keydown.enter.prevent="save()">
+             aria-describedby="{{ name }}-key-help" @keydown.enter.prevent="save()" @change.stop>
       <button type="button" class="btn-primary btn-sm" :disabled="busy" @click="save()"
               x-text="busy ? 'Saving…' : 'Save key'"></button>
     </div>

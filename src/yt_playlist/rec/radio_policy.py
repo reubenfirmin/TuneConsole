@@ -59,6 +59,8 @@ class RadioPolicy:
 
     @staticmethod
     def genre_mismatch(view: CandidateView, history: PlaybackHistory, track):
+        if getattr(view.candidates, 'cluster_members', None):
+            return False  # Indexed streams navigate styles; explicit exclusions are checked separately.
         return not GenrePolicy(view.candidates.tuning["theme"], [], current=history.current).allows(track)
 
     @staticmethod

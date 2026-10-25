@@ -239,6 +239,27 @@ assert.equal(messages.at(-1).albumBrowseId, "MPRE_v8");
 snapshot("v9", {videoId: "v8", likeStatus: "LIKE", albumBrowseId: "MPRE_v8"});
 assert.equal(messages.at(-1).likeStatus, "");
 assert.equal(messages.at(-1).albumBrowseId, "");
+// Native upload proof is independent of recording credits. The backend can use a known
+// catalog upload, while an unknown upload must be retried once its credits hydrate.
+const nativeSnapshot = (metadataVerified, brandKnown = true, paused = false) =>
+  listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorRevision: 10,
+    __tcNow: {title: 'Native title', artist: 'Uploader', videoId: 'native-id',
+      videoVerified: true, metadataVerified, brandKnown, brandId: 'brand-A', paused,
+      playerBar: {videoId: 'old-id', likeStatus: 'DISLIKE'}}}});
+nativeSnapshot(false, false);
+assert.equal(messages.at(-1).type, 'now-heartbeat');
+nativeSnapshot(false, true, true);
+assert.equal(messages.at(-1).type, 'now-heartbeat');
+nativeSnapshot(false);
+assert.equal(messages.at(-1).type, 'play');
+assert.equal(messages.at(-1).videoVerified, true);
+assert.equal(messages.at(-1).metadataVerified, false);
+assert.equal(messages.at(-1).likeStatus, '');
+nativeSnapshot(false);
+assert.equal(messages.at(-1).type, 'now-heartbeat');
+nativeSnapshot(true);
+assert.equal(messages.at(-1).type, 'play');
+assert.equal(messages.at(-1).metadataVerified, true);
 // Health pings ask MAIN for an immediate sample. An incomplete reply still proves MAIN liveness;
 // a legacy sensor cannot satisfy the versioned handshake.
 let health;
@@ -256,7 +277,7 @@ listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorProbeI
 assert.equal(health.ok, true);
 assert.equal(health.mainVersion, 4);
 assert.equal(health.mainRevision, 8);
-assert.equal(health.receiverRevision, 9);
+assert.equal(health.receiverRevision, 10);
 assert.equal(health.mainAgeMs, 0);
 assert.equal(health.capture.hasVideo, false);
 assert.equal(health.capture.accountKnown, false);
@@ -451,6 +472,7 @@ assert.equal(latest().thumbnail, 'https://yt3.googleusercontent.com/album=w544')
 assert.equal(latest().title, 'Next');
 assert.equal(latest().artist, 'Artist');
 assert.equal(latest().metadataVerified, false, 'artwork alone must not validate recording credits');
+assert.equal(latest().videoVerified, true, 'native upload proof does not authorize uploader credits');
 playerResponse.videoDetails.videoId = 'playing';
 tick();
 assert.equal(latest().thumbnail, '', 'a stale player response must not supply the previous artwork');
@@ -464,6 +486,7 @@ assert.equal(latest().playlist, '', 'an actual queue clear must stay clear');
 available = false;
 tick();
 assert.equal(latest().videoId, '', 'unknown player state must not borrow a browsed ID');
+assert.equal(latest().videoVerified, false);
 assert.equal(latest().playlist, '');
 assert.equal(exits().length, 1);
 available = true;

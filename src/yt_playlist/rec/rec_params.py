@@ -39,6 +39,10 @@ class ParamSpec:
 
 # Each default equals the constant it replaced, so behaviour is unchanged until a user moves it.
 PARAMS = [
+    ParamSpec('album_collab_weight', 'Album fit: playlist patterns', 'discovery',
+              'Share of album affinity supplied by the track embedding when both playlist patterns '
+              'and content features are available. Releases without one source use the available source.',
+              0, 1, .05, .5, percentage=True),
     ParamSpec("album_menu_novelty", "Album menus: comfort and novelty", "discovery",
               "Comfort favors familiar releases and close model fits. Novelty reserves more places for "
               "unsaved releases and reaches further within the model-ranked frontier. Half requests two "
@@ -107,8 +111,10 @@ PARAMS = [
               "It changes that record's shared context weight; clearing album feedback removes it. "
               "Individual track ratings remain separate.", 1, 3, .1, 1.5),
     ParamSpec("album_return_weight", "Album return days", "discovery",
-              "Standing support for returning to an album on separate days. Growth is logarithmic; "
-              "track count and uninterrupted album length do not increase it. Shared across listening formats.",
+              "Standing support from tracks heard on multiple days, scaled by their share of the complete "
+              "album tracklist. One repeated favorite gives a small boost; returning to most or all tracks "
+              "gives more. Growth across days is logarithmic; same-day replays add no return support. "
+              "Unknown tracklists supply no coverage boost. Shared across listening formats.",
               0, 3, 0.1, 1),
     ParamSpec("max_track_minutes", "Maximum track length (minutes)", "discovery",
               "Longest track allowed in generated song playlists. Lower limits keep DJ mixes and "

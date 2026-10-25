@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from tests.conftest import FakeClient
+from tests.musical_support import prepare_vibes
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
 from yt_playlist.rec import home_cards, home_prepared, home_themes, mix_tuning, mode_surfaces, surfaces
@@ -44,7 +45,7 @@ def seed(store):
             bundles["all"].setdefault(lane, []).extend(items)
     store.modes.replace_modes(modes, [], 1)
     store.rec_proposals.put_proposals("mode_bundles", bundles, 1)
-    return bundles
+    return prepare_vibes(store)
 
 
 @pytest.fixture
@@ -64,6 +65,15 @@ def test_generation_shares_play_counts_and_facets_across_summaries(store, monkey
     repo = type(store.rec_query)
     original = repo.play_counts
     calls = []
+    proposal_repo = type(store.rec_proposals)
+    read_proposals = proposal_repo.get_proposals
+    bundle_reads = []
+
+    def bounded_bundle_read(self, surface):
+        if surface == 'mode_bundles':
+            bundle_reads.append(self)
+            assert bundle_reads.count(self) == 1, 'Each snapshot must decode its candidate pool only once'
+        return read_proposals(self, surface)
 
     def counted(self):
         calls.append(True)
@@ -73,10 +83,12 @@ def test_generation_shares_play_counts_and_facets_across_summaries(store, monkey
         raise AssertionError('Home must reuse the generation summaries')
 
     monkeypatch.setattr(repo, 'play_counts', counted)
+    monkeypatch.setattr(proposal_repo, 'get_proposals', bounded_bundle_read)
     monkeypatch.setattr(repo, 'genre_play_distribution', forbidden)
     monkeypatch.setattr(repo, 'era_play_distribution', forbidden)
     assert home_prepared.prepare(store, 1000) is not None
     assert len(calls) == 1
+    assert len(bundle_reads) == 2  # Independent discovery and mix snapshots.
 
 
 def test_album_budget_deferral_still_publishes_mixes_with_last_good_album_context(store, monkeypatch):
@@ -99,6 +111,30 @@ def test_album_budget_deferral_still_publishes_mixes_with_last_good_album_contex
     assert result['menus'] and result['album_choices'] == albums['items']
     assert result['album_choice_context'] == albums['context']
     assert store.rec_proposals.get_proposals(album_choices.SURFACE) == albums
+
+
+def test_budget_retry_reuses_completed_genre_setup_and_publishes_a_menu(store, monkeypatch):
+    from yt_playlist.core.activity import WorkBudgetExceeded
+    seed(store)
+    original_options, original_cards = home_themes.genre_options, home_cards.HomeCards.cards
+    options_calls, cards_calls = [], []
+
+    def options(reader, **kwargs):
+        options_calls.append(True)
+        return original_options(reader, **kwargs)
+
+    def cards(self, request):
+        cards_calls.append(True)
+        if len(cards_calls) == 1:
+            raise WorkBudgetExceeded('The first menu starts after this batch deadline')
+        return original_cards(self, request)
+
+    monkeypatch.setattr(home_themes, 'genre_options', options)
+    monkeypatch.setattr(home_cards.HomeCards, 'cards', cards)
+    assert home_prepared.prepare(store, 1000) is None
+    result = home_prepared.prepare(store, 1001)
+    assert result and any(menu['protos'] for menu in result['menus'])
+    assert len(options_calls) == 1
 
 
 def test_preparation_is_bounded_complete_and_records_no_exposure(store, prepared):
@@ -489,6 +525,8 @@ def test_cache_rebuild_and_restart_preserve_evidence_and_experiment_identity(tmp
 
 
 def test_generation_race_retains_previous_cache(store, prepared, monkeypatch):
+    tid = store.tracks.track_ids_for_videos(['v-wheelhouse-0-0'])['v-wheelhouse-0-0']
+    store.tracks.set_track_genre(tid, 'House')  # Recompute the completed genre setup for new metadata.
     original = home_themes.genre_options
     def changed(reader, **kwargs):
         result = original(reader, **kwargs)
@@ -500,6 +538,8 @@ def test_generation_race_retains_previous_cache(store, prepared, monkeypatch):
 
 
 def test_setup_sql_obeys_total_budget_and_preserves_previous_cache(store, prepared, monkeypatch):
+    tid = store.tracks.track_ids_for_videos(['v-wheelhouse-0-0'])['v-wheelhouse-0-0']
+    store.tracks.set_track_genre(tid, 'House')
     def slow(reader, **kwargs):
         return reader.conn.execute('WITH RECURSIVE slow(n) AS (VALUES(0) UNION ALL '
             'SELECT n+1 FROM slow WHERE n<1000000000) SELECT sum(n) FROM slow').fetchone()
@@ -535,6 +575,8 @@ def test_small_preparation_batches_accumulate_alternatives_across_attempts(store
 
 
 def test_preparation_can_publish_while_ordinary_unrelated_ui_writes_continue(store, prepared, monkeypatch):
+    tid = store.tracks.track_ids_for_videos(['v-wheelhouse-0-0'])['v-wheelhouse-0-0']
+    store.tracks.set_track_genre(tid, 'House')
     iid = store.identities.upsert_identity('main', 'cred', None, True)
     original = home_themes.genre_options
 
@@ -600,7 +642,7 @@ def test_tuned_result_is_reused_and_expiry_restores_baseline(store, prepared):
     result = service(store).cards(home_cards.CardsRequest(1000, record=False))
     home_prepared.remember(store, prepared, result, 1000)
     tuned = home_prepared.load(store, 1001)
-    assert tuned["tuning"] == home_prepared.tuning_key(store)
+    assert tuned["tuning"] == home_prepared.tuning_key(store, 1000)
     assert len(tuned["menus"]) == 1
     assert home_prepared.load(store, 1000 + mix_tuning.TTL_S)["tuning"] == prepared["tuning"]
     assert store.rec_model.get_leans() == {}

@@ -7,6 +7,8 @@ import pytest
 from yt_playlist.rec import embedding_vectors as embed, radio_tuning, rec_params
 from yt_playlist.rec.radio_candidates import RadioCandidates, CLUSTER_POOL_LIMIT
 from yt_playlist.rec.radio_directions import RadioDirections
+from tests.musical_support import prepare_profiles
+from yt_playlist.core import catalog
 
 
 @pytest.fixture
@@ -21,6 +23,8 @@ def prepared(store):
             vid = f"m{mid}-{i}"
             tid = store.tracks.upsert_track(vid, vid, f"Artist {vid}", "", 200)
             store.tracks.set_track_enrichment(tid, genre, "2001")
+            with store.conn:
+                catalog.choose_field(store.conn, tid, 'energy', .02 if mid == 1 else .98)
             key = store.tracks.catalog_subject(tid)["identity_key"]
             track = dict(key=key, video_id=vid, title=vid, artist=f"Artist {vid}", genre=genre, year="2001")
             (fresh if i >= 6 else familiar).append(track)
@@ -28,6 +32,7 @@ def prepared(store):
         bundles[str(mid)] = dict(wheelhouse=familiar, fresh=fresh)
     store.modes.replace_modes(modes, retired_ids=[], now=1)
     store.rec_proposals.put_proposals("mode_bundles", bundles)
+    prepare_profiles(store)
     return tracks
 
 
@@ -68,14 +73,24 @@ def test_middle_uses_style_and_energy_while_themed_pins_the_playing_genre(store,
     assert themed.next_track([prepared[0]], target=prepared[-1])["genre"] == "ambient"
 
 
-def test_enrichment_updates_visible_metadata_and_rejects_known_energy_mismatch(store, prepared):
+def test_enrichment_updates_visible_metadata_without_rejecting_a_weak_genre_prior(store, prepared):
     c = candidate(store, energy=0)
     tid = store.tracks.upsert_track("missing", "Missing", "Artist", "", 200)
     track = {"key": store.tracks.catalog_subject(tid)["identity_key"], "video_id": "missing"}
     c.retain([track])
     store.tracks.set_track_enrichment(tid, "hardcore", "2020")
+    prepare_profiles(store)
     assert c.refresh_metadata([track])
     assert track["year"] == "2020"
+    assert c.fits(track)
+    assert not c.refresh_metadata([track])
+
+    # An explicit recording correction can reject a future track. This update
+    # changes only its prepared profile, with unchanged visible metadata.
+    with store.conn:
+        catalog.choose_field(store.conn, tid, 'energy', .95)
+    prepare_profiles(store)
+    assert c.refresh_metadata([track])
     assert not c.fits(track)
     assert not c.refresh_metadata([track])
 

@@ -41,6 +41,33 @@ def test_measurement_bound_counts_offers_and_excludes_analytics_from_visible_bus
     assert len(queue.take_measurements()) == 8 and not queue
 
 
+def test_measurement_batches_preserve_fifo_and_leave_other_jobs_admitted():
+    queue = PendingJobs()
+    offers = [SimpleNamespace(work_units=units) for units in (3, 4, 2, 1)]
+    for offer in offers:
+        assert queue.merge(Job.MEASUREMENT, offer)
+    queue.merge(Job.RATINGS)
+    assert queue.take_measurements(limit=8) == offers[:2]
+    assert list(queue.measurements) == offers[2:]
+    assert queue.drain() == {Job.RATINGS: True}
+    assert queue.take_measurements(limit=8) == offers[2:]
+    assert not queue
+
+
+def test_worker_services_ratings_between_measurement_batches(scheduled, monkeypatch):
+    worker, targets = scheduled
+    calls, closed = [], set()
+    for index in range(19):
+        assert worker.enqueue_measurement(SimpleNamespace(surface='home',
+            run=lambda index=index: calls.append(index), close=lambda index=index: closed.add(index)))
+    monkeypatch.setattr(worker.tasks, 'ratings', lambda: calls.append('ratings') or set())
+    worker.trigger_rating_update()
+    assert len(targets) == 1
+    targets.pop()()
+    assert calls == [*range(8), 'ratings', *range(8, 19)]
+    assert closed == set(range(19)) and not worker.jobs and not worker._running
+
+
 @pytest.mark.parametrize(("base", "cap", "exponent_cap", "expected"), [
     (2, 30, 4, [2, 4, 8, 16, 30, 30, 30]),
     (5, 300, 6, [5, 10, 20, 40, 80, 160, 300]),
@@ -202,12 +229,12 @@ def test_projection_admission_can_be_used_without_a_worker_and_releases_rejected
     projections = Projections(store, lambda: 100, logging.getLogger(__name__), accepting=lambda: True,
                               schedule=schedule, execute=lambda *args: {})
     projections.poll()
-    assert scheduled_kinds == [{"trends": True, "cleanup": True}] and not projections.active
+    assert scheduled_kinds == [{"trends": True, "cleanup": True, "analytics": True}] and not projections.active
     accepting[0] = True
     projections.poll()
-    assert projections.active == {"trends", "cleanup"}
+    assert projections.active == {"trends", "cleanup", "analytics"}
     projections.run("trends")
-    assert projections.active == {"cleanup"} and projections.completed["trends"][-1]
+    assert projections.active == {"cleanup", "analytics"} and projections.completed["trends"][-1]
 
 
 def test_shutdown_cancels_every_job_and_reader_and_rejects_direct_rebuild(scheduled, monkeypatch):

@@ -191,7 +191,7 @@ def test_poll_shares_one_scoped_capture_despite_unrelated_key_churn(store, monke
     assert len(captures) == 1
     baseline = captures.pop()
     assert baseline
-    assert all(not key or (table, key) == ('settings', 'key:takeout_imported_at')
+    assert all(not key or (table, key) in set().union(*maintenance.DEPENDENCIES.values())
                for table, key in baseline)
     with store.conn:
         store.conn.executemany('INSERT INTO settings VALUES (?,?)',
@@ -200,7 +200,7 @@ def test_poll_shares_one_scoped_capture_despite_unrelated_key_churn(store, monke
     assert len(original()) > 4000
     worker.projections.poll()  # Coalesced jobs are still active on this idle tick.
     assert captures == [baseline]
-    assert worker.projections.active == {'trends', 'cleanup'}
+    assert worker.projections.active == {'trends', 'cleanup', 'analytics'}
 
 
 def test_local_import_setting_invalidates_only_trends_inputs(store):

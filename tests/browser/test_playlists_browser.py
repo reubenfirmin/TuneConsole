@@ -284,16 +284,25 @@ def test_shift_selection_uses_clicked_occurrence_of_duplicate(recent_pl_app, pag
 
 @pytest.mark.parametrize("width", [1280, 390])
 def test_recent_and_generated_layout_and_promotion(recent_pl_app, page, width, tmp_path):
+    from datetime import datetime, timezone
     page.set_viewport_size({"width": width, "height": 900})
+    page.clock.set_fixed_time(datetime.fromtimestamp(2_000_000, tz=timezone.utc))
     page.emulate_media(reduced_motion="reduce")
     page.goto(f"{recent_pl_app}/playlists")
     page.wait_for_load_state("networkidle")
     recent, generated = page.locator(".playlist-new"), page.locator(".playlist-generated")
+    expect(recent.get_by_role('columnheader', name='Playlist', exact=True)).to_be_visible()
+    expect(recent.locator('.playlist-created').first).to_have_text('Created today')
+    if width > 1000:
+        expect(recent.get_by_role('columnheader', name='Last played', exact=True)).to_be_visible()
+        header = page.locator('.playlist-table-card thead th').first
+        assert header.evaluate('el => getComputedStyle(el).backgroundColor') == header.locator('xpath=following-sibling::th[1]').evaluate('el => getComputedStyle(el).backgroundColor')
     recent_box = recent.bounding_box()
     for section in [recent, page.locator(".playlist-table-card")]:
         box = section.get_by_role("checkbox").first.bounding_box()
         assert box["x"] >= 0 and box["x"] + box["width"] <= width
     page.screenshot(path=tmp_path / f"new-playlists-{width}.png", full_page=True)
+    page.screenshot(path=f'/tmp/tuneconsole-playlists-412-{width}.png', full_page=True)
     expect(recent.get_by_role("button", name="Promote to library", exact=True)).to_have_count(0)
     page.get_by_role("button", name="Generated playlists", exact=False).click()
     expect(recent).to_be_hidden()

@@ -97,13 +97,37 @@ document.addEventListener('htmx:afterSwap', (e) => {
     var data = window.playbackStatus.snapshot;
     highlight(data?.connected ? data.now_playing : null);
   }
+  var playsPending = false;
+  async function refreshPlays() {
+    if (playsPending || document.hidden) return;
+    var rows = [...document.querySelectorAll('tr[data-vid]:has(.track-plays)')];
+    var videos = [...new Set(rows.map(row => row.dataset.vid).filter(Boolean))];
+    if (!videos.length) return;
+    playsPending = true;
+    try {
+      for (var offset = 0; offset < videos.length; offset += 500) {
+        var response = await fetch('/album/track-plays?videos=' + encodeURIComponent(videos.slice(offset, offset + 500).join(',')));
+        if (!response.ok) continue;
+        var counts = (await response.json()).plays || {};
+        rows.forEach(function (row) {
+          var count = counts[row.dataset.vid];
+          if (!row.isConnected || !Number.isInteger(count) || count < 0) return;
+          row.dataset.plays = count;
+          row.querySelector('.track-plays .track-cell').textContent = count || '';
+        });
+      }
+    } catch (_) { /* Keep the last confirmed counts during a connection failure. */ }
+    finally { playsPending = false; }
+  }
   window.addEventListener('bridge-status', function (event) {
     highlight(event.detail?.connected ? event.detail.now_playing : null);
   });
-  document.addEventListener('htmx:afterSwap', highlightCurrent);
+  document.addEventListener('htmx:afterSwap', function () { highlightCurrent(); refreshPlays(); });
   document.addEventListener('DOMContentLoaded', function () { highlightCurrent(); refreshCells(); }, {once: true});
   highlightCurrent();
   refreshCells();
+  refreshPlays();
   setInterval(refreshCells, 2500);
+  setInterval(refreshPlays, 2500);
 })();
 

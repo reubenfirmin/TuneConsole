@@ -10,7 +10,7 @@
       ],
       "buildsystem": "simple",
       "build-commands": [
-        "pip3 install --no-index --no-deps --no-build-isolation --ignore-installed --find-links=file://${PWD} --prefix=${FLATPAK_DEST} annotated-doc==0.0.4 annotated-types==0.7.0 anyio==4.14.0 certifi==2026.6.17 charset-normalizer==3.4.7 click==8.4.1 dbus-next==0.2.3 fastapi==0.137.2 h11==0.16.0 httptools==0.8.0 idna==3.18 jinja2==3.1.6 markupsafe==3.0.3 numpy==2.4.6 pydantic==2.13.4 pydantic-core==2.46.4 python-dotenv==1.2.2 python-multipart==0.0.32 pyyaml==6.0.3 rapidfuzz==3.14.5 requests==2.34.2 scipy==1.18.1 starlette==1.3.1 threadpoolctl==3.7.0 typing-extensions==4.15.0 typing-inspection==0.4.2 urllib3==2.7.0 uvicorn==0.49.0 uvloop==0.22.1 watchfiles==1.2.0 websockets==16.0 ytmusicapi==1.12.1"
+        "pip3 install --no-index --no-deps --no-build-isolation --ignore-installed --find-links=file://${PWD} --prefix=${FLATPAK_DEST} annotated-doc==0.0.4 annotated-types==0.7.0 anyio==4.14.0 certifi==2026.6.17 charset-normalizer==3.4.7 click==8.4.1 dbus-next==0.2.3 fastapi==0.137.2 h11==0.16.0 httptools==0.8.0 idna==3.18 jinja2==3.1.6 markupsafe==3.0.3 numpy==2.4.6 pydantic==2.13.4 pydantic-core==2.46.4 python-dotenv==1.2.2 python-multipart==0.0.32 pyyaml==6.0.3 rapidfuzz==3.14.5 requests==2.34.2 scipy==1.18.1 starlette==1.3.1 threadpoolctl==3.7.0 typing-extensions==4.15.0 typing-inspection==0.4.2 urllib3==2.7.0 uvicorn==0.49.0 uvloop==0.22.1 watchfiles==1.2.0 websockets==16.0 ytmusicapi==1.12.3"
       ],
       "sources": [
         {
@@ -201,9 +201,9 @@
         },
         {
           "type": "file",
-          "url": "https://files.pythonhosted.org/packages/53/6d/f7156e7ab9953d09e14ef538de4e92c484169fac19d207b19b9d9eb9c845/ytmusicapi-1.12.1-py3-none-any.whl",
-          "sha256": "2a53f6df504b97b93a4d41c804b699b46190207cb9d864fcf4edeb338b1f15d9",
-          "dest-filename": "ytmusicapi-1.12.1-py3-none-any.whl"
+          "url": "https://files.pythonhosted.org/packages/29/ad/6d471ea9d81e1f59a4d01badda21e7f3f508b94ed171c677b6547b292f73/ytmusicapi-1.12.3-py3-none-any.whl",
+          "sha256": "f65db840907a43ca23b29bd563951a1e390fbe2089d7aa4ddbe2043824b2acd9",
+          "dest-filename": "ytmusicapi-1.12.3-py3-none-any.whl"
         }
       ]
     },
@@ -214,7 +214,7 @@
       ],
       "buildsystem": "simple",
       "build-commands": [
-        "pip3 install --no-index --no-deps --no-build-isolation --ignore-installed --find-links=file://${PWD} --prefix=${FLATPAK_DEST} annotated-doc==0.0.4 annotated-types==0.7.0 anyio==4.14.0 certifi==2026.6.17 charset-normalizer==3.4.7 click==8.4.1 dbus-next==0.2.3 fastapi==0.137.2 h11==0.16.0 httptools==0.8.0 idna==3.18 jinja2==3.1.6 markupsafe==3.0.3 numpy==2.4.6 pydantic==2.13.4 pydantic-core==2.46.4 python-dotenv==1.2.2 python-multipart==0.0.32 pyyaml==6.0.3 rapidfuzz==3.14.5 requests==2.34.2 scipy==1.18.1 starlette==1.3.1 threadpoolctl==3.7.0 typing-extensions==4.15.0 typing-inspection==0.4.2 urllib3==2.7.0 uvicorn==0.49.0 uvloop==0.22.1 watchfiles==1.2.0 websockets==16.0 ytmusicapi==1.12.1"
+        "pip3 install --no-index --no-deps --no-build-isolation --ignore-installed --find-links=file://${PWD} --prefix=${FLATPAK_DEST} annotated-doc==0.0.4 annotated-types==0.7.0 anyio==4.14.0 certifi==2026.6.17 charset-normalizer==3.4.7 click==8.4.1 dbus-next==0.2.3 fastapi==0.137.2 h11==0.16.0 httptools==0.8.0 idna==3.18 jinja2==3.1.6 markupsafe==3.0.3 numpy==2.4.6 pydantic==2.13.4 pydantic-core==2.46.4 python-dotenv==1.2.2 python-multipart==0.0.32 pyyaml==6.0.3 rapidfuzz==3.14.5 requests==2.34.2 scipy==1.18.1 starlette==1.3.1 threadpoolctl==3.7.0 typing-extensions==4.15.0 typing-inspection==0.4.2 urllib3==2.7.0 uvicorn==0.49.0 uvloop==0.22.1 watchfiles==1.2.0 websockets==16.0 ytmusicapi==1.12.3"
       ],
       "sources": [
         {
@@ -405,9 +405,9 @@
         },
         {
           "type": "file",
-          "url": "https://files.pythonhosted.org/packages/53/6d/f7156e7ab9953d09e14ef538de4e92c484169fac19d207b19b9d9eb9c845/ytmusicapi-1.12.1-py3-none-any.whl",
-          "sha256": "2a53f6df504b97b93a4d41c804b699b46190207cb9d864fcf4edeb338b1f15d9",
-          "dest-filename": "ytmusicapi-1.12.1-py3-none-any.whl"
+          "url": "https://files.pythonhosted.org/packages/29/ad/6d471ea9d81e1f59a4d01badda21e7f3f508b94ed171c677b6547b292f73/ytmusicapi-1.12.3-py3-none-any.whl",
+          "sha256": "f65db840907a43ca23b29bd563951a1e390fbe2089d7aa4ddbe2043824b2acd9",
+          "dest-filename": "ytmusicapi-1.12.3-py3-none-any.whl"
         }
       ]
     }

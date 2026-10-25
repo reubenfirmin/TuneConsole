@@ -61,11 +61,11 @@
   {% if path.startswith('/road_trip') %}
   <link rel="stylesheet" href="/static/road-trip.css?v={{ asset_v }}">
   {% endif %}
-  {% if path == '/' or path.startswith(('/playlist', '/album', '/artist', '/charts', '/generated')) %}
+  {% if path == '/' or path.startswith(('/playlist', '/album', '/artist', '/charts', '/generated', '/track/')) %}
   <link rel="stylesheet" href="/static/library.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/library-tables.css?v={{ asset_v }}">
   {% endif %}
-  {% if path in ('/artist', '/album') or path.startswith('/playlist/') %}
+  {% if path in ('/artist', '/album') or path.startswith(('/playlist/', '/track/')) %}
   <link rel="stylesheet" href="/static/library-entities.css?v={{ asset_v }}">
   {% endif %}
   {% if path.startswith('/charts') %}

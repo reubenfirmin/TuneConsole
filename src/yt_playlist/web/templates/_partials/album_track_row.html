@@ -35,7 +35,7 @@
     <span class="genre-display-wrap">{% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted ghint">—</span>{% endif %}</span>
     </div>
   </td>
-  <td class="num mono"><div class="track-cell">{{ t.plays or '' }}</div></td>
+  <td class="num mono track-plays"><div class="track-cell">{{ t.plays or '' }}</div></td>
   <td class="num mono"><div class="track-cell">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</div></td>
   <td class="rowmenu">
     <div class="track-cell">

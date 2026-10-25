@@ -36,7 +36,7 @@ def test_home_is_default_route(store):
     assert "home-status" in r.text         # live status card is present
     assert "Extension connected" not in r.text  # connection alone is not useful Home content
     assert "Library synced" not in r.text  # freshness line only appears after a first sync
-    assert 'class="arrival"' in r.text  # first-run connection and import screen
+    assert 'id="listening-format-title"' in r.text  # first-run format choice
 
 
 def test_next_home_visit_expires_a_day_old_theme_menu(store):
@@ -70,8 +70,36 @@ def test_home_rediscovers_unplayed_saved_albums(store):
     html = c.get("/").text
     assert "Something you used to love" in html
     assert "Kind of Blue" in html and "Miles Davis" in html
-    assert "Bring this one back" in html
+    assert "Saved music that you haven't played recently" in html
+    assert "Bring this one back" not in html
     assert "/album?browse=MPREb_x" in html            # tile links to the in-app album page
+
+
+def test_revisit_shows_full_current_playlist_in_saved_order(store):
+    from html import unescape
+    import re
+    from tests.conftest import seed_catalog_track
+
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    pid = store.playlists.upsert_playlist(iid, "quiet-list", "Quiet mix", 9, None, 1000)
+    tracks = [store.tracks.upsert_track(f"v{9-i}", f"Song {i}", "Artist", None, None, thumbnail="/static/icon.png")
+              for i in range(8)]
+    tracks.append(seed_catalog_track(store, "offline|artist", "Offline song", "Artist"))
+    store.playlists.set_playlist_tracks(pid, tracks)
+    store.settings.set_setting("last_sync_at", "1")
+    store.settings.set_setting("onboard_dismissed", "1")
+    html = _client(store).get("/").text
+    section = html.split('<section id="rediscover">', 1)[1].split('</section>', 1)[0]
+    table = re.search(r'<table class="track-table redis-tracks".*?</table>', section, re.S).group()
+    rows = re.findall(r'<tr class="srow".*?</tr>', table, re.S)
+    titles = [unescape(re.search(r'class="ptitle"[^>]*>(.*?)</(?:a|span)>', row).group(1)) for row in rows]
+    assert titles == [*[f"Song {i}" for i in range(8)], "Offline song"]
+    assert table.count('class="pl-thumb"') == 8
+    assert [unescape(re.search(r'class="pl-play" href="([^"]+)"', row).group(1)) for row in rows[:8]] == [
+        f"https://music.youtube.com/watch?v=v{9-i}&list=quiet-list" for i in range(8)]
+    assert 'class="pl-play"' not in rows[-1]
+    assert 'class="ui-arrow' not in section
+    assert "redis-more" not in section
 
 
 def test_playlists_moved_to_slash_playlists(store):
@@ -214,6 +242,8 @@ def test_presync_shows_recs_placeholder_not_feed(store):
     c = TestClient(app, base_url="http://127.0.0.1")
 
     html = c.get("/").text
+    assert 'id="listening-format-title"' in html
+    html = c.post('/home/onboard/format', data={'format': 'mixes'}).text
     assert 'class="arrival"' in html
     assert "personal mixes and find your next favorites" in html
     assert "More in your wheelhouse" not in html                           # feed hidden pre-sync

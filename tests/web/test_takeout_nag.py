@@ -65,6 +65,6 @@ def test_fresh_install_shows_welcome_before_optional_nudges(store):
     assert store.settings.get_setting("last_sync_at") is None
     c = TestClient(create_app(store, lambda: FakeClient()), base_url="http://127.0.0.1")
     html = c.get("/").text
-    assert "Welcome to TuneConsole" in html
+    assert "How do you like to listen?" in html
     assert "takeout-nag" not in html
     assert "lastfm-nudge" not in html

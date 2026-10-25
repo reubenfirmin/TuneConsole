@@ -133,7 +133,7 @@ def _linkify(text):
         url = m.group(1)
         out.append(Markup('<a href="{}" target="_blank" rel="noopener nofollow" '
                           'aria-label="Open biography source" title="Open biography source">{}</a>')
-                   .format(url, arrow_icon("external")))
+                   .format(url, "Source"))
         last = m.end()
     out.append(escape(s[last:]))
     return Markup("").join(out)

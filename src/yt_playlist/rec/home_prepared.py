@@ -20,6 +20,7 @@ from yt_playlist.util import genre_map
 from yt_playlist.rec.eligibility import home_exclusions
 
 SURFACE = "home_prepared"
+DISCOVERY_SURFACE = "home_discovery"
 SCHEMA = 1
 MAX_MENUS = 12
 MAX_AGE_S = 1800
@@ -36,12 +37,13 @@ class _NoJobs:
 def tuning_key(store, now=None):
     from yt_playlist.rec import candidate_refresh
     now = time.time() if now is None else now
+    vibe = home_vibe.current(store, now)
     genres = store.rec_proposals.get_proposals("home_genre_request") or {}
-    if genres.get("epoch") != home_cards._epoch(store, "cards"):
+    if not mix_tuning.genre_active(store, genres):
         genres = {}
     return _digest({"leans": store.rec_model.get_leans(),
                     "preferences": candidate_refresh.preferences(store, now),
-                    "vibe": store.settings.get_setting(home_vibe.SETTING),
+                    "vibe": vibe,
                     "album_feedback": store.settings.get_setting("album_feedback"),
                     "breadth": rec_params.get_param(store, "breadth_bias"),
                     "include": genres.get("include_genres", []),
@@ -52,8 +54,24 @@ def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:24]
 
 
+def _proposal_generation(reader):
+    digest = hashlib.sha256()
+    for surface in ('mode_bundles', 'fresh_pool'):
+        payload = reader.rec_proposals._proposal_json(surface)
+        if payload is None:
+            digest.update(b'missing;')
+        else:
+            encoded = payload.encode()
+            digest.update(str(len(encoded)).encode() + b':')
+            digest.update(encoded)
+    return digest.hexdigest()[:24]
+
+
 def prepare(store, now):
     """Prepare a bounded batch privately and publish only against unchanged inputs."""
+    # Discovery remains usable while a model change invalidates the mix menus,
+    # or a large mix assembly spends its entire preparation budget.
+    prepare_discovery(store, now)
     try:
         with work_budget(PREPARE_BUDGET_S):
             return _prepare(store, now)
@@ -62,6 +80,58 @@ def prepare(store, now):
         _LOG.debug('Home preparation deferred: total time budget exhausted; keeping previous collections')
         _LOG.debug('Home preparation budget boundary', exc_info=True)
         return None
+
+
+def load_discovery(store):
+    """The last bounded display pool survives disposable mix/model projections."""
+    try:
+        payload = store.rec_proposals.get_proposals(DISCOVERY_SURFACE)
+        if not isinstance(payload, dict):
+            return None
+        for field, identity, limit in (('discovery_albums', 'browse_id', 60),
+                                       ('discovery_artists', 'artist_id', 40),
+                                       ('discovery_tracks', 'key', 40)):
+            rows = payload.get(field)
+            if not isinstance(rows, list) or len(rows) > limit or any(
+                    not isinstance(row, dict) or identity not in row for row in rows):
+                return None
+            for row in rows:
+                value = row[identity]
+                if (identity == 'artist_id' and (type(value) is not int or value <= 0)
+                        or identity != 'artist_id' and (not isinstance(value, str) or not value)
+                        or not isinstance(row.get('artist'), str)
+                        or any(row.get(k) is not None and not isinstance(row[k], str)
+                               for k in ('genre', 'thumbnail'))):
+                    return None
+        return payload
+    except (ValueError, TypeError):
+        return None
+
+
+def prepare_discovery(store, now):
+    """Publish discovery separately, without waiting for complete mix menus."""
+    try:
+        with work_budget(PREPARE_BUDGET_S), store.read_snapshot() as snapshot:
+            reader = snapshot.store
+            leans = transient.facet_leans(reader, now)
+            previous = load_discovery(reader) or {}
+            tracks = fresh_pool.pick(reader, now, size=40, minimum=1)
+            if (not reader.rec_proposals.has_proposals('mode_bundles')
+                    and not reader.rec_proposals.has_proposals('fresh_pool')):
+                tracks = previous.get('discovery_tracks', [])
+            payload = {
+                'discovery_albums': discover.pick_discovered_albums(reader, 60, now, facet_leans=leans),
+                'discovery_artists': discover.pick_discovered_artists(reader, 40, now, facet_leans=leans),
+                'discovery_tracks': tracks,
+            }
+            encoded = json.dumps(payload, separators=(',', ':'))
+            if snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(
+                    encoded, now, surface=DISCOVERY_SURFACE),
+                    allow_stale_tables=mode_surfaces.RANKING_CHURN_TABLES):
+                return payload
+    except WorkBudgetExceeded:
+        _LOG.debug('Discovery preparation deferred; keeping the last display pool')
+    return None
 
 
 def _prepare(store, now):
@@ -83,25 +153,23 @@ def _prepare(store, now):
         tuning = tuning_key(reader, now)
         # Fresh can publish before there is enough library evidence for modes. Its
         # candidates must retire old menus even when mode_bundles is still empty.
-        generation = _digest([reader.rec_proposals._proposal_json(surface)
-                              for surface in ('mode_bundles', 'fresh_pool')])
+        generation = _proposal_generation(reader)
         reusable = (previous.get('generation') == generation and previous.get('tuning') == tuning
                     and now - previous.get('built_at', 0) < MAX_AGE_S)
         modes = ([] if bundles.get('_meta', {}).get('unmodeled')
                  else reader.modes.list_modes(active_only=True))
         mids = [m["mode_id"] for m in modes]
-        selection_data = {"plays": reader.rec_query.play_counts(),
-                          "audio": reader.rec_query.track_audio_features()}
+        selection_data = {"plays": reader.rec_query.play_counts()}
         facets = reader.rec_query.play_weighted_facets(selection_data['plays'])
-        options = home_themes.genre_options(reader, genre_plays=facets['genres'])
+        options = reader.memoized_read(('home-genre-options', generation, _digest(facets['genres'])),
+            lambda: home_themes.genre_options(reader, genre_plays=facets['genres'], bundles=bundles))
         fingerprint = {"breadth": taste_analysis.taste_breadth(reader, genre_plays=facets['genres']),
                        "eras": taste_analysis.era_distribution(reader, era_plays=facets['eras']),
                        "genre_plays": facets['genres'],
                        "transient": transient.facet_leans(reader, now)}
         collections = {"rediscover": surfaces.rediscover_playlists(reader, now, count=8, pool=8),
             "rediscover_albums": surfaces.rediscover_albums(reader, now, count=9, pool=9),
-            "discovery_albums": discover.pick_discovered_albums(reader, 60, now, facet_leans=fingerprint['transient']),
-            "discovery_artists": discover.pick_discovered_artists(reader, 40, now, facet_leans=fingerprint['transient'])}
+            **(load_discovery(reader) or {'discovery_albums': [], 'discovery_artists': [], 'discovery_tracks': []})}
         albums = reader.rec_proposals.get_proposals(album_choices.SURFACE) or {}
         collections["album_choices"] = albums.get('items', [])
         collections["album_choice_context"] = albums.get('context', {})
@@ -110,7 +178,7 @@ def _prepare(store, now):
         # These inputs belong to this snapshot, not to each recipe/menu. Re-reading
         # recent evidence for every card multiplied a small read into seconds of
         # repeated metadata queries during ordinary catch-up.
-        selection_data['preparation'] = {'leans': fingerprint['transient'],
+        selection_data['preparation'] = {'leans': fingerprint['transient'], 'bundles': bundles,
             'dists': (fingerprint['breadth']['families'], dict(fingerprint['eras'])),
             'vibe_rank': home_vibe.ranker(reader, now)}
         service = home_cards.HomeCards(reader, _NoJobs(), _LOG, genre_options=options,
@@ -146,8 +214,7 @@ def _prepare(store, now):
             "menus": [menus[k] for k in sorted(menus)], "genre_options": options,
             "modes": [{**m, "centroid": list(map(float, m["centroid"]))} for m in modes],
             "play_exposure": transient.play_facet_leans(reader, now),
-            "fingerprint": fingerprint, **collections,
-            "discovery_tracks": fresh_pool.pick(reader, now, size=40, minimum=1)}
+            "fingerprint": fingerprint, **collections}
         encoded = json.dumps(payload, separators=(",", ":"))
         if len(encoded.encode()) > MAX_BYTES:
             raise ValueError("Prepared Home collections exceeded their size budget")
@@ -272,6 +339,18 @@ def _valid(payload):
 
 def remember(store, payload, result, now):
     """Reuse the user's explicit tailored result on subsequent ordinary reads."""
+    # An explicit build or a completed pool replaces the assigned whole menu.
+    # Keep its frozen model inputs, but never give this new menu the old arm's
+    # randomized propensity. Also clear the immediate result before capture.
+    context = deepcopy(result.choice_context if result.choice_context is not None
+                       else (payload or {}).get('choice_context') or {})
+    context.pop('comparison', None)
+    result.choice_context = context
+    for proto in result.protos:
+        proto['assignment'] = None
+        if proto.get('experiment'):
+            proto['experiment']['assignment'] = None
+            proto['experiment']['ranker_controlled'] = False
     # Pool slots may contain a live job with locks; only the completed offers are cached.
     menu = asdict(home_cards.CardsResult(result.protos, [], result.genre_notice, result.genre_warning,
                                        result.genre_options, result.requested_genres, result.epoch, result.vibe))
@@ -290,6 +369,7 @@ def remember(store, payload, result, now):
     tailored = {**(payload or {}), "schema": SCHEMA, "built_at": now,
                 "tuning": tuning_key(store, now), "menus": [menu],
                 "genre_options": result.genre_options,
+                "choice_context": context,
                 "fingerprint": (payload or {}).get("fingerprint", {
                     "breadth": {"families": {}, "breadth": 0}, "eras": [], "transient": {}})}
     for field in ('rediscover', 'rediscover_albums', 'discovery_albums', 'discovery_artists', 'discovery_tracks'):
@@ -299,8 +379,7 @@ def remember(store, payload, result, now):
     # replacement to the earlier randomized menu assignment.
     held = {"epoch": result.epoch, "tuning": tailored["tuning"],
             "experiments": [p["experiment_id"] for p in menu["protos"]],
-            "menu": menu, "choice_context": (result.choice_context if result.choice_context is not None
-                                              else tailored.get("choice_context")),
+            "menu": menu, "choice_context": context,
             "assignment": None}
     store.rec_proposals.remember_home(json.dumps(tailored, separators=(",", ":")),
                                       json.dumps(held, separators=(",", ":")), now)
@@ -316,6 +395,9 @@ def _eligible_protos(store, protos, now):
     blocked = home_exclusions(store, keys, now)
     muted = store.rec_model.muted_artists()
     genres = store.rec_query.track_genres(keys)
+    weights = store.rec_model.get_weights(now=now)
+    metadata = store.rec_eligibility.offer_metadata([t['video_id'] for t in [*owned.values(), *discovered.values()]])
+    maximum = 60 * rec_params.get_param(store, 'max_track_minutes')
     kept = []
     for proto in protos:
         def eligible(track):
@@ -329,6 +411,11 @@ def _eligible_protos(store, protos, now):
                 return False
             request = proto.get("recipe", {}).get("genre_request") or {}
             family = genre_map.family(genres.get(key) or current.get("genre") or track.get("genre"))
+            details = metadata.get(current['video_id'], {})
+            subgenre = genre_map.subgenre(genres.get(key) or current.get('genre') or track.get('genre') or '')
+            if (weights.get(f'genre:{family}', 1) == 0 or weights.get(f'genre:{subgenre}', 1) == 0
+                    or (details.get('duration') and details['duration'] > maximum)):
+                return False
             if family in request.get("avoid", []) or (request.get("include") and family not in request["include"]):
                 return False
             if track.get("genre") and family != genre_map.family(track["genre"]):
@@ -350,11 +437,14 @@ def cards(store, payload, now, service, schedule=lambda: None, *, record=True):
     epoch = home_cards._epoch(store, "cards")
     tuning = tuning_key(store, now)
     genres = store.rec_proposals.get_proposals("home_genre_request") or {}
-    constrained = genres.get("epoch") == epoch and (genres.get("include_genres") or genres.get("avoid_genres"))
+    vibe = home_vibe.current(store, now)
+    constrained = (bool(vibe) or any(menu.get('vibe') for menu in (payload or {}).get('menus', []))
+                   or (genres.get("epoch") == epoch and (genres.get("include_genres") or genres.get("avoid_genres"))))
     if not payload or (constrained and payload.get("tuning") != tuning):
         schedule()
         return home_cards.CardsResult([], [], None, None,
-            (payload or {}).get("genre_options", []), [], epoch, home_vibe.current(store, now))
+            (payload or {}).get("genre_options", []),
+            sorted(genres.get('include_genres', [])) if mix_tuning.genre_active(store, genres) else [], epoch, vibe)
     menus = payload["menus"]
     band = epoch % 3
     candidates = [m for m in menus if m["epoch"] % 3 == band] or menus
@@ -377,6 +467,13 @@ def cards(store, payload, now, service, schedule=lambda: None, *, record=True):
     else:
         # Only a new choice window reads historical evidence. The displayed choice
         # survives refills; new feedback influences the next window.
+        from yt_playlist.rec import product_comparison
+        paired, comparison = product_comparison.prepared(store, 'mixes', epoch, now, tuning=tuning)
+        if paired:
+            payload = {**payload, **paired,
+                'choice_context': {**paired['choice_context'], 'comparison': comparison}}
+            menus = payload['menus']
+            candidates = [menu for menu in menus if menu['epoch'] % 3 == band] or menus
         started = store.modes.epoch_started_at(epoch)
         stats = mode_eval.mode_bandit_stats(store, before=started, now=now)
         modes = payload.get("modes", [])
@@ -409,6 +506,9 @@ def cards(store, payload, now, service, schedule=lambda: None, *, record=True):
         if held.get("assignment"):
             held["assignment"] = {**held["assignment"], "censored": True,
                                   "reason": "eligibility_changed_after_assignment"}
+        if (held.get('choice_context') or {}).get('comparison'):
+            held['choice_context'] = {**held['choice_context'], 'comparison': {
+                **held['choice_context']['comparison'], 'censored': True}}
     for proto in protos:
         proto["assignment"] = held.get("assignment")
         if proto.get("experiment"):
@@ -465,7 +565,7 @@ def collections(store, payload, now):
 
 
 def discovery(store, payload, now):
-    payload = payload or {}
+    payload = load_discovery(store) or payload or {}
     epoch = home_cards._epoch(store, "discover")
     muted = store.rec_model.muted_artists()
     weights = store.rec_model.get_weights(now=now)

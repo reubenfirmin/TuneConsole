@@ -32,17 +32,29 @@ def handle_play_event(ctx, msg, now) -> bool:
     same-track re-report, e.g. a likeStatus change, merges into the previous event instead)."""
     title = (msg.get("title") or "").strip()
     artist = (msg.get("artist") or "").strip()
-    if (not title or msg.get("metadataVerified") is False or msg.get("paused")
+    if (msg.get('brandKnown') is False or msg.get("paused")
             or msg.get("muted") or msg.get("tabMuted") or msg.get("volume") == 0):
         return False
     store = ctx.store
     ident = resolve_identity(store, (msg.get("brandId") or "").strip())
     if ident is None:
         return False
-    key = make_key(title, artist)
-    if msg.get('videoId'):
-        key = store.tracks.observe_track(msg['videoId'],title,artist,now=now)
-    status = (msg.get("likeStatus") or "").strip()
+    metadata_verified = msg.get('metadataVerified') is not False
+    if not metadata_verified:
+        # The native player can identify an upload before the player bar hydrates its
+        # credits. Use its existing catalog identity without importing uploader/stale
+        # metadata, a rating, or a guessed association with a different upload.
+        key = (store.tracks.identity_key_for_video(msg.get('videoId'))
+               if msg.get('videoVerified') is True and msg.get('videoId') else None)
+        if not key:
+            return False
+    else:
+        if not title:
+            return False
+        key = make_key(title, artist)
+        if msg.get('videoId'):
+            key = store.tracks.observe_track(msg['videoId'],title,artist,now=now)
+    status = (msg.get("likeStatus") or "").strip() if metadata_verified else ''
     rating = store.tracks.item_rating(ident, msg.get("videoId"))
     confirmed = rating is not None and rating["source"] == "api"
     if confirmed:
@@ -58,6 +70,12 @@ def handle_play_event(ctx, msg, now) -> bool:
     if new:
         store.settings.set_setting("last_plays_sync_at", str(now))   # plays-freshness for the sync-status badge
         choice_evidence.record_playback(store, msg, now, identity_id=ident)
+        from yt_playlist.rec.listening_analytics import capture_start
+        # Retained ratings predate this play. An unhydrated indifferent player
+        # readout cannot establish that an unobserved song was previously unliked.
+        initial = rating['status'] if rating else (status if status in _STATUSES else None)
+        capture_start(store, ident, msg.get('videoId'), msg.get('playlist') or None,
+                      initial, now, album=bool(context_choice))
     # A title alone cannot attribute an account's rating to an exact upload.
     if status in _STATUSES and msg.get('videoId'):
         if not confirmed:

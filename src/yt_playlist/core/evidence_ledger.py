@@ -189,7 +189,7 @@ class EvidenceLedger:
                 continue
         return records
 
-    def maintain(self, before, *, protected_artifacts=(), orphan_before=None):
+    def maintain(self, before, *, protected_artifacts=(), protected_runs=(), orphan_before=None):
         """Retire old unanswered menus and orphan artifacts; preserve choice/correction inputs.
 
         Chosen menus are retained within the byte budget. At capacity, new telemetry abstains
@@ -200,6 +200,8 @@ class EvidenceLedger:
             events = self.records("response")
             protected = {event["opportunity_id"] for event in events
                          if event["kind"] not in {"visible", "open"} or event["observed_at"] >= before}
+            protected.update(oid for oid, offer in offers.items()
+                if any((offer.get(field) or {}).get('run_id') in protected_runs for field in ('comparison', 'monitor')))
             retired = {oid for oid, offer in offers.items()
                        if offer["observed_at"] < before and oid not in protected}
             for oid in retired:

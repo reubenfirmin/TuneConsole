@@ -1,11 +1,45 @@
-"""Temporary genre backfill for fully Themed radio (#286).
+"""Bounded catalog hydration for continuing Radio style streams.
 
-TODO #141: replace this genre endpoint workaround with replenishing cluster-space
-streams. Bound each catalog read without making a prepared card's pool the limit
-of an ongoing session. This path never fits a model or loads a library matrix.
+Membership is prepared by the existing recommendation worker. Legacy sessions
+without that index retain the #286 genre fallback until their next launch.
 """
+from itertools import islice
+
 from yt_playlist.rec.radio_genres import GenrePolicy
 from yt_playlist.repos.base import LIKED_EXISTS
+
+
+def cluster_pool(store, keys, excluded, excluded_keys, allowed, *, limit):
+    """Hydrate eligible recordings, scanning past stale/removed uploads in pages.
+
+    Each SQL read and admitted vector batch is bounded by limit. No ranking,
+    fitting, or full-library vector read occurs on this path.
+    """
+    tracks, seen = [], set(excluded_keys)
+    remaining = (key for key in keys if key not in seen)
+    while batch := list(islice(remaining, limit)):
+        from yt_playlist.core.activity import check_cancellable_work
+        check_cancellable_work()
+        qs = ','.join('?' for _ in batch)
+        with store._lock:
+            rows = store.conn.execute(
+                'SELECT t.identity_key AS key, t.video_id, t.title, t.artist, t.album, t.thumbnail, '
+                't.duration_s AS duration, t.genre, t.mb_year AS year, t.available, t.bpm, t.energy, '
+                f't.danceability, COALESCE(p.plays,0) AS plays, {LIKED_EXISTS} AS liked, '
+                'NOT EXISTS(SELECT 1 FROM catalog_entries e JOIN library_memberships m ON m.entry_id=e.id '
+                'WHERE e.recording_id=t.recording_id) AS _radio_fresh '
+                'FROM catalog_tracks t LEFT JOIN listening_day_counts p ON p.identity_key=t.identity_key '
+                f'WHERE t.identity_key IN ({qs}) AND NULLIF(trim(t.video_id),\'\') IS NOT NULL '
+                'AND COALESCE(t.available,1)<>0 ORDER BY t.id', batch).fetchall()
+        for row in rows:
+            track = dict(row)
+            if track['key'] in seen or track['video_id'] in excluded or not allowed(track):
+                continue
+            seen.add(track['key'])
+            tracks.append(track)
+            if len(tracks) == limit:
+                return tracks
+    return tracks
 
 
 def themed_pool(store, genres: GenrePolicy, excluded, excluded_keys, allowed, *, limit):

@@ -6,6 +6,26 @@ from tests.conftest import FakeClient
 from yt_playlist.rec import choice_evidence
 
 
+def test_unsaved_album_reads_plays_without_album_membership_and_refreshes_locally(store):
+    from types import SimpleNamespace
+    from yt_playlist.library import live_plays
+    import re
+    client, fc, iid = _client(store)
+    # This recording was heard without being saved, or assigned to an album.
+    message = {'type': 'play', 'videoId': 'v1', 'title': 'One', 'artist': 'Artist X',
+               'playlist': '', 'brandId': '', 'metadataVerified': True}
+    assert live_plays.handle_play_event(SimpleNamespace(store=store), message, 1000)
+    html = client.get('/album?browse=MPREb_x').text
+    assert re.search(r'<tr[^>]*data-vid="v1"[^>]*data-plays="1"', html)
+    assert not store.collection.saved_album_ids()
+    # Polling reads the ledger without opening a catalogue connection.
+    fc.get_album = lambda *args: (_ for _ in ()).throw(AssertionError('No network during polling'))
+    response = client.get('/album/track-plays?videos=v1,v2,unknown')
+    assert response.status_code == 200 and response.json() == {'plays': {'v1': 1, 'v2': 0, 'unknown': 0}}
+    assert response.headers['cache-control'] == 'no-store'
+    assert client.get('/album/track-plays?videos=' + ','.join(f'v{i}' for i in range(501))).status_code == 400
+
+
 def test_album_choices_serve_independently_of_missing_mix_preparation(store, monkeypatch):
     from yt_playlist.rec import album_choices, home_prepared
     c, _fc, _iid = _client(store)
@@ -220,13 +240,14 @@ def test_album_page_renders_table_and_create_form(store):
     assert 'More like this album' not in r.text
 
 
-def test_open_album_inline_keeps_the_complete_tracklist_and_feedback(store):
+def test_open_album_inline_keeps_the_complete_tracklist_and_simple_controls(store):
     c, _fc, _iid = _client(store)
     r = c.get('/album/inline?browse=MPREb_x&opportunity=held-menu')
     assert r.status_code == 200
     assert 'One' in r.text and 'Two' in r.text
     assert '<html' not in r.text and 'album-page-head' not in r.text
-    assert '/track/v1?' in r.text and '/album/feedback' in r.text
+    assert '/track/v1?' in r.text
+    assert '/album/feedback' not in r.text and 'Album page' not in r.text
     assert 'value="held-menu"' in r.text
     assert '/collection/save-album' in r.text
     assert 'class="track-table"' in r.text and 'data-vid="v1"' in r.text
@@ -398,7 +419,12 @@ def test_saved_album_folds_in_durations_and_renders_liked_and_plays(store):
     assert "3:01" in r.text and "2:40" in r.text          # durations parsed and rendered back as M:SS
     assert "like-btn" in r.text                            # the liked heart toggle
     assert ">Plays<" in r.text                             # the Plays column header
-    assert 'aria-label="Album is in your library"' in r.text and '/collection/save-album' not in r.text
+    assert 'aria-label="Remove album from library" aria-pressed="true"' in r.text
+    assert '/collection/save-album' not in r.text
+    # Legacy saved membership has no confirmed owner. Its single bookmark opens
+    # the ownership explanation without issuing a destructive account request.
+    assert 'aria-label="Unsave album"' in r.text and 'Sync accounts to confirm ownership' in r.text
+    assert 'hx-post="/collection/unsave-album"' not in r.text
     assert '<a class="ptitle" href="/track/v1?' in r.text
     assert 'class="alink" href="/artist?name=Artist%20X"' in r.text
     # the folded-in tracks actually carry the parsed duration (seconds), not None

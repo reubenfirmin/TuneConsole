@@ -1,6 +1,7 @@
 """Focused publication prerequisites and public endpoint verification; no application suite."""
 import argparse
 import base64
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -140,17 +141,38 @@ def preflight(backend, tag, revision, rehearsal_tag, *, stable):
         raise RuntimeError("Publication preflight failed: " + ", ".join(failures)) from None
 
 
-def public_bytes(url):
+class PublicVerificationError(RuntimeError):
+    """Identify the anonymous operation without logging credentials or response bodies."""
+
+    def __init__(self, url, status=None):
+        target = urllib.parse.urlsplit(url)
+        safe_url = urllib.parse.urlunsplit(
+            (target.scheme, target.netloc.rsplit("@", 1)[-1], target.path, "", ""))
+        super().__init__(f"Public download GET {safe_url}" +
+                         (f" (HTTP {status})" if status is not None else " failed"))
+
+
+@contextmanager
+def public_response(url):
     # Deliberately anonymous: a release must work for users without CI credentials.
     request = urllib.request.Request(url, headers={"User-Agent": PUBLIC_USER_AGENT})
-    with urllib.request.urlopen(request, timeout=30) as response:
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            yield response
+    except urllib.error.HTTPError as exc:
+        raise PublicVerificationError(url, exc.code) from None
+    except (urllib.error.URLError, TimeoutError):
+        raise PublicVerificationError(url) from None
+
+
+def public_bytes(url):
+    with public_response(url) as response:
         return response.read()
 
 
 def public_download(url, digest):
     checksum = hashlib.sha256()
-    request = urllib.request.Request(url, headers={"User-Agent": PUBLIC_USER_AGENT})
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with public_response(url) as response:
         while block := response.read(1024 * 1024):
             checksum.update(block)
     if checksum.hexdigest() != digest:

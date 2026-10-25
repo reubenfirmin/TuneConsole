@@ -1,0 +1,35 @@
+<div class="listening-edition" x-data='listeningEditorial({{ listening_edition|tojson }})' data-listening-edition>
+  <header class="le-masthead">
+    <span>A listening journal</span>
+    <span>{{ listening_edition.day }} <span class="le-calendar">· {{ listening_edition.timezone }}</span></span>
+    <a href="/charts?view=analytics&amp;window=30d">More in Charts {{ arrow_icon('right') }}</a>
+  </header>
+  <div class="le-stories">
+  {% for story in listening_edition.stories %}
+    <article class="le-story {{ 'le-lead' if loop.first else 'le-support' }} le-{{ story.visual }}"
+             data-story-id="{{ story.id }}" aria-labelledby="le-title-{{ story.id }}">
+      <div class="le-copy">
+        <p class="le-description">{{ story.description }}</p>
+        <h2 id="le-title-{{ story.id }}">{{ story.title }}</h2>
+        <p class="le-evidence">{{ story.evidence }}</p>
+        <a class="le-open" href="{{ story.url }}">Explore this listening {{ arrow_icon('right') }}</a>
+      </div>
+      <figure class="le-figure">
+        {% if story.art and story.visual != 'returns' %}
+        <img class="le-art" src="{{ story.art }}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">
+        {% endif %}
+        <div class="le-composition" x-html="composition({{ loop.index0 }})"></div>
+        <figcaption>{{ story.since }} to {{ story.until }} <span>· end exclusive · {{ story.timezone }}</span></figcaption>
+      </figure>
+      <details class="le-source"><summary>Behind this observation {{ arrow_icon('disclosure') }}</summary>
+        <p>{{ story.evidence }} Includes generated listening. First encounters are relative to the available history.
+          {% if story.visual == 'formats' %}Only observed elapsed time contributes to these bands. Pauses, mute, seeks and missing heartbeats add no time.
+          {% elif story.visual == 'returns' %}Each ring is a distinct later listening day in the displayed period; six rings are drawn at most. The label gives the full count.
+          {% elif story.visual == 'decisions' %}Hearts and skulls are confirmed actions; native player readouts and imported retained ratings are separate evidence.
+          {% else %}Each register is one recording. Mark size shows recorded plays on that date, with the same scale throughout this piece.{% endif %}</p>
+      </details>
+    </article>
+  {% endfor %}
+  </div>
+  <footer class="le-footer">A few things your listening made visible. A new edition when there’s another story to tell.</footer>
+</div>

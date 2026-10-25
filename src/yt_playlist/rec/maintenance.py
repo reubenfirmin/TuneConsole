@@ -4,6 +4,7 @@ import time
 from typing import Callable
 
 from yt_playlist.core.activity import WorkClosing
+from yt_playlist.repos.listening_analytics import PLAYER_KINDS
 
 # These are source tables, never recommendation checkpoints or player telemetry.
 # Polling reads connection-local revision counters, not the library itself.
@@ -17,10 +18,15 @@ SOURCES = {
         'album_library_memberships', 'album_provider_ids'},
     'cleanup': CATALOG | PLAYLISTS | {'cleanup_ignored', 'suppressed_overlaps',
         'overlap_ignored', 'overlap_kept', 'ignored_merges'},
+    'analytics': CATALOG | PLAYLISTS | {'play_events', 'listening_observations', 'rec_feedback',
+                                      'listening_rating_actions'},
 }
-SURFACES = {'trends': 'trend_rollups', 'cleanup': 'cleanup'}
+SURFACES = {'trends': 'trend_rollups', 'cleanup': 'cleanup', 'analytics': 'listening_analytics'}
 DEPENDENCIES = {kind: {(table, '') for table in tables} for kind, tables in SOURCES.items()}
 DEPENDENCIES['trends'].add(('settings', 'key:takeout_imported_at'))
+DEPENDENCIES['analytics'].update(('player_events', 'key:' + kind) for kind in PLAYER_KINDS)
+DEPENDENCIES['analytics'].add(('settings', 'key:radio_session_playlist_ids'))
+DEPENDENCIES['analytics'].add(('settings', 'key:listening_timezone'))
 
 
 def inputs(store, kind, now):
@@ -40,10 +46,15 @@ def input_fingerprints(store, kinds, now):
         present = {row[0] for row in store.conn.execute(
             f'SELECT surface FROM rec_proposals WHERE surface IN ({placeholders})',
             tuple(SURFACES[kind] for kind in kinds))}
+        if 'analytics' in kinds:
+            from yt_playlist.rec.listening_dates import edition_day, timezone_name
+            zone = timezone_name(store.settings.get_setting('listening_timezone'))
+            editorial_clock = (edition_day(now, zone), int(now // 21600))
     return {kind: (
         tuple(sorted((table, revision) for (table, key), revision in revisions.items()
                      if (table, key) in DEPENDENCIES[kind])),
-        external, int(now // 86400) if kind == 'trends' else None, SURFACES[kind] in present,
+        external, editorial_clock if kind == 'analytics' else int(now // 86400) if kind == 'trends' else None,
+        SURFACES[kind] in present,
     ) for kind in kinds}
 
 
@@ -74,11 +85,12 @@ class Projections:
                     self.active.difference_update(pending)
 
     def run(self, kind):
-        from yt_playlist.rec import actions, trend_rollups
+        from yt_playlist.rec import actions, listening_analytics, trend_rollups
         result = None
         try:
             fingerprint = inputs(self.store, kind, self.now_fn())
-            target = trend_rollups.build if kind == 'trends' else actions.refresh_cleanup
+            target = {'trends': trend_rollups.build, 'cleanup': actions.refresh_cleanup,
+                      'analytics': listening_analytics.build}[kind]
             result = self.execute(kind + ' summary', target, self.store, self.now_fn())
             return result
         except WorkClosing:
@@ -98,4 +110,4 @@ class Projections:
                     # concurrent edit cannot be marked clean accidentally.
                     self.completed[kind] = (*fingerprint[:-1], True)
                     self.failures[kind] = 0
-                    self.retry_at[kind] = time.monotonic() + 30
+                    self.retry_at[kind] = time.monotonic() + (120 if kind == 'analytics' else 30)

@@ -21,7 +21,7 @@
       <th class="sorth" tabindex="0" role="button" @click="sortBy('album')" @keydown.enter.space.prevent="sortBy('album')">Album{{ sort_indicator('album') }}</th>
       <th class="sorth" tabindex="0" role="button" @click="sortBy('artist')" @keydown.enter.space.prevent="sortBy('artist')">Artist{{ sort_indicator('artist') }}</th>
       <th class="sorth num" tabindex="0" role="button" @click="sortBy('year')" @keydown.enter.space.prevent="sortBy('year')">Year{{ sort_indicator('year') }}</th>
-      <th>Saved in</th>
+      <th class="album-save">Saved in</th>
     </tr></thead>
     <tbody x-ref="body">
     {% for a in saved %}
@@ -31,7 +31,7 @@
         <td>{% if a.browse %}<a class="ptitle" href="/album?browse={{ a.browse }}">{{ a.title }}</a>{% else %}<span class="ptitle">{{ a.title }}</span>{% endif %}</td>
         <td><a class="alink" href="/artist?name={{ a.artist|urlencode }}">{{ a.artist }}</a></td>
         <td class="num mono">{{ a.year or '' }}</td>
-        <td>{{ album_save_control(a.browse, true, saved_owners.get(a.browse, [])) }}</td>
+        <td class="album-save">{{ album_save_control(a.browse, true, saved_owners.get(a.browse, [])) }}</td>
       </tr>
     {% else %}
       <tr><td colspan="5" class="empty">No saved albums found in your YouTube library.</td></tr>

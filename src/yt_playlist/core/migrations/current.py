@@ -14,7 +14,7 @@ from .runner import MigrationError
 
 
 CONTRACT_FLOOR = 32
-VERSION = 48
+VERSION = 51
 DEFINITION = Path(__file__).with_name('schema_v033.sql')
 SEED_SETTINGS = {
     'catalog_identity_version': '2',
@@ -30,6 +30,21 @@ TOKEN = re.compile(r"--[^\n]*|/\*.*?\*/|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|"
 
 
 def statements(version=VERSION):
+    if version == 51:
+        from .v051_listening_actions import statements as listening_statements
+        yield from statements(50)
+        yield from listening_statements()
+        return
+    if version == 50:
+        from .v050_musical_profiles import statements as musical_statements
+        yield from statements(49)
+        yield from musical_statements()
+        return
+    if version == 49:
+        from .v049_metadata_observations import statements as observation_statements
+        yield from statements(48)
+        yield from observation_statements()
+        return
     if version == 48:
         from .v048_playback_alternates import statements as alternate_statements
         yield from statements(47)

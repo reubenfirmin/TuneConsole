@@ -71,7 +71,7 @@ def test_fresh_and_current_do_not_call_historical_bootstrap_or_validation(monkey
         (migration.version, migration.name) for migration in registry.MIGRATIONS]
 
 
-@pytest.mark.parametrize('version', [1, 7, 8, 10, 11, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42])
+@pytest.mark.parametrize('version', [1, 7, 8, 10, 11, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 48])
 def test_every_supported_predecessor_family_matches_current_contract(tmp_path, version):
     with connect(tmp_path / 'upgrade.db') as conn:
         migrate(conn, registry=registry.MIGRATIONS[:version])

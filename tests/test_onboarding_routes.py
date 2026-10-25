@@ -34,6 +34,47 @@ def test_home_shows_onboarding_when_thin(store):
     assert "onboard-progress" not in html
 
 
+@pytest.mark.parametrize('format,panel', [('albums', 'album-choices'), ('mixes', 'directions'), ('radio', 'radio')])
+def test_first_format_choice_persists_and_finishes_after_offers_arrive(store, format, panel):
+    from tests.onboarding_support import publish_personal_album, publish_personal_mix
+
+    _, client = _client(store)
+    html = client.get('/').text
+    assert 'id="listening-format-title"' in html
+    assert 'id="arrival-title"' not in html
+    assert store.settings.get_setting('onboard_format_pending') == '1'
+    assert client.post('/home/onboard/format', data={'format': 'invalid'}).status_code == 422
+    assert store.settings.get_setting('onboard_listening_format') is None
+    response = client.post('/home/onboard/format', data={'format': format}, follow_redirects=False)
+    assert response.status_code == 303 and response.headers['location'] == '/'
+    assert store.settings.get_setting('onboard_listening_format') == format
+    assert store.settings.get_setting('onboard_format_pending') == '0'
+    assert 'id="arrival-title"' in client.get('/').text
+    store.settings.set_setting('last_sync_at', '1000')
+    publish_personal_album(store)
+    if format == 'mixes':
+        publish_personal_mix(store)
+    status = client.get('/home/onboard/status').json()['setup']
+    assert status['complete'] and status['albums_ready']
+    assert status['listening_format'] == format
+    html = client.get('/').text
+    assert 'id="onboarding-feed"' not in html
+    assert f"location.hash.slice(1) || '{panel}'" in html
+
+
+def test_pending_format_choice_survives_import_and_can_be_resolved_in_settings(store):
+    from tests.onboarding_support import publish_personal_album
+
+    _, client = _client(store)
+    client.get('/')
+    store.settings.set_setting('last_sync_at', '1000')
+    publish_personal_album(store)
+    assert client.get('/home/onboard/status').json()['setup']['complete']
+    assert 'id="listening-format-title"' in client.get('/').text
+    assert client.post('/home/format', data={'format': 'albums'}).status_code == 204
+    assert 'id="onboarding-feed"' not in client.get('/').text
+
+
 def test_onboard_radio_fragment_ok(store):
     _synced_thin(store)
     _, c = _client(store)
@@ -61,6 +102,8 @@ def test_first_mix_polls_until_verified_songs_arrive(store):
 
     fake, c = _client(store)
     html = c.get("/").text
+    assert 'id="listening-format-title"' in html
+    html = c.post('/home/onboard/format', data={'format': 'mixes'}).text
     assert 'hx-get="/home/onboard/radio"' in html
     assert "30 seconds" not in html
     empty = c.get("/home/onboard/start").text

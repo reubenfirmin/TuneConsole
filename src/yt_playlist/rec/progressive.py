@@ -11,7 +11,7 @@ import math
 import uuid
 
 from yt_playlist.core.activity import check_stopping, work_budget, WorkBudgetExceeded
-from yt_playlist.rec import content_model, rec_params, taste_modes
+from yt_playlist.rec import content_model, musical_preparation, rec_params, taste_modes
 from yt_playlist.repos.rec_model import VectorChanges
 from yt_playlist.util import genre_catalog
 
@@ -77,6 +77,7 @@ class Preparation:
         self.store, self.budget = store, budget
         self.batch = budget.batch
         self.retry_fit_at = 0
+        self._source_turn = True
 
     def _record(self, outcome, reason):
         self.store.maintenance_diagnostics.record(outcome, reasons=(reason,), phase=PHASE)
@@ -103,9 +104,20 @@ class Preparation:
     def due(self, now):
         """Retry a deferred basis even after the durable input queue has drained."""
         return (self.store.prepared_content.has_pending()
+                or musical_preparation.due(self.store)
                 or (now >= self.retry_fit_at and self._basis_reason(now) is not None))
 
     def capture(self, now):
+        # Alternate source fan-out and recording captures. Each admission gets
+        # one time budget, and continual source updates cannot starve recordings.
+        if self._source_turn:
+            self._source_turn = False
+            if musical_preparation.source_step(self.store, now, batch=self.batch,
+                                               seconds=self.budget.capture_seconds):
+                return True
+            if self.store.musical_profiles.pending():
+                return False
+        self._source_turn = True
         pending = self.store.prepared_content.pending(self.batch)
         if not pending:
             return False
@@ -113,6 +125,7 @@ class Preparation:
             with work_budget(self.budget.capture_seconds), self.store.read_snapshot() as snapshot:
                 reader = snapshot.store
                 rows = reader.prepared_content.capture(pending)
+                musical = musical_preparation.recordings(reader, rows)
                 raw_model = reader.settings.get_setting('rec_content_model')
                 revision = reader.settings.get_setting('rec_content_genre_revision')
                 changes = _delta(reader, rows, raw_model if revision == genre_catalog.REVISION else None)
@@ -120,6 +133,7 @@ class Preparation:
                 reader.settings.get_setting('rec_content_generation')
                 def publish():
                     self.store.prepared_content.publish_capture(rows, now)
+                    self.store.musical_profiles.publish_recordings(musical, now)
                     if changes:
                         self.store.rec_model.publish_training_generation(changes)
                         self.store.settings.publish_values({

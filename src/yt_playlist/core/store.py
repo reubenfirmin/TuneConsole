@@ -40,6 +40,7 @@ from yt_playlist.repos.playlist_recipes import PlaylistRecipesRepo
 from yt_playlist.repos.artist_similarity import ArtistSimilarityRepo
 from yt_playlist.repos.rec_refresh import RecRefreshRepo
 from yt_playlist.repos.prepared_content import PreparedContentRepo
+from yt_playlist.repos.musical_profiles import MusicalProfilesRepo
 from yt_playlist.repos.road_trip import RoadTripRepo
 from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.repos.search import SearchRepo
@@ -71,8 +72,8 @@ class Store:
         from yt_playlist.util.matching import search_squash
         self.conn.create_function("searchnorm", 1, search_squash, deterministic=True)
 
-    def read_snapshot(self):
-        """Read-only repository view for background calculation; never runs schema/setup work."""
+    def read_snapshot(self, *, dependencies=None):
+        """Read-only background view, optionally restricted to declared revision keys."""
         def make_reader():
             reader = Store.__new__(Store)
             reader._db_path = self._db_path
@@ -87,7 +88,7 @@ class Store:
             reader.maintenance_diagnostics = self.maintenance_diagnostics
             reader._bind_repositories()
             return reader
-        return read_snapshot(self, make_reader)
+        return read_snapshot(self, make_reader, dependencies=dependencies)
 
     def memoized_read(self, name, prepare):
         """Reuse a detached result on a pinned reader; name must include any non-database inputs."""
@@ -118,6 +119,7 @@ class Store:
         self.artist_similarity = ArtistSimilarityRepo(self)
         self.rec_refresh = RecRefreshRepo(self)
         self.prepared_content = PreparedContentRepo(self)
+        self.musical_profiles = MusicalProfilesRepo(self)
         self.charts = ChartsRepo(self)
         self.tracks = TrackRepo(self)
         self.playlists = PlaylistRepo(self)

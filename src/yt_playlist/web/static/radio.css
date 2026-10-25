@@ -112,7 +112,7 @@ body:has(.home-dashboard.is-radio) { isolation: isolate; }
 .radio-home .radio-tune:is(:hover, :focus-visible) { z-index: 2; color: var(--mix-tune-hover-ink); background: transparent; border-color: var(--mix-tune-hover); box-shadow: 0 0 0 2px var(--mix-tune-hover-ink), 0 0 1.4rem color-mix(in srgb, var(--mix-tune-hover) 45%, transparent), 0 0 2.5rem color-mix(in srgb, var(--mix-tune-hover-ink) 35%, transparent); }
 .radio-tune svg { width: 1.75rem; height: 1.75rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; transition: transform .3s cubic-bezier(.2, .85, .2, 1); }
 .radio-tune:is(:hover, :focus-visible) svg { transform: rotate(-12deg) scale(1.12); }
-.radio-junction path { fill: none; stroke: currentColor; stroke-width: 1; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; transition: d .65s cubic-bezier(.22,.8,.22,1); }
+.radio-junction path { fill: none; stroke: currentColor; stroke-width: 1; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
 .radio-junction .radio-junction-rest { opacity: .15; stroke-dasharray: 2 5; }
 .radio-junction .radio-junction-backing { fill: var(--canvas); stroke: none; }
 .radio-junction .radio-junction-fill { fill: url(#radio-junction-wash); stroke: none; }

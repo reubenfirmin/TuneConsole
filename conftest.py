@@ -13,7 +13,7 @@ import uuid
 
 import pytest
 
-pytest_plugins = ["ci_test_shards", "local_test_workers"]
+pytest_plugins = ["ci_test_shards", "local_test_workers", "tests.browser_fixtures"]
 
 
 # Deliberately independent of checkout, cwd, TMPDIR, and pytest's cache directory.

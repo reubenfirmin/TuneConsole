@@ -7,7 +7,7 @@
 (() => {
   const SENSOR_VERSION = 4;
   const MIN_SENSOR_REVISION = 8;
-  const RECEIVER_REVISION = 9;
+  const RECEIVER_REVISION = 10;
   const previous = window.__tcBridgeLoaded;
   if (Number.isSafeInteger(previous?.revision) && previous.revision >= RECEIVER_REVISION && !previous.stopped) return;
   // A legacy boolean guard owns anonymous listeners that cannot be removed safely. Let the
@@ -471,11 +471,15 @@
     const albumBrowseId = matches ? bar.albumBrowseId || "" : "";
     // The MediaSession and DOM can format the same title/artist differently. Use the video id
     // when available so switching sources does not re-report a play. Account/rating changes still do.
-    const key = JSON.stringify([np.brandId, vid || [np.title, np.artist], likeStatus]);
+    // A known native upload may already be recordable without trusted credits. Retry
+    // when those credits arrive as well, so a previously unknown upload can be learned.
+    const key = JSON.stringify([np.brandId, vid || [np.title, np.artist], likeStatus,
+      np.metadataVerified === true]);
     // The backend ages this card out when the YTM tab disappears. Keep its presence fresh when
     // paused or unchanged, without recording another play. Chrome can throttle both sensors in a
     // background tab, causing them to take turns reporting the same paused track.
-    if (np.paused || !vid || !np.brandKnown || np.metadataVerified !== true || key === lastNowPlaying) {
+    if (np.paused || !vid || !np.brandKnown ||
+        (np.metadataVerified !== true && np.videoVerified !== true) || key === lastNowPlaying) {
       // Carry the current snapshot as well as presence. Chrome can suspend/throttle this page while
       // audio devices change; if that gap exceeds the backend's stale-card timeout, a presence-only
       // heartbeat cannot rebuild Now Playing and the UI stays blank until the next track. This frame
@@ -483,6 +487,7 @@
       try { chrome.runtime.sendMessage({
         type: "now-heartbeat", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
         metadataVerified: np.metadataVerified === true,
+        videoVerified: np.videoVerified === true,
         likeStatus, videoId: vid, playlist: lst, albumBrowseId, position, duration, paused: !!np.paused,
         muted: !!np.muted, brandKnown: !!np.brandKnown, brandId: np.brandId || "",
       }); } catch (e) {}
@@ -493,7 +498,9 @@
     chrome.runtime.sendMessage({
       type: "play", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
       metadataVerified: np.metadataVerified === true,
-      likeStatus, videoId: vid, playlist: lst, albumBrowseId, position, duration, brandId: np.brandId || "",
+      videoVerified: np.videoVerified === true,
+      likeStatus, videoId: vid, playlist: lst, albumBrowseId, position, duration,
+      brandId: np.brandId || "", brandKnown: true,
       paused: !!np.paused, muted: !!np.muted, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     });
   };

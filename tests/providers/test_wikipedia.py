@@ -148,3 +148,39 @@ def test_malformed_search_is_retryable(monkeypatch, payload):
 
 def test_wikipedia_host_is_allowed():
     assert egress.host_allowed("en.wikipedia.org")
+
+
+def test_artist_photo_uses_matching_article_and_file_attribution(monkeypatch):
+    calls = []
+    def get(url):
+        calls.append(url)
+        if 'list=search' in url:
+            return {'query': {'search': [{'title': 'Robert Scott'}, {'title': 'Robert Hood'}]}}
+        if 'page/summary' in url:
+            return {'type': 'standard', 'title': 'Robert Hood', 'description': 'American electronic musician',
+                    'extract': 'Biography stays private.',
+                    'originalimage': {'source': 'https://upload.wikimedia.org/wikipedia/commons/a/ab/Robert_Hood.jpg'}}
+        return {'query': {'pages': {'1': {'imageinfo': [{
+            'thumburl': 'https://upload.wikimedia.org/1200px-Robert_Hood.jpg',
+            'descriptionurl': 'https://commons.wikimedia.org/wiki/File:Robert_Hood.jpg',
+            'extmetadata': {'Artist': {'value': '<a href="https://example.com">Jane &amp; Co.</a>'},
+                            'LicenseShortName': {'value': 'CC BY-SA 4.0'}}}]}}}}
+    monkeypatch.setattr(wikipedia, '_get_json', get)
+    art = wikipedia.fetch_artwork('Robert Hood')
+    assert art['credit'] == 'Robert Hood · Jane & Co. · CC BY-SA 4.0'
+    assert art['kind'] == 'artist' and '1200px' in art['url']
+    assert 'Biography' not in str(art)
+    assert len(calls) == 3 and not any('Robert_Scott' in url for url in calls)
+
+
+@pytest.mark.parametrize('summary', [
+    {'type': 'disambiguation', 'title': 'Robert Hood'},
+    {'type': 'standard', 'title': 'Robert Scott'},
+    {'type': 'standard', 'title': 'Robert Hood', 'description': 'Arctic explorer',
+     'originalimage': {'source': 'https://upload.wikimedia.org/Robert_Hood.jpg'}},
+    {'type': 'standard', 'title': 'Robert Hood', 'originalimage': {'source': 'https://example.com/art.jpg'}},
+])
+def test_artist_photo_rejects_unverified_subject_or_file(monkeypatch, summary):
+    _stub_json(monkeypatch, {'list=search': {'query': {'search': [{'title': 'Robert Hood'}]}},
+                            'page/summary': summary})
+    assert wikipedia.fetch_artwork('Robert Hood') is None

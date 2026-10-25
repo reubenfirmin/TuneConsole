@@ -82,7 +82,8 @@ def poc(monkeypatch, store):
         track["key"] = store.tracks.catalog_subject(tid)["identity_key"]
 
     class Candidates:
-        def __init__(self, store, now, tuning=None, *, now_source=None):
+        def __init__(self, store, now, tuning=None, *, now_source=None, comparison=None):
+            self.comparison = getattr(now_source, 'comparison', comparison)
             self.tuning = radio_session.radio_tuning.controls(tuning or radio_session.radio_tuning.DEFAULTS)
             self.now_sampled_at = now
             self.encoding_model = store.settings.get_setting("rec_content_model")
