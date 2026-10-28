@@ -44,8 +44,9 @@
 {% endif %}
 {% endmacro %}
 
-{% macro album_play_control(browse_id, title, opportunity_id=none, playlist='', css='album-play btn-primary', fallback='') %}
+{% macro album_play_control(browse_id, title, opportunity_id=none, playlist='', css='album-play btn-primary', fallback='', onboarding=false) %}
 <button type="button" class="{{ css }}" x-data='albumPlayback({{ browse_id|tojson }}, {{ playlist|tojson }}, {{ fallback|tojson }})'
+        {% if onboarding %}data-onboarding-album="{{ browse_id }}"{% endif %}
         @bridge-status.window="apply($event.detail)" @click="play($el)"
         hx-post="/album/play" hx-trigger="album-start" hx-swap="none" hx-disabled-elt="this"
         hx-vals='{{ {"browse_id": browse_id, "opportunity_id": opportunity_id}|tojson }}'
@@ -54,5 +55,6 @@
         :title='(playing ? "Pause " : "Play ") + {{ title|tojson }}'>
   <svg x-show="!playing" viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M7 3.5v17l14-8.5Z"/></svg>
   <svg x-show="playing" x-cloak viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M5 4h5v16H5zm9 0h5v16h-5z"/></svg>
+  {% if onboarding %}<span x-text="playing ? 'Pause album' : 'Play album'">Play album</span>{% endif %}
 </button>
 {% endmacro %}

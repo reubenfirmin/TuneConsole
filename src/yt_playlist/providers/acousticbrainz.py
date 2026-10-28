@@ -10,15 +10,24 @@ this MBID" (common, given frozen coverage): a clean miss, not an outage. Failure
 """
 import logging
 import math
-import urllib.request
+import urllib.error
 
+from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.integrations.acousticbrainz import AcousticBrainzIAO, API
+from yt_playlist.integrations.base import IntegrationUnavailable
 from yt_playlist.util import net
-from yt_playlist.providers import musicbrainz, transport
-from yt_playlist.providers.base import EnrichmentResult, MetadataObservation, RateLimiter
+from yt_playlist.providers import musicbrainz
+from yt_playlist.providers.base import EnrichmentResult, MetadataObservation
 
 logger = logging.getLogger(__name__)
 
 name = "acousticbrainz"
+manages_availability = True
+_iao = AcousticBrainzIAO()
+
+
+def access(store=None):
+    return _iao.context(store)
 
 
 def available(store=None) -> bool:
@@ -26,21 +35,22 @@ def available(store=None) -> bool:
 
 
 def tripped() -> bool:
-    return _breaker.tripped()
+    return not _iao.availability().ready(_iao.now())
 
 
 def reset() -> None:
-    _breaker.reset()
+    """Batch starts do not discard shared cooldowns or useful responses."""
 
 
 def probe(track, store=None, enrich_fn=None, mbid_fn=None) -> EnrichmentResult:
     """Retain source predictions separately from the legacy typed feature projection."""
-    mbid_fn = mbid_fn or musicbrainz.recording_mbid
+    mbid_fn = mbid_fn or (lambda title, artist: musicbrainz.recording_mbid(title, artist, store=store))
     mbid = track.get("mb_recording_id") or mbid_fn(track["title"], track["artist"])
     if not mbid:
         return EnrichmentResult("acousticbrainz", {})
     if enrich_fn is None:
-        low, high = _read(mbid)
+        with access(store):
+            low, high = _read(mbid)
         feat = _features(low, high)
     else:
         feat, low, high = enrich_fn(mbid), {}, {}
@@ -68,18 +78,8 @@ def probe(track, store=None, enrich_fn=None, mbid_fn=None) -> EnrichmentResult:
             match_evidence=match))
     return EnrichmentResult("acousticbrainz", fields, tuple(observations))
 
-_API = "https://acousticbrainz.org/api/v1"
-_USER_AGENT = "yt-playlist/0.1 ( https://github.com/yt-playlist ; rf@4rc.io )"
-_MIN_INTERVAL = 0.5                         # be a good citizen of a free community dataset
-_HTTP_TIMEOUT_S = 20                        # cap each request so a stalled socket can't wedge a run
-_pacer = RateLimiter(_MIN_INTERVAL)
-_breaker = net.CircuitBreaker()
-
-
 def _get_json(url):
-    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT,
-                                               "Accept": "application/json"})
-    return transport.request_json(req, timeout=_HTTP_TIMEOUT_S, pace=_pacer.wait, breaker=_breaker)
+    return _iao.get_url(url)
 
 
 def _prob(highlevel, model, label):
@@ -162,20 +162,31 @@ def _read(mbid):
         return low, high
     try:
         low = _read_endpoint(mbid, 'low-level')
+    except (WorkClosing, WorkBudgetExceeded):
+        raise
     except Exception as e:  # noqa: BLE001 - sparse frozen dataset: misses are routine
+        _record_failure(e)
         logger.debug("AcousticBrainz low-level miss for %s: %s", mbid, e)
     try:
         high = _read_endpoint(mbid, 'high-level')
+    except (WorkClosing, WorkBudgetExceeded):
+        raise
     except Exception as e:  # noqa: BLE001 - sparse frozen dataset: misses are routine
+        _record_failure(e)
         logger.debug("AcousticBrainz high-level miss for %s: %s", mbid, e)
     return low, high
 
 
+def _record_failure(error):
+    if (not isinstance(error, IntegrationUnavailable)
+            and not (isinstance(error, urllib.error.HTTPError) and error.code == 404)):
+        net.record_probe_failure(error)
+
+
 def _read_endpoint(mbid, endpoint):
-    data = _get_json(f'{_API}/{mbid}/{endpoint}')
+    data = _get_json(f'{API}/{mbid}/{endpoint}')
     if not isinstance(data, dict):
         error = ValueError(f'AcousticBrainz {endpoint} response is not an object')
-        net.record_probe_failure(error)
         raise error
     return data
 

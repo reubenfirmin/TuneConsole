@@ -18,6 +18,12 @@ from yt_playlist.web.app import create_app
 NOW = datetime(2026, 10, 24, 12, tzinfo=timezone.utc).timestamp()
 
 
+@pytest.fixture(autouse=True)
+def listening_enabled(monkeypatch, store):
+    monkeypatch.setenv('YT_PLAYLIST_LISTENING_CHARTS', '1')
+    store.settings.set_setting('listening_timezone', 'UTC')
+
+
 def seed(store):
     iid = store.identities.upsert_identity('Listener', 'fixture', None, True)
     for key, artist, genre in [('a', 'A', 'Techno'), ('b', 'A', 'Techno'), ('c', 'B', 'Jazz')]:
@@ -66,6 +72,27 @@ def test_generated_plays_coarse_evidence_and_discovery_use_complete_history(stor
     assert store.conn.execute('SELECT is_generated FROM play_events WHERE identity_key=?', ('a',)).fetchone()[0]
 
 
+def test_discovery_baseline_excludes_the_initial_capture_and_survives_partitioning(store):
+    iid = seed(store)
+    # A large first sync is still the start of a record, even with an old sighting.
+    for index in range(30):
+        key = f'baseline-{index}'
+        seed_catalog_track(store, key, key, f'Artist {index}', video_id=f'v-{index}')
+    store.history.record_history_plays(iid, NOW-60*86400, ['baseline-0'], source_timezone='UTC')
+    for index in range(100):
+        store.history.record_play_event(iid, f'baseline-{index%30}', f'v-{index%30}', NOW-40*86400+index)
+    assert analytics.build(store, NOW)['discovery_from'] is None
+    # Independent earlier listening days establish a baseline; no rate is inferred
+    # here. The browser additionally requires repeat listening in its selected dates.
+    for ago in range(39, 26, -1):
+        store.history.record_history_plays(iid, NOW-ago*86400, ['baseline-0'], source_timezone='UTC')
+    store.history.record_play_event(iid, 'a', 'va', NOW-86400)
+    payload = analytics.build(store, NOW)
+    assert payload['discovery_from'] == '2026-09-27'
+    assert ListeningAnalyticsRepo(store).prepared()['discovery_from'] == '2026-09-27'
+    assert payload['catalog']['baseline-0']['cohort']['first'] == '2026-08-25'
+
+
 def test_observed_seconds_exclude_pause_mute_seek_missing_samples_and_duplicate_exit(store):
     iid = seed(store)
     samples = [('tick', 0, 0, {}), ('tick', 30, 30, {}),
@@ -103,6 +130,57 @@ def test_new_start_and_positionless_exit_break_elapsed_intervals(store):
     assert total(analytics.build(store,NOW),'seconds') == 30
 
 
+def test_local_midnight_and_dst_do_not_borrow_time_from_another_day(store):
+    iid=seed(store)
+    store.settings.set_setting('listening_timezone','America/New_York')
+    midnight=datetime(2026,3,9,4,tzinfo=timezone.utc).timestamp()
+    event(store,iid,'tick',midnight-10,0)
+    event(store,iid,'tick',midnight+20,30)
+    payload=analytics.build(store,midnight+60)
+    assert payload['timezone']=='America/New_York'
+    assert [(r[0],r[payload['columns'].index('seconds')]) for r in payload['rows']]==[
+        ('2026-03-08',10),('2026-03-09',20)]
+
+
+def test_confirmed_action_history_survives_clear_and_native_or_sync_state_is_not_an_action(store):
+    iid=seed(store)
+    ratings.record_observations(store,iid,{'va':'LIKE'},source='sync',now=NOW-500)
+    ratings.record_observations(store,iid,{'vb':'LIKE'},source='action',now=NOW-400)
+    ratings.record_confirmed(store,iid,'va','DISLIKE',NOW-300)
+    ratings.record_confirmed(store,iid,'va','INDIFFERENT',NOW-200)
+    ratings.record_confirmed(store,iid,'va','LIKE',NOW-100)
+    ratings.record_confirmed(store,iid,'va','LIKE',NOW-90)
+    payload=analytics.build(store,NOW)
+    assert (total(payload,'hearts'),total(payload,'skulls'),total(payload,'clears'))==(1,1,1)
+    actions=list(store.conn.execute('SELECT previous_status,status FROM listening_rating_actions ORDER BY id'))
+    assert [tuple(a) for a in actions]==[('LIKE','DISLIKE'),('DISLIKE','INDIFFERENT'),('INDIFFERENT','LIKE')]
+
+
+def test_publication_uses_compact_manifest_and_preserves_inflight_previous_chunks(store):
+    iid=seed(store)
+    store.history.record_play_event(iid,'a','va',NOW-100)
+    payload=analytics.build(store,NOW)
+    repo=ListeningAnalyticsRepo(store)
+    manifest=repo.prepared()
+    assert 'rows' not in manifest and 'catalog' not in manifest
+    assert len(repo.encoded().encode())<32768
+    first=manifest['chunks'][0]['key']
+    assert json.loads(repo.encoded('listening_chunk:'+first))['rows']==payload['rows']
+    store.history.record_play_event(iid,'b','vb',NOW-20)
+    analytics.build(store,NOW)
+    assert repo.encoded('listening_chunk:'+first)  # an already opened manifest still works
+    assert all(c['bytes']<512*1024 for c in repo.prepared()['chunks'])
+    current=repo.prepared()['chunks'][0]['key']
+    with store.conn:
+        store.conn.execute('DELETE FROM play_events')
+        store.conn.execute('DELETE FROM listening_observations')
+    analytics.build(store,NOW)
+    assert not repo.prepared()['available']
+    assert repo.encoded('listening_chunk:'+current)  # one previous generation remains readable
+    analytics.build(store,NOW)
+    assert not store.conn.execute("SELECT 1 FROM rec_proposals WHERE surface LIKE 'listening_chunk:%'").fetchone()
+
+
 def test_rating_start_is_frozen_queued_and_never_borrowed_from_another_play(store):
     iid = store.identities.upsert_identity('Listener', 'fixture', None, True)
     offers = []
@@ -121,7 +199,7 @@ def test_rating_start_is_frozen_queued_and_never_borrowed_from_another_play(stor
     payload = analytics.build(store, NOW)
     assert total(payload, 'plays') == 2
     assert total(payload, 'rated') == 1 and total(payload, 'liked') == 1
-    assert total(payload, 'hearts') == 0 and total(payload, 'skulls') == 1
+    assert total(payload, 'hearts') == 1 and total(payload, 'skulls') == 1
 
 
 def test_worker_schedules_telemetry_separately_and_throttles_it(store, monkeypatch):

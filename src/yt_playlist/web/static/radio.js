@@ -13,7 +13,9 @@ function radioHome(initial = {}) {
     recordPlayback: null, pendingRecord: null, recordCoverFailed: '',
     launchSong: initial.launchPlaylist || (state.active && state.starting ? state.tracks?.[0] || {} : null),
     launchPlaylist: initial.launchPlaylist || null,
+    launchPreviousId: null,
     selectedSlot: null, switchChoice: null, switchSending: false, switchSerial: 0,
+    selectionError: '', selectionSlot: null, pendingSong: null,
     hoveredSlot: null, focusedSlot: null,
     tuningDraft: {comfort: 50, theme: 50, energy: 50}, tuningBusy: false,
     tuningAxes: [
@@ -65,6 +67,34 @@ function radioHome(initial = {}) {
           Date.now() >= pending.until)) this.pendingRecord = null;
       this.recordPlayback = {...song};
       this.currentVideo = song.video_id;
+      this.settleSongPlayback(song);
+    },
+    isPendingSong(branch, song) {
+      return this.pendingSong?.slot === branch.slot && this.pendingSong.videoId === song.video_id;
+    },
+    isSkippingSong(branch, song) {
+      return this.pendingSong?.slot === branch.slot && this.pendingSong.skipped.includes(song.video_id);
+    },
+    get selectionMessage() {
+      return this.selectionError || (this.pendingSong && !this.pendingSong.accepted ? '' : this.state.selection_error);
+    },
+    get displayDirections() {
+      const pending = this.pendingSong;
+      return (this.state.directions || []).map(branch => {
+        if (branch.slot !== pending?.slot) return branch;
+        // Keep the skip preview visible until playback catches up with a queue
+        // refresh that has already removed those rows from the offered stream.
+        const prefix = new Set(pending.preview.map(song => song.video_id));
+        return {...branch, tracks: [...pending.preview, ...branch.tracks.filter(song => !prefix.has(song.video_id))]};
+      });
+    },
+    songAvailable(branch, song) {
+      return this.state.directions?.some(current => current.slot === branch.slot &&
+        current.tracks.some(track => track.video_id === song.video_id));
+    },
+    settleSongPlayback(song) {
+      if (this.pendingSong && song?.playlist_ytm_id === this.pendingSong.playlistId &&
+          song.video_id === this.pendingSong.videoId && song.paused === false) this.pendingSong = null;
     },
     openTuning() {
       if (this.tuningBusy) return;
@@ -99,20 +129,23 @@ function radioHome(initial = {}) {
         directionCount: this.state.directions?.length || 4,
       };
     },
-    get preparingSession() { return !!(this.state.active && this.state.local_id && this.playlistSessionId !== this.state.local_id); },
+    sessionId(state = this.state) { return state.playlist_id || state.local_id; },
+    get preparingSession() { return !!(this.state.active && this.sessionId() && this.playlistSessionId !== this.sessionId()); },
     get restoring() { return (this.resolving || this.preparingSession) && !this.launchSong && !this.state.starting && this.busyAction !== 'start'; },
     get launching() { return this.resolving || this.busyAction === 'start' || !!this.launchSong || (this.state.active && this.state.starting) || this.preparingSession; },
     get showSeeds() { return !this.state.active && !this.launching; },
     get launchTracks() {
+      const pending = this.busyAction === 'start' || this.launchSong;
+      const established = !pending || (this.state.active && this.sessionId() !== this.launchPreviousId);
       const tracks = [this.launchSong, ...(this.launchPlaylist?.tracks || []),
-        ...(this.state.tracks || []).slice(0, 8), ...this.seeds].filter(song => song?.video_id);
+        ...(established ? (this.state.tracks || []).slice(0, 8) : [])].filter(song => song?.video_id);
       return tracks.filter((song, index) => tracks.findIndex(t => t.video_id === song.video_id) === index).slice(0, 8);
     },
     historyIds(state) {
       return (state.history || (state.tracks || []).slice(0, state.history_count || 0)).map(t => t.video_id);
     },
     tableKey(state) {
-      return JSON.stringify([state.local_id, state.metadata_revision || 0, this.historyIds(state)]);
+      return JSON.stringify([this.sessionId(state), state.metadata_revision || 0, this.historyIds(state)]);
     },
     playlistMatches(state, root = this.$refs.playlist) {
       return !!root?.querySelector('table') && JSON.stringify(
@@ -121,7 +154,7 @@ function radioHome(initial = {}) {
     },
     async prepareSession() {
       await this.$nextTick();
-      const state = this.state, sessionId = state.local_id;
+      const state = this.state, sessionId = this.sessionId(state);
       if (this.destroyed || this.resolving || !state.active || state.starting || !sessionId ||
           this.playlistSessionId === sessionId || this.playlistKey !== this.tableKey(state) ||
           !this.playlistMatches(state) || !(state.directions?.length || state.exhausted) ||
@@ -166,7 +199,7 @@ function radioHome(initial = {}) {
         image.src = url;
       })));
       if (this.destroyed || this.preparingKey !== key || !this.state.active || this.resolving ||
-          this.state.starting || this.state.local_id !== sessionId ||
+          this.state.starting || this.sessionId() !== sessionId ||
           JSON.stringify([this.playlistKey, this.state.directions]) !== key) return;
       this.fitSpace();
       this.playlistSessionId = sessionId;
@@ -186,8 +219,12 @@ function radioHome(initial = {}) {
         this.currentVideo = null;
         this.recordPlayback = null;
         this.pendingRecord = null;
+        this.pendingSong = null;
+        this.selectionSlot = null;
         this.recordCoverFailed = '';
       }
+      if (this.pendingSong?.accepted && state.selection_error) this.pendingSong = null;
+      if (state.browser_age != null && state.browser_age <= 8) this.settleSongPlayback(state.browser?.player);
       if (this.selectedSlot != null) {
         const slot = this.selectedSlot;
         const acknowledged = state.pending_slot === slot || (!state.updating &&
@@ -200,7 +237,7 @@ function radioHome(initial = {}) {
       this.resolving = !!state.resolving;
       this.publishSessionState();
       this.syncArtworkMotion();
-      this.animateQueues(changed);
+      this.animateQueues(changed.filter(slot => slot !== this.pendingSong?.slot));
       if (state.active && state.starting && !this.launchSong) this.launchSong = state.tracks?.[0] || {};
     },
     publishSessionState() {
@@ -212,7 +249,7 @@ function radioHome(initial = {}) {
         console.debug('[Radio] launch returned to song choices', this.state.error);
         this.launchSong = null;
         this.launchPlaylist = null;
-      } else if (!this.state.starting && this.playlistSessionId === this.state.local_id &&
+      } else if (!this.state.starting && this.playlistSessionId === this.sessionId() &&
                  this.playlistKey === this.tableKey(this.state)) {
         this.launchSong = null;
         this.launchPlaylist = null;
@@ -291,7 +328,7 @@ function radioHome(initial = {}) {
       if (!this.loaded && !state.active) this.loadSeeds();
       this.loading = false;
       const key = this.tableKey(state);
-      if (state.active && state.local_id && key !== this.playlistKey) {
+      if (state.active && this.sessionId(state) && key !== this.playlistKey) {
         const response = await fetch('/radio/playlist');
         if (!response.ok) throw new Error('Could not load the session playlist.');
         const html = await response.text();
@@ -329,7 +366,9 @@ function radioHome(initial = {}) {
     },
     async start(song, fromPlaylist = false) {
       if (this.busy) return;
+      window.tvPlaybackControls?.release();
       ++this.requestSerial;
+      this.launchPreviousId = this.sessionId() ?? null;
       this.launchPlaylist = fromPlaylist ? song : null;
       this.launchSong = song;
       this.busy = true; this.busyAction = 'start';
@@ -359,15 +398,54 @@ function radioHome(initial = {}) {
         await this.refresh().catch(error => console.debug('[Radio] refresh deferred', error));
       }
     },
-    select(branch) {
-      if (this.busy || branch.active || !this.state.active) return;
+    select(branch, song = null) {
+      if (this.busy || this.tuningBusy || (!song && branch.active) || !this.state.active) return;
+      // Static assets can update while the running server still only supports
+      // direction selection, which would silently ignore the requested song.
+      if (song && this.state.can_play_songs !== true) {
+        this.selectionSlot = branch.slot;
+        this.selectionError = 'Restart TuneConsole, then reload this page to play songs from streams.';
+        return;
+      }
       ++this.requestSerial;
+      this.selectionError = '';
+      this.selectionSlot = branch.slot;
       this.selectedSlot = branch.slot;
       this.switchChoice = {proposal_id: branch.id, menu_id: this.state.menu_id,
+        slot: branch.slot, playlistId: this.state.playlist_id,
+        ...(song ? {video_id: song.video_id} : {}),
         serial: ++this.switchSerial};
-      this.applyState({...this.state, pending_slot: branch.slot, updating: true});
+      this.pendingSong = song ? {videoId: song.video_id, title: song.title, artist: song.artist,
+        slot: branch.slot, playlistId: this.state.playlist_id, serial: this.switchSerial, accepted: false,
+        preview: branch.tracks.slice(0, branch.tracks.findIndex(track => track.video_id === song.video_id) + 1),
+        skipped: branch.tracks.slice(0, branch.tracks.findIndex(track => track.video_id === song.video_id))
+          .map(track => track.video_id)} : null;
+      this.applyState({...this.state, selection_error: null, pending_slot: branch.slot, updating: true});
       this.cacheView();
       this.sendSelection();
+    },
+    async requestSelection(choice) {
+      // Retry only an explicit stale rejection, never an uncertain delivery.
+      // Revalidate the exact song in the same stream and session each time.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const result = await this.json('select', {method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({proposal_id: choice.proposal_id, menu_id: choice.menu_id,
+            ...(choice.video_id ? {video_id: choice.video_id} : {})})});
+        if (this.destroyed || choice.serial !== this.switchSerial) return null;
+        if (result.ok || !result.stale) return result;
+        ++this.requestSerial;
+        const state = await this.json('status');
+        if (this.destroyed || choice.serial !== this.switchSerial) return null;
+        this.applyState(state);
+        this.cacheView();
+        if (!state.active || state.playlist_id !== choice.playlistId) return null;
+        const branch = state.directions?.find(branch => branch.slot === choice.slot);
+        if (!branch || (choice.video_id ? !branch.tracks.some(song => song.video_id === choice.video_id) :
+            branch.id !== choice.proposal_id)) return {ok: false, reason: choice.video_id ?
+              'That song is no longer in this stream. Choose another song.' : 'Choose another stream.'};
+        choice = {...choice, proposal_id: branch.id, menu_id: state.menu_id};
+      }
+      return {ok: false, reason: 'Could not start your selection. Try again.'};
     },
     async sendSelection() {
       if (this.switchSending) return;
@@ -379,14 +457,18 @@ function radioHome(initial = {}) {
           const choice = this.switchChoice;
           this.switchChoice = null;
           try {
-            const result = await this.json('select', {method: 'POST', headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({proposal_id: choice.proposal_id, menu_id: choice.menu_id})});
-            if (this.destroyed || choice.serial !== this.switchSerial) continue;
+            const result = await this.requestSelection(choice);
+            if (!result || this.destroyed || choice.serial !== this.switchSerial) continue;
             if (!result.ok) throw new Error(result.reason || 'Could not switch radio direction.');
+            if (this.pendingSong?.serial === choice.serial) this.pendingSong.accepted = true;
             this.applyState(result);
             this.cacheView();
           } catch (error) {
-            if (choice.serial === this.switchSerial) this.selectedSlot = null;
+            if (choice.serial === this.switchSerial) {
+              this.selectedSlot = null;
+              this.pendingSong = null;
+              this.selectionError = error.message || 'Could not switch radio direction. Try again.';
+            }
             console.debug('[Radio] direction refresh deferred', error);
           }
         }
@@ -397,8 +479,10 @@ function radioHome(initial = {}) {
     },
     async newRadio() {
       if (this.busy) return;
+      this.selectionError = '';
+      this.selectionSlot = null;
       ++this.requestSerial;
-      this.switchChoice = null; this.selectedSlot = null; ++this.switchSerial;
+      this.switchChoice = null; this.selectedSlot = null; this.pendingSong = null; ++this.switchSerial;
       this.busy = true;
       try {
         const state = await this.json('stop', {method: 'POST'});

@@ -1,7 +1,8 @@
 """The provider interface the enrichment harness talks to, plus the shared result type it compares.
 
-Each metadata provider exposes a read-only ``probe(track, store) -> EnrichmentResult`` that returns
-only what it *found* (never writing to the store). The harness logs every finding, fills the
+Each metadata provider exposes ``probe(track, store) -> EnrichmentResult`` that returns
+what it found without applying catalog metadata. Its IAO may persist operational access state
+such as a provider cooldown. The harness logs every finding, fills the
 canonical track fill-only, and compares results across providers to surface disagreements. Field
 comparison is declared in ``FIELD_SPECS`` so the harness stays provider-agnostic.
 
@@ -9,13 +10,12 @@ A "field" is a neutral concept name (``genre``, ``year``, ``bpm``, …), not a D
 layer maps it to a column (``year`` -> ``mb_year``). Fields absent from ``FIELD_SPECS`` are logged
 and filled but never conflict-checked (e.g. single-source audio features can't disagree).
 """
-import threading
-import time
 import math
 from dataclasses import dataclass, field
 from typing import Protocol
 from yt_playlist.util import genre_catalog
 from yt_playlist.core.metadata_observations import MetadataObservation
+from yt_playlist.integrations.base import RateLimiter
 
 
 class LookupUnavailable(Exception):
@@ -33,7 +33,7 @@ class Provider(Protocol):
     name: str
 
     def probe(self, track: dict, store) -> EnrichmentResult:
-        """Look the track up and return findings, WITHOUT writing to the store."""
+        """Return findings without applying them; the IAO owns access availability state."""
         ...
 
     def available(self, store) -> bool:
@@ -117,28 +117,5 @@ def detect_conflicts(results) -> dict:
                for index, (_, value) in enumerate(seen) for _, other in seen[index + 1:]):
             conflicts[fname] = [{"provider": p, "value": v} for p, v in seen]
     return conflicts
-
-
-# --- shared provider plumbing -------------------------------------------------------------------
-
-class RateLimiter:
-    """Per-process pacer: serializes calls across threads and spaces them >= min_interval seconds
-    apart, so we honour an external API's rate limit no matter how many enrichment threads run.
-    Each provider owns one instance carrying its own interval (see each provider's _MIN_INTERVAL)."""
-
-    def __init__(self, min_interval):
-        self.min_interval = min_interval
-        self._lock = threading.Lock()
-        self._last_call = 0.0
-
-    def wait(self, min_interval=None):
-        """Block until at least the interval has elapsed since the previous call. Pass min_interval
-        to override the default for this call (e.g. Discogs paces differently with vs without a token)."""
-        interval = self.min_interval if min_interval is None else min_interval
-        with self._lock:                           # serialize + pace all of a provider's traffic
-            wait = interval - (time.monotonic() - self._last_call)
-            if wait > 0:
-                time.sleep(wait)
-            self._last_call = time.monotonic()
 
 

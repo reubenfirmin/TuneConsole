@@ -113,7 +113,7 @@ def test_projection_outputs_and_settings_are_committed_before_checkpoint(databas
             assert database.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 0
             if projection == 'trends':
                 database.trends.publish_rollup(
-                    [('track', 'song', 0, 0., 'play_event')], '{"generation":2}', 2., None, None)
+                    [('track', 'song', 0, 0., 'play_event')], '{"generation":2}', 2., None)
             else:
                 database.rec_ledger.publish_prepared_policies([('projection-policy', '{}', 2.)])
                 database.rec_proposals.publish_prepared_bundles(

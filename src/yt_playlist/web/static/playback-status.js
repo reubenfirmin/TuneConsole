@@ -2,7 +2,7 @@
 // read the cached snapshot when they mount after the first response or an HTMX replacement.
 (function () {
   if (window.playbackStatus) return;
-  let timer = null, inFlight = null, frame = null, expiry = null, sample = null, lastFrame = 0;
+  let timer = null, inFlight = null, frame = null, expiry = null, sample = null, lastFrame = 0, bridgeSnapshot = null;
   const clock = () => window.performance?.now() ?? Date.now();
   const number = value => typeof value === 'number' && Number.isFinite(value);
 
@@ -36,6 +36,10 @@
   }
 
   function publish(data) {
+    bridgeSnapshot = data;
+    window.playbackStatus.audioSnapshot = data;
+    const tv = window.tvPlaybackControls;
+    if (tv?.active()) data = {...data, connected: true, now_playing: tv.snapshot(), resumable_player: null};
     if (frame !== null) cancelAnimationFrame(frame);
     if (expiry !== null) clearTimeout(expiry);
     frame = null;
@@ -110,8 +114,12 @@
   }
 
   window.playbackStatus = {snapshot: null, start, refresh, stop, progress};
+  window.addEventListener('tv-playback-state', () => publish(bridgeSnapshot || {connected: false}));
   window.addEventListener('pagehide', stop);
   window.addEventListener('pageshow', start);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && timer !== null) refresh();
+  });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, {once: true});
   else start();
 })();

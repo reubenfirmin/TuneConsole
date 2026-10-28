@@ -57,9 +57,11 @@ const flush = () => { while (queued.length) {const data=queued.shift();
 const content = fs.readFileSync('extension/content.js','utf8');
 const main = fs.readFileSync('extension/nowplaying_main.js','utf8');
 vm.runInContext(scenario === 'newer_receiver'
-  ? content.replace('const RECEIVER_REVISION = 10;', 'const RECEIVER_REVISION = 11;') : content, context);
+  ? content.replace(/const RECEIVER_REVISION = (\d+);/,
+    (_, revision) => `const RECEIVER_REVISION = ${Number(revision) + 1};`) : content, context);
 vm.runInContext(scenario === 'newer_main'
-  ? main.replace('var SENSOR_REVISION = 10;', 'var SENSOR_REVISION = 11;') : main, context);
+  ? main.replace(/var SENSOR_REVISION = (\d+);/,
+    (_, revision) => `var SENSOR_REVISION = ${Number(revision) + 1};`) : main, context);
 flush();
 if (scenario === 'newer_main' || scenario === 'newer_receiver') {
   const previous = scenario === 'newer_main' ? window.__tcNowPoller : window.__tcBridgeLoaded;

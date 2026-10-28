@@ -40,7 +40,7 @@ _ARCHETYPES = {
 
 
 def _month_bounds(month):
-    """'YYYY-MM' -> (since_ts, until_ts) UTC for that calendar month."""
+    """UTC timestamp labels for a calendar month's inclusive and exclusive dates."""
     y, m = (int(x) for x in month.split("-"))
     since = datetime(y, m, 1, tzinfo=timezone.utc).timestamp()
     until = datetime(y + (m == 12), (m % 12) + 1, 1, tzinfo=timezone.utc).timestamp()
@@ -79,7 +79,7 @@ def energy_axis(track_plays, audio, meta):
 
 
 def rhythm_axis(hours):
-    """Daylight(0)..Night-owl(1). Share of plays in the 21:00-05:59 window (UTC buckets)."""
+    """Daylight(0)..Night-owl(1). Share of local-hour plays in the 21:00-05:59 window."""
     total = sum(hours) or 1
     night = sum(hours[h] for h in list(range(21, 24)) + list(range(0, 6)))
     return _clamp01(night / total)
@@ -100,9 +100,9 @@ def personality(store, month, month_row, meta):
     """The signature beat: 3 axes -> a named archetype + a deterministic aura. Always defined (energy
     falls back to genre priors, exploration to the month rollup, rhythm to play timestamps)."""
     since, until = _month_bounds(month)
-    track_plays = store.trends.ledger_track_plays(since, until)
+    track_plays = store.trends.ledger_track_plays(since, until, calendar=True)
     audio = store.trends.track_audio()
-    hours = store.trends.play_hours(since, until)
+    hours = store.trends.play_hours(since, until, calendar=True)
     energy, e_src = energy_axis(track_plays, audio, meta)
     rhythm = rhythm_axis(hours)
     explore = exploration_axis(month_row or {})
@@ -134,7 +134,6 @@ def _beat_numbers(review, month_row):
 ALL_IN_MIN_SHARE = 0.10    # "all in on X" only when the top artist genuinely dominated (>=10% of plays)
 WIDE_NET_MIN_ARTISTS = 40  # ...else, a month spread thin across many artists tells THAT story instead
 WIDE_NET_MIN_RATIO = 0.35  # distinct artists / plays
-NEW_OBSESSION_MIN = 4      # a "new obsession" needs real repetition, not one curious play
 
 
 def _beat_all_in(review):
@@ -175,33 +174,6 @@ def _beat_biggest_night(review, month):
             "pct": b["pct"], "artist": b["artist"]}
 
 
-def _beat_new_obsession(review):
-    n = review.get("top_new_artist")
-    if not n or n.get("plays", 0) < NEW_OBSESSION_MIN:
-        return None
-    return {"kind": "new", "artist": n["artist"], "plays": n["plays"]}
-
-
-def _beat_diversity(months, month):
-    idx = next((i for i, x in enumerate(months) if x["month"] == month), None)
-    if idx is None or idx == 0:
-        return None
-    cur, prev = months[idx].get("diversity", 0.0), months[idx - 1].get("diversity", 0.0)
-    delta = cur - prev
-    if abs(delta) < 0.03:
-        return None
-    return {"kind": "diversity", "direction": "branched out" if delta > 0 else "narrowed in",
-            "cur": round(cur, 2), "prev": round(prev, 2), "delta": round(delta, 2)}
-
-
-def _beat_revival(insights):
-    rev = next((i for i in (insights or []) if i.get("kind") == "revival"), None)
-    if not rev:
-        return None
-    return {"kind": "revival", "artist": rev.get("artist") or rev.get("subject"),
-            "detail": rev.get("detail")}
-
-
 def listening_summary(plays, listen_days):
     """Describe recorded activity without mistaking artist concentration for heavy usage."""
     play_label = "play" if plays == 1 else "plays"
@@ -224,7 +196,7 @@ def _closing(review, month_name, personality_beat):
             "listen_days": review.get("listen_days", 0)}
 
 
-def build_story(store, months, review, insights, month_name, *, detail_beats=None):
+def build_story(store, months, review, month_name, *, detail_beats=()):
     """Assemble a completed month's recap. Returns None when there is no completed month to recap.
     `month_name` is the display name (e.g. 'June'); callers pass their own formatter so tz/locale stay
     in one place."""
@@ -238,11 +210,6 @@ def build_story(store, months, review, insights, month_name, *, detail_beats=Non
         _beat_all_in(review),
         _beat_wide_net(review, month_row),      # mutually exclusive with all_in
         _beat_biggest_night(review, month),
-        # New detail screens replace these older, overlapping single-month comparisons.
-        # None preserves compatibility for callers that haven't prepared detail inputs.
-        _beat_new_obsession(review) if detail_beats is None else None,
-        _beat_diversity(months, month) if detail_beats is None else None,
-        _beat_revival(insights) if detail_beats is None else None,
     ) if b]
     beats = [_cover(review, month_name, pers), *middle, *(detail_beats or []), pers,
              _closing(review, month_name, pers)]

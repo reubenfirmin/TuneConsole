@@ -50,7 +50,13 @@ function applySongMetadata(videoId, metadata) {
     for (const node of row.querySelectorAll('.genre-display-wrap')) {
       const label = document.createElement('span');
       label.className = genre ? 'gtag' : 'muted ghint';
-      label.textContent = genre || '—';
+      if (genre) {
+        const text = document.createElement('span');
+        text.className = 'gtag-label';
+        text.textContent = genre;
+        label.title = genre;
+        label.append(text);
+      } else label.textContent = '—';
       node.replaceChildren(label);
       if (node.closest('td[title]')) node.closest('td').title = genre;
     }
@@ -265,7 +271,7 @@ function songActions() {
       lookupStream?.close();
       this.$refs.dialog.close();
       trigger?.focus();
-      if (this.result && (this.context.refresh_on_save || this.result.url === location.pathname)) location.reload();
+      if (this.result && (this.context.refresh_on_save || this.result.url === location.pathname)) location.replace(location.href);
     },
     backdropClick(event) {
       if (event.target !== this.$refs.dialog) return;

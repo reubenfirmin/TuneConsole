@@ -35,6 +35,8 @@ def test_new_artists_taste_pinned_and_cached(store, monkeypatch):
         calls.append(name)
         return [("Fresh Artist", 0.9), ("CoreBand", 0.5)]       # 'CoreBand' is owned -> excluded
     monkeypatch.setattr(lastfm, "similar_artists", fake)
+    monkeypatch.setattr(lastfm, 'artist_genre', lambda *args: 'House')
+    monkeypatch.setattr(discover, '_artist_thumb', lambda *args: None)
 
     out = discover.new_artists(_ctx(store), limit=5)
     arts = [c["artist"] for c in out]

@@ -40,6 +40,17 @@ def test_failure_without_saved_card_is_short_lived_and_not_a_miss(store):
     assert store.wiki.should_refresh(subject, None, 1060)
 
 
+def test_demand_backoff_respects_a_later_vendor_deadline_without_restamping_content(store):
+    subject = 'artist:offline'
+    store.wiki.put(subject, 'artist', 'Offline', {'title': 'Offline', 'extract': 'Old card.'}, now=0)
+    row = store.wiki.get(subject)
+    now = 31 * 86400
+    store.wiki.defer(subject, now, retry_at=now + 600)
+    assert not store.wiki.should_refresh(subject, row, now + 599)
+    assert store.wiki.should_refresh(subject, row, now + 600)
+    assert store.wiki.get(subject)['fetched_at'] == 0
+
+
 def test_saved_cards_and_failure_backoffs_are_bounded(store, monkeypatch):
     from yt_playlist.repos import wiki
     monkeypatch.setattr(wiki, "WIKI_CACHE_LIMIT", 3)

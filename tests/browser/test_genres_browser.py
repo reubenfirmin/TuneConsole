@@ -84,6 +84,9 @@ def test_add_via_button_adds_chip_and_bumps_count(live_app, page):
     before = _count(page)
     page.get_by_role("textbox", name="Genre tag", exact=True).fill("Whack-a-doodle")
     page.get_by_role("button", name="Add", exact=True).click()
+    # The POST replaces the list, including its disclosure elements. Expand
+    # the new list only once its updated count proves the swap completed.
+    expect(page.get_by_text(re.compile(r"^\d+ genres$"))).to_have_text(f"{before + 1} genres")
     page.get_by_role("region", name="No family assigned").locator("summary").first.click()
     _chip(page, "Whack-a-doodle").wait_for(state="visible", timeout=3000)
     expect(page.get_by_role("region", name="No family assigned").get_by_text(

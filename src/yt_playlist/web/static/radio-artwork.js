@@ -12,21 +12,41 @@
  * descriptors so computed geometry remains reactive rather than being copied.
  */
 function radioArtwork() {
+  let echoCache;
+  let landscapeCache;
+  const junctionCache = new Map();
   // A saved seed reproduces the whole motion, without storing geometry or
   // choosing new random values on every frame.
-  const rhythms = seed => {
+  const generator = seed => {
     let value = seed;
-    const random = () => {
+    return () => {
       value = (value + 0x6D2B79F5) | 0;
       let bits = Math.imul(value ^ value >>> 15, 1 | value);
       bits ^= bits + Math.imul(bits ^ bits >>> 7, 61 | bits);
       return ((bits ^ bits >>> 14) >>> 0) / 4294967296;
     };
+  };
+  const rhythms = seed => {
+    const random = generator(seed);
     return [1, Math.SQRT1_2, 1 / Math.sqrt(5), 1 / Math.sqrt(3), Math.SQRT2]
       .map(rate => ({rate: rate * (.75 + random() * .25), offset: random() * Math.PI * 2}));
   };
+  const landscape = seed => {
+    const random = generator(seed ^ 0xA511E9B3);
+    const signed = (minimum, range) => (random() < .5 ? -1 : 1) * (minimum + random() * range);
+    // Local fields choose their own position, scale, travel and oscillator.
+    // Folds can form anywhere in the drawing, instead of at three fixed knots.
+    return Array.from({length: 3 + Math.floor(random() * 3)}, () => ({
+      kind: Math.floor(random() * 4), center: 80 + random() * 1040,
+      width: 120 + random() * 200, travel: signed(60, 180),
+      horizontal: signed(40, 100), vertical: signed(75, 125), compression: 1.1 + random() * 1.6,
+      rate: .45 + random() * 1.1, offset: random() * Math.PI * 2,
+      secondary: random() * Math.PI * 2,
+    }));
+  };
   return {
     artworkPhase: 0, artworkSeed: 0, artworkRhythms: rhythms(0), artworkPlaylistId: null,
+    artworkLandscape: landscape(0),
     artworkFrame: null, artworkRunning: false,
     queueCenters: {},
     junctionX: null, junctionForkX: null, junctionTarget: null, junctionFrame: null,
@@ -72,6 +92,7 @@ function radioArtwork() {
       this.artworkPhase = resume ? saved.phase : 0;
       this.artworkSeed = resume ? saved.seed : Math.floor(Math.random() * 4294967296);
       this.artworkRhythms = rhythms(this.artworkSeed);
+      this.artworkLandscape = landscape(this.artworkSeed);
     },
     pauseArtworkMotion() {
       cancelAnimationFrame(this.artworkFrame);
@@ -100,7 +121,7 @@ function radioArtwork() {
         const elapsed = now - previous;
         // Small direct steps need no CSS catch-up tween. A stalled frame never
         // advances through time we weren't displaying.
-        if (elapsed >= 100) {
+        if (elapsed >= 50) {
           this.artworkPhase += Math.min(200, elapsed) * Math.PI * 2 / 720000;
           previous = now;
         }
@@ -113,12 +134,27 @@ function radioArtwork() {
       const scale = Math.max(width / 1200, historyHeight / 340);
       const offset = (historyHeight - 340 * scale) / 2;
       const phase = this.artworkPhase;
-      // Every session begins with ordered bands. Ease in its random rhythms
-      // over the first few minutes, then let the fans fold and reverse freely.
+      // Every session begins with ordered bands. Ease in the seeded fields
+      // over the first few minutes, then let them fold and travel freely.
       const freedom = 1 - Math.exp(-((phase / .65) ** 2));
       const wave = i => Math.sin(phase * this.artworkRhythms[i].rate + this.artworkRhythms[i].offset);
-      const sway = freedom * wave(0), fold = freedom * wave(1), turn = freedom * wave(2);
-      const breath = freedom * (1 + wave(3)) / 2;
+      if (landscapeCache?.seed !== this.artworkSeed || landscapeCache.phase !== phase) {
+        const oscillate = (field, time) => {
+          switch (field.kind) {
+            case 0: return Math.sin(time);
+            case 1: return (Math.sin(time) + .45 * Math.sin(time * Math.SQRT1_2 + field.secondary)) / 1.45;
+            case 2: return Math.sin(time) * Math.cos(time / Math.sqrt(3) + field.secondary);
+            default: return Math.sin(time + .85 * Math.sin(time / Math.sqrt(5) + field.secondary));
+          }
+        };
+        landscapeCache = {seed: this.artworkSeed, phase, fields: this.artworkLandscape.map(field => {
+          const time = phase * field.rate + field.offset;
+          return {...field, center: field.center + field.travel * Math.sin(time * Math.SQRT1_2),
+            horizontal: freedom * field.horizontal * oscillate(field, time),
+            vertical: freedom * field.vertical * oscillate(field, time + field.secondary),
+            compression: freedom * field.compression * oscillate(field, time + Math.PI / 2)};
+        })};
+      }
       const spread = index - 6.5;
       const slot = this.artworkView.connectedSlot;
       const stream = Math.max(.08, Math.min(.92,
@@ -127,26 +163,34 @@ function radioArtwork() {
       const drift = (stream - .5) * width * .045;
       // Deform the whole field together as its lower part opens into the junction.
       const warp = ([x, y], tangent = null) => {
-        const t = Math.max(0, Math.min(1, (y - 180) / 120));
+        let dx = 0, dy = 0, xx = 1, yx = 0, yy = 1;
+        for (const field of landscapeCache.fields) {
+          const distance = (x - field.center) / field.width;
+          const influence = Math.exp(-distance * distance);
+          const slope = -2 * distance / field.width * influence;
+          const vertical = field.vertical + (y - 170) * field.compression;
+          dx += influence * field.horizontal;
+          dy += influence * vertical;
+          xx += slope * field.horizontal;
+          yx += slope * vertical;
+          yy += influence * field.compression;
+        }
+        const t = Math.max(0, Math.min(1, (y + dy - 180) / 120));
         const ease = t * t * (3 - 2 * t), slope = 6 * t * (1 - t) / 120;
-        return tangent
-          ? [tangent[0] * scale + drift * slope * tangent[1], tangent[1] * (scale + stretch * slope)]
-          : [x * scale + drift * ease, y * scale + offset + stretch * ease];
+        if (!tangent) return [(x + dx) * scale + drift * ease, (y + dy) * scale + offset + stretch * ease];
+        const tx = tangent[0] * xx, ty = tangent[0] * yx + tangent[1] * yy;
+        return [tx * scale + drift * slope * ty, ty * (scale + stretch * slope)];
       };
       const reflect = (point, handle) => point.map((value, axis) => 2 * value - handle[axis]);
-      const start = [-40, 58 + index * 18 + 35 * sway];
-      const a = [244 + 150 * sway, 155 + 70 * fold + spread * (17 - 20 * breath)];
-      const ah = [122 + 110 * sway, 130 + 100 * turn + spread * (17 + 8 * fold)];
-      const b = [580 + 190 * fold, 184 + 100 * turn + spread * (13 - 28 * breath)];
-      const bh = [440 + 150 * fold, 213 + 120 * sway + spread * (13 + 16 * turn)];
-      const c = [886 - 140 * turn, 155 - 100 * fold + spread * (15 - 30 * breath)];
-      const ch = [730 - 130 * turn, 126 - 130 * sway + spread * (15 - 10 * fold)];
+      const start = [-40, 58 + index * 18];
+      const a = [244, 155 + spread * 17], ah = [122, 130 + spread * 17];
+      const b = [580, 184 + spread * 13], bh = [440, 213 + spread * 13];
+      const c = [886, 155 + spread * 15], ch = [730, 126 + spread * 15];
       const curves = [
-        [start, [110, 58 + index * 18 + 90 * turn], ah, a],
+        [start, [110, 58 + index * 18], ah, a],
         [a, reflect(a, ah), bh, b],
         [b, reflect(b, bh), ch, c],
-        [c, reflect(c, ch), [1070, 195 + spread * (15 - 28 * breath) + 80 * sway],
-          [1250, 170 + spread * (15 - 28 * breath) + 70 * fold]],
+        [c, reflect(c, ch), [1070, 195 + spread * 15], [1250, 170 + spread * 15]],
       ];
       const at = (points, t) => {
         const u = 1 - t;
@@ -219,60 +263,66 @@ function radioArtwork() {
     },
     get recordEchoes() {
       const {width, historyHeight: height} = this.drawingSpace;
+      const phase = this.artworkPhase, seed = this.artworkSeed;
+      if (echoCache?.width === width && echoCache.height === height &&
+          echoCache.phase === phase && echoCache.seed === seed) return echoCache.copies;
       const scale = Math.max(width / 1200, height / 340);
-      const primary = {x: 244 * scale, y: height / 2 + scale, r: 119 * scale, depth: 0};
-      const placed = [primary], echoes = [], pending = [primary];
-      const sweep = .2;
-      const fitsOrbit = copy => {
-        const dx = copy.x - primary.x, dy = copy.y - primary.y;
-        const distance = Math.hypot(dx, dy), angle = Math.atan2(dy, dx);
-        const angles = [angle - sweep, angle + sweep];
-        // Include every horizontal/vertical extremum along the entire orbital
-        // arc, so its clearance never depends on the current animation frame.
-        for (let quarter = Math.ceil((angle - sweep) / (Math.PI / 2));
-             quarter * Math.PI / 2 < angle + sweep; quarter++) angles.push(quarter * Math.PI / 2);
-        return angles.every(at => {
-          const x = primary.x + Math.cos(at) * distance, y = primary.y + Math.sin(at) * distance;
-          return x - copy.r >= 8 && x + copy.r <= width - 8 &&
-            y - copy.r >= 8 && y + copy.r <= height - 8;
-        });
+      const primary = {x: 244 * scale, y: height / 2 + scale, r: 119 * scale,
+        depth: 0, heading: 0, id: -1, opacity: 1};
+      const copies = [], placed = [primary];
+      const smooth = value => { const t = Math.max(0, Math.min(1, value)); return t * t * (3 - 2 * t); };
+      const wave = (index, offset = 0) => {
+        const rhythm = this.artworkRhythms[index % 5];
+        return Math.sin(phase * 9 * rhythm.rate + rhythm.offset + offset);
       };
-      // Reuse the same disc at smaller scales. Only place complete, separated
-      // copies in the measured history area; cap both recursion and SVG work.
-      while (pending.length && echoes.length < 24) {
-        const parent = pending.shift();
-        if (parent.depth >= 4) continue;
-        for (const angle of [0, -.7, .7, Math.PI]) {
-          // The main disc sits near the left edge. Its left-hand copy needs
-          // extra clearance for the entire sweep on narrow history panels.
-          const r = parent.r * (angle === 0 ? .46 : angle === Math.PI ? .4 : .31);
-          if (r < 14) continue;
-          const distance = parent.r + r + 10;
-          const copy = {x: parent.x + Math.cos(angle) * distance,
-            y: parent.y + Math.sin(angle) * distance, r, depth: parent.depth + 1};
-          if (!fitsOrbit(copy) ||
-              placed.some(other => Math.hypot(copy.x - other.x, copy.y - other.y) < r + other.r + 8)) continue;
-          placed.push(copy);
-          echoes.push({...copy, id: echoes.length});
-          pending.push(copy);
-          if (echoes.length === 24) break;
+      const project = (parent, heading, ratio, branch, budget, growth = 1) => {
+        const depth = parent.depth + 1;
+        const r = parent.r * ratio * (.94 + .06 * wave(branch + depth)) * (.6 + .4 * growth);
+        const distance = parent.r + r + Math.max(8, 10 * scale);
+        const x = parent.x + Math.cos(heading) * distance;
+        const y = parent.y + Math.sin(heading) * distance;
+        const clearance = Math.min(x - r, width - x - r, y - r, height - y - r,
+          ...placed.map(other => Math.hypot(x - other.x, y - other.y) - r - other.r));
+        // Fade before a complete disc reaches an edge or another disc. Invisible
+        // ancestors cannot leave disconnected descendants floating in the field.
+        const opacity = parent.opacity * growth * smooth((clearance - 4) / 10) * smooth((r - 3) / 3);
+        const copy = {id: copies.length, parent: parent.id, depth, heading, x, y, r, opacity,
+          transform: `translate(${x} ${y}) scale(${r / 119}) translate(-244 -171)`};
+        copies.push(copy);
+        placed.push(copy);
+        if (depth >= 4 || budget <= 1) return;
+        // Each projection turns with its parent. Its three children open into
+        // a fan as the parent descends, then curl as that parent turns upward.
+        const position = (y - primary.y) / primary.r;
+        const bend = .24 * Math.sin(heading * 1.7 + position) + .18 * wave(branch + 2, depth);
+        const fan = 1.04 + .22 * Math.sin(heading + position + wave(branch + 3));
+        if (budget >= 4) {
+          const children = [];
+          for (const spread of [0, -1, 1]) {
+            const start = copies.length;
+            project(copy, heading + bend + spread * fan, spread ? .38 : .5, branch, 1);
+            children.push(copies[start]);
+          }
+          // Spend the remaining two slots on the central branch. Its last
+          // generation grows only at some parent angles, rather than making
+          // a permanent fourth row. Four roots have six slots each: 24 total.
+          const child = children[0];
+          project(child, child.heading + bend, .52, branch, budget - 4);
+        } else {
+          const emergence = depth === 3
+            ? smooth((Math.sin(heading * 1.3 + position + wave(branch + 1)) + .25) / .9) : 1;
+          project(copy, heading + bend, .52, branch, budget - 1, emergence);
         }
-      }
-      // Move the constellation together around the main record. A bounded
-      // sweep fits even a shallow phone viewport, preserves every separation,
-      // and leaves each cover upright. Its phase already survives navigation
-      // and pauses while the page is hidden.
-      const turn = sweep * Math.sin(this.artworkPhase * this.artworkRhythms[0].rate * .7);
-      return echoes.map(copy => {
-        const dx = copy.x - primary.x, dy = copy.y - primary.y;
-        const x = primary.x + dx * Math.cos(turn) - dy * Math.sin(turn);
-        const y = primary.y + dx * Math.sin(turn) + dy * Math.cos(turn);
-        return {...copy, x, y,
-          transform: `translate(${x} ${y}) scale(${copy.r / 119}) translate(-244 -171)`};
+      };
+      [0, Math.PI, -.9, .9].forEach((angle, branch) => {
+        const heading = angle + .24 * wave(branch) + .09 * wave(branch + 2, angle);
+        project(primary, heading, [ .46, .4, .31, .31 ][branch], branch, 6);
       });
+      echoCache = {width, height, phase, seed, copies};
+      return copies;
     },
     orbitTransform(index) {
-      const phase = this.artworkPhase;
+      const phase = this.artworkPhase * 9;
       const rhythm = this.artworkRhythms[index + 1];
       const sway = Math.sin(phase * rhythm.rate + rhythm.offset) - Math.sin(rhythm.offset);
       const tilt = (index ? 28 : -19) + sway * (index ? 34 : 26);
@@ -331,105 +381,110 @@ function radioArtwork() {
     junctionStyle(slot, detail = false) {
       const target = this.queueCenters[slot] ?? (slot + .5) * 1000 / this.artworkView.directionCount;
       const x = slot === this.artworkView.connectedSlot ? this.junctionX ?? target : target;
-      // Keep both table attachments fixed as the fork moves between streams.
-      const left = 40, right = 960;
-      const {x: cx, y: cy, rx, ry, insetX, insetY} = this.junctionHub;
-      const half = 18;
       const fork = slot === this.artworkView.connectedSlot ? this.junctionForkX ?? x : x;
-      const midpoint = (a, b) => a.map((value, i) => (value + b[i]) / 2);
-      const split = points => {
-        const a = midpoint(points[0], points[1]), b = midpoint(points[1], points[2]);
-        const c = midpoint(points[2], points[3]), d = midpoint(a, b), e = midpoint(b, c);
-        const center = midpoint(d, e);
-        return [[points[0], a, d, center], [center, e, c, points[3]]];
+      const {x: cx, y: cy, rx, ry, insetX, insetY} = this.junctionHub;
+      const ease = t => (t = Math.max(0, Math.min(1, t))) * t * (3 - 2 * t);
+      const key = `${slot}:${detail}`;
+      const values = [x, fork, cx, cy, rx, ry, insetX, insetY, this.drawingSpace.width, this.drawingSpace.gapHeight];
+      const cached = junctionCache.get(key);
+      if (cached?.values.every((value, i) => value === values[i])) return cached.style;
+      const finish = path => {
+        const style = `d: path("${path}")`;
+        // The four streams share their outline across fill, hatch, clip and ink.
+        // Cache only their latest geometry, never an animation's entire history.
+        if (junctionCache.size >= 8 && !junctionCache.has(key)) junctionCache.clear();
+        junctionCache.set(key, {values, style});
+        return style;
       };
+      const sample = (a, b, c, d, steps) => Array.from({length: steps}, (_, i) => {
+        const t = (i + 1) / steps, u = 1 - t;
+        return a.map((value, axis) => u ** 3 * value + 3 * u * u * t * b[axis]
+          + 3 * u * t * t * c[axis] + t ** 3 * d[axis]);
+      });
+      // Spread the pull through the whole lower Y, rather than adding a
+      // horizontal shoulder at the foot. Route the deformed arms afterwards:
+      // the fixed control must stay clear throughout the movement.
+      const bend = ([px, py]) => [px + (x - fork) * ease((py - 8) / 104), py];
+      // Each arm stays on its own side of the control until it can join the
+      // stem BELOW it. This is also the normal, settled route, not a temporary
+      // detour used only while switching streams.
       const arm = (start, end, depth, shoulder, radiusX, radiusY) => {
-        const points = [[start, 8], [start, shoulder], [end, 22], [end, depth]];
-        const segments = split(points).flatMap(split);
-        return {points: [points[0], ...segments.flatMap(segment => segment.slice(1))],
-          side: Math.sign(start - cx), radiusX, radiusY};
+        const side = Math.sign(start - cx), points = [[start, -3], [start, 8]];
+        const clearance = 1.002;
+        let previous;
+        for (const point of sample([start, 8], [start, shoulder], [end, 22], [end, depth], 48).map(bend)) {
+          let q = [(point[0] - cx) / radiusX, (point[1] - cy) / radiusY];
+          if (Math.abs(q[1]) < clearance)
+            q[0] = side * Math.max(side * q[0], Math.sqrt(clearance ** 2 - q[1] ** 2));
+          const length = Math.hypot(...q);
+          if (length < clearance) q = length < .00001 ? [0, -clearance] : q.map(v => v * clearance / length);
+          if (previous) {
+            const delta = q.map((v, axis) => v - previous[axis]);
+            const norm = delta[0] ** 2 + delta[1] ** 2;
+            const t = norm ? Math.max(0, Math.min(1, -(previous[0] * delta[0] + previous[1] * delta[1]) / norm)) : 0;
+            if (Math.hypot(previous[0] + t * delta[0], previous[1] + t * delta[1]) < clearance - .001) {
+              const a = Math.atan2(previous[1], previous[0]), b = Math.atan2(q[1], q[0]);
+              const turn = Math.atan2(Math.sin(b - a), Math.cos(b - a));
+              for (let step = 0; step <= 8; step++) {
+                const angle = a + turn * step / 8;
+                points.push([cx + Math.cos(angle) * radiusX * clearance, cy + Math.sin(angle) * radiusY * clearance]);
+              }
+            }
+          }
+          points.push([cx + q[0] * radiusX, cy + q[1] * radiusY]);
+          previous = q;
+        }
+        return points;
       };
-      const trace = (route, reverse = false, move = 'M') => {
-        const {points, side, radiusX, radiusY} = route;
-        const p = reverse ? [...points].reverse() : points;
-        let path = reverse ? `${move}${p[0].join(' ')}` : `${move}${p[0][0]} -3 L${p[0].join(' ')}`;
-        for (let i = 1; i < p.length; i += 3) path += ` C${p.slice(i, i + 3).flat().join(' ')}`;
-        if (reverse) path += ` L${p[p.length - 1][0]} -3`;
-        return this.bendJunction(path, cx, cy, radiusX, radiusY, side);
-      };
-      // Each shoulder stays on its own side of the control and joins below it.
-      // That continuous route cannot flip sides when the moving fork crosses
-      // the control's center, including during a rapid reversal.
-      let path;
+      const tail = (points, end, depth) => points.concat(
+        sample([end, depth], [end, 104], [end, 104], [end, 112], 12).map(bend));
+      const trace = (points, move = 'M') => `${move}${points[0].join(' ')}${this.smoothJunction(points)}`;
       if (detail) {
         const depth = Math.max(82, cy + ry - insetY / 2 + 4);
-        const flowLeft = arm(left + 12, fork - 6, depth, 36, rx - insetX / 2, ry - insetY / 2);
-        const flowRight = arm(right - 12, fork + 6, depth, 36, rx - insetX / 2, ry - insetY / 2);
-        // One circuit: descend through the left arm and return up the right.
-        // Both turnarounds sit just outside the viewport, keeping the visible
-        // dots inside the Y while preserving a continuous route during previews.
-        path = trace(flowLeft) + ` C${fork - 6} 104 ${x - 6} 104 ${x - 6} 112 ` +
-          `C${x - 6} 120 ${x + 6} 120 ${x + 6} 112 ` +
-          `C${x + 6} 104 ${fork + 6} 104 ${fork + 6} ${depth} ` + trace(flowRight, true, 'L') + ' Z';
-      } else {
-        const outerDepth = Math.max(82, cy + ry + 4);
-        const innerDepth = Math.max(68, cy + ry - insetY + 1);
-        const outerLeft = arm(left, fork - half, outerDepth, 48, rx, ry);
-        const outerRight = arm(right, fork + half, outerDepth, 48, rx, ry);
-        const innerLeft = arm(left + 24, fork, innerDepth, 26, rx - insetX, ry - insetY);
-        const innerRight = arm(right - 24, fork, innerDepth, 26, rx - insetX, ry - insetY);
-        path = trace(outerLeft) + ` C${fork - half} 104 ${x - half} 104 ${x - half} 112 L${x + half} 112 ` +
-          `C${x + half} 104 ${fork + half} 104 ${fork + half} ${outerDepth} ` + trace(outerRight, true, 'L') + ' ' +
-          trace(innerRight, false, 'L') + ' ' + trace(innerLeft, true, 'L') + ' Z';
+        const left = tail(arm(52, fork - 6, depth, 36, rx - insetX / 2, ry - insetY / 2), fork - 6, depth);
+        const right = tail(arm(948, fork + 6, depth, 36, rx - insetX / 2, ry - insetY / 2), fork + 6, depth);
+        const turn = sample([fork - 6, 112], [fork - 6, 120], [fork + 6, 120], [fork + 6, 112], 8).map(bend);
+        return finish(trace(left.concat(turn, right.reverse())) + ' Z');
       }
-      return `d: path("${path}")`;
+      const outerDepth = Math.max(82, cy + ry + 4), innerDepth = Math.max(68, cy + ry - insetY + 1);
+      const left = tail(arm(40, fork - 18, outerDepth, 48, rx, ry), fork - 18, outerDepth);
+      const right = tail(arm(960, fork + 18, outerDepth, 48, rx, ry), fork + 18, outerDepth);
+      const innerRight = arm(936, fork, innerDepth, 26, rx - insetX, ry - insetY);
+      const innerLeft = arm(64, fork, innerDepth, 26, rx - insetX, ry - insetY);
+      const path = trace(left) + ` L${x + 18} 112` + trace(right.reverse(), ' L') +
+        trace(innerRight.concat(innerLeft.reverse()), ' L') + ' Z';
+      return finish(path);
     },
-    bendJunction(path, cx, cy, rx, ry, side) {
-      const tokens = path.match(/[MLCZ]|-?\d+(?:\.\d+)?(?:e[-+]?\d+)?/gi);
-      let i = 0, point, origin, previous, output = '';
-      const coordinates = p => `${(cx + p[0] * rx).toFixed(3)} ${(cy + p[1] * ry).toFixed(3)}`;
-      const append = (p, move = false) => {
-        let q = [(p[0] - cx) / rx, (p[1] - cy) / ry];
-        if (Math.abs(q[1]) < 1.002) {
-          const edge = Math.sqrt(1.002 ** 2 - q[1] ** 2);
-          q[0] = side * Math.max(side * q[0], edge);
+    smoothJunction(points) {
+      // Round the routed contour in screen space, including its fork and stem.
+      // Uniform knots round the old contour's angular bends; a cubic
+      // B-spline shares derivatives across every join and keeps the silhouette.
+      const sx = this.drawingSpace.width / 1000, sy = this.drawingSpace.gapHeight / 112;
+      const knots = [points[0]];
+      let remaining = 6;
+      for (let i = 1; i < points.length; i++) {
+        let a = points[i - 1];
+        const b = points[i];
+        let distance = Math.hypot((b[0] - a[0]) * sx, (b[1] - a[1]) * sy);
+        while (distance >= remaining) {
+          a = a.map((value, axis) => value + (b[axis] - value) * remaining / distance);
+          knots.push(a);
+          distance -= remaining;
+          remaining = 6;
         }
-        const length = Math.hypot(...q);
-        if (length < 1.002) q = length < .00001 ? [0, -1.002] : q.map(v => v * 1.002 / length);
-        if (!move && previous) {
-          const delta = q.map((v, axis) => v - previous[axis]);
-          const norm = delta[0] ** 2 + delta[1] ** 2;
-          const t = norm ? Math.max(0, Math.min(1, -(previous[0] * delta[0] + previous[1] * delta[1]) / norm)) : 0;
-          if (Math.hypot(previous[0] + t * delta[0], previous[1] + t * delta[1]) < 1.001) {
-            const a = Math.atan2(previous[1], previous[0]), b = Math.atan2(q[1], q[0]);
-            const turn = Math.atan2(Math.sin(b - a), Math.cos(b - a));
-            const entry = [Math.cos(a) * 1.002, Math.sin(a) * 1.002];
-            const exit = [Math.cos(b) * 1.002, Math.sin(b) * 1.002];
-            output += ` L${coordinates(entry)} A${rx * 1.002} ${ry * 1.002} 0 0 ${turn > 0 ? 1 : 0} ${coordinates(exit)}`;
-          }
-        }
-        output += `${move ? ' ' + path[0] : ' L'}${coordinates(q)}`;
-        previous = q;
-      };
-      while (i < tokens.length) {
-        const command = tokens[i++];
-        if (command === 'Z') { append(origin); output += ' Z'; continue; }
-        const next = () => [+tokens[i++], +tokens[i++]];
-        if (command === 'M' || command === 'L') {
-          point = next();
-          if (command === 'M') origin = point;
-          append(point, command === 'M');
-        } else if (command === 'C') {
-          const start = point, a = next(), b = next(), end = next();
-          for (let sample = 1; sample <= 12; sample++) {
-            const t = sample / 12, u = 1 - t;
-            append([0, 1].map(axis => u ** 3 * start[axis] + 3 * u ** 2 * t * a[axis]
-              + 3 * u * t ** 2 * b[axis] + t ** 3 * end[axis]));
-          }
-          point = end;
-        }
+        remaining -= distance;
       }
-      return output.trim();
+      const end = points[points.length - 1];
+      knots.push(end);
+      const p = [knots[0], knots[0], ...knots, end, end];
+      let path = '';
+      for (let i = 1; i < p.length - 2; i++) {
+        const a = p[i].map((v, axis) => (2 * v + p[i + 1][axis]) / 3);
+        const b = p[i].map((v, axis) => (v + 2 * p[i + 1][axis]) / 3);
+        const c = p[i].map((v, axis) => (v + 4 * p[i + 1][axis] + p[i + 2][axis]) / 6);
+        path += ` C${a.join(' ')} ${b.join(' ')} ${c.join(' ')}`;
+      }
+      return path;
     },
     get junctionClearance() {
       const {x, y, rx, ry, insetX, insetY} = this.junctionHub;
@@ -461,27 +516,19 @@ function radioArtwork() {
       // Keep the newest played row at the junction, including after a table swap.
       scroller.scrollTop = scroller.scrollHeight;
     },
-    launchPosition(index) {
-      const angle = index * Math.PI / 4;
-      return {x: 50 + 38 * Math.cos(angle), y: 50 + 34 * Math.sin(angle)};
-    },
     fitSpace() {
       if (!this.artworkView.visible) return;
       const main = this.$refs.fieldContent.closest('main');
       const bottomPadding = main ? parseFloat(getComputedStyle(main).paddingBottom) : 20;
-      for (const [element, variable] of [[this.$refs.seeds, '--radio-grid-height'],
-                                        [this.$refs.launch, '--radio-launch-height'],
-                                        [this.$refs.session, '--radio-session-height']]) {
-        if (!element?.getClientRects().length) continue;
-        const top = element.getBoundingClientRect().top + window.scrollY;
+      const session = this.$refs.session;
+      if (session?.getClientRects().length) {
+        const top = session.getBoundingClientRect().top + window.scrollY;
         const height = Math.max(0, window.innerHeight - top - bottomPadding);
-        element.style.setProperty(variable, height + 'px');
-        if (element === this.$refs.session) {
-          const junction = this.$refs.junction.getBoundingClientRect().height;
-          const history = Math.max(0, Math.min(height * .52, height - junction - 120,
-            Math.max(140, window.innerHeight * .5 - top - 16)));
-          element.style.setProperty('--radio-history-height', history + 'px');
-        }
+        session.style.setProperty('--radio-session-height', height + 'px');
+        const junction = this.$refs.junction.getBoundingClientRect().height;
+        const history = Math.max(0, Math.min(height * .52, height - junction - 120,
+          Math.max(140, window.innerHeight * .5 - top - 16)));
+        session.style.setProperty('--radio-history-height', history + 'px');
       }
       this.layoutHistory();
       this.measureQueues();

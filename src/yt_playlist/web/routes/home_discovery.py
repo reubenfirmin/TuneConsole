@@ -93,9 +93,8 @@ def build(ctx, views):
 
     def rotate_album_choices(previous=''):
         now = now_fn()
-        choice_evidence.close_window(store, 'albums', now)
-        held = choice_evidence.opportunity(store, previous) if previous and len(previous) <= 64 else None
-        if held and held.get('format') == 'albums':
+        held = choice_evidence.close_window(store, 'albums', now, opportunity_id=previous)
+        if held:
             ids = [item['browse_id'] for item in held['options']]
         else:
             payload = album_choices.load(store, now) or {}
@@ -145,7 +144,7 @@ def build(ctx, views):
         album = next((row for row in albums if row.get('browse_id') == browse), None)
         if album is None:
             return Response(status_code=404)
-        store.rec_proposals.request_album_notes([album], now_fn())
+        store.rec_proposals.request_album_notes([album], now_fn(), visible=True)
         if ctx.rec_worker:
             views.schedule()
         pending = browse in (store.rec_proposals.get_proposals('album_note_requests') or {})

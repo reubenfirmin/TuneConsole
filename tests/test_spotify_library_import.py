@@ -165,6 +165,72 @@ class SongClient(FakeClient):
         return [track]
 
 
+@pytest.mark.parametrize("discovery", ["visible", "delayed", "unreadable", "duplicate"])
+@pytest.mark.parametrize("interruption", ["reply_loss", "local_publication"])
+def test_creation_interruption_retains_marker_and_never_recreates_after_restart(
+        tmp_path, monkeypatch, discovery, interruption):
+    class LostCreation(SongClient):
+        visible = discovery != "delayed"
+        readable = discovery != "unreadable"
+
+        def create_playlist(self, title, description):
+            remote_id = super().create_playlist(title, description)
+            if interruption == "reply_loss":
+                raise TimeoutError("creation reply lost")
+            return remote_id
+
+        def get_library_playlists(self, limit=None):
+            if not self.readable:
+                raise ConnectionError("library unavailable")
+            rows = [{"playlistId": pid} for pid, _, _ in self.created] if self.visible else []
+            return rows + ([{"playlistId": "OTHER"}] if discovery == "duplicate" else [])
+
+        def get_playlist(self, playlistId, limit=None):
+            detail = super().get_playlist(playlistId, limit)
+            if self.created:
+                detail["description"] = self.created[0][2]
+            return detail
+
+    path = tmp_path / "creation.db"
+    store = Store(path); store.init_schema()
+    identity = store.identities.upsert_identity("Main", "bridge", None, True)
+    client = LostCreation()
+    raw = _playlists_zip(("Road songs", ["One", "Two"]))
+    with monkeypatch.context() as patch:
+        if interruption == "local_publication":
+            save = store.settings.set_setting
+
+            def fail_id_publication(key, value):
+                if key == f"spotify_library_imported_playlists:{identity}" and any(
+                        transfer.get("ytm_playlist_id") for transfer in json.loads(value).values()):
+                    raise OSError("interrupted before destination ID publication")
+                return save(key, value)
+
+            patch.setattr(store.settings, "set_setting", fail_id_publication)
+        first = import_spotify_library(store, raw, client, identity, 100)
+    assert first["playlists_failed"] == 1
+    assert "ytm_playlist_id" not in first["details"]["playlists"][0]
+    assert not client.added
+    store.conn.close()
+    store = Store(path); store.init_schema()
+    try:
+        retry = import_spotify_library(store, raw, client, identity, 101)
+        if discovery != "visible":
+            assert retry["playlists_failed"] == 1
+            assert not client.added
+            client.visible = client.readable = True
+            if discovery == "duplicate":
+                # Ambiguous ownership must remain unresolved, even on another retry.
+                assert import_spotify_library(store, raw, client, identity, 102)["playlists_failed"] == 1
+                return
+            retry = import_spotify_library(store, raw, client, identity, 102)
+        assert retry["playlists_imported"] == 1
+        assert [t["videoId"] for t in client._tracks["PL_NEW_0"]] == ["yt-One", "yt-Two"]
+    finally:
+        assert len(client.created) == 1
+        store.conn.close()
+
+
 def test_identical_contents_in_destination_are_skipped_even_in_a_different_order(store):
     identity = store.identities.upsert_identity("main", "bridge", None, True)
     playlist = store.playlists.upsert_playlist(identity, "PL_EXISTING", "Road songs", 2, "hash", 1)

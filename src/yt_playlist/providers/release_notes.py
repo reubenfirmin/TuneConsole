@@ -2,7 +2,7 @@
 
 MusicBrainz release-group relationships supply review links and Discogs IDs. A
 Discogs community average describes the matched edition, never a critic's score.
-All calls use the existing providers' pacing, circuit breakers and egress policy.
+All vendor requests use their integration access objects and existing egress policy.
 """
 import math
 import re
@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded, check_cancellable_work
 from yt_playlist.providers import discogs, musicbrainz
-from yt_playlist.providers.base import LookupUnavailable
+from yt_playlist.util import net
 from yt_playlist.util.matching import recording_title
 
 
@@ -45,6 +45,17 @@ def _rating(value, count, scale, source, url):
 
 
 def fetch(album, store):
+    with net.probe_errors() as errors:
+        result = _fetch(album, store)
+    for error in errors:
+        net.record_probe_failure(error)
+    if errors:
+        result['retry'] = True
+        result['retry_at'] = max((getattr(error, 'retry_at', 0) for error in errors), default=0)
+    return result
+
+
+def _fetch(album, store):
     """One bounded release lookup; misses and partial provider outages stay explicit."""
     result = {'links': [], 'rating': None, 'label': None, 'track_count': None, 'description': None,
               'review': None, 'editorial_version': 5,
@@ -55,17 +66,17 @@ def fetch(album, store):
              f'artist:"{musicbrainz._lucene_escape(album["artist"])}"')
     release = None
     try:
-        if musicbrainz.tripped():
-            raise LookupUnavailable('MusicBrainz is backing off')
         check_cancellable_work()
-        search = musicbrainz._get('release-group', {'query': query, 'fmt': 'json', 'limit': '5'}, timeout=5)
+        with musicbrainz.access(store):
+            search = musicbrainz._get('release-group', {'query': query, 'fmt': 'json', 'limit': '5'}, timeout=5)
         matches = [row for row in search.get('release-groups') or [] if _mb_matches(row, album)]
         if matches:
             mbid = matches[0].get('id', '')
             if re.fullmatch(r'[0-9a-f-]{36}', mbid):
                 check_cancellable_work()
-                full = musicbrainz._get(f'release-group/{mbid}',
-                    {'inc': 'artist-credits+url-rels+ratings', 'fmt': 'json'}, timeout=5)
+                with musicbrainz.access(store):
+                    full = musicbrainz._get(f'release-group/{mbid}',
+                        {'inc': 'artist-credits+url-rels+ratings', 'fmt': 'json'}, timeout=5)
                 if _mb_matches(full, album):
                     result['evidence'].append({'provider': 'musicbrainz', 'id': mbid, 'response': full})
                     for relation in full.get('relations') or []:
@@ -88,14 +99,12 @@ def fetch(album, store):
 
     tok = discogs.token(store)
     try:
-        if discogs.tripped():
-            raise LookupUnavailable('Discogs is backing off')
         # Search requires authentication. Linked public release/master lookups do not.
         if release is None and tok:
             check_cancellable_work()
-            search = discogs._get('database/search', {'artist': album['artist'],
-                'release_title': album['title'], 'type': 'release', 'per_page': '5'}, tok, timeout=5)
-            for row in search.get('results') or []:
+            rows = discogs.search_releases(artist=album['artist'], title=album['title'],
+                                          store=store, tok=tok, timeout=5)
+            for row in rows:
                 artist, sep, title = (row.get('title') or '').partition(' - ')
                 if (sep and discogs._artist_key(artist) == discogs._artist_key(album['artist'])
                         and recording_title(title) == recording_title(album['title'])):
@@ -105,11 +114,11 @@ def fetch(album, store):
             kind, identity = release
             check_cancellable_work()
             if kind == 'master':
-                master = discogs._get(f'masters/{identity}', {}, tok, timeout=5)
+                master = discogs.master_details(identity, store=store, tok=tok, timeout=5)
                 identity = str(master.get('main_release') or '')
             if identity.isdigit():
                 check_cancellable_work()
-                full = discogs._get(f'releases/{identity}', {}, tok, timeout=5)
+                full = discogs.release_details(identity, store=store, tok=tok, timeout=5)
                 if _discogs_matches(full, album):
                     # Keep public facts only; authenticated user_data is not release evidence.
                     facts = {key: full.get(key) for key in ('id', 'title', 'artists', 'year',

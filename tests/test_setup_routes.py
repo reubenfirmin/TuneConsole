@@ -4,6 +4,18 @@ from urllib.parse import parse_qs, urlsplit
 from fastapi.testclient import TestClient
 from yt_playlist.web.app import create_app
 from tests.setup_support import _FakeRuntime
+def test_home_format_setting_is_in_setup_and_persists(store):
+    c = TestClient(create_app(store, lambda: {}, now_fn=lambda: 1.0), base_url='http://127.0.0.1')
+    html = c.get('/setup?tab=home').text
+    assert 'id="setup-home-format"' in html
+    assert 'hx-post="/home/format"' in html
+    assert 'Start Home with' not in c.get('/taste/panels/recommendations').text
+    assert c.post('/home/format', data={'format': 'radio'}).status_code == 204
+    assert '<option value="radio" selected>' in c.get('/setup?tab=home').text
+    assert c.post('/home/format', data={'format': 'invalid'}).status_code == 400
+    assert store.settings.get_setting('home_format') == 'radio'
+
+
 def test_unconfigured_home_still_renders(store):
     # The forced /setup redirect is gone by design: a default identity is auto-provisioned and the
     # extension pairs live, so the dashboard is reachable before setup. /setup stays available.

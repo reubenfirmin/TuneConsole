@@ -1,6 +1,7 @@
 """Plan candidates and reuse source checks only for the exact revision or verified merge tree."""
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 import re
 import tempfile
@@ -134,14 +135,23 @@ def plan(backend, tag, revision, event, ref):
     return result
 
 
-def timing_source(backend):
+def timing_source(backend, baseline=None):
     """Pin one trusted timing artifact for every shard, even if CI finishes mid-run."""
+    if baseline is None:
+        baseline = json.loads((Path(__file__).resolve().parents[1] / '.github/test-durations.json').read_text())
+    refreshed = baseline.get('refreshed_at')
+    refreshed_at = datetime.fromisoformat(refreshed) if refreshed else None
     result = backend.api(f"repos/{backend.repository}/actions/workflows/ci.yml/runs?branch=main&status=success&per_page=20")
     if not isinstance(result, dict) or not isinstance(result.get("workflow_runs"), list):
         raise RuntimeError("Cannot read the shard timing baseline")
     for run in result["workflow_runs"]:
         if (run["head_branch"] != "main" or run["status"] != "completed" or run["conclusion"] != "success"
                 or run["event"] not in {"push", "workflow_dispatch"}):
+            continue
+        # An older main artifact must not replace a reviewed, newer weight
+        # refresh from complete raw reports. Use main again once it catches up.
+        started = run.get('run_started_at')
+        if refreshed_at and (not started or datetime.fromisoformat(started) <= refreshed_at):
             continue
         artifacts = backend.api(f"repos/{backend.repository}/actions/runs/{run['id']}/artifacts?per_page=100")["artifacts"]
         matches = [artifact for artifact in artifacts

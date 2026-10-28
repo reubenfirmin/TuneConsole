@@ -33,6 +33,9 @@ def capture_start(store, identity, video, playlist, status, at, *, album=False):
     Serving only offers a small immutable source record. Durable writes and all
     interpretation run on the existing worker; unavailable capture stays unknown.
     """
+    from yt_playlist.core.features import listening_charts_enabled
+    if not listening_charts_enabled():
+        return
     capture = getattr(store, 'choice_capture', None)
     if capture is not None:
         capture.enqueue('listening analytics', store.player_events.record_player_event,
@@ -43,7 +46,10 @@ def capture_start(store, identity, video, playlist, status, at, *, album=False):
 def calculate(reader, now):
     repo = ListeningAnalyticsRepo(reader)
     metadata = {}
+    names = {str(row['id']): row['name'] for batch in repo.batches('SELECT id,name FROM artists') for row in batch}
     for batch in repo.catalog_rows():
+        for row in batch:
+            row['artist'] = names.get(str(row['artist_id']), row['artist'])
         metadata.update((row['identity_key'], row) for row in batch)
     with setting_reads(reader, ('radio_session_playlist_ids', 'listening_timezone')):
         radio_ids = set(json.loads(reader.settings.get_setting('radio_session_playlist_ids') or '[]'))
@@ -141,7 +147,7 @@ def calculate(reader, now):
             start = starts.get((*identity, play['played_at']), {})
             row = cell(date, key, format_of(play['playlist_ytm_id'], start.get('album', False)))
             row['plays'] += 1
-            exact_days.add((play['identity_id'], key, date))
+            exact_days.add((key, date))
             if key not in discovered_tracks and date < first_track.get(key, '9999-12-31'):
                 row['new_tracks'] += 1
             discovered_tracks.add(key)
@@ -163,9 +169,12 @@ def calculate(reader, now):
             if rating in ('LIKE', 'DISLIKE', 'INDIFFERENT'):
                 row['rated'] += 1
                 row['liked'] += rating == 'LIKE'
+    seen_days = set(exact_days)
     for row in observations:
-        if (row['identity_id'], row['identity_key'], row['day']) not in exact_days:
+        signature = (row['identity_key'], row['day'])
+        if signature not in seen_days:
             cell(row['day'], row['identity_key'], 'other')['sightings'] += 1
+            seen_days.add(signature)
     # Immutable confirmed transitions survive clears and reversals. Existing
     # retained state has no reliable action date and is reported separately.
     for batch in repo.rating_actions(now):
@@ -176,14 +185,53 @@ def calculate(reader, now):
             kind = {'LIKE': 'hearts', 'DISLIKE': 'skulls', 'INDIFFERENT': 'clears'}[row['status']]
             cell(date_of(row['at']), key, 'other')[kind] += 1
     retained = {'hearts': 0, 'skulls': 0}
+    rating_genres = defaultdict(lambda: {'hearts': 0, 'skulls': 0})
     for batch in repo.feedback(now):
         for row in batch:
-            retained['hearts' if row['kind'] == 'like' else 'skulls'] += 1
+            kind = 'hearts' if row['kind'] == 'like' else 'skulls'
+            retained[kind] += 1
+            rating_genres[metadata.get(row['item_key'], {}).get('genre') or ''][kind] += 1
+    # Imported ratings have no reliable action date. Only count their present
+    # genre distribution, and keep the detached summary bounded.
+    ordered_genres = sorted(rating_genres.items(), key=lambda item: (-sum(item[1].values()), item[0]))
+    retained['genres'] = [{'name': name, **counts} for name, counts in ordered_genres[:19]]
+    if len(ordered_genres) > 19:
+        retained['genres'].append({'name': 'Other genres / untagged', 'combined': True,
+            **{kind: sum(counts[kind] for _, counts in ordered_genres[19:]) for kind in ('hearts', 'skulls')}})
+    retained['known_genre_hearts'] = sum(counts['hearts'] for name, counts in rating_genres.items() if name)
+    retained['hearted_genres'] = sum(bool(name and counts['hearts']) for name, counts in rating_genres.items())
+    leading = max((name for name in rating_genres if name), key=lambda name: (rating_genres[name]['hearts'], name), default=None)
+    retained['leading_hearted_genre'] = {'name': leading, 'hearts': rating_genres[leading]['hearts']} if leading else None
     rows = [[*key[:4], *[round(values[field], 2) for field in FIELDS], *key[4:]]
             for key, values in sorted(cells.items())]
+    # Preserve a compact capture-boundary qualification in the manifest. Browser
+    # filters need not fetch years of partitions to establish an earlier baseline.
+    history_days, introductions = defaultdict(float), defaultdict(int)
+    for (date, *_), values in cells.items():
+        if values['plays'] or values['sightings']:
+            history_days[date] += values['plays'] + values['sightings']
+    for first in first_track.values():
+        introductions[first] += 1
+    discovery_from, entries, tracks = None, 0, 0
+    ordered_days = sorted(history_days)
+    for index, date in enumerate(ordered_days):
+        if (index >= 14 and entries >= 100 and tracks >= 30
+                and (calendar_date.fromisoformat(date)-calendar_date.fromisoformat(ordered_days[0])).days >= 28):
+            discovery_from = date
+            break
+        entries += history_days[date]
+        tracks += introductions[date]
+    for key, subject in subjects.items():
+        if key not in metadata:
+            continue
+        first = first_track[key]
+        age = (calendar_date.fromisoformat(date_of(now))-calendar_date.fromisoformat(first)).days
+        returns = [(calendar_date.fromisoformat(d)-calendar_date.fromisoformat(first)).days for d in subject['days']]
+        metadata[key]['cohort'] = {'first': first, 'age': age,
+            'days14': sum(0 < d <= 14 for d in returns), 'days28': sum(0 < d <= 28 for d in returns)}
     return {'schema': SCHEMA, 'built_at': now, 'today': date_of(now), 'timezone': zone,
         'columns': ['day', 'artist', 'genre', 'format', *FIELDS, 'track', 'artist_id'], 'rows': rows,
-        'catalog': metadata, 'retained': retained, 'first_seen': first_track,
+        'catalog': metadata, 'retained': retained, 'first_seen': first_track, 'discovery_from': discovery_from,
         'subjects': {key: {**value, 'days': sorted(value['days']), 'formats': sorted(value['formats'])}
                      for key, value in subjects.items()}}
 
@@ -194,6 +242,7 @@ def build(store, now):
         payload = calculate(snapshot.store, now)
         from yt_playlist.rec.listening_editions import prepare
         edition = prepare(payload, ListeningAnalyticsRepo(snapshot.store), now)
+        prior = ListeningAnalyticsRepo(snapshot.store).prepared() or {}
         chunks, manifest = partition(payload)
 
         def publish():
@@ -204,11 +253,14 @@ def build(store, now):
             repo.publish(json.dumps(manifest, separators=(',', ':'), allow_nan=False), now)
             store.conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES ('listening_timezone',?)",
                                (payload['timezone'],))
-            active = tuple('listening_chunk:' + key for key in chunks)
+            active = tuple('listening_chunk:' + key for key in
+                           {*chunks, *(item['key'] for item in prior.get('chunks', []))})
             # Publication and retirement share one guarded transaction.
             if active:
                 store.conn.execute("DELETE FROM rec_proposals WHERE surface LIKE 'listening_chunk:%' "
                     'AND surface NOT IN (' + ','.join('?' for _ in active) + ')', active)
+            else:
+                store.conn.execute("DELETE FROM rec_proposals WHERE surface LIKE 'listening_chunk:%'")
         if snapshot.publish(publish):
             return payload
     return None
@@ -217,6 +269,7 @@ def build(store, now):
 def partition(payload):
     """Content-addressed, bounded partitions; the compact manifest has no history rows."""
     chunks, refs, pending = {}, [], []
+    pending_bytes, pending_keys = 0, set()
 
     def flush():
         if not pending:
@@ -232,10 +285,18 @@ def partition(payload):
         pending.clear()
 
     for row in payload['rows']:
-        if pending and (row[0][:7] != pending[0][0][:7] or len(pending) >= 256):
+        key = row[-2]
+        size = len(json.dumps(row, separators=(',', ':')).encode()) + 1
+        if key not in pending_keys:
+            size += len(json.dumps(payload['catalog'].get(key, {}), separators=(',', ':')).encode()) + len(key.encode()) + 4
+        if pending and (row[0][:7] != pending[0][0][:7] or pending_bytes + size > 480*1024):
             flush()
+            pending_bytes, pending_keys = 0, set()
         pending.append(row)
+        pending_bytes += size
+        pending_keys.add(key)
     flush()
     return chunks, {key: payload[key] for key in ('schema', 'built_at', 'today', 'timezone', 'columns', 'retained')} | {
+        'discovery_from': payload.get('discovery_from'),
         'chunks': refs, 'available': bool(payload['rows']),
         'generation': hashlib.sha256(''.join(chunks).encode()).hexdigest()[:24]}

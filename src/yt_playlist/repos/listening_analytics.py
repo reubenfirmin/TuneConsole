@@ -30,6 +30,8 @@ class ListeningAnalyticsRepo(Repo):
         return self.batches('SELECT r.identity_key,r.title,r.artist,r.genre,'
             '(SELECT ta.artist_id FROM catalog_entries e JOIN track_artists ta ON ta.entry_id=e.id '
             'WHERE e.recording_id=r.id ORDER BY ta.position,e.id LIMIT 1) artist_id,'
+            '(SELECT y.video_id FROM youtube_items y WHERE y.recording_id=r.id '
+            'ORDER BY y.thumbnail IS NULL,y.video_id LIMIT 1) video_id,'
             '(SELECT y.thumbnail FROM youtube_items y WHERE y.recording_id=r.id '
             "AND y.thumbnail IS NOT NULL ORDER BY y.video_id LIMIT 1) thumbnail FROM recordings r")
 
@@ -59,9 +61,9 @@ class ListeningAnalyticsRepo(Repo):
                 ','.join('?' for _ in PLAYER_KINDS) + ') AND at<=? ORDER BY at,id', (*PLAYER_KINDS, now))
 
     def feedback(self, now):
-        return self.batches("SELECT item_key,kind,MIN(created_at) at FROM rec_feedback "
+        return self.batches("SELECT item_key,CASE WHEN kind='like' THEN 'like' ELSE 'dislike' END kind,MIN(created_at) at FROM rec_feedback "
             "WHERE kind IN ('like','dislike','ban') AND created_at<=? AND artist_id IS NULL "
-            "GROUP BY item_key,kind", (now,))
+            "GROUP BY item_key,CASE WHEN kind='like' THEN 'like' ELSE 'dislike' END", (now,))
 
     @synchronized
     def encoded(self, surface='listening_analytics'):

@@ -1,0 +1,15 @@
+<div id="content-maintenance" hx-get="/taste/content-maintenance"
+     hx-trigger="every 30s[document.getElementById('taste-health-panel')?.offsetParent != null]"
+     hx-swap="outerHTML">
+  {% if content_maintenance.blocked %}
+  <div class="notice err" role="alert">
+    <strong>Genre and audio model refresh is delayed.</strong>
+    <p>{% if content_maintenance.reason == 'fit-time-budget' %}This refresh repeatedly exceeds its time limit.
+      {% else %}Your library exceeds the processing limit for this refresh.{% endif %}
+      Automatic maintenance retries every 15 minutes.
+      {% if content_maintenance.has_model %}Your last completed model remains available.
+      {% else %}The first genre and audio model is still waiting to be built.{% endif %}
+      If the limit still prevents progress, an app update may be needed to handle this library.</p>
+  </div>
+  {% endif %}
+</div>

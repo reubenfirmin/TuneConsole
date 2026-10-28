@@ -93,7 +93,7 @@ def test_source_reset_during_calculation_cannot_publish_stale_rollup(database, m
     assert store.rec_proposals.get_proposals("trend_rollups") == {"saved": True}
     assert not store.conn.in_transaction
     monkeypatch.setattr(trend_rollups, "_calculate", calculate)
-    assert trend_rollups.build(store, 6 * 86400)["weeks"] == []
+    assert trend_rollups.build(store, 6 * 86400)["story"] is None
 
 
 def test_failed_publication_keeps_previous_index_rollup_and_review_stamp(database):

@@ -61,7 +61,8 @@ def test_source_slice_captures_only_its_four_revision_keys(store, monkeypatch):
     assert musical_preparation.source_step(store, 1000)
     expected = {(table, 'key:' + key) for table in (
         'rec_musical_pending', 'rec_musical_sources', 'rec_musical_links', 'rec_musical_source_profiles')}
-    assert captures == [expected, expected]
+    # Pinning records a scalar serial; only publication seeks consumed inputs.
+    assert captures == [expected]
 
 
 def test_identical_artist_tags_from_new_recording_retain_history_without_restarting_fanout(store):

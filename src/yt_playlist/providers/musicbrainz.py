@@ -1,46 +1,43 @@
-"""MusicBrainz enrichment: look up a track's genre and first-release year.
-
-MusicBrainz asks clients to (a) send a descriptive User-Agent and (b) make at most ~1 request per
-second. We honour both: a process-wide lock paces every call to >= 1s apart, and each track costs
-two calls: a recording search (match + year from its releases) and a recording lookup (genre from
-genres/tags). Network/parse failures degrade to (None, None) so one bad track never stops a run.
-"""
+"""Map MusicBrainz evidence to enrichment fields; vendor access belongs to its IAO."""
 import logging
 import re
-import urllib.parse
-import urllib.request
-from collections import OrderedDict
-from threading import Lock
-from time import monotonic
-
-from yt_playlist.util import net
+from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
+from yt_playlist.integrations.base import IntegrationUnavailable
+from yt_playlist.integrations.musicbrainz import MusicBrainzIAO, TIMEOUT_S
 from yt_playlist.util.matching import is_remix, normalize, recording_title
-from yt_playlist.providers.base import EnrichmentResult, RateLimiter
-from yt_playlist.providers import descriptive_tags, genres, transport
+from yt_playlist.providers.base import EnrichmentResult
+from yt_playlist.providers import descriptive_tags, genres
 
 logger = logging.getLogger(__name__)
 
 name = "musicbrainz"
+manages_availability = True
+_iao = MusicBrainzIAO()
+
+
+def access(store=None):
+    return _iao.context(store.enrichment_state if store is not None else None)
 
 
 def available(store=None) -> bool:
-    return True
+    # Configuration availability is distinct from a temporary access cooldown.
+    return _iao.configured
 
 
 def tripped() -> bool:
-    return _breaker.tripped()
+    return not _iao.availability().ready(_iao.now())
 
 
 def reset() -> None:
-    _breaker.reset()
+    """Batch boundaries do not reset vendor availability or retained responses."""
 
 
 def probe(track, store=None) -> EnrichmentResult:
-    """Read-only lookup: genre, year, the recording MBID (which keys AcousticBrainz), and the
-    candidate release MBIDs (which key Cover Art Archive). All from the one search."""
+    """Look up metadata without applying it; the IAO can persist access cooldowns."""
     observations = []
-    genre, year, mbid, release_ids, isrcs = enrich_full(track["title"], track["artist"],
-                                                    observations=observations)
+    with access(store):
+        genre, year, mbid, release_ids, isrcs = enrich_full(track["title"], track["artist"],
+                                                        observations=observations)
     fields = {}
     if genre:
         fields["genre"] = genre
@@ -54,19 +51,8 @@ def probe(track, store=None) -> EnrichmentResult:
         fields["isrc"] = isrcs
     return EnrichmentResult("musicbrainz", fields, tuple(observations))
 
-_API = "https://musicbrainz.org/ws/2"
-# MusicBrainz blocks requests without a meaningful UA; identify the app + a contact.
-_USER_AGENT = "yt-playlist/0.1 ( https://github.com/yt-playlist ; rf@4rc.io )"
-_MIN_INTERVAL = 1.1                       # seconds between requests (just over the 1/s limit)
-_HTTP_TIMEOUT_S = 20                      # cap each request so a stalled socket can't wedge a run
-_pacer = RateLimiter(_MIN_INTERVAL)
-_breaker = net.CircuitBreaker()           # stop a run once the host looks unreachable
-
-
-def _get(path, params, *, timeout=_HTTP_TIMEOUT_S):
-    url = f"{_API}/{path}?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, "Accept": "application/json"})
-    return transport.request_json(req, timeout=timeout, pace=_pacer.wait, breaker=_breaker)
+def _get(path, params, *, timeout=TIMEOUT_S):
+    return _iao.get(path, params, timeout=timeout)
 
 
 def _lucene_escape(text):
@@ -74,7 +60,7 @@ def _lucene_escape(text):
     return "".join("\\" + c if c in '+-&|!(){}[]^"~*?:\\/' else c for c in (text or ""))
 
 
-def tag_artists(tag, decade=None, limit=25):
+def tag_artists(tag, decade=None, limit=25, *, store=None):
     """Artists MusicBrainz files under a genre tag, optionally narrowed to those who RELEASED in a
     given decade. [] on error.
 
@@ -89,13 +75,20 @@ def tag_artists(tag, decade=None, limit=25):
     try:
         if decade:
             query += f" AND firstreleasedate:[{int(decade)} TO {int(decade) + 9}]"
-            res = _get("release-group", {"query": query, "fmt": "json", "limit": str(limit)})
+            with access(store):
+                res = _get("release-group", {"query": query, "fmt": "json", "limit": str(limit)})
             rows = res.get("release-groups") or []
-            names = [((r.get("artist-credit") or [{}])[0].get("name") or "").strip() for r in rows]
+            names = []
+            for row in rows:
+                credit = next((c for c in row.get('artist-credit') or [] if isinstance(c, dict)), {})
+                names.append((credit.get('name') or (credit.get('artist') or {}).get('name') or '').strip())
         else:
-            res = _get("artist", {"query": query, "fmt": "json", "limit": str(limit)})
+            with access(store):
+                res = _get("artist", {"query": query, "fmt": "json", "limit": str(limit)})
             names = [(a.get("name") or "").strip() for a in (res.get("artists") or [])]
-    except Exception as e:  # noqa: BLE001 - network/parse all degrade to "no artists found"
+    except (WorkClosing, WorkBudgetExceeded):
+        raise
+    except Exception as e:  # noqa: BLE001 - optional candidate acquisition can defer
         logger.warning("MusicBrainz tag artists failed for %r: %s", tag, e)
         return []
     out = []
@@ -119,7 +112,7 @@ def _earliest_year(recordings):
     rel = _years(rel.get("date") for r in recordings for rel in (r.get("releases") or []))
     if rel:
         return min(rel)
-    rg = _years(rel.get("release-group", {}).get("first-release-date")
+    rg = _years((rel.get("release-group") or {}).get("first-release-date")
                 for r in recordings for rel in (r.get("releases") or []))
     return min(rg) if rg else None
 
@@ -133,44 +126,24 @@ def _top_label(obj):
     return genres.pick_genre(tags)
 
 
-_ARTIST_CACHE_SIZE = 1024
-_ARTIST_TTL_S = 24 * 60 * 60
-_ARTIST_MISS_TTL_S = 60 * 60
-_artist_genre_cache = OrderedDict()
-_artist_lookup_lock = Lock()
-
-
 def _artist_genre(mbid, *, observations=None, match_evidence=None):
     """Artist-level genre (MusicBrainz keeps most genre data on artists, not recordings).
 
     Re-enrichment shares fresh raw evidence: tagged responses live for a day, empty responses
-    for an hour. It does not force another artist lookup for every recording. Provider reset
-    resets only the circuit breaker, so worker batches also share this bounded cache.
+    for an hour. It does not force another artist lookup for every recording. Worker
+    batches share the IAO's bounded cache and do not reset operational availability.
     """
     if not mbid:
         return None
-    # As with provider pacing, serialize the lookup and fill across worker threads. A second
-    # request for the same artist sees the completed refresh rather than fetching it again.
-    with _artist_lookup_lock:
-        cached = _artist_genre_cache.pop(mbid, None)
-        if cached is not None and monotonic() < cached[1]:
-            _artist_genre_cache[mbid] = cached
-            _retain_tags(observations, cached[0], 'artist', mbid, match_evidence)
-            return _top_label(cached[0])
-        try:
-            art = _get(f"artist/{mbid}", {"inc": "genres+tags", "fmt": "json"})
-            tagged = any(tag.get("name") for field in ("genres", "tags")
-                         for tag in art.get(field) or [])
-            genre = _top_label(art)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("MB artist lookup failed for %s: %s", mbid, e)
-            return None        # transient failure: don't cache, so a later track retries
-        ttl = _ARTIST_TTL_S if tagged else _ARTIST_MISS_TTL_S
-        _artist_genre_cache[mbid] = (art, monotonic() + ttl)
-        while len(_artist_genre_cache) > _ARTIST_CACHE_SIZE:
-            _artist_genre_cache.popitem(last=False)
-        _retain_tags(observations, art, 'artist', mbid, match_evidence)
-        return genre
+    try:
+        art = _get(f"artist/{mbid}", {"inc": "genres+tags", "fmt": "json"})
+    except (WorkClosing, WorkBudgetExceeded):
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.debug("MB artist lookup failed for %s: %s", mbid, e)
+        return None
+    _retain_tags(observations, art, 'artist', mbid, match_evidence)
+    return _top_label(art)
 
 
 def _retain_tags(observations, data, scope, mbid, match):
@@ -187,10 +160,11 @@ def _strip_parens(title):
     return _PARENS.sub("", title or "").strip()
 
 
-def recording_mbid(title, artist):
+def recording_mbid(title, artist, *, store=None):
     """Best-match MusicBrainz recording MBID for a track, or None. Used to key AcousticBrainz.
     Retries once with parenthetical qualifiers stripped, same as enrich_full()."""
-    recs = _recording_search(title, artist)
+    with access(store):
+        recs = _recording_search(title, artist)
     return recs[0].get("id") if recs else None
 
 
@@ -202,6 +176,8 @@ def _search_recordings(title, artist):
         query += f' AND artist:"{_lucene_escape(artist)}"'
     try:
         res = _get("recording", {"query": query, "fmt": "json", "limit": "25"})
+    except (IntegrationUnavailable, WorkClosing, WorkBudgetExceeded):
+        raise  # A transient failure must not trigger the alternate search.
     except Exception as e:  # noqa: BLE001
         logger.debug("MB search failed for %r / %r: %s", title, artist, e)
         return []
@@ -210,8 +186,7 @@ def _search_recordings(title, artist):
 
 def _recording_search(title, artist):
     """One recording search with the parens-stripped retry (a remaster / live / remix suffix often
-    blocks the match). Shared by recording_mbid() and enrich_full() so a single track
-    costs one search, not one per caller."""
+    blocks the match). The IAO shares successful responses across callers."""
     recs = [r for r in _search_recordings(title, artist) if _matches_recording(r, title, artist)]
     if not recs:
         stripped = _strip_parens(title)
@@ -264,7 +239,10 @@ def enrich_full(title, artist, *, observations=None):
     release_ids keys Cover Art Archive (which is keyed by release, not recording). It rides along
     here rather than in its own function so the cover fallback costs no extra search, and so this
     stays the single seam where MusicBrainz touches the network."""
-    recs = _recording_search(title, artist)
+    try:
+        recs = _recording_search(title, artist)
+    except IntegrationUnavailable:
+        return None, None, None, [], []
     genre, year = _genre_year(recs, title=title, observations=observations)
     return (genre, year, (recs[0].get("id") if recs else None), _release_ids(recs),
             (recs[0].get("isrcs") or []) if recs else [])
@@ -290,6 +268,10 @@ def _genre_year(recordings, *, title="", observations=None):
             _retain_tags(observations, full, 'recording', mbid, match)
             genre = _top_label(full)
             year = year or _earliest_year([full])
+        except IntegrationUnavailable:
+            return genre, year  # Preserve search evidence without another vendor request.
+        except (WorkClosing, WorkBudgetExceeded):
+            raise
         except Exception as e:  # noqa: BLE001
             logger.debug("MB lookup failed for %s: %s", mbid, e)
     if not genre and not is_remix(title or rec.get("title")):

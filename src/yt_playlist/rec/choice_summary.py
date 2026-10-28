@@ -2,12 +2,14 @@
 import math
 
 
-def album_track_days(offers, responses, attribution_seconds):
+def album_track_days(offers, responses, attribution_seconds, *, album_ids=None):
     """Confirmed tracks on distinct deliberate album-choice days.
 
     Later tracks in the chosen queue share its choice day. Continuation cannot
     manufacture another return, and unstarted choices supply no track coverage.
     Stable source withdrawals are filtered by the caller before recomputation.
+    Optional verified identities combine dates before counting, without changing
+    the original option IDs used to match each choice and its confirmed start.
     """
     selected, days = {}, {}
     for event in sorted(responses, key=lambda row: (row['at'], row['kind'] != 'choice', row['id'])):
@@ -31,7 +33,8 @@ def album_track_days(offers, responses, attribution_seconds):
                     if video and track.get('video_id') == video and track.get('key')}
             if len(keys) == 1:
                 key = keys.pop()
-                days.setdefault(event['option_id'], {}).setdefault(key, set()).add(int(choice['at'] // 86400))
+                browse = (album_ids or {}).get(event['option_id'], event['option_id'])
+                days.setdefault(browse, {}).setdefault(key, set()).add(int(choice['at'] // 86400))
     return {browse: {key: len(values) for key, values in tracks.items()} for browse, tracks in days.items()}
 
 

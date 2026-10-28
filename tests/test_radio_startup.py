@@ -9,6 +9,70 @@ from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.library import playlist_generated
 
 
+@pytest.fixture
+def owned_playback(poc, monkeypatch):
+    from yt_playlist.core.bridge import Bridge
+
+    controller, remote, frames, *_ = poc
+    bridge = Bridge()
+    bridge._send = frames.append
+    monkeypatch.setattr('yt_playlist.core.bridge.asyncio.run_coroutine_threadsafe', lambda frame, loop: None)
+    controller.ctx.bridge = controller.playback.bridge = bridge
+    return controller, remote, frames, bridge
+
+
+def test_newer_direct_play_survives_older_radio_creation(owned_playback, monkeypatch):
+    controller, remote, frames, bridge = owned_playback
+    create = playlist_generated.create_generated_playlist
+    direct = {'type': 'navigate', 'url': 'https://music.youtube.com/watch?v=newer'}
+
+    def create_after_direct(*args, **kwargs):
+        result = create(*args, **kwargs)
+        assert bridge.send_control(direct, intent=bridge.begin_playback_intent())
+        return result
+
+    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', create_after_direct)
+    assert controller.start()['ok']
+    assert remote.ids
+    assert controller.ctx.store.playlists.get_playlist(controller.session.local_id)
+    assert controller.persistence.load()['playlist'] == 'PLSESSION'
+    assert frames == [direct]
+
+
+def test_newer_direct_play_survives_radio_readiness_retry(owned_playback, monkeypatch):
+    controller, remote, frames, bridge = owned_playback
+    read = remote.get_playlist
+    monkeypatch.setattr(remote, 'get_playlist', lambda *args, **kwargs: {'tracks': [{'videoId': 'v1'}], 'trackCount': 1})
+    assert controller.start()['starting']
+    assert not frames
+    direct = {'type': 'navigate', 'url': 'https://music.youtube.com/watch?v=newer'}
+    bridge.send_control(direct, intent=bridge.begin_playback_intent())
+    monkeypatch.setattr(remote, 'get_playlist', read)
+    controller._complete_start(controller.session)
+    assert controller.session.tracks and not controller.session.initial_tracks
+    assert frames == [direct]
+
+
+def test_radio_route_reserves_playback_before_its_worker_starts(owned_playback, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from yt_playlist.web.routes import radio_session
+
+    controller, remote, frames, bridge = owned_playback
+    direct = {'type': 'navigate', 'url': 'https://music.youtube.com/watch?v=newer'}
+
+    async def delayed(target, *args, **kwargs):
+        bridge.send_control(direct, intent=bridge.begin_playback_intent())
+        return target(*args, **kwargs)
+
+    monkeypatch.setattr(controller.work, 'to_thread', delayed)
+    app = FastAPI()
+    app.include_router(radio_session.build(controller.ctx))
+    with TestClient(app) as client:
+        assert client.post('/radio/start', json={}).json()['ok']
+    assert remote.ids and frames == [direct]
+
+
 @pytest.mark.parametrize("presence", ["missing", "stale", "disconnected", "paused", "other_playlist"])
 def test_old_checkpoint_does_not_replace_song_choices_with_a_restore_loader(poc, presence):
     c, _, frames, *_ = poc

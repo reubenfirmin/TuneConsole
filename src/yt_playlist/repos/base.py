@@ -1,8 +1,8 @@
 """Shared base for the per-domain DAOs split out of the former Store god class.
 
-Each DAO is a thin class scoped to one domain (overlaps, playlists, …). They all share the
-Store's single sqlite connection and re-entrant lock: sqlite is not concurrency-safe and FastAPI
-serves sync routes from a threadpool, so every DB call serializes on that one lock.
+Each DAO is scoped to one domain. Writers use the Store's connection and
+re-entrant lock. Read decorators reuse an enclosing transaction or open a bounded
+private connection; small indexed lookups can reuse an immediately available lock.
 """
 from functools import wraps
 
@@ -11,6 +11,8 @@ from yt_playlist.core.db_diagnostics import database_operation
 
 # Default display group for generated playlists. Policy lives in playlist_provenance;
 # changing a group never changes taste eligibility. Only explicit adoption lifts quarantine.
+# Quarantine controls which generated sources supply learning evidence. A track's
+# membership in a generated playlist must never exclude it from recommendations.
 #
 # TWO TIERS OF SIGNAL. Conflating them is the trap, in both directions:
 #
@@ -50,20 +52,49 @@ def synchronized(method):
 
 
 def snapshot_read(method):
-    """Run a substantial read on a private snapshot, without the serving lock.
+    """Default for substantial read-only analytics on committed data.
 
-    Use only for read-only operations. Nested calls reuse the same pinned reader.
+    Reuse an enclosing reader or transaction. Otherwise use a bounded private
+    reader without the revision bookkeeping needed for guarded publication.
     """
     @wraps(method)
     def wrapper(self, *args, **kwargs):
         with database_operation(method.__qualname__):
-            if getattr(self._store, "_read_only", False):
+            if (getattr(self._store, "_read_only", False)
+                    or getattr(self._lock, 'held_by_current_thread', False)):
                 with self._lock:
                     check_cancellable_work()
                     return method(self, *args, **kwargs)
-            with self._store.read_snapshot() as snapshot:
-                reader = type(self)(snapshot.store)
+            with self._store.read_view() as view:
+                reader = type(self)(view)
                 return wrapper(reader, *args, **kwargs)
+    return wrapper
+
+
+def lookup_read(method):
+    """Keep indexed lookups cheap; use a private WAL reader when the writer is busy.
+
+    Owned transactions retain their uncommitted view. In-memory databases cannot
+    open another view of the same file and keep their existing serialization.
+    """
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with database_operation(method.__qualname__):
+            if (getattr(self._store, '_read_only', False)
+                    or self._store._db_path is None):
+                with self._lock:
+                    check_cancellable_work()
+                    return method(self, *args, **kwargs)
+            if self._lock.acquire(blocking=False):
+                try:
+                    check_cancellable_work()
+                    return method(self, *args, **kwargs)
+                finally:
+                    self._lock.release()
+            with self._store.read_view() as view:
+                with view._lock:
+                    check_cancellable_work()
+                    return method(type(self)(view), *args, **kwargs)
     return wrapper
 
 

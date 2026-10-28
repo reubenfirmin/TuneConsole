@@ -7,6 +7,7 @@ import json
 
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 from yt_playlist.repos.scorecard_attribution import Attribution
+from yt_playlist.repos import policy_storage
 
 RESPONSE_RETAIN_DAYS = 90
 RETENTION_BATCH_SIZE = 256
@@ -51,9 +52,13 @@ class RecLedgerRepo(Repo):
         return EvidenceLedger(directory, library_byte_budget(recordings))
 
     @synchronized
-    def publish_prepared_policies(self, rows) -> None:
+    def publish_prepared_policies(self, rows, bases=()) -> None:
         """Join the snapshot publisher's transaction without committing proposals early."""
-        self.conn.executemany("INSERT OR IGNORE INTO rec_serving_policies VALUES (?,?,?)", rows)
+        policy_storage.publish(self.conn, rows, bases, enforce_budget=True)
+
+    @snapshot_read
+    def policy_configuration(self, version):
+        return policy_storage.configuration(self.conn, version)
 
     @snapshot_read
     def scorecard_inputs(self, start, end, outcome_window_h=24,
@@ -72,18 +77,15 @@ class RecLedgerRepo(Repo):
     @snapshot_read
     def served_recommendation_inputs(self, impression_id):
         row = self.conn.execute(
-            "SELECT i.*,p.configuration FROM rec_served_impressions i "
-            "LEFT JOIN rec_serving_policies p USING(model_version) WHERE i.id=?",
+            "SELECT i.* FROM rec_served_impressions i WHERE i.id=?",
             (impression_id,)).fetchone()
         if row is None:
             return None
         result = dict(row)
         result["provenance"] = json.loads(result["provenance"])
-        result["configuration"] = json.loads(result["configuration"]) if result["configuration"] else None
+        result["configuration"] = policy_storage.configuration(self.conn, result['model_version'])
         pool = result["provenance"].get("pool_policy")
-        pool_row = self.conn.execute("SELECT configuration FROM rec_serving_policies WHERE model_version=?",
-                                     (pool,)).fetchone() if pool else None
-        result["pool_configuration"] = json.loads(pool_row[0]) if pool_row else None
+        result["pool_configuration"] = policy_storage.configuration(self.conn, str(pool)) if pool else None
         inputs = (None if result["provenance"].get("policy_kind") == "counterfactual" else
                   self.scorecard_inputs(result["served_at"], result["served_at"] + 1,
                                         impression_id=impression_id))
@@ -103,6 +105,8 @@ class RecLedgerRepo(Repo):
     @synchronized
     def claim_home_offers(self, epoch, signatures, now):
         """Deduplicate actual offers; home_shown is the ledger's reserved proposal key."""
+        if getattr(self._store, 'activity_paused', False):
+            return set(signatures)
         row = self.conn.execute("SELECT payload FROM rec_proposals WHERE surface='home_shown'").fetchone()
         try:
             previous = json.loads(row[0]) if row else {}
@@ -130,10 +134,10 @@ class RecLedgerRepo(Repo):
         self.conn.commit()
 
     @synchronized
-    def record_prepared_policies(self, rows) -> None:
+    def record_prepared_policies(self, rows, bases=()) -> None:
         """Store policy JSON that was calculated and encoded off the serving connection."""
-        self.conn.executemany("INSERT OR IGNORE INTO rec_serving_policies VALUES (?,?,?)", rows)
-        self.conn.commit()
+        with self.conn:
+            policy_storage.publish(self.conn, rows, bases, enforce_budget=True)
 
     def record_recommendation_outcomes(self, event_id, kind, keys, now, generated=False) -> None:
         if kind not in {"open", "start", "save", "promotion"}:
@@ -149,7 +153,8 @@ class RecLedgerRepo(Repo):
             "VALUES (?,?,?,?,?)", rows)
         self.conn.commit()
 
-    def record_served_impressions(self, request_id, surface, items, now, prune_before=None) -> None:
+    def record_served_impressions(self, request_id, surface, items, now, prune_before=None, *,
+                                  policies=(), bases=()) -> None:
         """Persist final live order or an explicitly marked counterfactual replay.
 
         ``items`` are dictionaries containing lane/key/rank plus optional mode_id, score and
@@ -165,28 +170,37 @@ class RecLedgerRepo(Repo):
             rows.append((request_id, surface, item.get("lane") or "", item.get("mode_id"), key,
                          int(item["rank"]), item.get("score"), item.get("model_version") or "unknown",
                          json.dumps(item.get("provenance") or {}, sort_keys=True), now))
-        self._insert_served_impressions(rows)
+        self._insert_served_impressions(rows, policies=policies, bases=bases)
         if prune_before is not None:
             self._prune_impression_batch(prune_before)
             self._prune_response_batch(prune_before)
             self._prune_policy_batch(prune_before)
 
     @synchronized
-    def _insert_served_impressions(self, rows):
-        if rows:
-            self.conn.executemany(
-                "INSERT OR IGNORE INTO rec_served_impressions("
-                "request_id,surface,lane,mode_id,identity_key,rank,score,model_version,provenance,served_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
-        self.conn.commit()
+    def _insert_served_impressions(self, rows, *, policies=(), bases=()):
+        with self.conn:
+            policy_storage.publish(self.conn, policies, bases)
+            if rows:
+                self.conn.executemany(
+                    "INSERT OR IGNORE INTO rec_served_impressions("
+                    "request_id,surface,lane,mode_id,identity_key,rank,score,model_version,provenance,served_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+                versions = []
+                for row in rows:
+                    pool = json.loads(row[8]).get('pool_policy')
+                    versions.extend((row[7], str(pool) if pool is not None else None))
+                policy_storage.refresh_references(self.conn, versions)
 
     @synchronized
     def _prune_impression_batch(self, before):
-        self.conn.execute(
-            "DELETE FROM rec_served_impressions WHERE id IN ("
-            "SELECT id FROM rec_served_impressions WHERE served_at<? ORDER BY served_at,id LIMIT ?)",
-            (before, RETENTION_BATCH_SIZE))
-        self.conn.commit()
+        expired = self.conn.execute('SELECT id,model_version,json_extract(provenance,\'$.pool_policy\') '
+            'FROM rec_served_impressions WHERE served_at<? ORDER BY served_at,id LIMIT ?',
+            (before, RETENTION_BATCH_SIZE)).fetchall()
+        with self.conn:
+            self.conn.executemany('DELETE FROM rec_served_impressions WHERE id=?', [(row[0],) for row in expired])
+            policy_storage.refresh_references(self.conn,
+                [version for row in expired for version in
+                 (row[1], str(row[2]) if row[2] is not None else None)])
 
     @synchronized
     def _prune_response_batch(self, before):
@@ -196,43 +210,13 @@ class RecLedgerRepo(Repo):
             (before, RETENTION_BATCH_SIZE))
         self.conn.commit()
 
-    @synchronized
     def _prune_policy_batch(self, before):
-        row = self.conn.execute('SELECT value FROM settings WHERE key=?', (POLICY_RETENTION_CURSOR,)).fetchone()
-        try:
-            cursor = json.loads(row[0]) if row else None
-        except (ValueError, TypeError):
-            cursor = None
-        if not (isinstance(cursor, list) and len(cursor) == 2
-                and isinstance(cursor[0], (float, int)) and isinstance(cursor[1], str)):
-            cursor = None
-        after = ' AND (created_at,model_version)>(?,?)' if cursor else ''
-        candidates = self.conn.execute(
-            'SELECT created_at,model_version FROM rec_serving_policies WHERE created_at<?' + after +
-            ' ORDER BY created_at,model_version LIMIT ?',
-            (before, *cursor, RETENTION_BATCH_SIZE) if cursor else (before, RETENTION_BATCH_SIZE)).fetchall()
-        if candidates:
-            # Indexed existence checks retain both immutable policy references.
-            # Do not scan JSON across the ledger or delete a policy still needed
-            # by an expired impression that hasn't reached its cleanup batch yet.
-            placeholders = ','.join('?' for _ in candidates)
-            self.conn.execute(
-                f'DELETE FROM rec_serving_policies WHERE model_version IN ({placeholders}) '
-                'AND NOT EXISTS (SELECT 1 FROM rec_served_impressions i '
-                'WHERE i.model_version=rec_serving_policies.model_version) '
-                'AND NOT EXISTS (SELECT 1 FROM rec_served_impressions i '
-                "WHERE CAST(json_extract(i.provenance,'$.pool_policy') AS TEXT)=rec_serving_policies.model_version)",
-                [r['model_version'] for r in candidates])
-        if len(candidates) == RETENTION_BATCH_SIZE:
-            # Persist the scan position so referenced old policies cannot starve
-            # later orphans, including when the app restarts during catch-up.
-            last = candidates[-1]
-            self.conn.execute('INSERT INTO settings(key,value) VALUES (?,?) '
-                              'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
-                              (POLICY_RETENTION_CURSOR, json.dumps([last['created_at'], last['model_version']])))
-        elif row:
-            self.conn.execute('DELETE FROM settings WHERE key=?', (POLICY_RETENTION_CURSOR,))
-        self.conn.commit()
+        with self._store.read_snapshot() as snapshot:
+            versions, cursor = policy_storage.retention_candidates(snapshot.store.conn,
+                before + policy_storage.GRACE_SECONDS, limit=RETENTION_BATCH_SIZE,
+                cursor_key=POLICY_RETENTION_CURSOR)
+            snapshot.publish(lambda: policy_storage.prune(self.conn, versions, cursor,
+                cursor_key=POLICY_RETENTION_CURSOR))
 
     @synchronized
     def lane_impression_counts(self, since=None) -> dict:

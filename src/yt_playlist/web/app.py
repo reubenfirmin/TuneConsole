@@ -21,6 +21,7 @@ from yt_playlist.web.icons import arrow_icon
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.core import updatecheck
 from yt_playlist.core.activity import WorkClosing
+from yt_playlist.core.storage_maintenance import StorageMaintenance, StorageCompacting
 from yt_playlist.core.work_diagnostics import CpuDiagnostics
 from yt_playlist.core.update_lifecycle import acquire_restart_locks
 from yt_playlist.rec.journeys import JOURNEY_LABELS
@@ -139,9 +140,8 @@ def _linkify(text):
     return Markup("").join(out)
 
 
-# How often the background library-sync daemon wakes, and how stale the library may get before it
-# re-pulls. The first tick fires POLL_S after start (so the initial post-setup sync lands shortly
-# after the extension first connects, not instantly on boot).
+# Periodic fallback for due library syncs. Startup and extension connections wake the daemon
+# immediately; an already-fresh library still keeps its usual daily refresh schedule.
 _SYNC_POLL_S = 30.0
 _SYNC_MAX_AGE_S = 86400.0    # 24 hours: full sync is expensive, so after the initial population we
                             # only re-pull the library once a day. Plays stay current via the live feed.
@@ -149,15 +149,31 @@ _SYNC_MAX_AGE_S = 86400.0    # 24 hours: full sync is expensive, so after the in
 
 def _maybe_check_update(ctx):
     """Refresh the cached latest-release version (interval-gated inside check_latest). Never raises,
-    so a failed check can't disturb the sync daemon."""
+    so a failed check can't stop future update checks."""
     try:
-        updatecheck.check_latest(ctx.store, ctx.now_fn())
+        now = ctx.now_fn()
+        updatecheck.schedule_first_check(ctx.store, now)
+        updatecheck.check_latest(ctx.store, now)
     except Exception:  # noqa: BLE001 - update check must never crash the daemon
         ctx.logger.warning("update check tick failed", exc_info=True)
 
 
+def _background_update_loop(ctx, stop, *, poll_s=30.0):
+    """Keep release-server requests out of the extension's sync response path."""
+    while not stop.wait(poll_s):
+        try:
+            release = ctx.work.admit("update check")
+        except WorkClosing:
+            return
+        try:
+            with ctx.work.entered(release):
+                _maybe_check_update(ctx)
+        finally:
+            release()
+
+
 def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=_SYNC_MAX_AGE_S,
-                          stop=None):
+                          stop=None, wake=None):
     """Refresh due resources and retry failures with persisted backoff.
 
     A new extension connection retries failures promptly. The shared sync lock
@@ -165,13 +181,22 @@ def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=
     """
     stop = stop or threading.Event()
     last_connection = None
-    while not stop.wait(poll_s):
+    if wake is not None:
+        wake.set()                     # also handle an extension connected before worker startup
+    while True:
+        if wake is None:
+            if stop.wait(poll_s):
+                return
+        else:
+            wake.wait(poll_s)
+            wake.clear()
+            if stop.is_set():
+                return
         try:
             release = ctx.work.admit("automatic sync")
         except WorkClosing:
             return
         try:
-            _maybe_check_update(ctx)
             if setup is not None and not setup.configured:
                 continue
             if not (bridge is not None and bridge.connected):
@@ -216,6 +241,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
     templates = Jinja2Templates(directory=str(web_dir / "templates"))
     background_work = BACKGROUND_WORK if background_work is None else background_work
     stop = threading.Event()
+    worker_lifecycle = threading.Lock()
     @asynccontextmanager
     async def lifespan(app):
         ctx.work.open()
@@ -226,12 +252,29 @@ def create_app(store, client_provider, *, now_fn=time.time,
         try:
             if background_work:
                 diagnostics.start()
-                ctx.radio.prepare()
-                ctx.rec_worker.start_ticker()
-                ctx.enrich_worker.start_ticker()
-                ctx.rec_worker.trigger_mode_refresh()
-                threads.append(threading.Thread(target=_background_sync_loop,
-                    args=(ctx, setup, bridge), kwargs={"stop": stop}, daemon=True))
+                ctx.storage_maintenance.start()
+                def start_background():
+                    while not ctx.storage_maintenance.ready.wait(.1):
+                        if stop.is_set():
+                            return
+                    with worker_lifecycle:
+                        if stop.is_set():
+                            return
+                        if bridge.connected:
+                            store.settings.set_setting('bridge_paired', '1')
+                            ctx.clear_all_auth_expired()
+                        ctx.radio.prepare()
+                        ctx.rec_worker.start_ticker()
+                        ctx.enrich_worker.start_ticker()
+                        ctx.rec_worker.trigger_mode_refresh()
+                    _background_sync_loop(ctx, setup, bridge, stop=stop, wake=ctx.sync_wake)
+                threads.append(threading.Thread(target=start_background, daemon=True))
+                def start_updates():
+                    while not ctx.storage_maintenance.ready.wait(.1):
+                        if stop.is_set():
+                            return
+                    _background_update_loop(ctx, stop)
+                threads.append(threading.Thread(target=start_updates, daemon=True))
             if idle_monitor is not None:
                 threads.append(threading.Thread(target=idle_monitor, args=(stop,), daemon=True))
             for thread in threads:
@@ -241,15 +284,19 @@ def create_app(store, client_provider, *, now_fn=time.time,
             ctx.work.close_admission()
             await ctx.pending_restart.close()
             diagnostics.stop()
-            stop.set()
-            ctx.rec_worker.shutdown()
-            ctx.enrich_worker.shutdown()
+            with worker_lifecycle:
+                stop.set()
+                ctx.sync_wake.set()
+                ctx.storage_maintenance.stop()
+                ctx.rec_worker.shutdown()
+                ctx.enrich_worker.shutdown()
             ctx.work.stop_executor()  # cancel queued applies; running mutations drain normally
             drained = await asyncio.to_thread(ctx.work.wait, _DRAIN_TIMEOUT_S)
             for thread in threads:
                 await asyncio.to_thread(thread.join, 1.0)
             await asyncio.to_thread(ctx.rec_worker.join, 1.0)
             await asyncio.to_thread(ctx.enrich_worker.join, 1.0)
+            await asyncio.to_thread(ctx.storage_maintenance.join, _DRAIN_TIMEOUT_S)
             if not drained or any(thread.is_alive() for thread in threads):
                 raise RuntimeError(f"Application shutdown timed out: {ctx.work.active}")
             if ctx.updater is not None:
@@ -283,6 +330,8 @@ def create_app(store, client_provider, *, now_fn=time.time,
             except (OSError, ValueError):
                 return "0"
     templates.env.globals["asset_v"] = _AssetVersion()
+    from yt_playlist.core.features import listening_charts_enabled
+    templates.env.globals['listening_charts_enabled'] = listening_charts_enabled()
     templates.env.globals["arrow_icon"] = arrow_icon
     templates.env.globals["journey_labels"] = JOURNEY_LABELS
     templates.env.filters["linkify"] = _linkify
@@ -307,6 +356,13 @@ def create_app(store, client_provider, *, now_fn=time.time,
             if origin and urlsplit(origin).hostname not in allowed:
                 return PlainTextResponse("cross-origin request blocked", status_code=403)
             ctx = getattr(app.state, "ctx", None)
+            playback_request = request.url.path in (
+                '/play', '/album/play', '/now-playing/next', '/now-playing/toggle',
+                '/radio/start', '/radio/stop', '/radio/select', '/radio/tune', '/radio/seen',
+                '/home/tv/takeover', '/heartbeat', '/goodbye') or (
+                request.url.path.startswith('/home/tv/playlist/') and request.url.path.endswith('/event'))
+            if ctx is not None and ctx.storage_maintenance.active and not playback_request:
+                return PlainTextResponse(str(StorageCompacting()), status_code=503)
             if (ctx is not None and ctx.updater is not None
                     and ctx.updater.phase == "restarting"
                     and request.url.path not in ("/app-update/restart", "/app-update/restart/cancel", "/heartbeat", "/goodbye")):
@@ -332,6 +388,10 @@ def create_app(store, client_provider, *, now_fn=time.time,
     async def closing_work(request, error):
         return PlainTextResponse(str(error), status_code=503)
 
+    @app.exception_handler(StorageCompacting)
+    async def compacting_storage(request, error):
+        return PlainTextResponse(str(error), status_code=503)
+
     from yt_playlist.providers import genres as genre_lib
     genre_lib.configure(store)                                 # load (and seed) the genre whitelist
 
@@ -342,6 +402,13 @@ def create_app(store, client_provider, *, now_fn=time.time,
         from yt_playlist.core.flatpak_update import FlatpakUpdater
         updater = FlatpakUpdater()
     ctx.updater = updater
+    ctx.storage_maintenance = StorageMaintenance(store, on_resume=ctx.radio.retain_provenance)
+    templates.env.globals['storage_maintenance_status'] = ctx.storage_maintenance.status
+
+    @app.get('/storage-maintenance/status')
+    def storage_maintenance_status():
+        status = ctx.storage_maintenance.status()
+        return {**status, 'auth_labels': [] if status['active'] else list(ctx.auth_expired.values())}
     app.include_router(build_bridge_route(ctx))
     from yt_playlist.rec.rec_worker import RecWorker
     ctx.rec_worker = RecWorker(ctx, enabled=background_work)

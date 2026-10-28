@@ -34,6 +34,21 @@ class RadioLaunch:
         self.store, self.playlists, self.persistence, self.policy = store, playlists, persistence, policy
         self.lock, self.now_fn = lock, now_fn
 
+    def retain_provenance(self):
+        """Keep source identity once writes resume, without replaying activity or a checkpoint."""
+        with self.store._lock:
+            if getattr(self.store, 'activity_paused', False):
+                return
+            pending = self.store.transient_radio_playlists.copy()
+            if not pending:
+                return
+            for playlist in pending:
+                self.store.playlists.mark_generated_playlist(playlist)
+            settings = self.store.settings
+            known = json.loads(settings.get_setting('radio_session_playlist_ids') or '[]')
+            settings.set_setting('radio_session_playlist_ids', json.dumps(sorted(set(known) | pending)))
+            self.store.transient_radio_playlists.difference_update(pending)
+
     def checkpoint_view(self, playing):
         """A saved checkpoint alone cannot establish current native playback."""
         try:
@@ -114,10 +129,16 @@ class RadioLaunch:
         with self.lock:
             s.playlist, s.local_id = result["new_ytm"], result["pid"]
             s.initial_handles = result.get("added_handles", {})
+        if s.local_id is None:
+            with self.store._lock:
+                self.store.transient_radio_playlists.add(s.playlist)
+                # Creation can finish just after the repair's resume callback.
+                self.retain_provenance()
         logger.info("Radio initial write: playlist=%s requested=%s acknowledged=%s",
                     s.playlist, [t['video_id'] for t in seeds], s.initial_handles)
-        seeds = [{**track, "key": track["identity_key"]}
-                 for track in self.store.charts.playlist_tracks_detail(s.local_id)]
+        seeds = ([{**track, "key": track["identity_key"]}
+                  for track in self.store.charts.playlist_tracks_detail(s.local_id)]
+                 if s.local_id is not None else result['tracks'])
         if not seeds:
             raise ValueError("No playable songs could be added to radio. Choose another playlist or song.")
         s.candidates.retain(seeds)
@@ -126,7 +147,8 @@ class RadioLaunch:
         s.choices[seeds[0]["video_id"]] = choice
         settings = self.store.settings
         known = json.loads(settings.get_setting("radio_session_playlist_ids") or "[]")
-        settings.set_setting("radio_session_playlist_ids", json.dumps(list(dict.fromkeys(known + [s.playlist]))))
+        if not getattr(self.store, 'activity_paused', False) and s.local_id is not None:
+            settings.set_setting("radio_session_playlist_ids", json.dumps(list(dict.fromkeys(known + [s.playlist]))))
         with self.lock:
             s.initial_tracks = seeds
             s.preparation_deadline = time.monotonic() + PREPARATION_TIMEOUT
@@ -174,7 +196,8 @@ class RadioLaunch:
         if not received:
             raise PlaylistChanged("YouTube Music did not save any playable songs. Choose another song.")
         confirmed = []
-        substitutions = RadioMutations(self.playlists, self.persistence, self.store.tracks, self.now_fn)
+        substitutions = RadioMutations(self.playlists, self.persistence, self.store.tracks, self.now_fn,
+                                       paused=lambda: getattr(self.store, 'activity_paused', False))
         for track, row in zip(matched, remote):
             if row.get('isAvailable') is False:
                 accepted.discard(track['video_id'])

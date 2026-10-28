@@ -104,10 +104,12 @@ class EnrichmentQueueRepo(Repo):
             "ORDER BY provider", {"providers": json.dumps(providers) if providers is not None else None})]
 
     @synchronized
-    def _admit_enrich_batch(self, candidates, configuration, *, providers, now):
+    def _admit_enrich_batch(self, candidates, configuration, *, providers, now, stale_before=None):
         # A changed configuration can replace the same recording/provider job. Defer it.
         if self._queue_provider_configuration(providers) != configuration:
             return []
+        eligibility = ("(t.first_enriched_at IS NULL OR " + pending_coverage() + ") AND " +
+                       eligible_providers(coverage=True)) if stale_before is None else self._resweep_eligibility()
         rows = self.conn.execute(
             "WITH " + TRACKS_CTE + " SELECT t.* FROM json_each(:candidates) selected "
             # Constrain the view's outer recording PK to avoid scanning all subjects per input.
@@ -115,12 +117,11 @@ class EnrichmentQueueRepo(Repo):
             "AND t.recording_id=t.queue_order "
             "AND t.id IS json_extract(selected.value,'$.id') "
             "AND t.last_enriched_at IS json_extract(selected.value,'$.last_enriched_at') "
-            "WHERE (t.first_enriched_at IS NULL OR " + pending_coverage() + ") AND " +
-            eligible_providers(coverage=True) + " ORDER BY CAST(selected.key AS INTEGER)",
+            "WHERE " + eligibility + " ORDER BY CAST(selected.key AS INTEGER)",
             {"candidates": json.dumps([{key: track.get(key) for key in
                                         ("recording_id", "id", "last_enriched_at")} for track in candidates]),
              "providers": json.dumps(providers) if providers is not None else None,
-             "now": time.time() if now is None else now}).fetchall()
+             "now": time.time() if now is None else now, "stale_before": stale_before}).fetchall()
         return [self._queue_track(row) for row in rows]
 
     @synchronized
@@ -154,16 +155,33 @@ class EnrichmentQueueRepo(Repo):
                 "now": time.time() if now is None else now}).fetchall()
         return [self._queue_track(r) for r in rows]
 
-    @synchronized
     def resweep_batch(self, limit, stale_before, *, providers=None, now=None) -> list:
         """Processed subjects missing any field, oldest pass first, one attempt per stale window."""
+        with database_operation("EnrichmentQueueRepo.resweep_batch"):
+            if getattr(self._store, '_read_only', False):
+                return self._select_resweep_batch(limit, stale_before, providers=providers, now=now)
+            with self._store.read_snapshot() as snapshot:
+                reader = snapshot.store.enrichment_queue
+                configuration = reader._queue_provider_configuration(providers)
+                candidates = reader._select_resweep_batch(limit, stale_before, providers=providers, now=now)
+            result = []
+            for start in range(0, len(candidates), 64):
+                result.extend(self._admit_enrich_batch(candidates[start:start + 64], configuration,
+                    providers=providers, now=now, stale_before=stale_before))
+            return result
+
+    @staticmethod
+    def _resweep_eligibility():
+        return ("t.first_enriched_at IS NOT NULL AND t.last_enriched_at < :stale_before "
+                "AND (t.genre IS NULL OR t.genre='' OR t.mb_year IS NULL OR t.mb_year='' "
+                "OR t.bpm IS NULL OR t.energy IS NULL OR t.danceability IS NULL) "
+                "AND NOT " + pending_coverage() + " AND " + eligible_providers())
+
+    @synchronized
+    def _select_resweep_batch(self, limit, stale_before, *, providers=None, now=None):
         rows = self.conn.execute(
             "WITH " + TRACKS_CTE + " SELECT * FROM enrichment_tracks t "
-            "WHERE first_enriched_at IS NOT NULL AND last_enriched_at < :stale_before "
-            "AND (genre IS NULL OR genre='' OR mb_year IS NULL OR mb_year='' "
-            "     OR bpm IS NULL OR energy IS NULL OR danceability IS NULL) "
-            "AND NOT " + pending_coverage() + " "
-            "AND " + eligible_providers() +
+            "WHERE " + self._resweep_eligibility() +
             " ORDER BY COALESCE((SELECT MAX(s.at) FROM enrichment_provider_state s "
             "WHERE s.recording_id=t.recording_id AND s.cycle=COALESCE(t.last_enriched_at,-1)),0), "
             "last_enriched_at ASC, queue_order ASC, source ASC LIMIT :limit",

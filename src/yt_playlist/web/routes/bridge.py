@@ -104,7 +104,7 @@ def build(ctx) -> APIRouter:
         radio = getattr(ctx, "radio", None)
         # The persisted session can already be playing before the radio panel has been opened
         # and its controller reattached. Use the same snapshot for attribution and the tab light.
-        session = radio.bootstrap()["state"] if radio is not None else {}
+        session = radio.state() if radio is not None else {}
         now_playing = bridge.now_playing
         seen_at = getattr(bridge, "now_playing_seen_at", None)
         if now_playing is not None and seen_at is not None and time.monotonic() - seen_at > 8:
@@ -153,12 +153,18 @@ def build(ctx) -> APIRouter:
             url = ""
         if not url.startswith("https://music.youtube.com/"):
             return {"ok": False, "error": "url must be a music.youtube.com link"}
-        return await activity_for(ctx).to_thread(_play, url)
+        intent = bridge.begin_playback_intent()
+        return await activity_for(ctx).to_thread(_play, url, intent)
 
-    def _play(url):
+    def _play(url, intent):
         try:
-            bridge.send_control({"type": "navigate", "url": url})
             query = parse_qs(urlparse(url).query)
+            playlist = (query.get('list') or [''])[0].removeprefix('RDAMPL')
+            if playlist:
+                for pl in ctx.store.playlists.get_playlists():
+                    if pl.ytm_playlist_id == playlist and (ctx.store.playlist_recipes.get_recipe(pl.scope_ref) or {}).get('media') == 'video':
+                        return {'ok': True, 'tv_url': f'/?tv_playlist={pl.id}#tv'}
+            bridge.send_control({"type": "navigate", "url": url}, intent=intent)
             video_id = (query.get("v") or [None])[0]
             if video_id:
                 measurement.record_action(ctx.store, "start", ctx.now_fn(), video_id=video_id)
@@ -329,12 +335,15 @@ def build(ctx) -> APIRouter:
         ping_task = asyncio.create_task(keepalive())
         store = getattr(ctx, "store", None)
         try:
-            if store is not None:
+            if store is not None and not getattr(store, 'activity_paused', False):
                 await run_in_threadpool(store.settings.set_setting, "bridge_paired", "1")
             clear = getattr(ctx, "clear_all_auth_expired", None)
             if callable(clear):
                 await run_in_threadpool(clear)
             logger.info("extension bridge connected")
+            wake = getattr(ctx, "sync_wake", None)
+            if wake is not None:
+                wake.set()
             while True:
                 msg = await ws.receive_json()
                 # No await separates this check from presence updates or reply
@@ -429,7 +438,8 @@ def build(ctx) -> APIRouter:
                 except (KeyError, ValueError, TypeError):
                     logger.warning("malformed bridge frame, ignoring: %r", msg)
                     continue
-                bridge.resolve(req_id, status, body, source_timezone=msg.get("timeZone"))
+                bridge.resolve(req_id, status, body, source_timezone=msg.get("timeZone"),
+                               response_headers=msg.get("headers"))
         except WebSocketDisconnect:
             pass
         finally:

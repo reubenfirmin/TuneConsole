@@ -51,6 +51,7 @@ def build(ctx) -> APIRouter:
             "rows": rows, "master_idx": master_idx, "error": error,
             "saved_identities": _saved_identities(),
             "configured": (setup.configured if setup else True),
+            "home_format": store.settings.get_setting('home_format') or 'auto',
             "flash": request.query_params.get("flash"),
             "enrichment": enrichment.load_config(store),
             "lastfm_configured": lastfm.api_key(store) is not None,
@@ -540,7 +541,8 @@ def build(ctx) -> APIRouter:
 
     @router.get("/import/spotify-library/spotify-thumbnail")
     def spotify_library_thumbnail(url: str):
-        thumbnail = spotify.thumbnail(url)
+        with spotify.access(store):
+            thumbnail = spotify.thumbnail(url)
         if not thumbnail:
             return Response(status_code=404)
         return RedirectResponse(thumbnail, status_code=307,

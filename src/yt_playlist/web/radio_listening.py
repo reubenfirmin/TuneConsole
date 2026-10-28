@@ -109,10 +109,13 @@ class RadioListening:
                     *report)
 
     @staticmethod
-    def player(s):
+    def player(s, *, allow_paused=False):
         if s.browser_seen_at is None:
             return None
-        return PlaybackObservation(s.browser or {}, s.browser_seen_at).player(s.playlist, allow_paused=s.skip_requested)
+        explicit_play = (s.requested_direction and s.requested_direction.get('play')
+                         or s.replacement and s.replacement.play)
+        return PlaybackObservation(s.browser or {}, s.browser_seen_at).player(
+            s.playlist, allow_paused=bool(allow_paused or s.skip_requested or explicit_play))
 
     def record(self, s, position, *, track=None):
         track = track if track is not None else s.tracks[position]
@@ -164,8 +167,9 @@ class RadioListening:
             self.now_fn(), request_id=menu_id, ranker='radio-seed',
             provenance={'menu_id': menu_id, 'fingerprint': candidates.fingerprint,
                         'choice_unit': 'radio_session'})
-        self.store.settings.set_setting('radio_seed_offer', json.dumps({'tracks': tracks, 'menu_id': menu_id,
-            'comparison': getattr(candidates, 'comparison', None)}))
+        if not getattr(self.store, 'activity_paused', False):
+            self.store.settings.set_setting('radio_seed_offer', json.dumps({'tracks': tracks, 'menu_id': menu_id,
+                'comparison': getattr(candidates, 'comparison', None)}))
         context = getattr(candidates, 'choice_context', None) or (self.store.rec_proposals.get_proposals("home_prepared") or {}).get("choice_context", {})
         choice_evidence.safe_issue(self.store, "radio", [{"id": t["video_id"], "position": i + 1,
             "tracks": [t], "mode_id": t.get("_radio_mode"), "intent": "seed",
@@ -207,23 +211,33 @@ class RadioListening:
             s.edits.queue({'slot': selected, 'tracks': list(branch['tracks']),
                            'choice': choice if branch['tracks'] else None})
 
-    def select(self, s, proposal_id, menu_id):
+    def select(self, s, proposal_id, menu_id, video_id=None, *, intent=None):
         """Queue a validated visible choice; the observer settles saved writes later."""
         if not self.current(s) or not s.directions:
             return {'ok': False, 'reason': 'Start a Radio Session first.'}, False
         slot, branch = s.directions.find(proposal_id)
         if menu_id != s.directions.menu_id or branch is None:
             return {'ok': False, 'stale': True, 'reason': 'The next songs changed. Choose a direction again.'}, False
-        if slot == selected_slot(s):
+        if video_id is None and slot == selected_slot(s):
             return {'ok': True}, False
         if not branch['tracks']:
             return {'ok': False, 'reason': 'No more library songs are available in that direction.'}, False
+        index = next((i for i, track in enumerate(branch['tracks']) if track['video_id'] == video_id), None)
+        if video_id is not None and index is None:
+            return {'ok': False, 'stale': True, 'reason': 'That song left the stream. Choose a current song.'}, False
+        index = index or 0
         self.capture_menu(s)
         choice_evidence.safe_respond(self.store, menu_id, "choice", self.now_fn(), option_id=branch["id"],
-            details={"episode_id": s.episode_id, "slot": slot})
-        s.edits.queue({'slot': slot, 'tracks': list(branch['tracks']),
-                       'choice': {'id': branch['id'], 'menu_id': menu_id}})
+            details={"episode_id": s.episode_id, "slot": slot,
+                     **({'video_id': video_id, 'sequence_position': index + 1} if video_id else {})})
+        request = {'slot': slot, 'tracks': list(branch['tracks'][index:]),
+                   'choice': {'id': branch['id'], 'menu_id': menu_id}}
+        if video_id is not None:
+            request['play'] = {'video_id': video_id, 'intent': intent}
+            request['excluded'] = [t['video_id'] for t in branch['tracks'][:index]]
+        s.edits.queue(request)
         s.error = None
+        s.selection_error = None
         return {'ok': True}, True
 
     def seen(self, s, menu_id):

@@ -9,8 +9,8 @@ from yt_playlist.core import catalog
 from yt_playlist.rec import musical_character
 
 
-def indexed(store, seed, count=110):
-    tracks = [catalog_track(store, f'cluster-{i}', label='Indie Rock' if i % 2 else 'Downtempo')[0]
+def indexed(store, seed, count=110, *, mixed=False):
+    tracks = [catalog_track(store, f'cluster-{i}', label='Indie Rock' if mixed and i % 2 else seed['genre'])[0]
               for i in range(count)]
     store.rec_proposals.put_proposals('mode_bundles', {
         '1': {'wheelhouse': [seed]}, '_radio': {'generation': None, 'space': '',
@@ -102,15 +102,32 @@ def test_correcting_feedback_readmits_a_recording_in_the_same_session(store, see
     assert c.next_track([seed])['key'] == track['key']
 
 
-def test_themed_streams_preserve_cluster_positions_across_mixed_genre_metadata(store, seed):
+def test_themed_streams_pin_the_playing_genre_inside_mixed_clusters(store, seed):
     from yt_playlist.rec.radio_directions import RadioDirections
-    indexed(store, seed, 110)
+    indexed(store, seed, 110, mixed=True)
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': 1})
     directions = RadioDirections(c, seed)
     directions.update([seed], [], 0)
     assert len(directions.public([])) == 4
     assert all(len(branch['tracks']) == 6 for branch in directions.slots)
+    assert all(t['genre'] == seed['genre'] for branch in directions.slots for t in branch['tracks'])
     first = [dict(branch) for branch in directions.slots]
-    # Polling alone never discards a within-cluster plan because genre labels differ.
+    # Polling alone preserves the already valid genre-constrained plans.
     assert not directions.update([seed], [], 0)
     assert directions.slots == first
+
+
+def test_pinned_refill_reads_past_a_full_page_of_other_genres(store, seed):
+    wrong = [catalog_track(store, f'wrong-{i}', label='Indie Rock')[0] for i in range(CLUSTER_POOL_LIMIT)]
+    matching = [catalog_track(store, f'matching-{i}', label=seed['genre'])[0] for i in range(30)]
+    store.rec_proposals.put_proposals('mode_bundles', {
+        '1': {'wheelhouse': [seed, *wrong]}, '_radio': {'generation': None, 'space': '',
+        'members': {'1': [t['key'] for t in [seed, *wrong, *matching]]}}})
+    c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': 1})
+    history = [seed]
+    for _ in matching:
+        track = c.next_track(history)
+        assert track is not None and track['genre'] == seed['genre']
+        history.append(track)
+    assert {t['key'] for t in history[1:]} == {t['key'] for t in matching}
+    assert c.next_track(history) is None

@@ -1,4 +1,11 @@
 {% set refreshing_groups = mode_refreshing and (not viz.recent.has_styles or not viz.recent.styles_current) %}
+{% if grouping %}
+<section class="card taste-summary" aria-labelledby="taste-groups-summary-title">
+  <h2 id="taste-groups-summary-title">Your music groups</h2>
+  <p>{{ grouping.counts.known }} tracks grouped{% if grouping.counts.unknown %}; {{ grouping.counts.unknown }} still awaiting enough musical detail{% endif %}. Groups can split or rejoin as your library develops.</p>
+  <a class="taste-detail-link" href="#groups" @click.prevent="select('groups')">Explore music groups {{ arrow_icon('right') }}</a>
+</section>
+{% endif %}
 <div class="taste-overview-cards"{% if refreshing_groups %}
      hx-get="/taste/panels/overview" hx-trigger="every 3s"
      hx-target="closest .taste-panel-content" hx-swap="innerHTML settle:0ms"{% endif %}>

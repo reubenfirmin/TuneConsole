@@ -47,6 +47,14 @@ class ArtistRepo(Repo):
         return self.public_keys(names)
 
     @synchronized
+    def album_credits(self, browse_id):
+        return [dict(row) for row in self.conn.execute(
+            'SELECT aa.*,a.name,ap.provider_id browse_id FROM album_provider_ids p '
+            'JOIN album_artists aa ON aa.album_id=p.album_id JOIN artists a ON a.id=aa.artist_id '
+            "LEFT JOIN artist_provider_ids ap ON ap.artist_id=a.id AND ap.provider='youtube' "
+            "WHERE p.provider='youtube' AND p.provider_id=? ORDER BY aa.position", (browse_id,))]
+
+    @synchronized
     def track_credits(self, entry_id):
         return [dict(r) for r in self.conn.execute(
             'SELECT ta.*,a.name,ap.provider_id browse_id FROM track_artists ta '

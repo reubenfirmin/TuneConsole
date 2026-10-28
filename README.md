@@ -50,8 +50,37 @@ b) And I find YouTube's discovery and playlist management to be pretty bad
 
 HTTP access logs are disabled by default. To include request logs in `app.log` and terminal
 output, start with `YT_PLAYLIST_ACCESS_LOG=1 uv run yt-playlist` (also works with `--reload`).
-Packaged apps and containers use the same environment variable. Application messages and
-server error tracebacks remain enabled regardless of this setting.
+Application messages and server error tracebacks remain enabled regardless of this setting.
+
+The new Charts Home journal and Listening analytics views are enabled for feedback.
+Start with `YT_PLAYLIST_LISTENING_CHARTS=0 uv run yt-playlist` to hide both views and
+stop their background preparation. Set the variable to `1` to enable them explicitly.
+The existing Charts rankings remain available in either mode.
+Packaged apps and containers use the same environment variable.
+
+Audio collection runs independently of developer vibe ratings. With a compatible
+extension model installed, ordinary app pages collect three ten-second excerpts
+during natural playback, near 30 seconds, halfway and two-thirds through a song.
+Keep a TuneConsole page open. Playback never seeks, and one app tab owns capture.
+Audio and inference stay in YouTube Music; only bounded measurements and frozen
+embeddings reach the app. Compatible measurements use the bundled Emotify vibe
+checkpoint and seed bounded artist/genre predictions for unmeasured recordings.
+Missing measurements retain the provider-metadata fallback. The existing six
+vibes and human annotations retain their meanings.
+
+Public extension archives currently exclude the optional research model assets.
+Those builds remain idle for automatic collection. Local model preparation is
+documented in `experiments/audio_lab/README.md`; reload the extension afterward.
+This checkpoint does not establish public model redistribution or population
+accuracy. See `experiments/audio_lab/MODEL_CHECKPOINT.md` for results and limits.
+
+The developer rating banner defaults off. To enable it, put
+`YT_PLAYLIST_AUDIO_VIBES=1` in the checkout's ignored `.env.local`, or set that
+environment variable explicitly. An explicit environment value takes precedence;
+`0` hides ratings without disabling collection. The banner accepts multiple
+existing vibe choices and preserves the prediction and sample evidence at each
+explicit edit. Regular users are never asked to label vibes. The dedicated Audio
+analysis preview retains its immediate manual/automatic single-excerpt behavior.
 
 ### Docker / Podman
 
@@ -91,17 +120,77 @@ and keep released versions unchanged. A migration uses explicit SQL on the suppl
 connection. The runner owns its transaction, version stamp and rollback; migration
 code must never commit, use `executescript`, or call repository write methods.
 
-Before upgrading an existing database, TuneConsole creates and integrity-checks a
-SQLite snapshot in `backups/` beside that database. Snapshot filenames identify
-the source and target schema versions. Fresh installations and reopening a current
-database do not create migration backups. Startup reports failed versions without
-starting the application against a partly upgraded schema.
+Each migration's schema changes, data changes and version stamp commit atomically.
+SQLite's transaction journal handles rollback and crash recovery; the framework does
+not create full-database snapshots or maintain a backup collection. If a migration
+fails, its changes roll back while previously completed versions remain committed,
+and the upgrade can resume on the next launch. Startup reports failed versions
+without starting the application against a partly upgraded schema.
 
-To recover, stop TuneConsole, preserve the failed database together with any `-wal`,
-`-shm` or journal files, and copy the verified backup to the database location.
-Remove the stopped database's old sidecar files from that location before reopening.
-Use an application release compatible with the backup's schema. Recovery is manual;
-TuneConsole never automatically downgrades or restores over your database.
+Prepared recommendation policies share a content-addressed configuration body across
+ranker, vibe, lane and genre variants. Existing full JSON policies remain readable.
+Background preparation collects unused policies after a one-hour grace period,
+preserving impression references and policy IDs in prepared/session data. Unused
+shared policy storage has admission limits of 64 MiB and 131,072 variants; an individual
+batch is capped at 8 MiB and 16,384 variants. These admission limits apply to new
+shared records; legacy full JSON policies are collected in bounded batches.
+If unused shared records, including newly expired served
+evidence, exceed the limits, preparation defers while maintenance catches up.
+A rejected batch retains the published pools.
+Online collection targets 8 MiB each for policy rows and orphan bodies per pass,
+including the last row that crosses the target, with at most 4,096 of each.
+Prepared policy writes reserve at least 256 MiB of filesystem headroom. Served
+attribution is protected independently of those disposable-data limits.
+
+On upgrade, a one-time repair starts automatically on a separate background
+connection. The UI opens immediately; browsing, starting and tuning radio, and
+existing playback remain available. A banner shows "Compacting storage - won't
+record activity until done" while repair is active. Activity is not recorded and
+radio session checkpoint writes are skipped; personal edits return a retry message.
+Radio uses an in-memory session during repair. After repair, minimal generated
+playlist provenance is saved so subsequent plays stay excluded from taste learning;
+discarded activity and session checkpoints are never replayed. Recommendation,
+enrichment and sync workers wait until repair finishes or safely defers. Normal
+recording then resumes and the banner clears, including when final compaction is
+deferred. The deferral reason remains in the logs and maintenance status.
+
+Repair collects obsolete legacy policies, shares retained configurations, and
+reclaims empty pages with native SQLite VACUUM in WAL mode. UI reads continue
+during compaction. SQLite serializes other application instances' writers; no
+stale snapshot replaces current data. Each conversion verifies the resolved
+configuration before committing, and integrity/foreign-key checks run around
+cleanup and compaction. Durable batch progress survives interruption; Ctrl+C
+cancels outstanding SQLite work and later launches resume committed progress.
+Logs report progress and completion.
+
+Cleanup reserves 32 MiB plus bounded batch work. Compaction needs temporary space
+for SQLite's compact working database and approximately twice the occupied-page
+size plus 256 MiB and overhead on the live database filesystem. If these are the
+same filesystem, their requirements add together. This is a working-space
+estimate: SQLite disk-full errors roll back safely. Busy readers get bounded,
+interruptible retries before further batches can grow the WAL. Insufficient
+space or prolonged contention defers repair, preserves completed batches, and
+retries on the next startup. No full oversized migration backup is created for
+this derived-policy cleanup. SQLite transaction protection remains on.
+
+For a separate recovery rehearsal on another filesystem:
+
+```bash
+uv run python -m yt_playlist.core.policy_recovery \
+  --source "$HOME/.local/share/yt-playlist/state.db" \
+  --output-dir /path/with/space/tuneconsole-recovery
+```
+
+The destination must be new and have approximately three times the source database's
+size available. The command opens the source read-only, keeps an untouched verified
+SQLite backup, collects unused policies on a working copy, shares retained policy
+bodies, and creates `compact.db`. `report.json` records integrity/foreign-key checks,
+non-policy table counts, exact retained configuration fingerprints and before/after
+sizes. It never replaces the source. Before using the candidate, stop all application
+writers and create a fresh candidate from that final state; a candidate created while
+the application was running excludes subsequent user changes. Preserve the stopped
+original database and its sidecars together before installing the candidate. Use the
+application version that supports the candidate's schema.
 
 The shared catalog separates a musical recording (`recordings.id`) from its playable
 uploads (`youtube_items.video_id`). New uploads get separate provisional recordings;

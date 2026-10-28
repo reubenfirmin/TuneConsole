@@ -254,11 +254,7 @@ def test_populated_upgrade_repairs_partial_and_complete_moves_and_reopens(tmp_pa
     assert list(s.conn.iterdump())==state
     assert s.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
     s.conn.close()
-    backups = list((tmp_path/'backups').glob('*.db'))
-    assert backups
-    with sqlite3.connect(backups[-1]) as conn:
-        assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]==27
-        assert conn.execute('SELECT entry_id FROM discovery_memberships WHERE recording_id=1').fetchone()[0]==1
+    assert not (tmp_path/'backups').exists()
 
 
 def test_failed_upgrade_restores_installed_schema_and_rows(tmp_path):

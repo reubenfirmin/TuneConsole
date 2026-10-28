@@ -153,7 +153,21 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(count('/bridge/status'), before + 2);
   assert.equal(replacement.nowPlaying.video_id, 'two');
   assert(rows[1].classList.contains('now-playing'));
+  // A visible tab gets fresh song identity immediately, even if background
+  // timers have been throttled. Hidden events do not add another status poll.
+  document.hidden = true;
+  const hiddenCount = count('/bridge/status');
+  document.dispatchEvent(new Event('visibilitychange')); await flush();
+  assert.equal(count('/bridge/status'), hiddenCount);
+  response = () => Promise.resolve({ok: true, json: async () => snapshot('one')});
+  document.hidden = false;
+  document.dispatchEvent(new Event('visibilitychange')); await flush();
+  assert.equal(count('/bridge/status'), hiddenCount + 1);
+  assert.equal(replacement.nowPlaying.video_id, 'one');
+  assert(rows[0].classList.contains('now-playing'));
   window.playbackStatus.stop();
+  document.dispatchEvent(new Event('visibilitychange')); await flush();
+  assert.equal(count('/bridge/status'), hiddenCount + 1, 'a suspended document stays stopped');
   home?.destroy();
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """

@@ -35,6 +35,47 @@ def test_routes_use_independent_playlist_session(poc, monkeypatch):
     assert remote.ids == ["v1", "v2", "v3", "v4"]
 
 
+@pytest.mark.parametrize("restored", [False, True])
+def test_status_polls_project_session_without_loading_seed_menu(poc, monkeypatch, restored):
+    from yt_playlist.web.radio_session import PlaylistRadio
+    from yt_playlist.web.routes.bridge import build as build_bridge_route
+
+    c, *_ = poc
+    c.seeds()
+    assert c.start()["ok"]
+    play(c, "v1")
+    if restored:
+        c = PlaylistRadio(c.ctx)
+        c.ctx.radio = c
+    expected = c.bootstrap()["state"]
+    settings = c.ctx.store.settings.get_setting
+
+    def without_seed_menu(key, *args, **kwargs):
+        assert key != "radio_seed_offer", "Status loaded the saved seed menu"
+        return settings(key, *args, **kwargs)
+
+    def no_seed_work(*args, **kwargs):
+        pytest.fail("Session status performed seed-menu work")
+
+    monkeypatch.setattr(c.ctx.store.settings, "get_setting", without_seed_menu)
+    monkeypatch.setattr(c, "bootstrap", no_seed_work)
+    monkeypatch.setattr(c, "_eligible_seeds", no_seed_work)
+    c.ctx.bridge.resumable_player = None
+    app = FastAPI()
+    app.include_router(radio_routes.build(c.ctx))
+    app.include_router(build_bridge_route(c.ctx))
+    with TestClient(app) as client:
+        response = client.get("/radio/status")
+        assert response.status_code == 200
+        state = response.json()
+        for key in ("active", "playlist_id", "title", "history"):
+            assert state[key] == expected[key]
+        bridge = client.get("/bridge/status")
+        assert bridge.status_code == 200
+        assert bridge.json()["radio"] == expected["active"]
+        assert bridge.json()["now_playing"]["source"]["kind"] == "radio"
+
+
 def test_playlist_seed_preserves_source_order_and_continues_in_a_separate_playlist(poc):
     c, remote, frames, _, _ = poc
     store = c.ctx.store

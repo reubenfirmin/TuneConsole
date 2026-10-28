@@ -525,12 +525,12 @@ def test_rediscover_albums_coldest_first_and_carries_thumbnail(store):
     _seed_album(store, iid, "AOLD", "Ancient", now, played_at=now - 150 * day)
     _seed_album(store, iid, "AMID", "Dusty", now, played_at=now - 80 * day)
     _seed_album(store, iid, "AHOT", "Fresh", now, played_at=now - 2 * day)
-    _seed_album(store, iid, "ANEW", "Untouched", now)                 # never played -> coldest
+    _seed_album(store, iid, "ANEW", "Untouched", now)
 
     out = surfaces.rediscover_albums(store, now, count=3, epoch=0)
-    assert [a["title"] for a in out] == ["Untouched", "Ancient", "Dusty"]   # coldest (never, then oldest)
-    assert out[0]["browse_id"] == "ANEW" and out[0]["thumbnail"] == "t.jpg"
-    assert out[0]["artist"] == "ANEW artist" and out[0]["year"] == "2020"
+    assert [a["title"] for a in out] == ["Ancient", "Dusty"]
+    assert out[0]["browse_id"] == "AOLD" and out[0]["thumbnail"] == "t.jpg"
+    assert out[0]["artist"] == "AOLD artist" and out[0]["year"] == "2020"
 
 
 def test_rediscover_albums_rotates_through_cold_pool_by_epoch(store):
@@ -538,7 +538,7 @@ def test_rediscover_albums_rotates_through_cold_pool_by_epoch(store):
     day = 86400.0
     now = 400 * day
     for browse, title, age in [("A1", "A", 200), ("A2", "B", 150), ("A3", "C", 100),
-                               ("A4", "D", 50), ("A5", "E", 25), ("A6", "F", 10)]:
+                               ("A4", "D", 50), ("A5", "E", 40), ("A6", "F", 35)]:
         _seed_album(store, iid, browse, title, now, played_at=now - age * day)
     titles = lambda e: [a["title"] for a in surfaces.rediscover_albums(store, now, count=3, epoch=e)]
     assert titles(0) == ["A", "B", "C"]      # coldest page leads

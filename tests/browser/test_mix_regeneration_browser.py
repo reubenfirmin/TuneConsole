@@ -6,6 +6,41 @@ from tests.test_home_other_genres import seed_genres
 from tests.test_mode_cards_route import prepare_home
 
 
+def test_regeneration_sends_the_held_recipe_after_each_animated_swap(live_app, store, page):
+    import json
+    from urllib.parse import parse_qs
+    from yt_playlist.rec import choice_evidence
+
+    seed_genres(store)
+    store.settings.set_setting('last_sync_at', '1')
+    store.settings.set_setting('onboard_dismissed', '1')
+    prepare_home(store, 1)
+    page.route('https://i.ytimg.com/**', lambda route: route.abort())
+    page.goto(live_app + '/')
+    card = page.locator('#gen-wheelhouse')
+    expect(card).to_be_visible()
+    card.locator('.gen-poster').click()
+    body = card.locator('.gen-card-body')
+    closed = []
+    for index in range(2):
+        held = json.loads(body.get_attribute('data-recipe'))['opportunity_id']
+        other = choice_evidence.present(store, 'mixes', [{'id': 'other'}], 1,
+                                       context={}, window=f'other-tab-{index}')
+        with page.expect_response('**/home/refresh-cards') as refreshed:
+            card.get_by_role('button', name='Regenerate this mix', exact=True).click()
+        response = refreshed.value
+        assert response.status == 200
+        assert parse_qs(response.request.post_data)['opportunity_id'] == [held]
+        incoming = page.evaluate("""text => new DOMParser().parseFromString(text, 'text/html')
+            .getElementById('gen-body-wheelhouse').dataset.recipe""", response.text())
+        expect(body).to_have_attribute('data-recipe', incoming)
+        assert json.loads(incoming)['opportunity_id'] != held
+        closed.append(held)
+        responses = [row for row in store.rec_ledger.evidence().records('response') if row['kind'] == 'close']
+        assert {row['opportunity_id'] for row in responses} == set(closed)
+        assert all(row['opportunity_id'] != other for row in responses)
+
+
 @pytest.mark.parametrize("endpoint", ["/home/refresh-cards", "/home/refresh-card/wheelhouse"])
 @pytest.mark.parametrize("failure", ["network", "http", "unprocessable", "missing", "invalid", "empty"])
 def test_mix_regeneration_recovers_from_failure(live_app, store, page, endpoint, failure):

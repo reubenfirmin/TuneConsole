@@ -31,7 +31,6 @@ document.addEventListener('htmx:afterSwap', (e) => {
     return (s || '').toLowerCase().replace(/\(.*?\)|\[.*?\]/g, '').replace(/\bfeat\.?.*$/, '')
       .replace(/[^a-z0-9]+/g, ' ').trim();
   }
-  function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
   function rowByVid(vid) {
     var sel = window.CSS && CSS.escape ? CSS.escape(vid) : vid;
     return document.querySelector('tr[data-vid="' + sel + '"]');
@@ -76,7 +75,16 @@ document.addEventListener('htmx:afterSwap', (e) => {
           var g = row.querySelector('.genre-display-wrap');
           if (g && !g.querySelector('.gtag')) {
             var hint = g.querySelector('.ghint');
-            if (hint) hint.outerHTML = '<span class="gtag">' + esc(c.genre) + '</span>';
+            if (hint) {
+              var badge = document.createElement('span');
+              badge.className = 'gtag';
+              badge.title = c.genre;
+              var label = document.createElement('span');
+              label.className = 'gtag-label';
+              label.textContent = c.genre;
+              badge.append(label);
+              hint.replaceWith(badge);
+            }
             row.setAttribute('data-genre', String(c.genre).toLowerCase());
           }
         }

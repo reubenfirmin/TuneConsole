@@ -29,9 +29,9 @@ class RadioPreparation:
                 or time.monotonic() - s.candidates_checked_at < 6):
             return None
         s.candidates_checked_at = time.monotonic()
-        with self.store._lock:
-            ready = bool(self.store.settings.get_setting('rec_content_model')
-                         and self.store.rec_proposals.get_proposals('mode_bundles'))
+        with self.store.read_view() as reader:
+            ready = bool(reader.settings.get_setting('rec_content_model')
+                         and reader.rec_proposals.has_proposals('mode_bundles'))
         if not ready:
             if worker and not worker.busy and not s.preparation_requested:
                 worker.trigger_mode_refresh()

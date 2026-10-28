@@ -3,6 +3,7 @@ import json
 import pytest
 
 from yt_playlist.core.store import Store
+from yt_playlist.integrations.deepseek import DeepSeekIAO
 from yt_playlist.providers import deepseek
 from yt_playlist.rec import album_descriptions as copy
 
@@ -10,9 +11,14 @@ ALBUM = {'browse_id': 'first-id', 'artist': 'Patrice Bäumel',
          'title': 'Global Underground #42: Berlin (DJ Mix)', 'year': '2019'}
 
 
+@pytest.fixture(autouse=True)
+def access_boundary(monkeypatch):
+    monkeypatch.setattr(deepseek, '_iao', DeepSeekIAO())
+
+
 @pytest.fixture
 def generated(store, monkeypatch):
-    monkeypatch.setattr(deepseek, 'api_key', lambda *args: 'secret-key')
+    monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'secret-key')
     calls = []
     def describe(album, key):
         calls.append((album, key))
@@ -29,7 +35,7 @@ def test_refresh_alternate_id_disable_and_key_change_reuse_paid_copy(store, gene
     other = {**ALBUM, 'browse_id': 'another-id', 'artist': 'Patrice Baumel', 'year': '2023'}
     assert copy.get(store, other, 200)[0] == description
     store.settings.set_setting('deepseek_album_descriptions_enabled', '0')
-    monkeypatch.setattr(deepseek, 'api_key', lambda *args: 'replacement-secret')
+    monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'replacement-secret')
     assert copy.get(store, other, 999999)[0] == description
     assert copy.read(store, other) == description
     assert len(generated) == 1
@@ -66,7 +72,7 @@ def test_daily_limit_counts_failures_survives_restart_and_does_not_reset_on_new_
     store = Store(path)
     store.init_schema()
     try:
-        monkeypatch.setattr(deepseek, 'api_key', lambda *args: 'another-key')
+        monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'another-key')
         store.rec_proposals.wake_album_descriptions(200)
         deferred = copy.get(store, {**ALBUM, 'title': 'Another release'}, 200)[1]
         assert deferred == {'status': 'daily_limit', 'retry_at': 86400}
@@ -106,8 +112,7 @@ def test_two_database_connections_share_the_reservation(tmp_path):
 
 
 def test_reservation_uses_current_clock_after_earlier_worker_work(store, generated):
-    clock = iter([10000, 10002])
-    copy.get(store, ALBUM, 1, now_fn=lambda: next(clock))
+    copy.get(store, ALBUM, 1, now_fn=lambda: 10000 + (2 if generated else 0))
     usage = store.rec_proposals.get_proposals('album_description_usage')
     record = store.rec_proposals.get_proposals('album_description:' + copy.identity(ALBUM))
     assert usage['requests'] == 1 and record['at'] == 10002
@@ -121,7 +126,7 @@ def test_auth_failure_stops_all_albums_until_key_changes(store, generated, monke
     assert copy.get(store, ALBUM, 100)[1]['status'] == 'auth'
     assert copy.get(store, {**ALBUM, 'title': 'Another album'}, 200000)[1]['status'] == 'auth'
     assert len(generated) == 1
-    monkeypatch.setattr(deepseek, 'api_key', lambda *args: 'a-fixed-key')
+    monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'a-fixed-key')
     assert copy.get(store, ALBUM, 102)[1]['status'] == 'auth'
     assert len(generated) == 2  # A new credential can retry the same failed record immediately.
 
@@ -157,7 +162,7 @@ def test_disabled_missing_key_or_zero_limit_never_requests_provider(store, gener
     store.settings.set_setting('deepseek_album_descriptions_enabled', '1')
     store.settings.set_setting('deepseek_daily_limit', '0')
     assert copy.get(store, ALBUM, 100)[1]['status'] == 'paused'
-    monkeypatch.setattr(deepseek, 'api_key', lambda *args: None)
+    monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: None)
     assert copy.get(store, ALBUM, 100)[1]['status'] == 'not_configured'
     assert generated == []
     assert store.rec_proposals.get_proposals('album_description_usage') is None

@@ -1,7 +1,8 @@
 // MV3 bootstrap: construct modules, wire explicit interfaces, and own Chrome lifecycle listeners.
 // Factories register no listeners and perform no work until called here.
 importScripts("worker/config.js", "worker/music_tabs.js", "worker/sensors.js", "worker/ratings.js",
-  "worker/playback.js", "worker/requests.js", "worker/radio.js", "worker/site.js", "worker/setup.js", "worker/transport.js");
+  "worker/playback.js", "worker/requests.js", "worker/radio.js", "worker/site.js", "worker/setup.js", "worker/transport.js",
+  "worker/audio_preview.js");
 
 const tuneConsole = (() => {
   const warn = createBridgeWarnings();
@@ -17,16 +18,23 @@ const tuneConsole = (() => {
   const site = createSiteIntegration({appOrigin: TC_CONFIG.appOrigin, connected: () => transport.connected});
   const setup = createSetupIntegration({musicOrigin: TC_CONFIG.musicOrigin,
     connected: () => transport.connected, openPlayer: site.openPlayer});
+  const audioPreview = createAudioPreview({appOrigin: TC_CONFIG.appOrigin, pickTab: playback.pickTab});
 
   async function dispatch(frame) {
     if (frame && frame.type === "navigate") { playback.navigate(frame.url); return; }
-    if (frame && frame.type === "playpause") { playback.playPause(frame); return; }
+    if (frame && frame.type === "playpause") {
+      const result = await playback.playPause(frame);
+      if (Number.isSafeInteger(frame.id) && frame.id > 0)
+        return {id: frame.id, status: 200, body: JSON.stringify(result)};
+      return;
+    }
     if (frame && frame.type === "refresh-view") { playback.refreshView(frame.playlist); return; }
-    if (frame && ["rate", "next", "radio-session", "playlist-session-poc"].includes(frame.type)) {
+    if (frame && ["rate", "next", "pause-for-tv", "radio-session", "playlist-session-poc"].includes(frame.type)) {
       let result;
       try {
         result = frame.type === "rate" ? await playback.rate(frame.action, frame.videoId, frame.likeStatus, frame.skip, frame.brandId)
-          : frame.type === "next" ? await playback.next(frame.videoId) : await radio.update(frame);
+          : frame.type === "next" ? await playback.next(frame.videoId)
+          : frame.type === "pause-for-tv" ? await playback.pauseForTv() : await radio.update(frame);
       } catch (e) { result = {ok: false, error: String(e)}; }
       return {id: frame.id, status: 200, body: JSON.stringify(result)};
     }
@@ -40,6 +48,7 @@ const tuneConsole = (() => {
   chrome.runtime.onMessage.addListener(site.receive);
   chrome.runtime.onMessage.addListener(setup.receive);
   chrome.runtime.onMessage.addListener(playback.receive);
+  chrome.runtime.onConnectExternal?.addListener(audioPreview.connect);
   chrome.tabs.onRemoved.addListener(id => { playback.removed(id); sensors.removed(id); });
   chrome.tabs.onUpdated.addListener((id, info, tab) => {
     if (info.status === "complete" && tab.url?.startsWith(TC_CONFIG.musicOrigin + "/")) sensors.probe();
@@ -55,5 +64,5 @@ const tuneConsole = (() => {
   chrome.runtime.onStartup.addListener(site.publish);
   setup.install();
   transport.connect();
-  return {tabs, sensors, playback, requests, radio, site, setup, transport};
+  return {tabs, sensors, playback, requests, radio, site, setup, transport, audioPreview};
 })();

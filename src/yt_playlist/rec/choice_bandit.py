@@ -14,7 +14,7 @@ import numpy as np
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.library.listen_derive import classify_exit
 from yt_playlist.rec import rec_params, taste_modes
-from yt_playlist.rec.choice_context import resolve_context
+from yt_playlist.rec.choice_context import learning_context
 
 WEIGHTS = ('choice', 'open', 'start', 'completion', 'promotion', 'early_exit')
 POLICY = 'context-response-v1'
@@ -43,12 +43,15 @@ def _decisions(offers, visible, selections):
             yield oid, offer, chosen, seen, at, start, end
 
 
-def compile(store, offers, responses, now):
+def observations(store, offers, responses, now, excluded):
+    """Visibility/time/outcome admission shared by legacy and hierarchical compilers.
+
+    This yields actual served options and their frozen context, without assigning
+    them to today's groups. Mapping and historical compatibility remain separate.
+    """
     params = parameters(store)
     since = now - params['window_d'] * 86400
-    current = store.modes.list_modes(active_only=True)
-    modes = {mode['mode_id']: mode for mode in current}
-    visible, selections, actions, contexts, compatibility = {}, {}, {}, {}, {}
+    visible, selections, actions, contexts = {}, {}, {}, {}
     for event in responses:
         check_cancellable_work()
         offer = offers.get(event['opportunity_id'])
@@ -62,8 +65,6 @@ def compile(store, offers, responses, now):
             selections.setdefault(oid, []).append((event['option_id'], set(visible.get(oid, ())), event['at']))
         if event['option_id'] is not None:
             actions.setdefault((oid, event['option_id']), []).append(event)
-    units, excluded, expirations = {}, {'unseen': 0, 'unmapped_mode': 0, 'drifted_mode': 0,
-                                      'future_context': 0, 'missing_context': 0}, []
     for oid, offer, chosen, seen, at, start, end in _decisions(offers, visible, selections):
         if offer['format'] != 'mixes' or not since < offer['at'] <= now:
             continue
@@ -74,7 +75,7 @@ def compile(store, offers, responses, now):
         context_id = offer['context']
         if context_id not in contexts:
             try:
-                contexts[context_id] = resolve_context(store, {'artifact': context_id})
+                contexts[context_id] = learning_context(store, context_id)
             except ValueError:
                 contexts[context_id] = None
         if contexts[context_id] is None:
@@ -83,21 +84,9 @@ def compile(store, offers, responses, now):
         if contexts[context_id].get('at', offer['at']) > offer['at']:
             excluded['future_context'] += 1
             continue
-        historical = {mode['mode_id']: mode for mode in contexts[context_id].get('groups', [])}
         for option in offer['options']:
-            option_id, mid = str(option['id']), option.get('mode_id')
+            option_id = str(option['id'])
             if option_id not in seen:
-                continue
-            old, live = historical.get(mid), modes.get(mid)
-            if old is None or live is None:
-                excluded['unmapped_mode'] += 1
-                continue
-            pair = (context_id, mid)
-            if pair not in compatibility:
-                matched, _ = taste_modes.reconcile([old], [live], threshold=params['match_threshold'])
-                compatibility[pair] = matched[0]['mode_id'] == mid
-            if not compatibility[pair]:
-                excluded['drifted_mode'] += 1
                 continue
             events = [event for event in actions.get((oid, option_id), []) if start <= event['at'] < end]
             kinds = {event['kind'] for event in events}
@@ -120,13 +109,42 @@ def compile(store, offers, responses, now):
                         + params['completion'] * completion
                         + params['promotion'] * ('promote' in kinds))
             negative = params['choice'] * (chosen is not None and not selected) + params['early_exit'] * early
-            if positive + negative == 0:
-                continue
-            unit = units.setdefault((mid, int(at // 86400)), {'positive': 0., 'negative': 0., 'menus': set()})
-            unit['positive'] = max(unit['positive'], positive)
-            unit['negative'] = max(unit['negative'], negative)
-            unit['menus'].add(oid)
-            expirations.append(offer['at'] + params['window_d'] * 86400)
+            yield {'opportunity': oid, 'option': option, 'context': contexts[context_id],
+                   'context_id': context_id, 'positive': positive, 'negative': negative,
+                   'day': int(at // 86400), 'offer_at': offer['at'],
+                   'expires_at': offer['at'] + params['window_d'] * 86400}
+
+
+def compile(store, offers, responses, now):
+    params = parameters(store)
+    since = now - params['window_d'] * 86400
+    current = store.modes.list_modes(active_only=True)
+    modes = {mode['mode_id']: mode for mode in current}
+    units, compatibility, expirations = {}, {}, []
+    excluded = {'unseen': 0, 'unmapped_mode': 0, 'drifted_mode': 0,
+                'future_context': 0, 'missing_context': 0}
+    for observation in observations(store, offers, responses, now, excluded):
+        mid = observation['option'].get('mode_id')
+        historical = {mode['mode_id']: mode for mode in observation['context'].get('groups', [])}
+        old, live = historical.get(mid), modes.get(mid)
+        if old is None or live is None:
+            excluded['unmapped_mode'] += 1
+            continue
+        pair = (observation['context_id'], mid)
+        if pair not in compatibility:
+            matched, _ = taste_modes.reconcile([old], [live], threshold=params['match_threshold'])
+            compatibility[pair] = matched[0]['mode_id'] == mid
+        if not compatibility[pair]:
+            excluded['drifted_mode'] += 1
+            continue
+        positive, negative = observation['positive'], observation['negative']
+        if positive + negative == 0:
+            continue
+        unit = units.setdefault((mid, observation['day']), {'positive': 0., 'negative': 0., 'menus': set()})
+        unit['positive'] = max(unit['positive'], positive)
+        unit['negative'] = max(unit['negative'], negative)
+        unit['menus'].add(observation['opportunity'])
+        expirations.append(observation['expires_at'])
     rows = {}
     for (mid, day), unit in units.items():
         row = rows.setdefault(mid, {'mode_id': mid, 'label': modes[mid]['label'],

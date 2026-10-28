@@ -1,6 +1,18 @@
 {% import "_partials/taste_viz.html" as tv with context %}
 {% if panel == 'overview' %}
 {{ tv.overview() }}
+{% elif panel == 'groups' %}
+<section class="taste-settings-section" aria-labelledby="taste-grouping-preview-title" x-data="{ query: '' }">
+  <h2 id="taste-grouping-preview-title">Music groups</h2>
+  <p class="section-note">Your library forms broad areas and smaller interests as musical details arrive. Weak connections can separate and stronger ones can bring groups together again. Small interests stay visible even when they cannot fill a mix.</p>
+  <p class="section-note">{% if group_policy == 'adaptive' %}Home’s Mix tapes now draw from these groups. Your mix choices shape which areas return, and recent listening and sound preferences shape the tracks.{% else %}Home uses the existing mixes while these groups are prepared.{% endif %}</p>
+  <label class="taste-group-search" for="music-group-search">Find a group or artist
+    <input id="music-group-search" type="search" x-model="query" placeholder="Search music groups…">
+  </label>
+  <div id="taste-grouping-preview-body" hx-get="/taste/grouping-preview" hx-trigger="intersect once, every 10s [document.visibilityState === 'visible' && document.getElementById('taste-grouping-preview-body').offsetParent !== null]">
+    {% include "_partials/taste_grouping_preview.html" %}
+  </div>
+</section>
 {% elif panel == 'experiment' %}
 {% include "_partials/taste_experiment.html" %}
 {% elif panel == 'profile' %}
@@ -19,15 +31,6 @@
 
 <div {{ tt.panel('intro', prefix='taste-recommendation', state='recommendationTab', extra_class='taste-recommendation-panel') }}>
 <section class="taste-intro" aria-labelledby="taste-intro-context-title">
-  <form hx-post="/home/format" hx-trigger="change" hx-swap="none">
-    <label for="taste-home-format">Start Home with</label>
-    <select id="taste-home-format" name="format">
-      {% for value, label in [('auto','Follow my listening'), ('mixes','Mix tapes'), ('albums','Long play'), ('radio','On air'), ('both','My last listening tab')] %}
-      <option value="{{ value }}" {{ 'selected' if home_format == value }}>{{ label }}</option>
-      {% endfor %}
-    </select>
-    <p class="section-note">Follow my listening starts with your onboarding choice and adapts after you choose and play a format on three separate days. Currently: {{ home_format_label }}. Choose a specific tab to keep it fixed. All formats share your musical interests.</p>
-  </form>
   <h2 id="taste-intro-context-title">How your picks take shape</h2>
   <p>TuneConsole combines several signals: track similarity, relationships between artists, and information about genre, era, and sound. Your playlists, listening history, and feedback help it work out which music fits your taste. Recent activity can shift that balance toward what you’re enjoying now.</p>
   <p>These settings let you change that balance: give less-played genres more room, make recommendations follow recent listening more closely, or favor specific genres. If a week of jazz is crowding out the rest of your collection, for example, reducing recent-play influence gives your broader taste more say.</p>

@@ -20,6 +20,8 @@ def build(ctx):
     def home_generate(request: Request, form=Depends(request_form)):
         """Materialize a proto-playlist as a real YouTube playlist, auto-grouped 'Generated' so the
         rec engine ignores it until it's played. The card's surviving rows are posted as `tracks`."""
+        bridge = getattr(ctx, "bridge", None)
+        intent = bridge.begin_playback_intent() if bridge is not None else None
         name = (form.get("name") or "").strip()
         try:
             tracks = json.loads(form.get("tracks") or "[]")
@@ -51,10 +53,9 @@ def build(ctx):
                 # playlist exists (playlist_navigation.navigate_when_ready), on a background thread so this
                 # response is not held for the poll. The result template never opens a YouTube tab.
                 watch_url = f"https://music.youtube.com/watch?list={res['new_ytm']}"
-                bridge = getattr(ctx, "bridge", None)
                 if bridge is not None and getattr(bridge, "connected", False):
                     activity_for(ctx).start_thread(playlist_navigation.navigate_when_ready,
-                        args=(client, bridge, res["new_ytm"], watch_url))
+                        args=(client, bridge, res["new_ytm"], watch_url), kwargs={"intent": intent})
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
                 if res.get("pid") and res.get("added"):
                     measurement.record_action(store, "save", now_fn(), playlist_id=res["pid"],

@@ -5,6 +5,7 @@ coverage. Controls only assemble these bounded prepared opportunities.
 """
 from collections import Counter
 
+from yt_playlist.core import json_cache
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.rec import home_vibe, musical_character, musical_profiles, radio_intensity, rec_params
 from yt_playlist.rec.eligibility import home_exclusions
@@ -84,7 +85,33 @@ def prepare(store, bundles, now, policies):
 
 
 def candidates(store, preset, lane, *, bundles=None, include_genres=(), avoid_genres=()):
-    bundles = bundles if bundles is not None else store.rec_proposals.get_proposals('mode_bundles') or {}
+    if bundles is None:
+        filters = {'include_genres': include_genres, 'avoid_genres': avoid_genres}
+
+        def read():
+            encoded = store.rec_proposals._proposal_json('mode_bundles')
+
+            def select(value):
+                prepared = (value or {}).get('_vibes') or {}
+                if prepared.get('version') != home_vibe.VERSION:
+                    return {}
+                genres = prepared.get('genres', {}).get(preset, {}).get(lane, {})
+                genres = {family: items for family, items in genres.items()
+                          if (include_genres or avoid_genres) and family not in avoid_genres
+                          and (not include_genres or family in include_genres)}
+                return {'_vibes': {'version': prepared.get('version'),
+                    'pools': {preset: {lane: prepared.get('pools', {}).get(preset, {}).get(lane, [])}},
+                    'genres': {preset: {lane: genres}}}}
+
+            # Restore musical evidence only for this preset/lane, rather than
+            # every Home and Radio copy. Reuse the bounded result across retries;
+            # eligibility is still checked against the current snapshot below.
+            selected = (json_cache.decode(encoded, keys={'_vibes'}, project=select)
+                        if encoded is not None else {})
+            return candidates(store, preset, lane, bundles=selected, **filters)
+
+        return store.memoized_read(('vibe-pool-candidates', home_vibe.VERSION, preset, lane,
+                                    tuple(sorted(include_genres)), tuple(sorted(avoid_genres))), read)
     prepared = bundles.get('_vibes') or {}
     if prepared.get('version') != home_vibe.VERSION:
         return []

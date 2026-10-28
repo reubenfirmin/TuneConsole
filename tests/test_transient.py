@@ -112,6 +112,35 @@ def test_organic_plays_still_produce_play_lean(store):
     assert leans.get("artist:OrganicBand", 0.0) > 0
 
 
+def test_play_exposure_batches_metadata_without_changing_per_track_decay(store, monkeypatch):
+    first = _jazz_track(store, 'v1', 'First', artist='Band')
+    second = _jazz_track(store, 'v2', 'Second', artist='Other', year='1970')
+    identity = store.identities.upsert_identity('main', 'cred', None, True)
+    for key, video, at in ((first, 'v1', 5), (second, 'v2', 500), (first, 'v1', 1000)):
+        store.history.record_play_event(identity, key, video, at, source_timezone='UTC')
+    now = 86410
+    plays = transient.evidence_plays(store, rec_params.get_param(store, 'recent_play_limit'))
+    assert len(plays) == 2 and dict(plays)[first] == 1000
+    expected = {}
+    for key, at in plays:
+        strength = rec_params.get_param(store, 'play_transient_w') * transient.decay_weight(
+            now - at, rec_params.get_param(store, 'play_halflife_d'))
+        for facet in transient.facets_for(store, [key]):
+            expected[facet] = expected.get(facet, 0.0) + strength
+    calls = {}
+    for name in ('track_genres', 'track_decades', 'track_artists'):
+        original = getattr(store.rec_query, name)
+
+        def capture(keys, _name=name, _original=original):
+            calls.setdefault(_name, []).append(list(keys))
+            return _original(keys)
+
+        monkeypatch.setattr(store.rec_query, name, capture)
+    assert transient.play_facet_leans(store, now) == expected
+    assert all(len(batches) == 1 and set(batches[0]) == {first, second} for batches in calls.values())
+    assert len(calls) == 3
+
+
 def test_radio_play_lean_stays_zero_after_history_sync_shadow(store):
     # The slow-burn re-entry: radio plays a track today, the next YTM history sync re-records it as
     # a provenance-free noon-bucket history row the SAME day. The lean must stay zero, or radio

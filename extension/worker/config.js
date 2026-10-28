@@ -4,8 +4,8 @@ const TC_CONFIG = Object.freeze({
   appOrigin: "http://127.0.0.1:8765",
   bridgeUrl: "ws://127.0.0.1:8765/bridge/ws",
   sensorVersion: 4,
-  sensorRevision: 10,
-  receiverRevision: 10,
+  sensorRevision: 12,
+  receiverRevision: 14,
   minimumSensorRevision: 8,
   minimumReceiverRevision: 7,
 });

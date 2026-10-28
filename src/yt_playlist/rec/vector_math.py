@@ -9,6 +9,20 @@ def normalize(v):
     return v / (np.linalg.norm(v) + NORM_EPS)
 
 
+def rank_by_context(keys, vectors, context, eligible, k=20):
+    """Select candidates nearest the context centroid, with stable identity ties."""
+    idx = {key: i for i, key in enumerate(keys)}
+    context = sorted(context & set(idx))
+    if not context or not eligible:
+        return set()
+    centroid = vectors[[idx[key] for key in context]].mean(0)
+    norm = np.linalg.norm(centroid)
+    if norm < NORM_EPS:
+        return set()
+    scores = vectors @ (centroid / norm)
+    return set(sorted(eligible, key=lambda key: (-float(scores[idx[key]]), key))[:k])
+
+
 def percentile_scores(scores) -> dict:
     """Ascending average ranks in (0, 1]; tied raw scores share their mean rank.
 

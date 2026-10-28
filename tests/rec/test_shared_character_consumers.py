@@ -40,7 +40,7 @@ def opportunities(store):
         '_meta': {'full_pools': True, 'comfort_pool': 0}}, 1000)
     prepare_vibes(store)
     with mix_tuning.adjusting_vibe(store, 1000):
-        store.settings.set_setting(home_vibe.SETTING, 'gentle')
+        store.settings.set_setting(home_vibe.SETTING, 'relax')
     return pools
 
 
@@ -67,17 +67,23 @@ def test_fit_precedes_mode_heads_within_explicit_genres_in_every_cached_fallback
         assert all(int(track['key'].split('-')[-1]) >= 40 for track in tracks)
         assert all(musical_character.intensity(track) < .5 for track in tracks), [
             (track['key'], musical_character.intensity(track)) for track in tracks]
-    assert all(track['serving_context']['vibe'] == 'gentle' for card in cards for track in card['tracks'])
+    assert all(track['serving_context']['vibe'] == 'relax' for card in cards for track in card['tracks'])
     for card in cards:
         for track in card['tracks']:
             context = track['serving_context']
             assert context['musical_version'] == track['musical']['version']
             assert context['musical_digest'] == track['musical']['digest']
-            assert context['intensity'] == musical_character.dimension(track, 'intensity')[0]
+            value, support = musical_character.intensity_evidence(track)
+            assert context['intensity'] == value
+            assert context['intensity_support'] == support
+            assert context['intensity_source'] == 'provider_measurement'
+            assert context['intensity_vibe'] in ('energize', 'release')
+            fit = track['musical']['vibes']['fits'][context['intensity_vibe']]
+            assert (value, support) == (fit['score'], fit['support'])
 
 
 def test_prepared_profile_stamp_survives_a_new_profile_until_menu_publication(store, opportunities):
-    before = vibe_pools.pick(store, 1000, 'gentle', 'wheelhouse')
+    before = vibe_pools.pick(store, 1000, 'relax', 'wheelhouse')
     track = before[0]
     tid = store.tracks.track_ids_for_videos([track['video_id']])[track['video_id']]
     with store.conn:
@@ -85,7 +91,7 @@ def test_prepared_profile_stamp_survives_a_new_profile_until_menu_publication(st
     prepare_profiles(store)
     current = musical_character.load(store, [track['key']])[track['key']]
     assert current['digest'] != track['musical']['digest']
-    after = vibe_pools.pick(store, 1000, 'gentle', 'wheelhouse')
+    after = vibe_pools.pick(store, 1000, 'relax', 'wheelhouse')
     assert after == before
     observed = {}
     from yt_playlist.rec import journeys
@@ -108,13 +114,13 @@ def test_selected_genre_has_reserved_candidates_beyond_the_global_vibe_head(stor
         items.append({'key': key, 'video_id': key, 'title': key, 'artist': f'Artist {i}', 'genre': genre})
     store.rec_proposals.put_proposals('mode_bundles', {'all': {'fresh': items}})
     prepare_vibes(store)
-    assert all(t['genre'] == 'Techno' for t in vibe_pools.candidates(store, 'gentle', 'fresh'))
-    focused = vibe_pools.pick(store, 1000, 'gentle', 'fresh', include_genres=['jazz'])
-    other = vibe_pools.pick(store, 1000, 'gentle', 'fresh', avoid_genres=['techno'])
+    assert all(t['genre'] == 'Techno' for t in vibe_pools.candidates(store, 'relax', 'fresh'))
+    focused = vibe_pools.pick(store, 1000, 'relax', 'fresh', include_genres=['jazz'])
+    other = vibe_pools.pick(store, 1000, 'relax', 'fresh', avoid_genres=['techno'])
     assert len(focused) == len(other) == 12
     assert all(t['genre'] == 'Jazz' for t in focused + other)
     # A thin or exhausted explicit choice must not silently expand to other genres.
-    assert vibe_pools.pick(store, 1000, 'gentle', 'fresh', include_genres=['metal']) == []
+    assert vibe_pools.pick(store, 1000, 'relax', 'fresh', include_genres=['metal']) == []
 
 
 def test_unknown_intensity_stays_neutral_and_weaker_than_a_known_endpoint_fit():
@@ -127,7 +133,7 @@ def test_unknown_intensity_stays_neutral_and_weaker_than_a_known_endpoint_fit():
 
 
 def test_live_and_reused_offers_preserve_current_explicit_exclusions(store, opportunities):
-    pool = vibe_pools.candidates(store, 'gentle', 'wheelhouse')
+    pool = vibe_pools.candidates(store, 'relax', 'wheelhouse')
     first, second, third = pool[:3]
     store.rec_model.record_dislike(first['key'], 2000, 1000)
     store.rec_model.set_weight(f"genre:{genre_map.family('Metal')}", 0, lo=0, now=1000)
@@ -136,11 +142,11 @@ def test_live_and_reused_offers_preserve_current_explicit_exclusions(store, oppo
         catalog.choose_field(store.conn, tid, 'duration_s', 100_000)
     tid = store.tracks.track_ids_for_videos([third['video_id']])[third['video_id']]
     store.tracks.set_track_genre(tid, 'Classical')
-    remaining = vibe_pools.pick(store, 1000, 'gentle', 'wheelhouse')
+    remaining = vibe_pools.pick(store, 1000, 'relax', 'wheelhouse')
     assert not {first['key'], second['key'], third['key']} & {track['key'] for track in remaining}
     assert all(track['genre'] != 'Metal' for track in remaining)
     protos = home_prepared._eligible_protos(store, [{'lane': 'wheelhouse', 'tracks': deepcopy(pool[:24]),
-                                                   'recipe': {'vibe': 'gentle'}}], 1000)
+                                                   'recipe': {'vibe': 'relax'}}], 1000)
     assert protos
     assert not {first['key'], second['key'], third['key']} & {t['key'] for p in protos for t in p['tracks']}
     assert all(t['genre'] != 'Metal' for p in protos for t in p['tracks'])
@@ -152,11 +158,13 @@ def sound(key, score=0, **overrides):
 
 
 @pytest.mark.parametrize('preset,preferred,other', [
-    ('focus', {'instrumental': 1, 'mood_relaxed': 1, 'energy': .1},
+    ('relax', {'instrumental': 1, 'mood_relaxed': 1, 'energy': .1},
               {'instrumental': 1, 'mood_aggressive': 1, 'energy': 1}),
-    ('bright', {'mood_happy': 1, 'energy': .2}, {'mood_happy': .1, 'energy': 1}),
-    ('move', {'danceability': 1, 'energy': .6}, {'danceability': .1, 'energy': 1}),
-    ('unwind', {'mood_acoustic': 1, 'energy': .1}, {'mood_acoustic': 0, 'energy': .1}),
+    ('concentrate', {'instrumental': 1, 'energy': .3}, {'instrumental': 0, 'energy': .9}),
+    ('cruise', {'energy': .5}, {'energy': .05}),
+    ('energize', {'mood_happy': .1, 'energy': 1}, {'mood_happy': 1, 'energy': .1}),
+    ('uplift', {'mood_happy': 1, 'energy': .1}, {'mood_happy': .1, 'energy': 1}),
+    ('release', {'mood_aggressive': 1, 'energy': .1}, {'mood_aggressive': 0, 'energy': 1}),
 ])
 def test_neighboring_presets_use_distinct_character_dimensions(preset, preferred, other):
     assert home_vibe.affinity(sound('preferred', **preferred), preset) > home_vibe.affinity(sound('other', **other), preset)
@@ -166,32 +174,35 @@ def test_actual_taste_scores_break_close_fit_ties_independently_of_pool_order_an
     weak = sound('weak', score=100, energy=1)
     low = sound('low', score=-2, energy=.1)
     high = sound('high', score=2, energy=.11)
-    assert sorted([weak, low, high], key=lambda item: home_vibe.order_key(item, 'gentle')) == [high, low, weak]
+    assert sorted([weak, low, high], key=lambda item: home_vibe.order_key(item, 'relax')) == [high, low, weak]
     assert home_vibe.taste_score(high) == home_vibe.taste_score({**high, 'key': 'in-another-pool'})
     assert home_vibe.taste_score({'key': 'unknown'}) == .5
 
 
 def test_clicked_library_fallback_prepares_the_shared_pools(store, monkeypatch):
-    store.settings.set_setting(home_vibe.SETTING, 'focus')
+    store.settings.set_setting(home_vibe.SETTING, 'release')
     calls = []
     monkeypatch.setattr(mode_surfaces, 'prepare_bundles', lambda s, now: calls.append((s, now)))
     library_pool.prepare(store, 1000, {'lane': 'explore', 'include_genres': ['jazz'], 'avoid_genres': []})
     assert calls == [(store, 1000)]
 
 
-def test_prepared_menu_from_another_vibe_is_never_served_as_the_current_intent(store, opportunities):
+def test_prepared_set_from_another_vibe_is_served_with_a_preference_notice(store, opportunities):
     payload = home_prepared.prepare(store, 1000)
     assert payload and payload['menus']
     service = home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__), genre_options=[])
     assert home_prepared.cards(store, payload, 1000, service, record=False).protos
     with mix_tuning.adjusting_vibe(store, 1000):
-        store.settings.set_setting(home_vibe.SETTING, 'boost')
+        store.settings.set_setting(home_vibe.SETTING, 'energize')
     scheduled = []
-    assert not home_prepared.cards(store, payload, 1000, service, lambda: scheduled.append(True), record=False).protos
+    fallback = home_prepared.cards(store, payload, 1000, service, lambda: scheduled.append(True), record=False)
+    assert fallback.protos and fallback.preparing
+    assert fallback.preference_notice == "Heads up - we're unable to create energize mix tapes right now."
+    assert all(p['recipe'].get('vibe') != 'energize' for p in fallback.protos)
     assert scheduled == [True]
     with mix_tuning.adjusting_vibe(store, 1000):
         store.settings.delete_setting(home_vibe.SETTING)
-    assert not home_prepared.cards(store, payload, 1000, service, record=False).protos
+    assert home_prepared.cards(store, payload, 1000, service, record=False).protos
 
 
 def test_radio_midpoint_is_neutral_and_saved_session_preserves_profile_stamps(store, opportunities):

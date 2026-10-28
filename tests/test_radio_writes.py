@@ -299,9 +299,11 @@ def test_external_edits_pause_writes_and_preserve_confirmed_radio_view(poc, monk
         def wait(self, timeout=None):
             self.calls += 1
             tick[0] += 40
-            return self.calls > 3 or self.is_set()
+            if self.calls > 3:
+                c.session.stop.set()
+            return self.is_set()
     monkeypatch.setattr(radio_session.time, "monotonic", lambda: tick[0])
-    c.session.stop = ImmediateEvent()
+    c.session.wake = ImmediateEvent()
     c._monitor(c.session)
     assert c.status()["active"]
     assert c.session.halted

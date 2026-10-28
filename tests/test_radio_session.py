@@ -75,6 +75,53 @@ def test_skip_forward_catches_up_and_going_back_does_not_append(poc):
     assert remote.adds == [["v4"]]
 
 
+@pytest.mark.parametrize('retries', [0, 2])
+def test_explicit_skip_records_one_request_and_stale_retries_do_not_reject_the_next_song(poc, monkeypatch, retries):
+    c, *_ = poc
+    c.start()
+    play(c, 'v1', position=1)
+    advance, attempts = c._advance, []
+
+    def preparing(s):
+        attempts.append(True)
+        if len(attempts) <= retries:
+            raise PlaylistPending('Controlled native preparation delay')
+        return advance(s)
+
+    def next_song(video):
+        assert video == 'v1'
+        c.ctx.bridge.now_playing = {**c.ctx.bridge.now_playing, 'video_id': 'v2', 'position': 0}
+        return 200, {'ok': True}
+
+    monkeypatch.setattr(c, '_advance', preparing)
+    monkeypatch.setattr(c.playback, 'next', next_song)
+    assert c.skip('v1') == {'ok': True}
+    rows = c.ctx.store.player_events.player_events_since(0, kind='next')
+    assert len(rows) == 1
+    assert rows[0]['video_id'] == 'v1' and rows[0]['position'] == 1
+    assert rows[0]['identity_id'] == c.session.identity
+    assert c.skip('v1') == {'ok': True}
+    assert c.ctx.store.player_events.player_events_since(0, kind='next') == rows
+
+
+@pytest.mark.parametrize('restored', [False, True])
+def test_cached_seed_suggestions_recheck_skip_breaks_and_return_after_expiry(poc, restored):
+    c, *_ = poc
+    offer = c.seeds()
+    track = offer['tracks'][0]
+    c.ctx.store.player_events.record_player_event(
+        c.ctx.store.identities.get_master_identity().id, 'next', track['video_id'], 1, 200, '', None, 1234)
+    if restored:
+        c.offer = None
+    bootstrap = c.bootstrap()
+    assert track['key'] not in {item['key'] for item in bootstrap['seeds']}
+    assert bootstrap['seedMenu'] == offer['menu_id']
+    if not restored:
+        assert track['key'] not in {item['key'] for item in c.seeds()['tracks']}
+    c.ctx.now_fn = lambda: 1234 + 86400
+    assert track['key'] in {item['key'] for item in c.bootstrap()['seeds']}
+
+
 @pytest.mark.parametrize("video,playlist,extra", [
     ("v3", "OTHER", {}), ("unknown", "PLSESSION", {}),
     ("v3", "", {}), ("v3", "PLSESSION", {"paused": True}),
@@ -191,7 +238,7 @@ def test_playlist_preparation_times_out_without_leaving_an_endless_launch(poc, m
     s.preparation_deadline = time.monotonic() - 1
     with pytest.raises(PlaylistChanged, match="preparation timed out"):
         c._complete_start(s)
-    monkeypatch.setattr(s.stop, "wait", lambda _: False)
+    monkeypatch.setattr(s.wake, "wait", lambda _: False)
     c._monitor(s)
     assert not c.status()["active"]
     assert "preparation timed out" in c.status()["error"]
@@ -314,7 +361,7 @@ def test_monitor_exits_when_application_closes_or_extension_disconnects(poc, dis
     class ImmediateEvent(threading.Event):
         def wait(self, timeout=None):
             return self.is_set()
-    c.session.stop = ImmediateEvent()
+    c.session.wake = ImmediateEvent()
     c._monitor(c.session)
     assert c.session.stop.is_set()
     assert not c.session.monitoring

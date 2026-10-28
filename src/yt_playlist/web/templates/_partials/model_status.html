@@ -1,6 +1,7 @@
 {# Re-fetch the data summary and lazy prediction checks when Auto-tune finishes. #}
 <div id="model-status"
      hx-get="/taste/model-status" hx-trigger="autotune-done from:body" hx-swap="outerHTML">
+  {% include "_partials/content_maintenance.html" %}
   <section class="model-health-section model-health-foundation" aria-labelledby="model-data-title">
     <div class="model-health-section-head">
       <div class="model-health-title-row">

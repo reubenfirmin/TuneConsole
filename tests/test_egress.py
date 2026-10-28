@@ -3,6 +3,7 @@ allow the allowlist, block everything else, strip secrets from the log, and gate
 *both* HTTP stacks (requests and urllib). The request must never reach the
 underlying transport when the host is off-allowlist."""
 import io
+import json
 import ssl
 import urllib.error
 import urllib.request
@@ -279,8 +280,9 @@ def test_urllib_update_request_cannot_add_data_at_open(guarded_transports, as_re
     assert "SECRET" not in "\n".join(g.recent())
 
 
-def test_update_checker_still_fetches_latest_release_through_guard(guarded_transports):
+def test_update_checker_still_fetches_latest_release_through_guard(guarded_transports, monkeypatch):
     from yt_playlist.core import updatecheck
+    from yt_playlist.integrations.github import GitHubReleasesIAO
 
     g, _ = guarded_transports
     sent = []
@@ -293,12 +295,88 @@ def test_update_checker_still_fetches_latest_release_through_guard(guarded_trans
         return response
 
     g._orig_opener_send = fetch
+    # A fresh boundary proves transport reached the guard instead of a shared cache.
+    monkeypatch.setattr(updatecheck, '_github', GitHubReleasesIAO())
     assert updatecheck._fetch_latest_release() == "0.2.0"
     assert len(sent) == 1
     assert sent[0].full_url == _UPDATE_URL
     assert sent[0].get_method() == "GET"
     assert sent[0].data is None
     assert "verdict=ALLOW" in g.recent()[0]
+
+
+def test_spotify_report_thumbnail_uses_guarded_public_transport(guarded_transports, monkeypatch):
+    from yt_playlist.integrations.spotify import SpotifyIAO
+    from yt_playlist.providers import spotify
+
+    g, _ = guarded_transports
+    sent = []
+
+    def fetch(opener, request, *args, **kwargs):
+        sent.append(request)
+        body = (b'{"type":"rich","version":"1.0","provider_name":"Spotify",'
+                b'"title":"Record","html":"","thumbnail_url":"https://i.scdn.co/image/art"}')
+        response = urllib.response.addinfourl(io.BytesIO(body), {}, request.full_url, code=200)
+        response.msg = 'OK'
+        return response
+
+    g._orig_opener_send = fetch
+    monkeypatch.setattr(spotify, '_iao', SpotifyIAO())
+    assert spotify.thumbnail('https://open.spotify.com/album/abc123') == 'https://i.scdn.co/image/art'
+    assert len(sent) == 1 and sent[0].get_method() == 'GET' and sent[0].data is None
+    assert sent[0].full_url.startswith('https://open.spotify.com/oembed?url=')
+    assert sent[0].get_header('Authorization') is None
+    assert 'verdict=ALLOW' in g.recent()[0]
+
+
+def test_youtube_storyboard_iao_uses_the_existing_narrow_guard(guarded_transports):
+    import time
+    from yt_playlist.integrations.youtube_music import YouTubeStoryboardIAO
+    guard, _ = guarded_transports
+    sent = []
+    def fetch(adapter, request, *args, **kwargs):
+        sent.append(request)
+        response = requests.Response()
+        response.status_code, response.url = 200, request.url
+        response.headers = {'Content-Type': 'image/jpeg'}
+        response.raw = io.BytesIO(b'sprite')
+        return response
+    guard._orig_adapter_send = fetch
+    url = 'https://i.ytimg.com/sb/abcdefghijk/storyboard3_L1/M0.jpg?sigh=PRIVATE'
+    assert YouTubeStoryboardIAO().read(url, time.monotonic() + 10) == b'sprite'
+    assert len(sent) == 1 and sent[0].method == 'GET' and sent[0].body is None
+    assert sent[0].headers.get('Authorization') is None
+    lines = guard.recent()
+    assert len(lines) == 1 and 'verdict=ALLOW' in lines[0]
+    assert 'PRIVATE' not in lines[0] and 'sigh=' not in lines[0]
+
+
+def test_deepseek_admission_uses_exact_guarded_post(guarded_transports, store, monkeypatch):
+    from tests.providers.test_deepseek import ALBUM, TEXT, response
+    from yt_playlist.integrations.deepseek import DeepSeekIAO
+    from yt_playlist.providers import deepseek
+    from yt_playlist.rec import album_descriptions
+
+    g, _ = guarded_transports
+    sent = []
+
+    def fetch(opener, request, *args, **kwargs):
+        sent.append(request)
+        result = urllib.response.addinfourl(io.BytesIO(json.dumps(response()).encode()),
+                                            {}, request.full_url, code=200)
+        result.msg = 'OK'
+        return result
+
+    g._orig_opener_send = fetch
+    monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
+    store.settings.set_setting('deepseek_api_key', 'sk-SECRET-12345678')
+    monkeypatch.setattr(deepseek, '_iao', DeepSeekIAO())
+    assert album_descriptions.get(store, ALBUM, 1000)[0]['text'] == TEXT
+    assert len(sent) == 1 and sent[0].full_url == 'https://api.deepseek.com/chat/completions'
+    assert sent[0].get_method() == 'POST'
+    assert store.rec_proposals.get_proposals('album_description_usage')['requests'] == 1
+    assert all('SECRET' not in entry for entry in g.recent())
+    assert any('verdict=ALLOW' in entry for entry in g.recent())
 
 
 @pytest.mark.parametrize("stack", ["requests", "urllib"])
@@ -367,11 +445,11 @@ def logged_transports(tmp_path, monkeypatch):
     return guard
 
 
-def _urllib_response(url, status, headers=None):
+def _urllib_response(url, status, headers=None, body=b"unconsumed body"):
     message = Message()
     for key, value in (headers or {}).items():
         message[key] = value
-    response = urllib.response.addinfourl(io.BytesIO(b"unconsumed body"), message, url, code=status)
+    response = urllib.response.addinfourl(io.BytesIO(body), message, url, code=status)
     response.msg = "SECRET reason"
     return response
 
@@ -483,3 +561,46 @@ def test_redirect_hops_keep_their_own_status_and_failure(logged_transports, stac
     assert expected[ending] in lines[1]
     assert len(reached) == (1 if ending == "blocked" else 2)
     assert "SECRET" not in "\n".join(lines)
+
+
+@pytest.mark.parametrize('ending', ['success', 'http503', 'timeout', 'blocked'])
+def test_cover_art_iao_keeps_guarded_archive_redirects_and_retry_outcomes(logged_transports, monkeypatch, ending):
+    from types import SimpleNamespace
+    from yt_playlist.integrations.coverartarchive import CoverArtArchiveIAO
+    from yt_playlist.providers import coverart
+
+    guard, reached = logged_transports, []
+    start = 'https://coverartarchive.org/release/release'
+    target = ('https://archive.org.evil.example/index.json' if ending == 'blocked'
+              else 'https://dn721909.ca.archive.org/mbid-release/index.json')
+    data = {'images': [{'front': True, 'image': 'https://archive.org/cover.jpg'}]}
+
+    def transport(opener, request, *args, **kwargs):
+        url = request.full_url
+        reached.append(url)
+        if len(reached) == 1:
+            return _urllib_response(url, 307, {'Location': target})
+        if ending == 'timeout':
+            raise TimeoutError('controlled archive outage')
+        return _urllib_response(url, 503 if ending == 'http503' else 200,
+            {'Retry-After': '120'} if ending == 'http503' else {}, json.dumps(data).encode())
+
+    guard._orig_opener_send = transport
+    monkeypatch.setattr(urllib.request, '_opener',
+                        urllib.request.build_opener(urllib.request.ProxyHandler({})))
+    monkeypatch.setattr(coverart, '_iao', CoverArtArchiveIAO(now_fn=lambda: 100,
+        pacer=SimpleNamespace(wait=lambda: None)))
+    outcome = coverart.lookup(['release'])
+    if ending == 'success':
+        assert outcome.status == 'found' and outcome.url == 'https://archive.org/cover.jpg'
+    else:
+        assert outcome.status == 'retry' and outcome.url is None
+        if ending == 'http503':
+            assert outcome.retry_in == 120
+        # Host failures defer other releases; a blocked redirect defers its request.
+        assert coverart.lookup(['release' if ending == 'blocked' else 'different']).status == 'retry'
+    assert reached == ([start] if ending == 'blocked' else [start, target])
+    lines = guard.recent()
+    assert len(lines) == 2 and 'status=307' in lines[0]
+    assert ('verdict=BLOCK' in lines[1]) == (ending == 'blocked')
+    assert 'SECRET' not in '\n'.join(lines)

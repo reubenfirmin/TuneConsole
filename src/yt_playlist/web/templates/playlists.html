@@ -52,21 +52,22 @@
     <td class="playlist-art-cell">
       <span class="pl-cover art-playlist">
         <img class="pl-thumb" :src="r.thumbnail" x-show="r.thumbnail" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
-        <a class="pl-play" :href="'https://music.youtube.com/playlist?list=' + r.ytm"
-           target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
+        <a class="pl-play" :href="r.is_video ? '/?tv_playlist=' + r.id + '#tv' : 'https://music.youtube.com/playlist?list=' + r.ytm"
+           :target="r.is_video ? '_self' : '_blank'" rel="noopener" :title="r.is_video ? 'Play on TV' : 'Play on YouTube Music'">▶</a>
       </span>
     </td>
     <td>
       {% if promote %}<div class="generated-title-actions">{% endif %}
         <a class="ptitle" :href="'/playlist/' + r.id" x-text="r.title" title="Open in TuneConsole"></a>
         {% if show_created %}<small class="playlist-created" x-text="'Created ' + fmtLast(r.created)"></small>{% endif %}
+        <small class="playlist-playback" x-text="r.last == null ? 'No recorded playlist listening' : 'Last listened ' + fmtLast(r.last)"></small>
         {% if promote %}<button type="button" class="promote-btn" x-show="r.is_generated" @click.stop="promote(r)"
                 title="Keep this playlist in your library and use it to shape your recommendations">Promote to library</button>
       </div>{% endif %}
     </td>
-    {% if has_groups %}<td><span class="gtag" x-show="r.group" x-text="r.group"></span></td>{% endif %}
+    {% if has_groups %}<td><span class="gtag" x-show="r.group" :title="r.group"><span class="gtag-label" x-text="r.group"></span></span></td>{% endif %}
     <td class="num mono" x-text="r.count"></td>
-    <td class="num lastcol" x-text="fmtLast(r.last)"></td>
+    <td class="num lastcol" x-text="r.last == null ? 'No recorded listen' : fmtLast(r.last)"></td>
     <td class="pl-activity-cell">
       <span class="pl-activity" role="img" :title="activityLabel(r)" :aria-label="activityLabel(r)">
         <i :style="{ '--heat': activity(r) }"></i>
@@ -81,7 +82,7 @@
         <th class="col-thumb" aria-label="Cover"></th>
         {% for label, key, cls in [('Playlist', 'title', ''), ('Group', 'group', 'col-group'), ('Songs', 'count', 'num col-count'), ('Last played', 'last', 'num col-last'), ('Activity', 'listens', 'col-length')] %}
         {% if key != 'group' or has_groups %}
-        <th class="{{ cls }}{% if sortable %} sorth{% endif %}"{% if sortable %} tabindex="0" role="button" @click="sortBy('{{ key }}')" @keydown.enter.space.prevent="sortBy('{{ key }}')"{% endif %}{% if key == 'last' %} title="Most recent play of any song currently in this playlist, including plays before the playlist was created"{% elif key == 'listens' %} title="Relative activity based on track plays within each playlist. Hover a meter for the exact total."{% endif %}>{{ label }}{% if sortable %}{{ sort_indicator(key) }}{% endif %}</th>
+        <th class="{{ cls }}{% if sortable %} sorth{% endif %}"{% if sortable %} tabindex="0" role="button" @click="sortBy('{{ key }}')" @keydown.enter.space.prevent="sortBy('{{ key }}')"{% endif %}{% if key == 'last' %} title="Most recent recorded playback from this playlist. Partial listening counts; playing its songs elsewhere does not."{% elif key == 'listens' %} title="Playlist listening sessions, including partial listens. A context change or 30 minutes without playback starts a new session; track changes and repeated reports do not."{% endif %}>{{ label }}{% if sortable %}{{ sort_indicator(key) }}{% endif %}</th>
         {% endif %}
         {% endfor %}
       </tr></thead>

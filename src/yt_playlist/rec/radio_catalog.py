@@ -23,7 +23,7 @@ def cluster_pool(store, keys, excluded, excluded_keys, allowed, *, limit):
         qs = ','.join('?' for _ in batch)
         with store._lock:
             rows = store.conn.execute(
-                'SELECT t.identity_key AS key, t.video_id, t.title, t.artist, t.album, t.thumbnail, '
+                'SELECT t.identity_key AS key, t.video_id, t.title, t.artist, t.album, t.album_browse_id, t.thumbnail, '
                 't.duration_s AS duration, t.genre, t.mb_year AS year, t.available, t.bpm, t.energy, '
                 f't.danceability, COALESCE(p.plays,0) AS plays, {LIKED_EXISTS} AS liked, '
                 'NOT EXISTS(SELECT 1 FROM catalog_entries e JOIN library_memberships m ON m.entry_id=e.id '
@@ -58,7 +58,7 @@ def themed_pool(store, genres: GenrePolicy, excluded, excluded_keys, allowed, *,
     while len(tracks) < limit:
         with store._lock:
             rows = store.conn.execute(
-                "SELECT t.id, t.identity_key AS key, t.video_id, t.title, t.artist, t.album, t.thumbnail, "
+                "SELECT t.id, t.identity_key AS key, t.video_id, t.title, t.artist, t.album, t.album_browse_id, t.thumbnail, "
                 "t.duration_s AS duration, t.genre, t.mb_year AS year, t.available, t.bpm, t.energy, t.danceability, "
                 "COALESCE(p.plays,0) AS plays, "
                 f"{LIKED_EXISTS} AS liked, "

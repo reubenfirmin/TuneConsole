@@ -50,7 +50,8 @@ def test_projection_upgrade_refreshes_legacy_pools_on_worker_without_refitting(s
     refreshed = store.rec_proposals.get_proposals('mode_bundles')['_vibes']
     assert refreshed['version'] == home_vibe.VERSION
     assert refreshed['profile_version'] == musical_character.VERSION
-    assert refreshed['pools']['gentle']['explore']
+    assert set(refreshed['pools']) == set(home_vibe.PRESETS)
+    assert refreshed['pools']['relax']['explore']
     assert not candidate_refresh.due(store, 2001)
     assert store.rec_model.get_rec_vectors() == vectors
 
@@ -72,8 +73,7 @@ def test_genre_edits_reset_and_restore_update_scores_and_served_provenance(store
             assert row is None
         else:
             assert (row['score'] < original['score']) == (weight < 1)
-            policy = json.loads(store.conn.execute('SELECT configuration FROM rec_serving_policies '
-                'WHERE model_version=?', (row['pool_policy'],)).fetchone()[0])
+            policy = store.rec_ledger.policy_configuration(row['pool_policy'])
             assert policy['weights'][axis] == weight
         assert store.rec_model.get_rec_vectors() == vectors
     store.rec_model.reset_weights()
@@ -159,8 +159,7 @@ def test_taste_controls_rerank_saved_pools_after_edits_resets_and_checkpoint_res
     assert client.post('/taste/weight', data={'axis': 'lane:deep_cut', 'weight': 3}).status_code == 200
     changed = pool('wheelhouse')
     assert [r['key'] for r in changed] != [r['key'] for r in original]
-    policy = json.loads(store.conn.execute('SELECT configuration FROM rec_serving_policies WHERE model_version=?',
-                                          (changed[0]['pool_policy'],)).fetchone()[0])
+    policy = store.rec_ledger.policy_configuration(changed[0]['pool_policy'])
     assert policy['weights']['lane:deep_cut'] == 3
     assert policy['params']['comfort_min_plays'] == 4
     assert client.post('/taste/reset-weights').status_code == 200

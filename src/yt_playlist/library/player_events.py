@@ -12,7 +12,7 @@ from yt_playlist.library.live_plays import resolve_identity
 from yt_playlist.library import ratings
 from yt_playlist.util.curation import confirmed_rate
 
-PLAYBACK_KINDS = {"track_exit", "ended", "state", "tick", "volume", "bye"}
+PLAYBACK_KINDS = {"track_exit", "ended", "state", "tick", "volume", "bye", "next"}
 CURATION_KINDS = {"rate", "playlist_edit", "feedback", "subscription", "share_intent"}
 
 # Server-written kinds: recorded directly via store.record_player_event by server-side routes, never
@@ -25,7 +25,7 @@ _BODY_CAP = 4096
 # A successful request is authoritative, including an explicit unlike. Player-bar readouts
 # remain untrusted for clearing a rating (see live_plays._STATUSES).
 _RATE_STATUS = {"like": "LIKE", "dislike": "DISLIKE", "removelike": "INDIFFERENT"}
-_PAYLOAD_EXTRAS = ("state", "volume", "shuffle", "repeat")
+_PAYLOAD_EXTRAS = ("state", "volume", "muted", "tabMuted", "paused", "shuffle", "repeat")
 
 
 def _extract_action_from_url(url):
@@ -63,8 +63,14 @@ def _curation_fields(kind, msg):
 
 def handle_player_event(ctx, msg, now) -> bool:
     """Persist one pevent frame. Returns True when a row was recorded."""
+    if getattr(ctx.store, 'activity_paused', False):
+        return False
     kind = (msg.get("kind") or "").strip()
     if kind not in PLAYBACK_KINDS and kind not in CURATION_KINDS:
+        return False
+    if (kind in CURATION_KINDS or kind == 'next') and msg.get('brandKnown') is not True:
+        # Empty brand ID means main account only with a verified request-time
+        # identity. Unknown and legacy observer frames carry no attribution.
         return False
     store = ctx.store
     ident = resolve_identity(store, (msg.get("brandId") or "").strip())

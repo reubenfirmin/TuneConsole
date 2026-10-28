@@ -9,15 +9,70 @@ from playwright.sync_api import expect
 from tests.browser.radio_ui_support import radio_ui
 
 
+def test_seed_grid_fills_available_space_without_javascript_sizing(page, radio_ui):
+    # Disable the measurement callback before Alpine creates the reloaded view.
+    # CSS must allocate the initial grid and handle resizing independently.
+    def without_sizing(route):
+        response = route.fetch()
+        route.fulfill(response=response, body=response.text() + '''
+          const measuredRadioArtwork = radioArtwork;
+          radioArtwork = function() {
+            const artwork = measuredRadioArtwork();
+            artwork.fitSpace = function() {};
+            return artwork;
+          };
+        ''')
+
+    page.route('**/static/radio-artwork.js*', without_sizing)
+    page.reload(wait_until='domcontentloaded')
+    expect(page.locator('.radio-seed')).to_have_count(16)
+    for width, height in [(1440, 1000), (1440, 700), (390, 820), (390, 600)]:
+        page.set_viewport_size({'width': width, 'height': height})
+        geometry = page.locator('.radio-seeds').evaluate('''grid => {
+          const main = grid.closest('main'), bounds = grid.getBoundingClientRect();
+          const page = main.getBoundingClientRect();
+          const styles = getComputedStyle(grid);
+          return {height: bounds.height, bottom: bounds.bottom,
+            expectedBottom: page.bottom - parseFloat(getComputedStyle(main).paddingBottom),
+            pageBottom: page.bottom, viewport: innerHeight,
+            columns: styles.gridTemplateColumns.split(' ').length,
+            rows: styles.gridTemplateRows.split(' ').length,
+            overflow: document.documentElement.scrollWidth > innerWidth};
+        }''')
+        assert abs(geometry['bottom'] - geometry['expectedBottom']) < 2, geometry
+        assert geometry['height'] > height / 2, geometry
+        assert geometry['pageBottom'] <= height + 12, geometry  # main's entrance animation may translate 10px
+        assert geometry['columns'] == (2 if width < 500 else 4), geometry
+        assert geometry['rows'] == (8 if width < 500 else 4), geometry
+        assert not geometry['overflow'], geometry
+    expect(page.locator('.radio-seeds')).to_have_css('overflow-y', 'auto')
+    page.get_by_role('tab', name='Mix tapes', exact=True).click()
+    expect(page.locator('.radio-seeds')).to_be_hidden()
+    page.get_by_role('tab', name='On air', exact=True).click()
+    expect(page.locator('.radio-seeds')).to_be_visible()
+
+
+def test_repair_radio_renders_without_a_local_playlist_record(page, radio_ui):
+    api = radio_ui
+    api.state = {**api.ready, 'local_id': None}
+    expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
+    expect(page.locator('.radio-session table')).to_be_visible()
+    expect(page.get_by_role('status', name='Starting radio')).to_be_hidden()
+    expect(page.locator('.radio-seeds')).to_be_hidden()
+    page.reload()
+    expect(page.locator('.radio-session table')).to_be_visible(timeout=6000)
+    expect(page.get_by_role('status', name='Starting radio')).to_be_hidden()
+
+
 def test_launch_waits_for_playback_and_playlist_before_revealing_session(page, radio_ui):
     api = radio_ui
     page.locator(".radio-seed").first.click()
     launch = page.get_by_role("status", name="Starting radio")
     expect(launch).to_be_visible()
-    expect(launch).to_contain_text("finding your frequency")
+    expect(launch).to_contain_text("Finding your frequency")
     expect(page.locator(".radio-seeds")).to_be_hidden()
     expect(page.locator(".radio-session")).to_be_hidden()
-    expect(launch.locator(".radio-launch-node")).to_have_count(8)
+    expect(launch.locator(".gen-node")).to_have_count(8)
     expect(launch).to_have_css("opacity", "1")
     page.screenshot(path="/tmp/tuneconsole-radio-launch.png")
 
@@ -26,7 +81,7 @@ def test_launch_waits_for_playback_and_playlist_before_revealing_session(page, r
     assert len(api.starts) == 1
     assert api.starts[0].request.post_data_json["video_id"] == "radio0"
     api.starts.pop().fulfill(json={"ok": True, **api.state})
-    expect(launch).to_contain_text("connecting to youtube music")
+    expect(launch).to_contain_text("Connecting to YouTube Music")
     # Confirmed playback alone cannot reveal a session whose playlist is still loading.
     api.state = api.ready
     with page.expect_request("**/radio/status", timeout=6000):
@@ -73,7 +128,7 @@ def test_resuming_session_waits_for_history_and_keeps_it_visible_during_refresh(
         api.state = api.ready
     launch = page.get_by_role("status", name="Starting radio")
     expect(launch).to_be_visible(timeout=6000)
-    expect(launch).to_contain_text("returning to your frequency")
+    expect(launch).to_contain_text("Returning to your radio")
     session = page.locator('.radio-session')
     expect(session).to_be_hidden()
     expect(page.locator('.radio-directions')).to_be_hidden()
@@ -111,7 +166,7 @@ def test_restart_waits_for_extension_and_join_before_showing_radio(page, radio_u
     page.reload()
     launch = page.get_by_role("status", name="Starting radio")
     expect(launch).to_be_visible()
-    expect(launch).to_contain_text("returning to your frequency")
+    expect(launch).to_contain_text("Returning to your radio")
     expect(page.locator('.radio-seeds')).to_be_hidden()
     expect(page.locator('.radio-session')).to_be_hidden()
     api.hold_playlist = True
@@ -337,7 +392,7 @@ def test_unconfirmed_launch_returns_to_launcher_instead_of_showing_session(page,
     expect(page.locator(".radio-launch")).to_be_visible()
     api.state = {**api.ready, "starting": True}
     api.starts.pop().fulfill(json={"ok": True, **api.state})
-    expect(page.locator(".radio-launch")).to_contain_text("connecting to youtube music")
+    expect(page.locator(".radio-launch")).to_contain_text("Connecting to YouTube Music")
     api.state = {**api.ready, "starting": False, "active": False}
     expect(page.locator(".radio-seeds")).to_be_visible(timeout=6000)
     expect(page.locator(".radio-session")).to_be_hidden()
@@ -366,8 +421,10 @@ def test_launcher_highlight_keyboard_and_touch_layout(page, radio_ui, width, tou
     page.emulate_media(reduced_motion="reduce")
     seed.get_by_role('button').press("Enter")
     expect(page.locator(".radio-launch")).to_be_visible()
-    expect(page.locator(".radio-launch-node").first).to_have_css("animation-name", "radio-float")
-    expect(page.locator(".radio-launch-node").first).to_have_css("animation-play-state", "running")
+    node = page.locator(".radio-launch .gen-node").first
+    start = node.evaluate("el => el.style.transform")
+    page.wait_for_function("start => document.querySelector('.radio-launch .gen-node').style.transform !== start", arg=start)
+    expect(page.locator(".radio-launch .gen-hub-ring")).to_have_css("animation-play-state", "running")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
 
@@ -406,7 +463,7 @@ def test_playlist_radio_button_starts_through_transition_without_relaunching_on_
     assert "video_id" not in data
     api.state = {**api.ready, "starting": True}
     api.starts.pop().fulfill(json={"ok": True, **api.state})
-    expect(launch).to_contain_text("connecting to youtube music")
+    expect(launch).to_contain_text("Connecting to YouTube Music")
     with page.expect_response(lambda response: response.url.endswith('/radio/status')
                               and response.json().get('starting') is False, timeout=6000):
         api.state = api.ready

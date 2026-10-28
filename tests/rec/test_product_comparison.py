@@ -112,25 +112,32 @@ def test_comparison_services_queued_capture_between_individual_menus(store, tria
             future = threads.submit(worker._stage, 'comparison audit', comparison_preparation.prepare,
                                     store, trial, product.DAY, checkpoint)
             try:
-                assert entered.wait(5)
+                assert entered.wait(5), store.model_selection.selection_run(trial['run_id'])
                 oid = choices.issue(store, 'albums', [{'id': 'a'}], product.DAY, context={})
                 assert choices.respond(store, oid, 'visible', product.DAY + 1, visible=['a'])
                 assert not store.rec_ledger.evidence().get('opportunity', oid)
             finally:
                 release.set()
-            assert future.result(15)
+            assert future.result(15), store.model_selection.selection_run(trial['run_id'])
         assert checkpoints and all(ident != threading.get_ident() for ident in checkpoints)
         assert choices.opportunity(store, oid)
         assert store.rec_ledger.evidence().get('response', f'{oid}:visible:')
         assert not worker.jobs.measurements
         assert store.rec_model.get_rec_vectors() == old
         from yt_playlist.rec import home_prepared
+        from yt_playlist.rec.comparison_storage import decode
         for arm in ('incumbent', 'challenger'):
             paired = store.rec_proposals.get_proposals(product.pair_surface(trial['run_id'], arm, 'mixes'))
-            assert paired['data']['tuning'] == home_prepared.tuning_key(store, product.DAY)
-        timings = store.model_selection.selection_run(trial['run_id'])['preparation_timings']
+            assert decode(paired)['tuning'] == home_prepared.tuning_key(store, product.DAY)
+        saved_run = store.model_selection.selection_run(trial['run_id'])
+        sizes, timings = saved_run['preparation_bytes'], saved_run['preparation_timings']
+        assert len(sizes['projections']) == 6
+        assert sizes['total'] == sum(len(row[0].encode()) for row in store.conn.execute(
+            'SELECT payload FROM rec_proposals WHERE surface LIKE ?', (f"model_pair:{trial['run_id']}:%",)))
+        assert sizes['total'] <= comparison_preparation.MAX_PREPARED_BYTES
         for arm in ('incumbent', 'challenger'):
             assert all(f'{arm}: mix menu {index + 1}' in timings for index in range(12))
+            assert all(f'{arm}: {format} storage' in timings for format in product.FORMATS)
     finally:
         release.set()
         worker.shutdown()
@@ -157,6 +164,23 @@ def test_unknown_endings_invisible_options_late_outcomes_and_withdrawals_stay_di
     assert revised['formats']['mixes']['arms'][assigned['arm']]['unknown'] == 3
     # A later correction does not rewrite an earlier observation cutoff.
     assert product.measure(store, trial, 3 * product.DAY) == report
+
+
+@pytest.mark.parametrize('format', ['albums', 'mixes'])
+def test_interleaved_views_only_attribute_a_close_to_the_requesting_offer(store, trial, format):
+    assigned = product.assignment(store, format, 'view', 100)
+    held = [choices.present(store, format, [{'id': 'option'}], 100 + index,
+        context={'comparison': assigned}, window=index, episode_id=f'view-{index}') for index in range(2)]
+    for oid in held:
+        choices.respond(store, oid, 'visible', 102, visible=['option'])
+    assert store.rec_proposals.get_proposals('choice_window:' + format)['opportunity_id'] == held[1]
+    choices.close_window(store, format, 103, opportunity_id=held[0])
+    choices.close_window(store, format, 104, opportunity_id=held[0])
+    closes = [row for row in store.rec_ledger.evidence().records('response') if row['kind'] == 'close']
+    assert [row['opportunity_id'] for row in closes] == [held[0]]
+    row = product.measure(store, trial, 3 * product.DAY)['formats'][format]['arms'][assigned['arm']]
+    assert (row['visible'], row['observed'], row['unknown'], row['qualified']) == (2, 1, 1, 0)
+    assert len(store.rec_ledger.evidence().records('opportunity')) == 2
 
 
 def test_many_tracks_or_branches_cannot_manufacture_independent_days(store, trial):
@@ -211,6 +235,32 @@ def test_failed_daily_preparation_keeps_the_trial_and_last_published_pair(store,
     assert current['decision_at'] == trial['decision_at']
     assert store.rec_proposals.get_proposals(surface) == saved
     assert store.model_selection.selection_run(trial['run_id'])['status'] == 'running'
+
+
+def test_pair_quota_failure_retains_complete_previous_pairs_and_records_sizes(store, trial, monkeypatch):
+    store.settings.set_setting('rec_dim', '2')
+    trial['vectors'] = store.rec_ledger.evidence().artifact({'incumbent': [], 'challenger': []})
+    saved = {}
+    for arm in ('incumbent', 'challenger'):
+        for format in product.FORMATS:
+            surface = product.pair_surface(trial['run_id'], arm, format)
+            saved[surface] = {'run_id': trial['run_id'], 'data': {'last_good': [arm, format]}}
+            store.rec_proposals.put_proposals(surface, saved[surface], 0)
+
+    def complete_arm(*args):
+        return {'_policies': [], '_policy_bases': [], **{
+            format: {'complete': [f'recording:{i}' for i in range(100)]} for format in product.FORMATS}}
+
+    monkeypatch.setattr(comparison_preparation, '_arm', complete_arm)
+    monkeypatch.setattr(comparison_preparation, 'MAX_PREPARED_BYTES', 1)
+    assert not comparison_preparation.prepare(store, trial, product.DAY)
+    assert all(store.rec_proposals.get_proposals(surface) == value for surface, value in saved.items())
+    run = store.model_selection.selection_run(trial['run_id'])
+    assert run['status'] == 'running'
+    assert 'storage budget' in run['preparation_error']
+    assert run['preparation_bytes']['total'] > 1
+    assert set(run['preparation_bytes']['projections']) == set(saved)
+    assert product.state(store)['decision_at'] == trial['decision_at']
 
 
 def test_interrupted_admission_without_published_trial_state_recovers_as_failed(store, trial):
@@ -352,25 +402,55 @@ def test_storage_keeps_an_old_active_restore_point_and_radio_assignment(store, t
     assert store.rec_proposals.get_proposals(product.pair_surface(trial['run_id'], 'incumbent', 'radio')) is None
 
 
-def test_health_and_history_render_production_policy_without_fitting(store, trial, monkeypatch):
+def test_health_uses_daily_policy_and_preserves_legacy_history_without_fitting(store, trial, monkeypatch):
     from fastapi.testclient import TestClient
     from yt_playlist.web.app import create_app
     report = favorable(store, trial)
     store.rec_proposals.put_proposals('model_live_report', report, trial['decision_at'])
+    historical = store.model_selection.selection_run(trial['run_id'])
+    historical.update(status='retained', product_report=report, ended_at=trial['decision_at'],
+                      reason='Historical menu comparison retained')
+    store.model_selection.save_selection(trial['run_id'], historical)
     monkeypatch.setattr(model_setup, 'build', lambda *a: pytest.fail('health request fitted a model'))
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
     with TestClient(app, base_url='http://127.0.0.1') as client:
         response = client.get('/taste/autotune-status')
         assert response.status_code == 200
-        assert 'Choices and listening' in response.text and 'Observed days:' in response.text
-        assert 'Model changes wait for validated choice evidence' not in response.text
+        assert 'Checks run daily when enough fresh listening is available.' in response.text
+        assert 'Choices and listening' not in response.text and 'Observed days:' not in response.text
         history = client.get('/taste/model-selection/history')
-        assert history.status_code == 200 and '28 days' in history.text
+        assert history.status_code == 200
+        assert f'id="selection-run-{trial["run_id"]}"' in history.text
+        assert 'Historical menu comparison retained' in history.text
+        assert 'Controlled menus and Radio episodes:' in history.text
+        assert f'{report["overall"]["days"]["incumbent"]} observed days with the current setup' in history.text
+        assert 'Listening outcomes by format' in history.text
+        assert 'the latest 30 days' in history.text and 'withheld as one comparison period' in history.text
+
+
+def test_health_pause_resume_controls_daily_selection_without_fitting(store, monkeypatch):
+    from fastapi.testclient import TestClient
+    from yt_playlist.rec import daily_model_selection as daily
+    from yt_playlist.web.app import create_app
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('health control request fitted a model')
+
+    monkeypatch.setattr(model_setup, 'build', forbidden)
+    monkeypatch.setattr(daily.training, 'build_vectors_from_baskets', forbidden)
+    app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
+    with TestClient(app, base_url='http://127.0.0.1') as client:
+        assert daily.due(store, 1000)
         paused = client.post('/taste/model-selection/pause')
         assert paused.status_code == 200 and 'Resume automatic selection' in paused.text
-        assert product.assignment(store, 'albums', 'paused', 1000) is None
-        assert client.post('/taste/model-selection/resume').status_code == 200
-        assert product.assignment(store, 'albums', 'resumed', 1000)
+        assert store.settings.get_setting('rec_selection_paused') == '1'
+        assert daily.readiness(store, 1000)['state'] == 'paused'
+        assert not daily.due(store, 1000)
+        resumed = client.post('/taste/model-selection/resume')
+        assert resumed.status_code == 200 and 'Pause automatic selection' in resumed.text
+        assert store.settings.get_setting('rec_selection_paused') == ''
+        assert daily.readiness(store, 1000)['state'] != 'paused'
+        assert daily.due(store, 1000)
 
 
 def test_collaborative_change_affects_actual_album_scores_with_content_available(store):
@@ -507,7 +587,7 @@ def test_new_home_tuning_preserves_the_tailored_menu_without_comparison_attribut
     now = 1000
     if steering in ('vibe_change', 'vibe_reset', 'vibe_expire'):
         with mix_tuning.adjusting(store, now):
-            store.settings.set_setting(home_vibe.SETTING, 'boost')
+            store.settings.set_setting(home_vibe.SETTING, 'energize')
     original = home_prepared.prepare(store, now)
     assert original is not None
     for arm in ('incumbent', 'challenger'):
@@ -528,7 +608,7 @@ def test_new_home_tuning_preserves_the_tailored_menu_without_comparison_attribut
                 store.rec_proposals.put_proposals('home_genre_request', {
                     'epoch': home_cards._epoch(store, 'cards'), f'{steering}_genres': [family]}, now)
             elif steering in ('vibe', 'vibe_change'):
-                store.settings.set_setting(home_vibe.SETTING, 'gentle')
+                store.settings.set_setting(home_vibe.SETTING, 'relax')
             elif steering == 'vibe_reset':
                 mix_tuning.reset(store)
             elif steering == 'breadth':

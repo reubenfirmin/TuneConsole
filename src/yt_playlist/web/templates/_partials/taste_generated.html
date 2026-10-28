@@ -30,7 +30,11 @@
     {% if choice_daily %}<p class="section-note">Daily replay covers recorded menus, predicting before each response is revealed. New-menu policies need prospective controlled exposure. These diagnostics cannot promote a model.</p>{% endif %}
     {% if choice_daily and choice_daily.storage %}<p class="section-note">Retained choice evidence: {{ '%.1f'|format(choice_daily.storage.used_bytes / 1048576) }} / {{ '%.1f'|format(choice_daily.storage.budget_bytes / 1048576) }} MiB. Capacity grows with your library. Unanswered menus expire; chosen menus remain. At capacity, new observations are unknown until space is available.</p>{% endif %}
     <p class="section-note">Current and Session choices use the existing hour-scale controls. Recent choices decay with wall time. Saved support needs distinct return days. Inspect actual context weights in Taste influences and adjust defaults in Recommendations.</p>
-    {% if listening_choices and listening_choices.bandit %}
+    {% if generation.choices.adaptive %}
+    <h3>Dynamic group allocation</h3>
+    <p class="section-note">Home uses the current music groups and visible mix responses. Broad areas share their allocation with smaller interests; adding more subgroups does not give an area more chances. A small interest can use a broader related group when it cannot fill twelve diverse tracks. Historical choices stay attached to the definitions you actually saw.</p>
+    <a href="#groups" @click.prevent="select('groups')">Explore music groups</a>
+    {% elif listening_choices and listening_choices.bandit %}
     {% set bandit = listening_choices.bandit %}
     <h3>Mix response allocation</h3>
     <p class="section-note">The current sampler uses visible mix responses from the last {{ bandit.parameters.window_d|int }} days, reconciled against recorded group definitions. Each group contributes at most one unit per UTC day. These weights are initial policy hypotheses, adjustable in Recommendations.</p>
@@ -48,7 +52,7 @@
   </section>
 
   <ol class="generation-process" aria-label="How a mix is built">
-    <li><span>01</span><h3>Choose a music group</h3><p>The model groups tracks by genre, era, and sound. Your library, mix choices, and recent listening help decide which groups to draw from.</p></li>
+    <li><span>01</span><h3>Choose a music group</h3><p>{% if generation.choices.adaptive %}Supported genre and sound similarities connect tracks into groups. Library coverage and observed mix responses help decide which groups to draw from.{% else %}The model groups tracks by genre, era, and sound. Your library, mix choices, and recent listening help decide which groups to draw from.{% endif %}</p></li>
     <li><span>02</span><h3>Find the tracks</h3><p>Each mix picks tracks using one of the four approaches below.</p></li>
     <li><span>03</span><h3>Make room for variety</h3><p>Leave out hidden music, avoid repeats between mixes, and limit tracks by the same artist or album.</p></li>
     <li><span>04</span><h3>Order the tracks</h3><p>The list is run through a DJ model to produce a coherent progression.</p></li>
@@ -91,19 +95,20 @@
   <section class="taste-generated-section" aria-labelledby="generation-learning-title">
     <header class="generation-section-head"><h2 id="generation-learning-title">What your mix choices teach the model</h2></header>
     <p class="generation-deck">Creating a mix supplies a weak choice signal for its musical group. Confirmed playback and later response are measured separately. New menus retain an exploration share.</p>
-    <p class="generation-group-intro">The chart below retains the legacy rendered-offer and creation counts for comparison. It is separate from the browser-confirmed response allocation above. Each row describes a musical group; composition percentages describe its tracks, not enjoyment.</p>
+    <p class="generation-group-intro">{% if generation.choices.adaptive %}The chart shows groups with eligible browser-confirmed offers in the last {{ generation.choices.window_days|int }} days. Counts describe the group you actually saw; response scores can also draw on bounded support from its broader group. Explore all prepared interests in <a href="#groups" @click.prevent="select('groups')">Music groups</a>.{% else %}The chart below retains the legacy rendered-offer and creation counts for comparison. It is separate from the browser-confirmed response allocation above. Each row describes a musical group; composition percentages describe its tracks, not enjoyment.{% endif %}</p>
     <div class="generation-evidence-guide">
-      <div><h3>Offers</h3><p>Server-rendered Home offers in the last {{ generation.choices.window_days|int }} days. Reloading the same set doesn’t add to the count. This legacy sampler count does not prove browser visibility.</p></div>
-      <div><h3>Selections</h3><p>Successful mix creations in that window. Creation does not confirm playback.</p></div>
+      <div><h3>Offers</h3><p>{% if generation.choices.adaptive %}Mix options confirmed visible in the browser, counted once per recorded menu. Unseen options supply no negative evidence.{% else %}Server-rendered Home offers in the last {{ generation.choices.window_days|int }} days. Reloading the same set doesn’t add to the count. This legacy sampler count does not prove browser visibility.{% endif %}</p></div>
+      <div><h3>Selections</h3><p>{% if generation.choices.adaptive %}Recorded mix choices among those visible options, counted once per option and menu. A choice does not confirm playback.{% else %}Successful mix creations in that window. Creation does not confirm playback.{% endif %}</p></div>
     </div>
-    {% if generation.choices.rows %}{{ choices.chart(generation.choices.rows) }}
-    {% else %}<p class="taste-quiet">The chart will appear once the model has grouped your library by genre, era, and sound.</p>{% endif %}
+    {% set choice_rows = generation.choices.rows|selectattr('has_evidence')|list if generation.choices.adaptive else generation.choices.rows %}
+    {% if choice_rows %}{{ choices.chart(choice_rows) }}
+    {% else %}<p class="taste-quiet">{% if generation.choices.adaptive %}Visible mix responses will appear here after Home offers your music groups.{% else %}The chart will appear once the model has grouped your library by genre, era, and sound.{% endif %}</p>{% endif %}
     <div class="generation-calculation">
       {% set example = generation.choices.rows|selectattr('has_evidence')|sort(attribute='offered', reverse=true)|first %}
       <h3>Reading your choices</h3>
-      {% if example %}<p><strong>{{ example.profile.title }}:</strong> {{ example.picked }} selection{{ '' if example.picked == 1 else 's' }} from {{ example.offered }} offer{{ '' if example.offered == 1 else 's' }} gives a legacy score of <strong>{{ '%.0f'|format(example.estimate*100) }}/100</strong>. The dot sits at {{ '%.0f'|format(example.estimate*100) }}; its bar spans <strong>{{ '%.0f'|format(example.low*100) }}–{{ '%.0f'|format(example.high*100) }}</strong>.</p>{% else %}<p>Legacy counts appear as groups are rendered on Home and mixes are created.</p>{% endif %}
+      {% if example %}<p><strong>{{ example.profile.title }}:</strong> {{ example.picked }} selection{{ '' if example.picked == 1 else 's' }} from {{ example.offered }} offer{{ '' if example.offered == 1 else 's' }}{% if generation.choices.adaptive %}. Its current response-allocation score is{% else %} gives a legacy score of{% endif %} <strong>{{ '%.0f'|format(example.estimate*100) }}/100</strong>. The dot sits at {{ '%.0f'|format(example.estimate*100) }}; its bar spans <strong>{{ '%.0f'|format(example.low*100) }}–{{ '%.0f'|format(example.high*100) }}</strong>.</p>{% else %}<p>{% if generation.choices.adaptive %}Groups start with neutral priors while the worker waits for eligible visible responses.{% else %}Legacy counts appear as groups are rendered on Home and mixes are created.{% endif %}</p>{% endif %}
       <p>The bar describes uncertainty in this allocation heuristic; your saved genre weights are separate. Unseen offers, repeated occasions and display position limit its interpretation; it is not confidence in enjoyment or a causal comparison.</p>
-      <p class="generation-data-note">Scores start with one selection and one pass. Creating another copy can add another selection; replaying an existing playlist does not. Evidence older than {{ generation.choices.window_days|int }} days expires. Sound descriptions show measured-track coverage.</p>
+      <p class="generation-data-note">{% if generation.choices.adaptive %}Choices, opens, confirmed starts, listening and adoption provide separate response evidence. Repeated occasions on one day are bounded, and historical responses stay with compatible definitions. Missing playback supplies no negative response.{% else %}Scores start with one selection and one pass. Creating another copy can add another selection; replaying an existing playlist does not. Sound descriptions show measured-track coverage.{% endif %} Evidence older than {{ generation.choices.window_days|int }} days expires.</p>
     </div>
   </section>
 

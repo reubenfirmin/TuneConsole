@@ -3,6 +3,7 @@ import json
 import logging
 
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
+from yt_playlist.library.album_fetch import fetch_album, shareable_album_tracks
 from yt_playlist.library.executor import add_tracks_to_playlist
 from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.library.playlist_writes import (
@@ -108,12 +109,12 @@ def create_playlist_from_album(store, browse_id, name, client, now, identity_id)
     """Create a NEW playlist from an album's tracks (non-destructive). Fetches the album, creates a
     real (un-grouped) playlist under `identity_id` with its songs, and materializes it into the store
     so it shows up immediately. Returns the new playlist's local db id for redirecting to its page."""
-    a = with_retry(lambda: client.get_album(browse_id))
+    a = with_retry(lambda: fetch_album(client, browse_id))
     if not a:
         raise ValueError("couldn't load that album")
     artist = ", ".join(x.get("name", "") for x in (a.get("artists") or []) if x.get("name"))
     vids, seen, meta = [], set(), {}
-    for t in (a.get("tracks") or []):
+    for t in shareable_album_tracks(a):
         v = t.get("videoId")
         if v and v not in seen:
             seen.add(v)

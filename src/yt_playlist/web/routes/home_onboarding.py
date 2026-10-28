@@ -56,12 +56,18 @@ def build(ctx):
     router = APIRouter()
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
 
+    @router.post('/home/onboard/welcome')
+    def welcome():
+        store.settings.set_setting('onboard_welcomed', '1')
+        return RedirectResponse('/', status_code=303)
+
     @router.post('/home/onboard/format')
     async def choose_listening_format(request: Request):
         preference = (await request.form()).get('format')
         if preference not in home_preferences.PANELS:
             return Response('Choose albums, mixes or radio.', status_code=422)
         store.settings.set_setting('onboard_listening_format', preference)
+        store.settings.set_setting('onboard_welcomed', '1')
         store.settings.set_setting('onboard_format_pending', '0')
         return RedirectResponse('/', status_code=303)
 
@@ -123,9 +129,20 @@ def build(ctx):
 
     @router.get("/home/onboard/start")
     def home_onboard_start(request: Request):
+        preference = home_preferences.default_format(store)
+        if preference == 'albums':
+            return templates.TemplateResponse(request, '_partials/onboarding_album.html', {
+                'album': onboarding.starter_album(store)})
+        if preference == 'radio':
+            bootstrap = ctx.radio.bootstrap()
+            if bootstrap['seeds'] or bootstrap['state'].get('active'):
+                return templates.TemplateResponse(request, '_partials/onboarding_radio.html', {
+                    'radio_bootstrap': bootstrap,
+                    'radio_tracks': ctx.radio.history_tracks(bootstrap['state'])})
         tracks = onboarding.library_sample(store, n=home_cards.PROTO_SIZE)
         proto = _proto(store, "onboard_library", "Something to listen to", tracks, now_fn()) if tracks else None
-        return templates.TemplateResponse(request, "_partials/onboarding_start.html", {"proto": proto})
+        return templates.TemplateResponse(request, "_partials/onboarding_start.html", {
+            "proto": proto, 'radio_fallback': preference == 'radio'})
 
     @router.post("/onboard/done")
     def onboard_done():

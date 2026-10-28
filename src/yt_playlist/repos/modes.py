@@ -113,13 +113,20 @@ class ModesRepo(Repo):
     def log_impressions(self, epoch, rows, now) -> None:
         """Record which mode (and, from #57, which in-mode ranker) filled each card lane for this menu
         epoch. Idempotent per (epoch, lane). Each row is (lane, mode_id) or (lane, mode_id, ranker)."""
-        for row in rows:
-            lane, mode_id = row[0], row[1]
-            ranker = row[2] if len(row) > 2 else None
-            self.conn.execute(
-                "INSERT OR IGNORE INTO rec_mode_impressions(epoch, lane, mode_id, ranker, created_at) "
-                "VALUES (?, ?, ?, ?, ?)", (int(epoch), lane, int(mode_id), ranker, float(now)))
-        self.conn.commit()
+        self.conn.execute('SAVEPOINT mode_impressions')
+        try:
+            for row in rows:
+                lane, mode_id = row[0], row[1]
+                ranker = row[2] if len(row) > 2 else None
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO rec_mode_impressions(epoch, lane, mode_id, ranker, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)", (int(epoch), lane, int(mode_id), ranker, float(now)))
+            self.conn.execute('RELEASE mode_impressions')
+        except BaseException:
+            if self.conn.in_transaction:
+                self.conn.execute('ROLLBACK TO mode_impressions')
+                self.conn.execute('RELEASE mode_impressions')
+            raise
 
     @synchronized
     def log_pick(self, playlist_id, mode_id, now, ranker=None) -> None:

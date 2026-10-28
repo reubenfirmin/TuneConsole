@@ -7,10 +7,11 @@
       <header class="starter-head">
         <div>
           <h2 id="starter-title-{{ p.lane }}">Something to listen to</h2>
-          <p class="starter-context">while we complete setup for you.</p>
+          <p class="starter-context">{% if radio_fallback %}Start with this mix while we prepare your Radio Session.{% else %}while we complete setup for you.{% endif %}</p>
         </div>
         <div class="starter-actions">
           <button class="btn btn-primary starter-play" type="button" aria-label="Save and play this mix"
+                  {% if not subsequent_mix %}data-onboarding-play{% endif %}
                   hx-post="/home/generate" hx-target="#gen-{{ p.lane }}" hx-swap="outerHTML" hx-disabled-elt="this"
                   onclick="genOpenYT('gen-{{ p.lane }}')"
                   hx-vals='js:{name: genName("gen-{{ p.lane }}"), tracks: genTracks("gen-{{ p.lane }}"), recipe: ""}'>

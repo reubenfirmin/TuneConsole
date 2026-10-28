@@ -12,6 +12,7 @@ from collections import Counter
 import numpy as np
 
 from yt_playlist.rec import content_model, embedding_vectors, layers, rec_params, scoring
+from yt_playlist.rec.album_feedback import state as feedback_state, set_feedback
 from yt_playlist.util.matching import normalize, recording_title
 from yt_playlist.util.years import decade
 
@@ -67,7 +68,7 @@ def prepare_cached(store, now):
                         'context': choice_evidence.freeze_context(reader,
                             choice_evidence.model_context(reader, now, facet_leans=leans))}
 
-            payload = reader.memoized_read(('album-choices', 5, int(now // MAX_AGE_S)), calculate)
+            payload = reader.memoized_read(('album-choices', 6, int(now // MAX_AGE_S)), calculate)
             encoded = json.dumps(payload, separators=(',', ':'))
             if not snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(
                     encoded, payload['built_at'], surface=SURFACE),
@@ -78,30 +79,6 @@ def prepare_cached(store, now):
         store.maintenance_diagnostics.record('deferred', reasons=('time_budget',), phase='rec: Albums')
         _LOG.debug('Album preparation deferred; keeping previous albums', exc_info=True)
         return None
-
-
-def feedback_state(store):
-    return json.loads(store.settings.get_setting("album_feedback") or "{}")
-
-
-def set_feedback(store, browse, kind, now, opportunity_id=None):
-    """Explicit release feedback, reversible independently of album saves/track ratings."""
-    import uuid
-    from yt_playlist.rec import choice_evidence
-    if kind not in {"more", "known", "reject", "clear"} or not browse:
-        raise ValueError("Choose an album feedback action")
-    states = feedback_state(store)
-    previous = states.pop(browse, None)
-    if previous and previous.get("opportunity_id") and previous.get("action_id"):
-        choice_evidence.safe_respond(store, previous["opportunity_id"], "withdraw", now,
-            action_id=uuid.uuid4().hex, details={"action_id": previous["action_id"]})
-    if kind != "clear":
-        action = uuid.uuid4().hex
-        states[browse] = {"kind": kind, "at": now, "opportunity_id": opportunity_id, "action_id": action}
-        if opportunity_id:
-            choice_evidence.safe_respond(store, opportunity_id, "feedback", now, option_id=browse,
-                                        action_id=action, details={"kind": kind})
-    store.settings.set_setting("album_feedback", json.dumps(states))
 
 
 def _release_family(title, artist):
@@ -191,7 +168,7 @@ def prepare(store, now, discoveries):
             if normalize(album.get('artist') or '') in familiar_artists else 'discovery')
         if album["classification"] == "discovery":
             album["classification"] = album['unsaved_classification']
-    feedback = feedback_state(store)
+    feedback = feedback_state(store, candidates)
     ranked, features, collab_features = [], [], []
     for album in candidates.values():
         if feedback.get(album["browse_id"], {}).get("kind") == "reject":
@@ -253,12 +230,6 @@ def prepare(store, now, discoveries):
                                            cap=rec_params.get_param(store, 'axis_weight_cap'))
     values = {int(i): value for i, value in adjusted.items()}
     order = sorted(range(len(ranked)), key=lambda i: (i not in values, -values.get(i, 0)))
-    companions = [[] for album in ranked]
-    if content_positions:
-        selected = _companions(store, [ranked[i] for i in content_positions],
-            np.asarray([features[i] for i in content_positions]), matrix, index)
-        for i, companion in zip(content_positions, selected):
-            companions[i] = companion
     # Reserve frontier capacity for discovery before saved releases can crowd it out.
     # Serving can then vary the requested balance without fitting a model on a request.
     unseen = [i for i in order if ranked[i]['classification'] in {'discovery', 'familiar_artist'}]
@@ -278,10 +249,16 @@ def prepare(store, now, discoveries):
         if len(frontier) >= 24:
             break
         frontier.add(i)
+    companions = {}
+    companion_positions = [i for i in content_positions if i in frontier]
+    if companion_positions:
+        selected = _companions(store, [ranked[i] for i in companion_positions],
+            np.asarray([features[i] for i in companion_positions]), matrix, index)
+        companions = dict(zip(companion_positions, selected))
     return [{**ranked[i], "score": values.get(i), "feature": spaces[i].tolist() if i in spaces else None,
              'affinity': affinities.get(i),
              'rationale': rationales.get(i),
-             "companion": companions[i],
+             "companion": companions.get(i, []),
              "interest": interests.get(i), "basis": bases.get(i),
              'prediction_status': 'scored' if i in values else 'unscored'}
             for i in order if i in frontier]
@@ -383,16 +360,16 @@ def _companions(store, albums, features, matrix, index):
 def eligible(store, items, now):
     """Recheck current explicit constraints without synchronous model work."""
     from yt_playlist.util import genre_map
-    muted = store.rec_model.muted_artists()
+    muted = store.rec_model.muted_album_ids([album['browse_id'] for album in items], now)
     weights = store.rec_model.get_weights(now=now)
-    feedback = feedback_state(store)
+    feedback = feedback_state(store, [album['browse_id'] for album in items])
     saved = store.collection.saved_album_ids(browse_ids=[album['browse_id'] for album in items])
     result = []
     for album in items:
         kind = feedback.get(album["browse_id"], {}).get("kind")
         if kind == "reject":
             continue
-        if album.get("artist") in muted:
+        if album['browse_id'] in muted:
             continue
         genre = album.get("genre")
         if genre and (weights.get("genre:" + genre_map.family(genre), 1) == 0

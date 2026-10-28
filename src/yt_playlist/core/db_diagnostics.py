@@ -206,6 +206,11 @@ class DiagnosticCursor(sqlite3.Cursor):
             raise
         except BaseException as exc:
             error = exc
+            if (getattr(exc, 'sqlite_errorcode', 0) & 255 == sqlite3.SQLITE_READONLY
+                    and getattr(self.connection, '_storage_compacting', False)):
+                from yt_playlist.core.db_space import StorageCompacting
+                self.connection.rollback()
+                raise StorageCompacting() from exc
             raise
         finally:
             # Sum only time inside SQLite, excluding Python work between fetches.

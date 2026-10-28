@@ -27,6 +27,92 @@ def test_optional_create_tile_does_not_drop_the_first_real_playlist(create):
     assert len(bridge.calls) == 1
 
 
+@pytest.mark.parametrize('metadata', [
+    {}, {'subtitle': None}, {'subtitle': {}}, {'subtitle': {'runs': None}},
+    {'subtitle': {'runs': [None]}}, {'subtitle': {'runs': [{'text': 42}]}},
+    {'subtitle': {'runs': [{'text': 'Author'}, {'text': ' • '}, {'text': None}]}},
+    {'title': {'simpleText': 'Display title'}},
+    {'title': {'runs': [{'text': 'Display title'}]}}, {'title': None},
+    {'menu': {'menuRenderer': {'items': 42}}},
+    {'thumbnailRenderer': None},
+    {'thumbnailRenderer': {'musicThumbnailRenderer': {'thumbnail': {'thumbnails': [None, 42]}}}},
+])
+def test_identifiable_tiles_survive_missing_or_malformed_display_metadata(metadata):
+    item = _renderer('VLDISPLAY')
+    renderer = item['musicTwoRowItemRenderer']
+    renderer.pop('subtitle')
+    renderer['navigationEndpoint'] = {'browseEndpoint': {'browseId': 'VLDISPLAY'}}
+    renderer.update(metadata)
+    client, _ = _production_client([_first_page({'items': [item]})])
+    result = client.get_library_playlists(limit=None)
+    assert result.complete and [p['playlistId'] for p in result] == ['DISPLAY']
+    assert isinstance(result[0]['thumbnails'], list)
+    if isinstance(metadata.get('title'), dict):
+        assert result[0]['title'] == 'Display title'
+
+
+def test_optional_metadata_recovery_retains_ownership_and_usable_artwork():
+    item = _renderer('VLOWNED')
+    renderer = item['musicTwoRowItemRenderer']
+    renderer.pop('subtitle')
+    renderer['menu'] = {'menuRenderer': {'items': [None, {
+        'menuNavigationItemRenderer': {'navigationEndpoint': {
+            'playlistEditorEndpoint': {'playlistId': 'OWNED'},
+        }},
+    }]}}
+    artwork = {'url': 'https://example.invalid/cover.jpg', 'width': 120, 'height': 120}
+    renderer['thumbnailRenderer']['musicThumbnailRenderer']['thumbnail']['thumbnails'] = [None, artwork]
+    client, _ = _production_client([_first_page({'items': [item]})])
+    playlist, = client.get_library_playlists(limit=None)
+    assert playlist['owned'] is True
+    assert playlist['title'] == 'VLOWNED'
+    assert playlist['thumbnails'] == [artwork]
+
+
+def test_regular_playlist_keeps_upstream_count_author_and_description():
+    item = _renderer('VLNORMAL')
+    item['musicTwoRowItemRenderer']['subtitle'] = {'runs': [
+        {'text': 'Author', 'navigationEndpoint': {'browseEndpoint': {'browseId': 'CHANNEL'}}},
+        {'text': ' • '}, {'text': '12 songs'},
+    ]}
+    client, _ = _production_client([_first_page({'items': [item]})])
+    playlist, = client.get_library_playlists(limit=None)
+    assert playlist['count'] == '12'
+    assert playlist['author'] == [{'name': 'Author', 'id': 'CHANNEL'}]
+    assert playlist['description'] == 'Author • 12 songs'
+
+
+def test_display_variant_on_page_27_does_not_discard_preceding_or_following_pages():
+    responses = [_first_page(_page('VL1', continuation='page2'))]
+    for page in range(2, 27):
+        responses.append({'continuationContents': {'gridContinuation':
+            _page(f'VL{page}', continuation=f'page{page + 1}')}})
+    late_page = _page(*(f'VLLATE{i}' for i in range(50)), continuation='last')
+    late_page['items'][49]['musicTwoRowItemRenderer'].pop('subtitle')
+    responses.extend([
+        {'continuationContents': {'gridContinuation': late_page}},
+        {'continuationContents': {'gridContinuation': _page('VLFINAL')}},
+    ])
+    client, bridge = _production_client(responses)
+    result = client.get_library_playlists(limit=None)
+    assert [p['playlistId'] for p in result] == [
+        *(str(page) for page in range(1, 27)), *(f'LATE{i}' for i in range(50)), 'FINAL',
+    ]
+    assert result.complete and len(bridge.calls) == 28
+
+
+@pytest.mark.parametrize('browse_id', [None, '', 'VL', 42, {}, 'MPRE_album', 'VLOTHER'])
+def test_unidentified_nonplaylist_and_conflicting_endpoints_cannot_certify_membership(browse_id):
+    item = _renderer('VLONE')
+    renderer = item['musicTwoRowItemRenderer']
+    renderer['navigationEndpoint'] = {'browseEndpoint': {'browseId': browse_id}}
+    if browse_id != 'VLOTHER':
+        renderer['title']['runs'][0].pop('navigationEndpoint')
+    client, _ = _production_client([_first_page({'items': [item]})])
+    with pytest.raises(LibrarySnapshotError, match='malformed playlist grid item; page=1; item=0'):
+        client.get_library_playlists(limit=None)
+
+
 @pytest.mark.parametrize("create_only", [False, True])
 def test_empty_grid_is_explicitly_verified(create_only):
     page = _page()
@@ -132,7 +218,9 @@ def test_continuation_failure_reports_the_correct_page_without_exposing_payload(
     with pytest.raises(LibrarySnapshotError) as caught:
         client.get_library_playlists(limit=None)
     message = str(caught.value)
-    assert "page=2" in message and "musicTwoRowItemRenderer" in message
+    assert "page=2; item=0" in message and "musicTwoRowItemRenderer" in message
+    assert "musicTwoRowItemRenderer.navigationEndpoint=missing" in message
+    assert "musicTwoRowItemRenderer.subtitle=missing" in message
     assert "PRIVATE_" not in message
 
 
@@ -193,3 +281,41 @@ def test_only_verified_empty_library_can_remove_cached_playlists(store, monkeypa
     else:
         assert store.playlists.get_playlists() == before
         assert result["resources"]["playlist_listing"]["status"] == "failed"
+
+
+@pytest.mark.parametrize('identified', [False, True])
+@pytest.mark.parametrize('cached', [False, True])
+def test_sync_with_a_display_variant_imports_known_playlists_but_preserves_cache_on_unknown_tiles(
+        store, monkeypatch, identified, cached):
+    monkeypatch.setattr(sync, 'with_retry', lambda fn, **kw: fn())
+    iid = store.identities.upsert_identity('Main', 'bridge', None, True)
+    fake = Client()
+    if cached:
+        sync.sync_all(store, {iid: fake}, 100)
+    before = store.playlists.get_playlists()
+    page = _page('VLPL')
+    variant = _renderer('VLNEW')
+    variant['musicTwoRowItemRenderer'].pop('subtitle')
+    if not identified:
+        variant['musicTwoRowItemRenderer']['title']['runs'][0].pop('navigationEndpoint')
+    client, _ = _production_client([
+        _first_page({**page, 'continuations': [{'nextContinuationData': {'continuation': 'next'}}]}),
+        {'continuationContents': {'gridContinuation': {'items': [variant]}}},
+    ])
+    reads = []
+
+    def playlist_detail(pid, limit=None):
+        reads.append(pid)
+        return {**fake.get_playlist('PL', limit=limit), 'title': f'Detail {pid}', 'trackCount': 1}
+
+    monkeypatch.setattr(client, 'get_playlist', playlist_detail)
+    monkeypatch.setattr(client, 'get_history', lambda: [])
+    result = sync.sync_identity(store, iid, client, 200)
+    if identified:
+        assert result['resources']['playlist_listing']['status'] == 'complete'
+        assert reads == ['PL', 'NEW']
+        assert {p.ytm_playlist_id for p in store.playlists.get_playlists()} == {'PL', 'NEW'}
+    else:
+        assert result['resources']['playlist_listing']['status'] == 'failed'
+        assert store.playlists.get_playlists() == before
+        assert not reads

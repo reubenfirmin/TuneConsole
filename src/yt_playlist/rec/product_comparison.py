@@ -10,6 +10,7 @@ serving and evidence capture never import that orchestration.
 """
 import hashlib
 import math
+import zlib
 from collections import defaultdict
 
 import numpy as np
@@ -67,11 +68,16 @@ def prepared(store, format, window, now, *, existing=None, tuning=None):
     payload = store.rec_proposals.get_proposals(pair_surface(selected['run_id'], selected['arm'], format))
     if not payload or payload.get('run_id') != selected['run_id']:
         return None, None
-    if tuning is not None and payload['data'].get('tuning') != tuning:
+    from yt_playlist.rec import comparison_storage
+    try:
+        data = comparison_storage.decode(payload)
+    except (ValueError, KeyError, TypeError, zlib.error):
+        return None, None
+    if tuning is not None and data.get('tuning') != tuning:
         # Missing stamps from older preparations are also ineligible. The normal
         # tailored menu remains available without a controlled attribution.
         return None, None
-    return payload['data'], selected
+    return data, selected
 
 
 def pair_surface(run_id, arm, format):

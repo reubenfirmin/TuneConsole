@@ -1,7 +1,8 @@
 """Generated proto-playlists: the two dated, saveable lanes on Home.
 
-Covers the load-bearing constraint: a playlist this app generates (auto-grouped "Generated") must
-NOT feed the recommendation engine until it's played or re-grouped, plus the create endpoint.
+Covers generated-playlist creation and learning provenance. Generated sources
+do not supply track-level taste evidence until explicit adoption; membership
+must never suppress a track that remains eligible for recommendations.
 """
 import json
 import threading
@@ -175,7 +176,7 @@ def test_save_button_opens_generating_screen(store):
     assert "window.open('/home/generating'" in app_js.text       # opens during the user gesture
 
 
-def test_saved_proto_tracks_not_re_offered(store):
+def test_generated_membership_is_retained_without_suppressing_candidates(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "Art", None, None, 1) for i in range(2)]
     gen = store.playlists.upsert_playlist(iid, "PLG", "From your catalog - June 21 2026", 2, "h", 1.0)
@@ -184,7 +185,9 @@ def test_saved_proto_tracks_not_re_offered(store):
     store.playlists.mark_generated_playlist('PLG')
 
     keys = store.rec_eligibility.generated_track_keys()
-    assert keys == {identity_key("S0", "Art"), identity_key("S1", "Art")}   # spoken for; don't re-offer
+    assert keys == {identity_key("S0", "Art"), identity_key("S1", "Art")}
+    assert not store.rec_eligibility.suppressed_candidate_keys(keys, 1)
+    assert not any(keys & set(basket) for basket in store.rec_evidence.rec_baskets())
 
 
 def test_generate_endpoint_rejects_empty(store):
@@ -330,6 +333,18 @@ def test_gc_keeps_generated_when_at_least_half_played(store, monkeypatch, tmp_pa
     half = [identity_key(f"PLGT{i}", "GenArt") for i in (0, 1)]            # 2 of 4 = 50% played since creation
     store.history.record_history_plays(iid, now - day, half, source_timezone="UTC")
 
+    assert playlist_generated.gc_generated_playlists(store, {iid: FakeClient()}, now) == []
+    assert store.playlists.get_playlist(pid) is not None
+
+
+def test_gc_counts_live_generated_playback_without_feeding_organic_history(store):
+    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    day, now = 86400.0, 100 * 86400.0
+    pid, ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day, n=4)
+    for i in (0, 1):
+        store.history.record_play_event(iid, identity_key(f'PLGT{i}', 'GenArt'), f'PLG{i}',
+                                        now - day, playlist_ytm_id=ytm)
+    assert all(at is None for at in store.charts.get_playlist_track_recency()[pid])
     assert playlist_generated.gc_generated_playlists(store, {iid: FakeClient()}, now) == []
     assert store.playlists.get_playlist(pid) is not None
 

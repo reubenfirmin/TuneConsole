@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Audio analysis preview - TuneConsole{% endblock %}
+{% block page_styles %}
+<link rel="stylesheet" href="/static/audio-preview.css?v={{ asset_v }}">
+<script type="module" src="/static/audio-preview.js?v={{ asset_v }}"></script>
+{% endblock %}
+{% block body %}
+<section class="audio-preview" data-audio-preview data-model-available="{{ 'true' if model_available else 'false' }}" data-extension-ids="{{ extension_ids|join(',') }}">
+  <h1>Audio analysis preview</h1>
+  <p class="audio-preview-intro">Hear a track, then see what the model hears. Play music from
+    <a href="/#radio">On Air</a> or <a href="/#directions">Mix Tapes</a>. This page automatically analyses a ten-second excerpt of each playing song.</p>
+  <div class="card audio-preview-card">
+    <h2>Playing in TuneConsole</h2>
+    <p class="audio-preview-track" data-preview-track>Waiting for music…</p>
+    {% if model_available %}
+    <p>Analysis starts automatically through your TuneConsole extension, with no sharing dialog.
+      Your music keeps playing normally. Audio is analysed and discarded inside the YouTube Music tab;
+      analysis results reach this page.</p>
+    <div class="audio-preview-actions">
+      <button class="btn btn-primary" type="button" data-preview-start disabled>Analyse again</button>
+      <button class="btn" type="button" data-preview-stop disabled>Stop analysis</button>
+      <button class="btn" type="button" data-preview-export disabled>Export result</button>
+    </div>
+    <progress class="audio-preview-progress" data-preview-progress max="10" value="0" aria-label="Excerpt captured" hidden></progress>
+    <p class="audio-preview-status" data-preview-status role="status">Waiting for music and the TuneConsole extension…</p>
+    {% else %}
+    <p role="status">The local research model is unavailable in this build.</p>
+    {% endif %}
+  </div>
+  <section class="card audio-preview-card" data-preview-result hidden aria-labelledby="preview-result-title">
+    <h2 id="preview-result-title">Mood predictions</h2>
+    <p data-preview-summary></p>
+    <ol class="audio-preview-tags" data-preview-moods aria-label="Experimental mood predictions"></ol>
+    <p class="audio-preview-note">Mood scores run from 0 to 1. Activation and emotional tone use a 1–9 scale.
+      Binary mood scores compare a mood with “not that mood”; they do not measure its intensity.
+      A mean near 0.5 can reflect uncertainty or disagreement between patches.
+      These are raw model outputs, not confidence percentages or calibrated vibe ratings.</p>
+    <details><summary>General music tags</summary>
+      <ol class="audio-preview-tags" data-preview-tags aria-label="Highest model tag scores"></ol>
+      <pre data-preview-native></pre>
+    </details>
+  </section>
+  <p class="audio-preview-note">These experimental mood predictions still need listening validation.
+    This preview does not change On Air or Mix Tapes selections. The captured stream’s recording identity
+    is unverified, so results are previews rather than saved track metadata.</p>
+</section>
+{% endblock %}

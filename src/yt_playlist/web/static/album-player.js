@@ -22,6 +22,7 @@ function albumPlayback(browse, playlist = '', fallback = '') {
       // Privately owned uploads have no audioPlaylistId. Preserve their existing
       // browser handoff instead of submitting an album queue that cannot exist.
       if (fallback) { window.tcPlay(fallback); return; }
+      window.tvPlaybackControls?.release();
       htmx.trigger(button, 'album-start');
     },
   };

@@ -1,14 +1,22 @@
 {# Editable playlist title. The page includes this inside the head; /playlist/{id}/rename returns it
    standalone and htmx swaps it into #pl-title with the new title. The click-to-edit toggle stays
    Alpine (pure client state); Enter/blur posts via htmx. Escape reverts the draft and closes. #}
-<div id="pl-title" x-data="titleEditor({{ pl.id }})">
-  <h1 x-show="!editing" @click="start()" x-ref="h1" class="editable-title" title="Click to rename">
-    {% if pl.ytm_playlist_id == 'LM' %}<svg class="lm-heart" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-8-4.8-8-11a4.5 4.5 0 0 1 8-2.7A4.5 4.5 0 0 1 20 10c0 6.2-8 11-8 11z"/></svg>{% endif %}{{ pl.title }}
+<div id="pl-title" class="{{ 'pl-structured-title' if generated_heading else '' }}" data-title="{{ pl.title }}" x-data="titleEditor({{ pl.id }})">
+  {% if generated_heading %}
+  <div class="pl-generated-meta" x-show="!editing">
+    <span class="pl-type-badge">{{ generated_heading.kind }}</span>
+    {% if generated_heading.version %}<span class="pl-version">Version {{ generated_heading.version }}</span>{% endif %}
+    <time class="pl-generated-date" datetime="{{ generated_heading.date }}">{{ generated_heading.date_label }}</time>
+  </div>
+  {% endif %}
+  <h1 x-show="!editing" @click="start()" @keydown.enter.prevent="start()" @keydown.space.prevent="start()"
+      tabindex="0" x-ref="h1" class="editable-title" title="Click to rename">
+    {% if pl.ytm_playlist_id == 'LM' %}<svg class="lm-heart" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-8-4.8-8-11a4.5 4.5 0 0 1 8-2.7A4.5 4.5 0 0 1 20 10c0 6.2-8 11-8 11z"/></svg>{% endif %}{{ generated_heading.name if generated_heading else pl.title }}
   </h1>
   <input x-show="editing" x-cloak class="title-input" x-model="draft" x-ref="inp" name="title"
          hx-post="/playlist/{{ pl.id }}/rename"
          hx-trigger="keyup[key=='Enter'], blur[event.target.dataset.cancel!=='1']"
          hx-target="#pl-title" hx-swap="outerHTML"
          @focus="$el.dataset.cancel = ''"
-         @keydown.escape="draft = $refs.h1.textContent.trim(); $el.dataset.cancel = '1'; editing = false">
+         @keydown.escape="draft = originalTitle(); $el.dataset.cancel = '1'; editing = false">
 </div>

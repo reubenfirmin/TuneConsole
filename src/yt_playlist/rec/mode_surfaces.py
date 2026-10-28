@@ -16,6 +16,7 @@ import numpy as np
 from yt_playlist.core.activity import WorkClosing, check_stopping
 from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.core.work_diagnostics import work_span
+from yt_playlist.repos.rec_proposals import encode_proposals
 from yt_playlist.rec import (embedding_vectors as vectors, experiments, home_themes, home_vibe, layers, mode_eval, rec_params, surfaces,
                              taste_modes, transient, measurement, negative, vibe_pools)
 from yt_playlist.util import genre_map
@@ -98,17 +99,22 @@ def prepare_bundles(store, now) -> dict | None:
     can advance while these disposable rankings calculate. No ranking, fingerprints or JSON
     under UI locks; serving checks current eligibility before offering cached candidates.
     """
+    measurement.maintain_storage(store, now)
     with store.read_snapshot() as snapshot:
         from yt_playlist.rec import candidate_refresh
         with column_group_reads(snapshot.store, "recordings", "catalog"):
             policies = measurement.PoolPolicies(snapshot.store, now)
             payload, fresh = _calculate_bundles(snapshot.store, now, policies)
             settings = candidate_refresh.prepared_settings(snapshot.store, now)
-        encoded, fresh_encoded = json.dumps(payload), json.dumps(fresh)
+        encoded = encode_proposals('mode_bundles', payload)
+        fresh_encoded = encode_proposals('fresh_pool', fresh)
+        # Release the pinned WAL reader before staging. These immutable chunks
+        # are invisible until both heads, policies and settings commit together.
+        snapshot.release_reader()
+        prepared = store.rec_proposals.stage_prepared_bundles(encoded, fresh_encoded)
         def publish():
-            store.rec_ledger.publish_prepared_policies(list(policies.rows.values()))
-            store.rec_proposals.publish_prepared_bundles(
-                encoded, fresh_encoded, now)
+            store.rec_ledger.publish_prepared_policies(list(policies.rows.values()), list(policies.bases.values()))
+            store.rec_proposals.publish_prepared_bundles(*prepared, now)
             store.settings.publish_values(settings)
         if not snapshot.publish(publish, allow_stale_tables=RANKING_CHURN_TABLES):
             return None
@@ -361,7 +367,7 @@ def _tilt_key(d, leans):
     return 1.0 + leans.get(f"genre:{fam}", 0.0)
 
 
-def _diversify(items, max_artist, max_album) -> list:
+def _diversify(items, max_artist, max_album, *, limit=None) -> list:
     """Cap tracks per artist and per album, preserving order. An empty album ('' = a single) is never
     album-capped (each single is its own thing). Kills 'one compilation fills the card' / 'four artists
     over twelve tracks'."""
@@ -376,6 +382,8 @@ def _diversify(items, max_artist, max_album) -> list:
         if ab:
             al[ab] += 1
         out.append(d)
+        if limit is not None and len(out) >= limit:
+            break
     return out
 
 

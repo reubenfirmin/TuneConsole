@@ -20,7 +20,7 @@
       <p class="album-choice-artist"><a href="/artist?name={{ a.artist|urlencode }}" data-choice-action="open">{{ a.artist }}</a></p>
       <div class="album-choice-facts">
         {% if a.year %}<span>{{ a.year }}</span>{% endif %}
-        {% if a.genre %}<span class="gtag">{{ a.genre }}</span>{% endif %}
+        {% if a.genre %}<span class="gtag" title="{{ a.genre }}"><span class="gtag-label">{{ a.genre }}</span></span>{% endif %}
         {% if a.familiarity %}<span class="album-familiarity album-familiarity--{{ a.familiarity.level }}" role="img"
               aria-label="Listening familiarity for {{ a.title }}: {{ a.familiarity.label }}"
               title="{{ a.familiarity.label }} Based on recorded track plays, not complete album listens."></span>{% endif %}

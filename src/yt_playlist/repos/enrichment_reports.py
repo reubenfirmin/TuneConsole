@@ -6,7 +6,7 @@ belongs to core.metadata; these projections do not duplicate either mutation pol
 import json
 
 from yt_playlist.core import catalog, metadata
-from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.repos.base import Repo, snapshot_read, synchronized
 from yt_playlist.repos.enrichment import FIELD_COLUMN
 from yt_playlist.repos.enrichment_sql import TRACKS_CTE, pending_coverage
 
@@ -120,7 +120,7 @@ class EnrichmentReportsRepo(Repo):
             (album_browse_id,)).fetchall()
         return self._conflicts(rows)
 
-    @synchronized
+    @snapshot_read
     def coverage_stats(self, include_discovery=False) -> dict:
         # Onboarding measures the library; the enrichment page measures every queued source.
         prefix = "WITH " + TRACKS_CTE if include_discovery else ""
@@ -136,14 +136,14 @@ class EnrichmentReportsRepo(Repo):
         return {k: (r[k] or 0) for k in
                 ("total", "processed", "genre", "year", "bpm", "energy", "danceability")}
 
-    @synchronized
+    @snapshot_read
     def queue_remaining(self) -> int:
         return self.conn.execute(
             "WITH " + TRACKS_CTE +
             " SELECT COUNT(*) n FROM enrichment_tracks t WHERE first_enriched_at IS NULL OR " +
             pending_coverage()).fetchone()["n"]
 
-    @synchronized
+    @snapshot_read
     def queue_stats(self) -> dict:
         """Separate first passes from refreshes without counting provider jobs as tracks."""
         row = self.conn.execute(

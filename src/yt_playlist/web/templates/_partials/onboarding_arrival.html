@@ -22,3 +22,13 @@
     <img class="arrival-illustration" src="/static/onboarding-arrival.png" alt="" fetchpriority="high">
   </div>
 </section>
+<div class="arrival-next">
+  <div class="arrival-progress" x-show="!starterReady && (connected || running || imported || songs > 0)" x-cloak
+       :class="{ 'is-working': !statusError && (connected || running) }" role="status" aria-live="polite">
+    <span class="arrival-wave" aria-hidden="true">
+      <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+    </span>
+    <span x-text="progressLabel">Bringing in your music</span>
+  </div>
+  <p class="arrival-learning">TuneConsole's recommendations will continue improving over the next few days as we learn about your music preferences.</p>
+</div>

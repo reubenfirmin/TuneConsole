@@ -121,11 +121,14 @@ class PreparedContentRepo(Repo):
     @synchronized
     def corpus(self, limit):
         """Bound detached memory before decoding payloads; None requests a larger budget."""
-        rows = self.conn.execute('SELECT identity_key,payload,digest FROM rec_prepared_content '
-                                 'ORDER BY identity_key LIMIT ?', (limit + 1,)).fetchall()
-        if len(rows) > limit:
+        count = self.conn.execute('SELECT COUNT(*) FROM (SELECT 1 FROM rec_prepared_content LIMIT ?)',
+                                  (limit + 1,)).fetchone()[0]
+        if count > limit:
             return None
-        return [(r['identity_key'], json.loads(r['payload']), r['digest']) for r in rows]
+        # Decode one row at a time; do not retain every raw JSON string beside
+        # the decoded corpus during bootstrap.
+        return [(r['identity_key'], json.loads(r['payload']), r['digest']) for r in self.conn.execute(
+            'SELECT identity_key,payload,digest FROM rec_prepared_content ORDER BY identity_key LIMIT ?', (limit,))]
 
     @synchronized
     def missing_previous_inputs(self):
@@ -135,6 +138,40 @@ class PreparedContentRepo(Repo):
             'ON p.identity_key=v.identity_key WHERE p.identity_key IS NULL) OR '
             'EXISTS(SELECT 1 FROM rec_discovered_content_vectors v LEFT JOIN rec_prepared_content p '
             'ON p.identity_key=v.identity_key WHERE p.identity_key IS NULL)').fetchone()[0]
+
+    @synchronized
+    def missing_unqueued(self, limit=32):
+        """Find lost bootstrap work, including old vectors needing a retraction.
+
+        Each indexed anti-join returns at most one batch. Already queued work
+        keeps its revision and position; no accepted input is discarded.
+        """
+        keys = set()
+        for table in ('recordings', 'rec_content_vectors', 'rec_discovered_content_vectors'):
+            rows = self.conn.execute(
+                f'SELECT v.identity_key FROM {table} v '
+                'LEFT JOIN rec_prepared_content p ON p.identity_key=v.identity_key '
+                'LEFT JOIN rec_content_pending q ON q.identity_key=v.identity_key '
+                'WHERE p.identity_key IS NULL AND q.identity_key IS NULL LIMIT ?', (limit,))
+            keys.update(row[0] for row in rows)
+            if len(keys) >= limit:
+                break
+        return sorted(keys)[:limit]
+
+    @synchronized
+    def enqueue_missing(self, keys):
+        """Called only inside the maintenance snapshot's guarded publication."""
+        if not self.conn.in_transaction:
+            raise RuntimeError('Preparation repair requires guarded publication')
+        self.conn.executemany('INSERT INTO rec_content_pending(identity_key) VALUES (?) '
+                              'ON CONFLICT(identity_key) DO NOTHING', ((key,) for key in keys))
+
+    @synchronized
+    def vector_storage_bytes(self):
+        """Bound old serialized vectors and Python lookup overhead during publication prep."""
+        return sum(self.conn.execute(
+            f'SELECT COALESCE(SUM(length(vec)+4*length(identity_key)+512),0) FROM {table}'
+        ).fetchone()[0] for table in ('rec_content_vectors', 'rec_discovered_content_vectors'))
 
     @synchronized
     def serial(self):

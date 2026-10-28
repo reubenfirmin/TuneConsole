@@ -15,7 +15,9 @@ function bucket(day,period) {
 }
 function range(data,filters) {
     const n={'7d':7,'30d':30,'90d':90}[filters.window];
-    const valid = value => /^\d{4}-\d{2}-\d{2}$/.test(value || '') && !isNaN(date(value));
+    const valid = value => /^\d{4}-\d{2}-\d{2}$/.test(value || '') && !isNaN(date(value)) && stamp(date(value))===value;
+    if(filters.window === 'custom' && (!valid(filters.start) || !valid(filters.end) || filters.end<=filters.start))
+        throw new RangeError('Choose valid dates with an end date after the start date. The end date itself is not included.');
     const start=filters.window === 'custom' && valid(filters.start) ? filters.start : n ? shift(data.today,1-n) : null;
     const end=filters.window === 'custom' && valid(filters.end) ? filters.end : shift(data.today,1);
     return {start,end};
@@ -24,6 +26,7 @@ function summarize(data,filters) {
     const bounds=range(data,filters), catalog=data.catalog || {};
     const options={artists:new Map(),genres:new Set()}, selected=[];
     const artists=values(filters.artist), genres=values(filters.genre), fmts=values(filters.format);
+    const tracks=values(filters.track);
     const total=empty(), previous=empty();
     let earliest=data.today;
     const selectedSpan=bounds.start ? Math.max(1,(date(bounds.end)-date(bounds.start))/86400000) : null;
@@ -31,12 +34,12 @@ function summarize(data,filters) {
     for (const row of data.rows) {
         const r=Object.fromEntries(data.columns.map((k,i)=>[k,row[i]]));
         for (const k of metrics) r[k]=Number(r[k]) || 0;
-        const aid=String(r.artist_id || r.artist || ''), name=r.artist || 'Unknown artist';
+        const aid=String(r.artist_id || r.artist || '@unknown'), name=r.artist || 'Unknown artist';
         options.artists.set(aid,name); options.genres.add(r.genre || 'Unknown');
         if (artists.length && !artists.includes(aid) && !artists.includes(name)) continue;
         if (genres.length && !genres.includes(r.genre || 'Unknown')) continue;
         if (fmts.length && !fmts.includes(r.format)) continue;
-        if (filters.track && r.track !== filters.track) continue;
+        if (tracks.length && !tracks.includes(r.track)) continue;
         if (r.day >= bounds.end || r.day > data.today) continue;
         if (bounds.start && r.day < bounds.start) {
             if (filters.compare && previousStart && r.day >= previousStart) for (const k of metrics) previous[k]+=r[k];
@@ -73,6 +76,7 @@ function summarize(data,filters) {
         if(period === 'month') cursor.setUTCMonth(cursor.getUTCMonth()+1);
         else cursor.setUTCDate(cursor.getUTCDate()+(period === 'week' ? 7 : 1));
     }
+    if(stamp(cursor)<=end) throw new RangeError('This selection has more than 12,000 periods. Choose a shorter range or a wider grouping.');
     const overlays=[...groups.values()].filter(g=>measure === 'minutes' ? g.seconds : g[historyMetric])
         .sort((a,b)=>(measure === 'minutes' ? b.seconds-a.seconds : b[historyMetric]-a[historyMetric]) || a.name.localeCompare(b.name)).slice(0,30)
         .map(g=>({...g,count:measure === 'minutes' ? g.seconds/60 : g[historyMetric],values:series.map(s=>{
@@ -80,10 +84,28 @@ function summarize(data,filters) {
             return measure === 'share' ? (s[historyMetric] ? value/s[historyMetric]*100 : 0) : value;
         })}));
     const time=formats.map(key=>({key,seconds:series.reduce((n,b)=>n+b.secondsByFormat[key],0),plays:series.reduce((n,b)=>n+b.formats[key],0)})).filter(r=>r.seconds || r.plays);
+    const discoveryStart=data.discovery_from && (!bounds.start || bounds.start<data.discovery_from) ? data.discovery_from : bounds.start;
+    const eligible=data.discovery_from ? selected.filter(r=>r.day>=discoveryStart) : [];
+    const returning=eligible.filter(r=>r.plays && catalog[r.track]?.cohort?.first<discoveryStart);
+    const established=eligible.reduce((n,r)=>n+r.plays,0)>=60 && new Set(eligible.filter(r=>r.plays).map(r=>r.day)).size>=5
+        && returning.reduce((n,r)=>n+r.plays,0)>=20 && new Set(returning.map(r=>r.day)).size>=3;
+    const discoveryTotal=empty(), discoveryBins=new Map();
+    for(const row of eligible) {
+        const key=bucket(row.day,period);
+        if(!discoveryBins.has(key)) discoveryBins.set(key,bin(key));
+        for(const metric of metrics) {discoveryTotal[metric]+=row[metric]; discoveryBins.get(key)[metric]+=row[metric];}
+    }
+    const discovery={start:discoveryStart,total:discoveryTotal,series:series.map(s=>discoveryBins.get(s.day) || bin(s.day))};
     const populated=Object.values(total).some(Boolean);
-    return {total,retained:data.retained || {hearts:0,skulls:0},previous,series,time,overlays,period,historyMetric,measure,
+    const cohortSubjects=[...new Set(selected.filter(r=>r.plays).map(r=>r.track))].map(key=>catalog[key]?.cohort).filter(Boolean)
+        .filter(c=>data.discovery_from && c.first>=discoveryStart && c.first<bounds.end);
+    const cohorts={introduced:cohortSubjects.length,pending:cohortSubjects.filter(c=>c.age<14).length,
+        mature:cohortSubjects.filter(c=>c.age>=14).length,
+        regulars:cohortSubjects.filter(c=>c.age>=14 && c.days14>=2).length,
+        regulars28:cohortSubjects.filter(c=>c.age>=28 && c.days28>=2).length};
+    return {total,retained:data.retained || {hearts:0,skulls:0},previous,series,time,overlays,period,historyMetric,measure,cohorts,discovery,
         options:{artists:[...options.artists].map(([id,name])=>({id,name})).sort((a,b)=>a.name.localeCompare(b.name)),genres:[...options.genres].sort()},
-        modules:{activity:!!(total.plays || total.sightings || total.seconds),discovery:!!total.plays,formats:!!time.length,
+        modules:{activity:!!(total.plays || total.sightings || total.seconds),discovery:established,formats:!!time.length,
             feedback:!!(total.hearts || total.skulls || total.clears || total.rated),details:populated},
         details:[...details.values()].filter(r=>metrics.some(k=>r[k])),
         start:bounds.start || earliest,end:bounds.end,compare:!!(filters.compare && selectedSpan),
@@ -121,6 +143,6 @@ if(typeof self!=='undefined') self.onmessage=async event=>{
         if(!manifest || manifest.schema!==2) throw new Error('Unsupported listening data');
         const result=await prepared(filters,id);
         if(result && id===request) self.postMessage({id,result});
-    } catch(_) { if(id===request) self.postMessage({id,error:true}); }
+    } catch(error) { if(id===request) self.postMessage({id,error:error instanceof RangeError ? error.message : 'Could not read listening data. Reload the selection.'}); }
 };
 if(typeof module!=='undefined') module.exports={summarize,range};

@@ -284,7 +284,8 @@ class HistoryRepo(Repo):
             "AND (s.provider_id=? OR 'RDAMPL' || s.provider_id=?) "
             "AND (s.identity_id IS NULL OR s.identity_id=?))",
             (GENERATED_GROUP, playlist_ytm_id, playlist_ytm_id, identity_id)).fetchone()[0]
-        is_generated = int(bool(is_generated or context_choice))
+        transient_radio = (playlist_ytm_id or '').removeprefix('RDAMPL') in self._store.transient_radio_playlists
+        is_generated = int(bool(is_generated or context_choice or transient_radio))
         with self.conn:
             listening.calendar(self.conn,identity_id,source_timezone)
             subject = catalog.play_key(self.conn,identity_key,video_id)

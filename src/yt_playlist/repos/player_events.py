@@ -1,6 +1,6 @@
 """#91 PlayerEventsRepo: the raw player/curation event stream. Append-only; every judgment about
 these rows (skip vs completion, sessions) is a read-time derivation, never persisted here."""
-from yt_playlist.library.listen_derive import classify_exit
+from yt_playlist.library.listen_derive import classify_exit, skip_blackouts, SKIP_HISTORY_DAYS
 from yt_playlist.core.db_revisions import keyed_reads
 from yt_playlist.repos.base import Repo, synchronized
 
@@ -50,3 +50,25 @@ class PlayerEventsRepo(Repo):
                 continue
             latest.setdefault(key, float(r["at"]))  # rows are at DESC, so first hit is the latest
         return sorted(latest.items(), key=lambda kv: kv[1], reverse=True)
+
+    @synchronized
+    def skip_blackouts(self, now, *, keys=None) -> dict[str, float]:
+        """Derive current recording breaks from bounded raw exit history.
+
+        Resolve through uploads, including discovery-only recordings and alternate
+        uploads. A skipped unknown upload becomes covered when its identity is
+        resolved; no synthetic feedback or rating change is written.
+        """
+        keys = list(dict.fromkeys(keys)) if keys is not None else None
+        if keys == []:
+            return {}
+        clause = (' AND r.identity_key IN (' + ','.join('?' for _ in keys) + ')') if keys is not None else ''
+        with keyed_reads(self._store, 'player_events', ('track_exit', 'bye', 'next')):
+            rows = self.conn.execute(
+                'SELECT r.identity_key AS key, pe.identity_id, pe.kind, pe.position, pe.duration, pe.at '
+                'FROM player_events pe JOIN youtube_items y ON y.video_id=pe.video_id '
+                'JOIN recordings r ON r.id=y.recording_id '
+                "WHERE pe.kind IN ('track_exit','bye','next') AND pe.at>=? AND pe.at<=?" + clause +
+                ' ORDER BY pe.at,pe.id',
+                (now - SKIP_HISTORY_DAYS * 86400, now, *(keys or []))).fetchall()
+        return skip_blackouts(rows, now)

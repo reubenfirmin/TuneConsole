@@ -8,9 +8,11 @@ static/tokens.css so a new theme is a single-file edit.
 from __future__ import annotations
 
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
+from jinja2 import Environment, FileSystemLoader
 
 WEB = Path(__file__).resolve().parents[1] / "src" / "yt_playlist" / "web"
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -83,7 +85,7 @@ def test_every_referenced_token_is_defined():
         "--mix-order", "--mix-x", "--mix-y", "--genre-tint",
         "--part-opacity", "--playlist-c", "--share",
         "--arrival-delay", "--track-delay",
-        "--setup-banner-height",
+        "--setup-banner-height", "--playback-dock-height",
     }
     missing = {}
     for p in _source_files():
@@ -150,11 +152,13 @@ def test_elements_do_not_repeat_style_attributes():
     assert not offenders, f"duplicate style attributes found: {offenders}"
 
 
-def test_generating_takeover_title_is_scoped():
-    """The takeover heading must not override dashboard playlist-row song titles."""
+def test_shared_loader_console_status_is_scoped():
+    """The shared console heading must keep its type within the launch stage."""
     css = (WEB / "static" / "generating.css").read_text()
-    assert ".gen-stage .gen-title" in css
-    assert not re.search(r"(?m)^\.gen-title\s*\{", css)
+    rules = re.findall(r"(?s)\.gen-stage \.gen-status\s*\{(.*?)\}", css)
+    assert rules and "font-family: var(--font-mono)" in rules[0]
+    assert not re.search(r"(?m)^\.gen-status\s*\{", css)
+    assert ".gen-title" not in css
 
 
 def test_flat_surface_foundation_and_protected_experiences():
@@ -227,19 +231,19 @@ def test_neon_green_is_reserved_for_explicit_primary_actions():
         assert "btn-primary" in line, f"primary action is not classified: {line.strip()}"
 
 
-def test_serif_is_limited_to_the_generating_takeover():
+def test_application_and_shared_loader_do_not_use_the_retired_display_face():
     offenders = {}
     for path in (WEB / "static").glob("*.css"):
-        if path.name in {"tokens.css", "generating.css"}:
+        if path.name == "tokens.css":
             continue
         if "var(--font-display)" in path.read_text():
             offenders[path.name] = True
     assert not offenders, f"routine application CSS still uses the serif face: {offenders}"
 
-    overrides = (WEB / "static" / "generating.css").read_text()
-    uses = re.findall(r"font-family:\s*var\(--font-display\)", overrides)
-    assert len(uses) == 1
-    assert ".gen-stage .gen-title" in overrides
+    loader = (WEB / "static" / "generating.css").read_text()
+    assert "font-family: var(--font-mono)" in loader
+    assert "font-family: var(--font-sans)" in loader
+    assert not re.search(r"font-family\s*:[^;}]*?(?<![-\w])serif\b", loader)
 
 
 def test_decorative_eyebrows_are_absent_everywhere():
@@ -247,7 +251,52 @@ def test_decorative_eyebrows_are_absent_everywhere():
                  if re.search(r"\beyebrow(?:-|\b)", p.read_text())]
     assert not offenders, f"templates still use decorative eyebrows: {offenders}"
     assert ".eyebrow" not in (WEB / "static" / "app.css").read_text()
-    assert "gen-status" in (WEB / "templates" / "generating.html").read_text()
+
+
+@pytest.mark.parametrize('template,status', [
+    ('generating.html', 'Wiring up your playlist'),
+    ('_partials/radio.html', 'Tuning your radio'),
+    ('_partials/tv.html', 'Generating TV session'),
+])
+def test_composed_launch_surfaces_have_one_shared_console_heading(template, status):
+    class LoaderMarkup(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.depth = self.loaders = 0
+            self.headings = []
+            self.statuses = 0
+            self.text = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == 'div':
+                if 'gen-loader' in attrs.get('class', '').split():
+                    self.loaders += 1
+                    self.depth = 1
+                elif self.depth:
+                    self.depth += 1
+            if self.depth:
+                if re.fullmatch(r'h[1-6]', tag):
+                    self.headings.append((tag, attrs.get('class', '')))
+                self.statuses += 'data-loader-status' in attrs
+
+        def handle_endtag(self, tag):
+            if tag == 'div' and self.depth:
+                self.depth -= 1
+
+        def handle_data(self, data):
+            if self.depth:
+                self.text.append(data)
+
+    source = (WEB / 'templates' / template).read_text()
+    assert '{% include "_partials/launch_loader.html" %}' in source
+    env = Environment(loader=FileSystemLoader(WEB / 'templates'), autoescape=True)
+    markup = LoaderMarkup()
+    markup.feed(env.get_template(template).render(radio_bootstrap={}, tv_max_minutes=60))
+    assert markup.loaders == 1
+    assert markup.headings == [('h2', 'gen-status')]
+    assert markup.statuses == 1
+    assert status in ''.join(markup.text)
 
 
 def test_shared_typography_uses_the_application_scale():

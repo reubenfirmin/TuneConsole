@@ -26,9 +26,9 @@ class WikiRepo(Repo):
                 and (row is None or not self.is_fresh(row, now)))
 
     @synchronized
-    def defer(self, subject, now) -> None:
-        """Keep saved content intact; failures have only a short, bounded in-memory backoff."""
-        self._retry_after[subject] = now + WIKI_RETRY_S
+    def defer(self, subject, now, *, retry_at=0) -> None:
+        """Keep content intact; demand retries also respect the vendor's admission deadline."""
+        self._retry_after[subject] = max(now + WIKI_RETRY_S, retry_at)
         self._retry_after.move_to_end(subject)
         while len(self._retry_after) > WIKI_CACHE_LIMIT:
             self._retry_after.popitem(last=False)

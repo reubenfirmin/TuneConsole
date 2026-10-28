@@ -53,7 +53,7 @@ def test_interrupted_retirement_rolls_back_schema_and_models(tmp_path, monkeypat
             refresh_migration.apply(connection, context)
             raise RuntimeError('interrupted refresh upgrade')
         monkeypatch.setattr(registry, 'MIGRATIONS', (*original[:38], Migration(
-            39, original[38].name, interrupted, replaces_data=False)))
+            39, original[38].name, interrupted)))
         with pytest.raises(MigrationError, match='interrupted refresh upgrade'):
             migrate(conn)
         assert list(conn.iterdump()) == before

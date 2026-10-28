@@ -125,12 +125,17 @@ def test_musicbrainz_skips_noisy_or_disabled_top_tags_and_keeps_relevance():
 
 
 def test_musicbrainz_cached_artist_rechecks_edited_vocabulary(monkeypatch):
+    import io
+    import json
+    from types import SimpleNamespace
+    from yt_playlist.integrations.musicbrainz import MusicBrainzIAO
     calls = []
-    monkeypatch.setattr(musicbrainz, "_artist_genre_cache", musicbrainz.OrderedDict())
-    def lookup(*args):
-        calls.append(args)
-        return {"genres": [{"name": "hip-hop", "count": 10}, {"name": "jazz", "count": 5}]}
-    monkeypatch.setattr(musicbrainz, "_get", lookup)
+    def lookup(request, **kwargs):
+        calls.append(request.full_url)
+        return io.StringIO(json.dumps({'id': 'artist', 'name': 'Artist', "genres": [
+            {"name": "hip-hop", "count": 10}, {"name": "jazz", "count": 5}]}))
+    monkeypatch.setattr(musicbrainz, '_iao', MusicBrainzIAO(open_fn=lookup,
+                        pacer=SimpleNamespace(wait=lambda: None)))
     genres.set_active(["Hip Hop", "Jazz"])
     assert musicbrainz._artist_genre("artist") == "Hip Hop"
     genres.set_active(["Jazz"])

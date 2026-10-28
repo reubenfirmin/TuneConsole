@@ -5,7 +5,7 @@
 {% block body %}
 <article class="track-detail" x-data='trackDetails({{ track.video_id|tojson }}, {{ rating|tojson }})'
          @track-like-changed.window="ratingChanged($event.detail)"
-         @song-metadata-updated.window="if ($event.detail.videoId === videoId) location.reload()">
+         @song-metadata-updated.window="if ($event.detail.videoId === videoId) location.replace(location.href)">
   <header class="artist-head pl-head library-hero release-hero track-release-hero">
     <span class="pl-art">
     <img class="track-detail-art" src="{{ cover|default(track.thumbnail) }}" data-fallback="{{ track.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="if(this.src !== new URL(this.dataset.fallback, location.href).href) this.src = this.dataset.fallback; else this.style.visibility='hidden'">

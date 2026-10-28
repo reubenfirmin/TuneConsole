@@ -74,8 +74,8 @@ def test_taste_topics_show_one_group_at_a_time(store, page, monkeypatch, request
 
     tabs = page.get_by_role("tablist", name="Taste Model sections", exact=True)
     expect(page.get_by_role("tablist")).to_have_count(1)
-    expect(tabs.get_by_role("tab")).to_have_count(8)
-    expect(tabs.get_by_role("tab").nth(1)).to_have_text("Experiment")
+    expect(tabs.get_by_role("tab")).to_have_count(9)
+    expect(tabs.get_by_role("tab").nth(1)).to_have_text("Music groups")
     positions = tabs.get_by_role("tab").evaluate_all("els => els.map(el => el.getBoundingClientRect().top)")
     assert len(set(positions)) == 1
     expect(page.locator('[role="tabpanel"] [role="tablist"]')).to_have_count(0)
@@ -558,7 +558,16 @@ def test_taste_recovery_restores_preexisting_settings_after_reload(live_app, sto
 
 
 @pytest.mark.parametrize("height", [720, 1200])
-def test_taste_loads_diagnostics_only_when_opened(live_app, page, height):
+def test_taste_loads_diagnostics_only_when_opened(live_app, store, page, monkeypatch, height):
+    from yt_playlist.rec import eval_recs, model_health
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("A page request must not prepare prediction checks")
+
+    assert store.rec_proposals.get_proposals(model_health.SURFACE) is None
+    monkeypatch.setattr(model_health, "prepare", forbidden)
+    for name in ("recall_at_k", "projection_recall", "rolling_temporal_recall"):
+        monkeypatch.setattr(eval_recs, name, forbidden)
     paths = {"/taste/viz/engine", "/taste/viz/recent-sound", "/taste/viz/playlist-influence",
              "/taste/recall", "/taste/preview", "/taste/comparison"}
     requests = []
@@ -574,7 +583,7 @@ def test_taste_loads_diagnostics_only_when_opened(live_app, page, height):
     # Playwright cannot wait for layout stability on a node the response just removed.
     page.locator("#model-health-checks").evaluate(
         "el => el.scrollIntoView({block: 'center', behavior: 'instant'})")
-    expect(page.locator("#model-status")).to_contain_text("Future listening")
+    expect(page.locator("#model-status")).to_contain_text("Preparing prediction checks in the background.")
     assert requests == ["/taste/recall"]
     page.get_by_role("tab", name="Overview", exact=True).click()
     page.get_by_role("tab", name="Model health", exact=True).click()
@@ -595,6 +604,7 @@ def test_taste_loads_diagnostics_only_when_opened(live_app, page, height):
     influence.scroll_into_view_if_needed()
     expect(influence).to_contain_text("Build the model to see the interests")
     assert requests.count("/taste/viz/playlist-influence") == 1
+    assert store.rec_proposals.get_proposals(model_health.SURFACE) is None
 
 
 def test_taste_loads_only_selected_panel_and_keeps_it_on_return(live_app, page):

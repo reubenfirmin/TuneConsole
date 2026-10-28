@@ -30,12 +30,31 @@ test for that feature:
 | Web routes | `test_web.py` (shell, security and navigation), `test_setup_routes.py`, `test_network_routes.py`, `test_sync_routes.py`, `test_cleanup_routes.py`, `test_merge_routes.py`, `test_enrichment_routes.py`, `test_move_routes.py` |
 | Taste routes | `test_taste_page.py` (overview and readings), `test_taste_controls_web.py`, `test_taste_evaluation_web.py`, `test_taste_feedback_web.py` |
 | Taste browser | `browser/test_taste_browser.py` (overview and feedback), `browser/test_taste_learning_browser.py`, `browser/test_taste_health_browser.py`, `browser/test_taste_controls_browser.py` |
+| Storage repair | `test_storage_maintenance.py` (real WAL compaction, radio, playback and recording), `browser/test_storage_maintenance_browser.py` (radio launch and startup notice through completion or low-space deferral) |
 
 For example, validate Radio write settlement with
 `uv run pytest tests/test_radio_writes.py tests/test_radio_recovery.py`.
 Validate Taste control interactions separately with
 `uv run pytest -m browser tests/browser/test_taste_controls_browser.py`.
 Use `--test-lock-wait=60` if waiting for the current owner is useful.
+
+Storage repair acceptance uses temporary file databases; the saved multi-gigabyte
+recovery rehearsal remains opt-in. Run the server and browser checks together:
+
+```sh
+uv run pytest --test-lock-wait=60 -m '' \
+  tests/test_storage_maintenance.py tests/browser/test_storage_maintenance_browser.py
+```
+
+The browser case covers 520- and 720-pixel window heights with successful and
+deferred compaction. It holds repair active, clicks the named Start Radio button
+outside the separate song-title link, checks the real start response and extension
+navigation within one five-second deadline, and confirms the session appears
+without recording activity. It then checks the notice clears when recording
+resumes, including a reload before polling. Each case writes
+`radio-launch-diagnostics.json` under its pytest temporary directory with request
+and response timing, the start response, bridge frames and browser console events.
+Failures add server/UI state and a screenshot, and print the diagnostic path.
 
 Shared setup is explicit:
 

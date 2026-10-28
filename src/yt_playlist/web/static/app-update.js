@@ -35,10 +35,14 @@ function appUpdate() {
           // Sparkle's Install and Relaunch happens in a native window. The old listener
           // may close between polls, so detect the new process even without a final status.
           if (this.instance && state.instance !== this.instance) {
-            window.location.reload();
-            return;
+            if (window.dispatchEvent(new Event('app-before-auto-reload', {cancelable: true}))) {
+              window.location.reload();
+              return;
+            }
+            // Retry after the listener finishes using an open feedback panel.
+          } else {
+            this.apply(state);
           }
-          this.apply(state);
         }
       } catch (_) {
         if (pollId === this.pollId && !this.destroyed && !this.pending) {

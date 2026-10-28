@@ -337,10 +337,13 @@ runners, with the separate packaged-resolution check on unit shard 1 only.
 The planner pins one immutable timing artifact from successful main-branch CI for
 all eight runners. Whole files are assigned deterministically by measured duration;
 new files use measured median per-case estimates and join the partition automatically.
-Until successful main-branch timings exist, `.github/test-durations.json` supplies
-measured file durations from PR #351's retained run, with its source revision and
-failed cases recorded. That failed run is timing evidence only; it cannot admit
-packaging or stand in for a passing performance comparison.
+The committed `.github/test-durations.json` is also a measured fallback. Its PR #351
+weights have a partial refresh from PR #425's complete raw reports: new files and
+files whose scaled estimate missed by more than eight seconds use the newer observed
+cost. The source revisions and refresh date are recorded. A main artifact older than
+that refresh cannot override it; a newer passing main run supplies timings again.
+These failed runs supply diagnostic timing weights only; they cannot admit packaging
+or stand in for a passing performance comparison.
 Every shard records normal collection before partitioning, including parametrized
 case IDs. The coverage job compares both collections, source revisions and file plans,
 then requires the union of completed cases to equal normal collection exactly once.
@@ -377,7 +380,23 @@ These are file-load projections, excluding queues, container pulls, dependency
 setup, collection and additional session-fixture work. The four-runner split
 doubles the number of test runners; repeated setup and fixtures can increase
 runner minutes even when elapsed time falls. A hosted four-runner improvement
-has not yet been measured.
+still needs a controlled comparison.
+
+The later PR #425 run executed all 6,197 unit and 603 browser cases exactly once,
+but failed seven tests. Its browser phase loads were 732.49s, 528.65s, 409.00s and
+452.43s. Repartitioning those same recorded file costs with the refreshed weights
+projects 532.31s, 538.69s, 518.62s and 532.95s. Unit phase loads project a longest
+shard of 467.37s instead of the observed 521.94s. These are projections on the old
+inventory, excluding runner setup, collection and any subsequent source changes.
+They do not establish a passing end-to-end improvement.
+
+The radio geometry checks now bound arc-length samples and measure curve-join
+tangents directly; they retain intermediate positions, fixed-control clearance,
+both motion preferences, phone/desktop coverage and rapid reversals. Long record-art
+geometry scans advance the listening phase and render a frame instead of replaying
+ninety seconds of unrelated animation frames in each viewport. Real wall-clock
+record/ring motion, polling continuity and elapsed-time integration remain separately
+covered.
 
 For the hosted comparison, manually run **Tests** at the same fixed revision at
 least twice with `test_shards=2` and twice with `test_shards=4`, waiting for each run

@@ -261,7 +261,8 @@ def test_store_exposes_only_named_repositories_and_preserves_them_on_reinit(stor
 
 
 def _unguarded_connection_access(method):
-    if {ast.unparse(node) for node in method.decorator_list} & {"synchronized", "snapshot_read"}:
+    if {ast.unparse(node) for node in method.decorator_list} & {
+            "synchronized", "snapshot_read", "lookup_read"}:
         return False
 
     def unguarded(node, locked=False):
@@ -277,6 +278,15 @@ def _unguarded_connection_access(method):
         return any(unguarded(child, locked) for child in ast.iter_child_nodes(node))
 
     return unguarded(method)
+
+
+def test_connection_guard_recognizes_only_known_repository_decorators():
+    for decorator in ('synchronized', 'snapshot_read', 'lookup_read'):
+        method = ast.parse(f'@{decorator}\ndef query(self):\n    self.conn.execute("SELECT 1")').body[0]
+        assert not _unguarded_connection_access(method), decorator
+    for decorator in ('wraps', 'unrelated_read', 'lookup_read()'):
+        method = ast.parse(f'@{decorator}\ndef query(self):\n    self.conn.execute("SELECT 1")').body[0]
+        assert _unguarded_connection_access(method), decorator
 
 
 def test_connection_guard_recognizes_explicit_lock_scope():

@@ -39,7 +39,7 @@ def observe(conn, browse_id, *, title=None, artist=None, year=None, type=None,
     previous_rank = None
     if aid is None:
         aid = conn.execute('INSERT INTO albums(title,artist,year,type,thumbnail,genre,metadata_rank) VALUES (?,?,?,?,?,?,?)', (*values,rank)).lastrowid
-        conn.execute("INSERT INTO album_provider_ids VALUES ('youtube',?,?)", (browse_id,aid))
+        conn.execute("INSERT INTO album_provider_ids(provider,provider_id,album_id) VALUES ('youtube',?,?)", (browse_id,aid))
     else:
         previous_rank = conn.execute('SELECT metadata_rank FROM albums WHERE id=?', (aid,)).fetchone()[0]
         fields = ('title','artist','year','type','thumbnail','genre')

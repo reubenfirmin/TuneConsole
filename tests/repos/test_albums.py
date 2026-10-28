@@ -1,5 +1,4 @@
 import json
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -77,7 +76,7 @@ def test_legacy_cache_preserves_unknown_order_unresolved_keys_and_raw_evidence(i
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
-def test_populated_album_upgrade_rolls_back_and_reopens_with_verified_backup(installed_v22,tmp_path,monkeypatch):
+def test_populated_album_upgrade_rolls_back_and_reopens_without_backups(installed_v22,tmp_path,monkeypatch):
     store = installed_v22
     entry = 1
     before = list(store.conn.iterdump())
@@ -99,12 +98,8 @@ def test_populated_album_upgrade_rolls_back_and_reopens_with_verified_backup(ins
     store.init_schema()
     assert list(store.conn.iterdump()) == state
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-    backups = list((tmp_path / 'backups').glob('*.db'))
-    assert len(backups) >= 1
-    for path in backups:
-        with sqlite3.connect(path) as backup:
-            assert backup.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-            assert backup.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 22
+    assert not (tmp_path / 'backups').exists()
+    assert store.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
 
 
 def test_release_consumers_keep_same_title_releases_and_previous_associations(store):

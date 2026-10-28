@@ -24,7 +24,8 @@
     </dl>
     {% if r.challenger %}<p class="section-note">Challenger: {{ r.challenger.label }}.</p>{% endif %}
     {% if r.restored_date %}<p class="section-note">Previous setup restored on {{ r.restored_date }}. Later-listening measurements stopped at restoration.</p>{% endif %}
-    {% if r.baseline %}<p class="section-note">{{ r.baseline.trials }} usable test tracks across {{ r.baseline.windows }} periods. A comparison needs at least {{ s.min_trials }} tracks across {{ s.min_windows }} periods.</p>{% endif %}
+    {% if r.followup.frozen_at|default(none) is not none %}<p class="section-note">This historical forecast summary is retained as last measured. Its 180-day source window has closed, so later listening does not revise it.</p>{% endif %}
+    {% if r.baseline %}<p class="section-note">{% if r.kind|default('') == 'daily' %}{{ r.baseline.trials }} comparable first-play tracks across {{ r.baseline.active_days }} active days in one 30-day holdout. Training uses all reconstructable history before the cutoff. At least {{ s.min_trials }} tracks and {{ s.min_active_days }} active days are required.{% else %}{{ r.baseline.trials }} usable test tracks across {{ r.baseline.windows }} periods.{% endif %}</p>{% endif %}
     {% if r.product_report %}
     <p>Controlled menus and Radio episodes: {{ r.product_report.overall.days.incumbent }} observed days with the current setup,
       {{ r.product_report.overall.days.challenger }} with the challenger.
@@ -64,8 +65,8 @@
   <section class="selection-report" aria-labelledby="selection-method-title">
     <h2 id="selection-method-title">How the comparison works</h2>
     <div class="selection-explanation">
-      <div><h3>Choosing a setup</h3><p>After 14 days of history and 100 modeled tracks, the worker prepares a challenger with the same library, taste inputs and serving pipeline. Complete recommendation menus and Radio episodes keep their assigned setup. New windows share a random assignment for each UTC day.</p><p>A decision follows 28 days of exposure and one day for outcomes. It needs observed days in both setups, adequate observation coverage, a supported useful improvement, and separate checks for each used format. Correlated tracks stay within their episode and day. Uncertain comparisons keep the current model. Repeated attempts use a shared error budget.</p></div>
-      <div><h3>Checking later listening</h3><p>Visibility, choice, playback start and observed completion remain separate. Missing endings stay unknown. After a switch, weekly checks report coverage and sustained observed declines, with an option to restore the exact previous model. Later monitoring is observational.</p><p>Earlier first-play forecasts remain available as representation diagnostics. They do not establish whether a recommendation menu improved.</p></div>
+      <div><h3>Choosing a setup</h3><p>Each candidate trains on all reconstructable history before the latest 30 days. Those 30 days are withheld as one comparison period, with the same eligible tracks for every candidate. Training needs at least 14 earlier days and 100 modeled tracks; comparison needs 50 first-play tracks across seven active days.</p><p>The worker checks daily, requiring 30 distinct freshly played tracks after the previous comparison. A switch needs a supported improvement of at least five prediction matches and two percentage points. Uncertain results, ties and incomplete comparisons keep the current setup. Each comparison corrects for testing multiple alternatives.</p></div>
+      <div><h3>Training and restoring</h3><p>After selection, the chosen setup trains on all current data. Candidate fits run privately in bounded steps while the last published model remains available. A switch saves the exact previous vectors and configuration for restoration; restoring pauses automatic selection.</p><p>These scores measure first-play prediction accuracy. They do not establish better recommendation menus, album choices or enjoyment. Historical menu experiments and prospective forecast measurements remain available in their original reports.</p></div>
     </div>
   </section>
 

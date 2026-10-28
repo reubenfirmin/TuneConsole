@@ -212,7 +212,7 @@ def test_publication_seeks_only_consumed_revisions(database, monkeypatch):
         snapshot.store.settings.get_setting('input')
         database.settings.set_setting('unrelated', 'changed')
         assert snapshot.publish(lambda: None)
-    assert captures == [None, {('settings', 'key:input')}]
+    assert captures == [{('settings', 'key:input')}]
 
 
 @pytest.mark.parametrize('changed', [False, True])
@@ -248,20 +248,30 @@ def test_revision_capture_batches_below_sqlite_parameter_limit(database):
         database.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous)
 
 
-def test_closed_snapshot_releases_revision_map_without_waiting_for_cycle_collection(database, monkeypatch):
-    class RevisionMap(dict):
-        pass
-    original = database._snapshot_revisions.capture
-    monkeypatch.setattr(database._snapshot_revisions, 'capture',
-                        lambda dependencies=None: RevisionMap(original(dependencies)))
+def test_closed_snapshot_releases_memo_callback_without_waiting_for_cycle_collection(database):
     collecting = gc.isenabled()
     gc.disable()
     try:
         with database.read_snapshot() as snapshot:
             snapshot.store.settings.get_setting('input')
-            revisions = weakref.ref(snapshot._revisions)
+            callback = weakref.ref(snapshot.store._memoized_read)
         del snapshot
-        assert revisions() is None
+        assert callback() is None
     finally:
         if collecting:
             gc.enable()
+
+
+@pytest.mark.parametrize('changed', [False, True])
+def test_released_reader_keeps_original_guard_after_context_exit(database, changed):
+    database.settings.set_setting('input', 'old')
+    with database.read_snapshot() as snapshot:
+        assert snapshot.store.settings.get_setting('input') == 'old'
+        snapshot.release_reader()
+        snapshot.release_reader()
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            snapshot.store.conn.execute('SELECT 1')
+    database.settings.set_setting('input' if changed else 'foreground-setting', 'new')
+    published = []
+    assert snapshot.publish(lambda: published.append(True)) == (not changed)
+    assert published == ([] if changed else [True])

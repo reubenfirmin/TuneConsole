@@ -19,3 +19,10 @@ def test_setting_persists_on_the_shared_connection(store):
     store.settings.set_setting("lastfm_api_key", "abc")
     assert store.conn.execute("SELECT value FROM settings WHERE key='lastfm_api_key'").fetchone()[0] == "abc"
     assert store.settings.get_setting("lastfm_api_key") == "abc"
+
+
+def test_namespace_lookup_treats_sql_pattern_characters_literally(store):
+    for key in ("gc_!%:one", "gc_!%:two", "gcX!%:one", "gc_!anything:one", "other"):
+        store.settings.set_setting(key, key)
+    assert store.settings.get_settings_with_prefix("gc_!%:") == {
+        "gc_!%:one": "gc_!%:one", "gc_!%:two": "gc_!%:two"}

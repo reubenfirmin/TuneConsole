@@ -4,11 +4,11 @@ Every remote write has a committed backup reference first. Interrupted writes ar
 read back on recovery; recovery never replays a destructive request.
 """
 import json
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 
 from yt_playlist.library.playlist_snapshot import http_status, playlist_if_present
 from yt_playlist.library.playlist_mutation import mutation_status
-from yt_playlist.library.action_claim import claim_action
+from yt_playlist.library.action_claim import claim_action, claim_deletion_target
 from yt_playlist.util.action_kinds import APPLY_MERGE, GC_GENERATED, MOVE_IDENTITY, PLAN
 
 
@@ -39,15 +39,27 @@ def pending_deletion(store, playlist):
     return store.actions.get_pending_deletion(playlist.identity_id, playlist.ytm_playlist_id)
 
 
-def reconcile_deletion(store, action_id, clients, now, *, locked=False):
+def reconcile_deletion(store, action_id, clients, now, *, locked=False, claimed_target=None):
     """Resolve a pending attempt using complete reads, without another deletion."""
-    with nullcontext() if locked else claim_action(store, action_id, operation="Deletion"):
+    with ExitStack() as claims:
+        if not locked:
+            claims.enter_context(claim_action(store, action_id, operation="Deletion"))
         action = store.actions.get_action(action_id)
         if action is None or action.status not in ("delete_pending", "delete_failed"):
             raise ValueError("This action has no pending deletion. Reload the Action Log.")
         undo = json.loads(action.undo_json)
+        for target in sorted({(e["identity"], e["ytm"]) for e in undo.get("deletions", [])}):
+            if target != claimed_target:
+                claims.enter_context(claim_deletion_target(store, *target))
         for entry in undo.get("deletions", []):
             if entry["phase"] == "complete":
+                continue
+            if entry["phase"] == "remote_complete":
+                # Absence was already verified and committed before local cleanup.
+                # An unavailable reconnect must not strand that local completion.
+                _prune(store, action, entry)
+                entry["phase"] = "complete"
+                _save(store, action_id, undo, now)
                 continue
             client = clients.get(entry["identity"])
             if client is None:
@@ -87,13 +99,39 @@ def resume_pending_deletion(store, playlist, client, now):
     action = pending_deletion(store, playlist)
     if action is None:
         return None
-    action = reconcile_deletion(store, action.id, {playlist.identity_id: client}, now)
+    action = reconcile_deletion(store, action.id, {playlist.identity_id: client}, now,
+                                claimed_target=(playlist.identity_id, playlist.ytm_playlist_id))
     if action.status != "executed":
         raise ValueError("The previous deletion did not complete. The playlist was preserved. "
                          "Review the saved action before requesting deletion again.")
     undo = json.loads(action.undo_json)
     return next(entry["backup"] for entry in undo["deletions"]
                 if entry["identity"] == playlist.identity_id and entry["ytm"] == playlist.ytm_playlist_id)
+
+
+def resume_gc_deletion(store, playlist, clients, now):
+    """Reconcile saved GC failures before considering a fresh, backed-up attempt.
+
+    Reconciliation itself never writes to YouTube. A confirmed surviving GC target
+    may proceed through the normal fresh-backup gate; other actions keep ownership
+    of their failed deletion and require an explicit request.
+    """
+    target = (playlist.identity_id, playlist.ytm_playlist_id)
+    action = (pending_deletion(store, playlist)
+              or store.actions.get_failed_deletion(*target))
+    if action is None:
+        return None
+    action = reconcile_deletion(store, action.id, clients, now, claimed_target=target)
+    entries = json.loads(action.undo_json)["deletions"]
+    entry = next(e for e in entries if (e["identity"], e["ytm"]) == target)
+    if entry["phase"] == "complete":
+        return entry["backup"]
+    if action.kind != GC_GENERATED or len(entries) != 1:
+        raise ValueError("A previous deletion still owns this playlist. Recheck its saved "
+                         "action before explicitly requesting deletion again.")
+    # A failed entry here means a complete read confirmed that the playlist exists.
+    # The caller must take a new complete backup before recording another intent.
+    return None
 
 
 def delete_backed_up(store, playlist, client, backup, now, *, kind, action_id=None,

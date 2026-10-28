@@ -75,9 +75,11 @@ def test_our_extension_origin_connects_and_round_trips():
         frame = ws.receive_json()
         assert frame["body"] == {"b": 1}
         ws.send_json({"id": frame["id"], "status": 200, "body": json.dumps({"ok": True}),
-                      "timeZone": "America/Costa_Rica"})
+                      "timeZone": "America/Costa_Rica",
+                      "headers": {"retry-after": "120", "authorization": "secret", "set-cookie": "secret"}})
         t.join(timeout=5)
         assert out["res"] == (200, json.dumps({"ok": True}))
+        assert out["res"].headers == {"Retry-After": "120"}
         assert bridge.source_timezone == "America/Costa_Rica"
 
 
@@ -89,6 +91,22 @@ def test_wrong_origin_rejected():
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect("/bridge/ws", headers={"origin": "https://evil.example"}) as ws:
             ws.receive_json()
+
+
+def test_extension_connection_wakes_sync_after_pairing_and_auth_reset():
+    from types import SimpleNamespace
+
+    wake = threading.Event()
+    store = _FakeStore()
+    cleared = []
+    ctx = SimpleNamespace(bridge=Bridge(), store=store, sync_wake=wake,
+                          clear_all_auth_expired=lambda: cleared.append(True))
+    app = FastAPI()
+    app.include_router(build_bridge_route(ctx))
+    with TestClient(app).websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}):
+        assert wake.wait(5)
+        assert store.settings.get_setting("bridge_paired") == "1"
+        assert cleared == [True]
 
 
 def test_dev_extension_origin_accepted():
@@ -439,8 +457,8 @@ def test_active_radio_links_to_specialist_view(store, active, playing, kind, url
     store.playlists.upsert_playlist(iid, "PL_other", "Another mix", 1, "", 1)
     bridge = Bridge()
     bridge.now_playing = {"title": "Song", "video_id": "v1", "playlist_ytm_id": playing}
-    radio = SimpleNamespace(active=active, bootstrap=lambda: {"state": {
-        "active": active, "playlist_id": "PL_radio", "title": "Radio Session"}})
+    radio = SimpleNamespace(active=active, state=lambda: {
+        "active": active, "playlist_id": "PL_radio", "title": "Radio Session"})
     app = FastAPI()
     app.include_router(build_bridge_route(SimpleNamespace(bridge=bridge, store=store, radio=radio)))
     source = TestClient(app).get("/bridge/status").json()["now_playing"]["source"]

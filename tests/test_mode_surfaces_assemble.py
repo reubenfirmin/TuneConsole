@@ -287,7 +287,9 @@ def test_thin_mix_exhausts_deeper_family_before_adjacent_tracks(store, monkeypat
     tracks = cards[0]["tracks"]
     assert len(tracks) == len({d["key"] for d in tracks}) == 12
     assert all(d["genre"] in {"Soul", "Funk"} for d in tracks)
-    assert not {"deep0", "deep1"} & {d["key"] for d in tracks}
+    keys = {d["key"] for d in tracks}
+    assert "deep0" not in keys  # Explicit dislike still suppresses a candidate.
+    assert "deep1" in keys  # Generated membership does not erase independent eligibility.
     assert store.rec_proposals.get_proposals("mode_bundles") == payload
 
 

@@ -100,10 +100,21 @@ def test_evicted_job_endpoints_explain_missing_or_expired(store):
     job = jobs.create()
     job.done = True
     client = TestClient(app, base_url="http://127.0.0.1")
-    for path in ("/sync/events/", "/playlist/enrich/events/", "/track/genre-lookup/events/"):
+    for path in ("/sync/events/", "/sync/status/", "/playlist/enrich/events/", "/track/genre-lookup/events/"):
         response = client.get(path + str(job.id))
         assert response.status_code == 404
         assert "expired" in response.json()["detail"]
+
+
+def test_retained_sync_status_observes_completion_after_active_job_disappears(store):
+    app = create_app(store, lambda: {})
+    job = app.state.ctx.jobs.create("library")
+    client = TestClient(app, base_url="http://127.0.0.1")
+    assert client.get(f"/sync/status/{job.id}").json() == {"done": False, "error": None, "outcome": None}
+    job.outcome = "complete"
+    job.done = True
+    assert client.get("/sync/active").json()["job_id"] is None
+    assert client.get(f"/sync/status/{job.id}").json() == {"done": True, "error": None, "outcome": "complete"}
 
 
 @pytest.mark.parametrize("kind", ["fresh_pool", "library_pool"])

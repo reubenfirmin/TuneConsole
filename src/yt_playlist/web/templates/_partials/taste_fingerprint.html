@@ -106,7 +106,7 @@
     </form>
     <p id="home-vibe-status" class="fp-feedback" role="status">Pick a vibe. Your mixes update right away.</p>
     <details class="fp-vibe-explainer"><summary>{{ arrow_icon('disclosure') }} What shapes a vibe?</summary>
-      <p>Intensity, tempo, groove, mood, acoustic character, and instrumentalness, where available. Genre and artist descriptions provide weaker clues. Missing details stay uncertain.</p>
+      <p>Choose the kind of listening session you want. Energy, relaxation, emotional tone, force, and how much the music demands your attention help shape it across genres. Genre choices restrict the music available. Missing details stay uncertain.</p>
       <ul>{% for key, preset in (vibe_presets|default({})).items() %}<li><strong>{{ preset.label }}:</strong> {{ preset.signals }}</li>{% endfor %}</ul>
     </details>
   </div>

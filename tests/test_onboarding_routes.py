@@ -25,6 +25,82 @@ def _synced_thin(store):
     store.settings.set_setting("last_sync_at", "999")   # makes sync.last_synced_ago truthy so home enters the synced branch
 
 
+def test_saved_album_starter_arrives_without_tracks_or_training(store):
+    _, client = _client(store)
+    store.settings.set_setting('onboard_listening_format', 'albums')
+    assert 'hx-get="/home/onboard/start"' in client.get('/').text
+    waiting = client.get('/home/onboard/start').text
+    assert 'every 3s' in waiting and 'Play mix' not in waiting
+    store.collection.add_saved_album({'browse': 'MPRE_first', 'title': 'First record',
+                                      'artist': 'My artist', 'type': 'Album'})
+    html = client.get('/home/onboard/start').text
+    assert 'First record' in html and 'From your album collection' in html
+    assert 'hx-post="/album/play"' in html
+    assert 'data-onboarding-album="MPRE_first"' in html
+    assert 'Play album' in html and 'Play mix' not in html
+    assert 'every 3s' not in html
+    assert store.settings.get_setting('last_sync_at') is None
+    assert store.rec_proposals.get_proposals('album_prepared') is None
+    assert store.rec_model.rec_content_vectors_count() == 0
+
+
+def test_album_starter_can_use_familiar_artists_but_not_incomplete_imports(store):
+    from yt_playlist.core import albums
+    from tests.conftest import seed_catalog_track
+
+    _, client = _client(store)
+    store.settings.set_setting('onboard_listening_format', 'albums')
+    store.tracks.observe_track_entry('partial', 'Unverified', 'Unknown artist', now=1000)
+    with store.conn:
+        albums.observe(store.conn, 'MPRE_unknown', title='Unverified album', artist='Unknown artist')
+    assert 'Play album' not in client.get('/home/onboard/start').text
+    for i in range(2):
+        seed_catalog_track(store, f'familiar {i}|artist', f'Familiar {i}', 'Familiar artist',
+                           video_id=f'familiar-{i}')
+    with store.conn:
+        albums.observe(store.conn, 'MPRE_familiar', title='Familiar record', artist='Familiar artist')
+    html = client.get('/home/onboard/start').text
+    assert 'Familiar record' in html and 'Unverified album' not in html
+    assert 'An album from an artist in your collection' in html
+    assert 'Play mix' not in html
+    # A saved release takes priority over the familiar-artist fallback.
+    store.collection.add_saved_album({'browse': 'MPRE_saved', 'title': 'Saved record', 'artist': 'Other artist'})
+    html = client.get('/home/onboard/start').text
+    assert 'Saved record' in html and 'Familiar record' not in html
+
+
+def test_radio_starter_uses_ready_radio_and_falls_back_without_building_models(store, monkeypatch):
+    from tests.conftest import seed_catalog_track
+
+    _, client = _client(store)
+    store.settings.set_setting('onboard_listening_format', 'radio')
+    seed_catalog_track(store, 'ready|artist', 'Ready song', 'Artist', video_id='ready')
+    radio = client.app.state.ctx.radio
+    monkeypatch.setattr(radio, 'seeds', lambda: pytest.fail('Starter must only read prepared radio'))
+    html = client.get('/home/onboard/start').text
+    assert 'Play mix' in html
+    assert 'while we prepare your Radio Session' in html
+    radio.offer = [{'key': 'ready|artist', 'video_id': 'ready', 'title': 'Ready song', 'artist': 'Artist'}]
+    radio.offer_id = 'prepared-radio-offer'
+    html = client.get('/home/onboard/start').text
+    assert 'Your first Radio Session' in html and 'Start radio' in html
+    assert 'prepared-radio-offer' in html
+    assert 'Play mix' not in html
+
+
+def test_uploaded_starter_preserves_existing_browser_handoff(store):
+    from yt_playlist.library.album_fetch import UPLOAD_RELEASE_PREFIX
+
+    _, client = _client(store)
+    store.settings.set_setting('onboard_listening_format', 'albums')
+    store.collection.add_saved_album({'browse': UPLOAD_RELEASE_PREFIX + '_first',
+                                      'title': 'My upload', 'artist': 'My artist'})
+    html = client.get('/home/onboard/start').text
+    assert 'My upload' in html and 'Play album' in html
+    assert 'https://music.youtube.com/browse/' + UPLOAD_RELEASE_PREFIX in html
+    assert 'Play mix' not in html
+
+
 def test_home_shows_onboarding_when_thin(store):
     _synced_thin(store)
     _, c = _client(store)
@@ -40,7 +116,14 @@ def test_first_format_choice_persists_and_finishes_after_offers_arrive(store, fo
 
     _, client = _client(store)
     html = client.get('/').text
+    assert 'id="welcome-title"' in html
+    assert 'id="listening-format-title"' not in html
+    assert 'id="welcome-title"' in client.get('/').text
+    html = client.post('/home/onboard/welcome').text
     assert 'id="listening-format-title"' in html
+    assert 'id="welcome-title"' not in html
+    assert 'Customize your landing page.' in html
+    assert 'Taste Model settings' not in html
     assert 'id="arrival-title"' not in html
     assert store.settings.get_setting('onboard_format_pending') == '1'
     assert client.post('/home/onboard/format', data={'format': 'invalid'}).status_code == 422
@@ -70,6 +153,8 @@ def test_pending_format_choice_survives_import_and_can_be_resolved_in_settings(s
     store.settings.set_setting('last_sync_at', '1000')
     publish_personal_album(store)
     assert client.get('/home/onboard/status').json()['setup']['complete']
+    assert 'id="welcome-title"' in client.get('/').text
+    client.post('/home/onboard/welcome')
     assert 'id="listening-format-title"' in client.get('/').text
     assert client.post('/home/format', data={'format': 'albums'}).status_code == 204
     assert 'id="onboarding-feed"' not in client.get('/').text
@@ -102,7 +187,7 @@ def test_first_mix_polls_until_verified_songs_arrive(store):
 
     fake, c = _client(store)
     html = c.get("/").text
-    assert 'id="listening-format-title"' in html
+    assert 'id="welcome-title"' in html
     html = c.post('/home/onboard/format', data={'format': 'mixes'}).text
     assert 'hx-get="/home/onboard/radio"' in html
     assert "30 seconds" not in html
@@ -275,6 +360,92 @@ def test_prepared_offer_readiness_agrees_between_home_and_setup_without_modes(st
     assert setup["complete"]
     assert setup["phase"] == "ready"
     assert 'class="setup-banner"' not in client.get("/playlists").text
+
+
+@pytest.mark.parametrize('format', ['mixes', 'albums'])
+def test_completed_setup_survives_offer_loss_and_a_database_restart(tmp_path, format):
+    from tests.onboarding_support import publish_personal_album, publish_personal_mix
+    from yt_playlist.rec import onboarding
+
+    path = tmp_path / 'library.db'
+    first = Store(path)
+    first.init_schema()
+    try:
+        first.settings.set_setting('last_sync_at', '1000')
+        (publish_personal_mix if format == 'mixes' else publish_personal_album)(first)
+        client = TestClient(create_app(first, lambda: {}, now_fn=lambda: 1000,
+                                       background_work=False), base_url='http://127.0.0.1')
+        assert client.get('/home/onboard/status').json()['setup']['complete']
+        assert first.settings.get_setting(onboarding.SETUP_COMPLETE) == '1'
+        # Disposable projections and offer-deduplication rows are not setup state.
+        with first.conn:
+            first.conn.execute("DELETE FROM rec_proposals WHERE surface IN "
+                               "('home_prepared','home_tuned','home_choice','home_shown','album_prepared')")
+    finally:
+        first.conn.close()
+    restored = Store(path)
+    restored.init_schema()
+    try:
+        client = TestClient(create_app(restored, lambda: {}, now_fn=lambda: 1100,
+                                       background_work=False), base_url='http://127.0.0.1')
+        setup = client.get('/home/onboard/status').json()['setup']
+        assert setup['complete'] and setup['phase'] == 'ready'
+        assert not setup['offers_ready']
+        assert not onboarding.initial_setup_pending(restored, 1100)
+        assert not onboarding.onboarding_active(restored, 1100)
+        html = client.get('/').text
+        assert 'id="home-feed"' in html
+        assert 'id="onboarding-feed"' not in html
+        assert 'class="setup-banner"' not in html
+    finally:
+        restored.conn.close()
+
+
+@pytest.mark.parametrize('surface,payload', [
+    ('home_shown', {'epoch': 4, 'signatures': ['actual-offer']}),
+    ('choice_window:mixes', {'window': '4', 'opportunity_id': 'actual-menu'}),
+    ('choice_window:albums', {'window': '4', 'opportunity_id': 'actual-menu'}),
+])
+def test_existing_actual_home_offers_backfill_setup_completion(store, surface, payload):
+    from yt_playlist.rec import onboarding
+
+    _synced_thin(store)
+    store.rec_proposals.put_proposals(surface, payload, 999)
+    _, client = _client(store)
+    assert store.settings.get_setting(onboarding.SETUP_COMPLETE) is None
+    html = client.get('/').text
+    assert 'id="onboarding-feed"' not in html
+    assert 'id="home-feed"' in html
+    assert store.settings.get_setting(onboarding.SETUP_COMPLETE) == '1'
+
+
+@pytest.mark.parametrize('surface,payload', [
+    ('home_shown', {'signatures': []}),
+    ('home_shown', {'signatures': [None, '']}),
+    ('home_shown', {'signatures': 'invalid'}),
+    ('choice_window:albums', {'opportunity_id': None}),
+    ('choice_window:mixes', {'opportunity_id': ''}),
+])
+def test_empty_or_invalid_historical_offers_do_not_complete_setup(store, surface, payload):
+    from yt_playlist.rec import onboarding
+
+    _synced_thin(store)
+    store.rec_proposals.put_proposals(surface, payload, 999)
+    assert onboarding.initial_setup_pending(store, 1000)
+    assert store.settings.get_setting(onboarding.SETUP_COMPLETE) is None
+
+
+def test_snapshot_readiness_does_not_write_setup_completion(store):
+    from tests.onboarding_support import publish_personal_mix
+    from yt_playlist.rec import onboarding
+
+    store.settings.set_setting('last_sync_at', '1000')
+    publish_personal_mix(store)
+    with store.read_snapshot() as snapshot:
+        assert not onboarding.initial_setup_pending(snapshot.store, 1000)
+    assert store.settings.get_setting(onboarding.SETUP_COMPLETE) is None
+    assert not onboarding.initial_setup_pending(store, 1000)
+    assert store.settings.get_setting(onboarding.SETUP_COMPLETE) == '1'
 
 
 def test_setup_status_uses_live_import_step_and_empty_accounts_finish(store):

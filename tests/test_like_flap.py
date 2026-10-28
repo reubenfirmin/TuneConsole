@@ -222,7 +222,7 @@ def test_rate_removelike_pevent_does_not_clear_a_like(store):
     store.tracks.upsert_track("v1", "Song", "Band", "", None)
     store.rec_model.record_like(KEY, 900.0, provenance="action")
     body = json.dumps({"target": {"videoId": "v1"}})
-    msg = {"kind": "rate", "url": ".../youtubei/v1/like/removelike", "body": body, "brandId": ""}
+    msg = {"kind": "rate", "url": ".../youtubei/v1/like/removelike", "body": body, "brandId": "", "brandKnown": True}
     assert player_events.handle_player_event(_ctx(store), msg, 1000.0) is True   # persisted raw
     assert KEY in store.rec_model.recent_liked_keys()                    # but the like is untouched
 
@@ -231,7 +231,7 @@ def test_rate_like_pevent_acts_with_action_provenance(store):
     store.identities.upsert_identity("main", "bridge", None, True)
     store.tracks.upsert_track("v1", "Song", "Band", "", None)
     body = json.dumps({"target": {"videoId": "v1"}})
-    msg = {"kind": "rate", "url": ".../youtubei/v1/like/like", "body": body, "brandId": ""}
+    msg = {"kind": "rate", "url": ".../youtubei/v1/like/like", "body": body, "brandId": "", "brandKnown": True}
     msg.update(phase="settled", success=True, httpStatus=200)
     player_events.handle_player_event(_ctx(store), msg, 1000.0)
     assert store.rec_model.like_provenance(KEY) == "action"

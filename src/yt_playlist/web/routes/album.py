@@ -58,7 +58,8 @@ def build(ctx) -> APIRouter:
         a = fetch_album(client, browse_id)
         if not a or not a.get('title'):
             return None
-        remember_album(store, browse_id, a)
+        if not getattr(store, 'activity_paused', False):
+            remember_album(store, browse_id, a)
         return {
             'title': a.get('title'),
             'artist': ', '.join(x.get('name', '') for x in a.get('artists') or []),
@@ -118,7 +119,8 @@ def build(ctx) -> APIRouter:
         # the live album has more than we hold: an upload typically arrives as a PARTIAL subset (sync
         # stamps only the tracks that appear in a playlist), and a `not tracks` guard would skip the
         # fold entirely for it, leaving 3 of 17 rows on screen.
-        if in_library and album and album.get("tracks") and len(tracks) < len(album["tracks"]):
+        if (not getattr(store, 'activity_paused', False)
+                and in_library and album and album.get("tracks") and len(tracks) < len(album["tracks"])):
             for t in album["tracks"]:
                 if t.get("video_id") and t.get("title"):
                     store.tracks.upsert_track(t["video_id"], t["title"], t.get("artist") or album.get("artist") or "",
@@ -135,7 +137,7 @@ def build(ctx) -> APIRouter:
         # Unsaved releases use the same row component. Merge known metadata by exact
         # upload while retaining the full fetched sequence and keeping library ownership intact.
         table_tracks = tracks if album else []
-        if album and not in_library:
+        if album and (not in_library or getattr(store, 'activity_paused', False)):
             known = {t['video_id']: t for t in store.charts.video_tracks_detail(
                 [t['video_id'] for t in album.get('tracks') or [] if t.get('video_id')])}
             table_tracks = [{
@@ -153,8 +155,8 @@ def build(ctx) -> APIRouter:
         cover, mosaic = cover_and_mosaic(album, tracks)
         editorial = {'browse_id': browse_id, 'title': (album or {}).get('title'),
                      'artist': (album or {}).get('artist')}
-        if album and not inline:
-            store.rec_proposals.request_album_notes([editorial], ctx.now_fn())
+        if album and not inline and not getattr(store, 'activity_paused', False):
+            store.rec_proposals.request_album_notes([editorial], ctx.now_fn(), visible=True)
             if ctx.rec_worker:
                 ctx.rec_worker.trigger_home_refresh()
         prepared = store.rec_proposals.get_proposals("home_prepared") or {}
@@ -182,7 +184,7 @@ def build(ctx) -> APIRouter:
             "saved_owners": store.collection.saved_album_owners(browse_id).get(browse_id, []),
             "editorial": editorial, "notes": album_notes.read(store, editorial),
             "opportunity_id": opportunity,
-            "album_feedback": album_choices.feedback_state(store).get(browse_id, {}).get("kind"),
+            "album_feedback": album_choices.feedback_state(store, [browse_id]).get(browse_id, {}).get("kind"),
             "companion": companion, "companion_recipe": companion_recipe,
             "is_upload": upload, "in_library": in_library,
             "library_track_count": len({t["track_id"] for t in library_tracks}),
@@ -211,6 +213,7 @@ def build(ctx) -> APIRouter:
         action_id = (form.get('action_id') or uuid.uuid4().hex).strip()
         if not browse:
             return _toast(request, "Choose an album to play.")
+        intent = ctx.bridge.begin_playback_intent()
 
         def start():
             if not ctx.bridge.connected:
@@ -223,8 +226,9 @@ def build(ctx) -> APIRouter:
             video = next((track.get("videoId") for track in tracks if track.get("videoId")), None)
             if not playlist or not video:
                 raise ValueError("The complete album queue is unavailable. Open its details and try again.")
-            remember_album(store, browse, album)
-            if opportunity:
+            if not getattr(store, 'activity_paused', False):
+                remember_album(store, browse, album)
+            if opportunity and not getattr(store, 'activity_paused', False):
                 choice_evidence.safe_respond(store, opportunity, "choice", ctx.now_fn(), option_id=browse,
                     action_id=action_id,
                     details={"playlist": playlist, "video_id": video,
@@ -235,7 +239,8 @@ def build(ctx) -> APIRouter:
                     "browse": browse, "playlist": playlist, "at": ctx.now_fn(), 'action_id': action_id,
                     'videos': [track['videoId'] for track in tracks if track.get('videoId')]}))
             ctx.bridge.send_control({"type": "navigate", "url":
-                "https://music.youtube.com/watch?v=" + quote(video, safe="") + "&list=" + quote(playlist, safe="")})
+                "https://music.youtube.com/watch?v=" + quote(video, safe="") + "&list=" + quote(playlist, safe="")},
+                intent=intent)
         try:
             await activity_for(ctx).to_thread(start)
         except ValueError as exc:
@@ -261,7 +266,8 @@ def build(ctx) -> APIRouter:
                 tracks = shareable_album_tracks(a)
                 title = a.get("title")
                 vids = [track["videoId"] for track in tracks]
-                remember_album(store, browse, a)
+                if not getattr(store, 'activity_paused', False):
+                    remember_album(store, browse, a)
             except ValueError as exc:
                 problem = str(exc)
             except Exception:

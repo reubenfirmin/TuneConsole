@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "TuneConsole audio lab (experiment)",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "description": "Local reference-audio capture experiment for issue #406.",
+  "permissions": ["activeTab", "tabCapture", "offscreen"],
+  "action": {"default_title": "Open audio lab / start or stop reference capture"},
+  "commands": {"_execute_action": {"suggested_key": {"default": "Ctrl+Shift+Y"}}},
+  "background": {"service_worker": "background.js", "type": "module"},
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; connect-src 'self'; media-src 'self' blob:; worker-src 'self'"
+  }
+}

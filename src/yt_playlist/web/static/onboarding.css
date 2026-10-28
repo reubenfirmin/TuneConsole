@@ -12,6 +12,22 @@
 
 /* The first experience uses the space beside the rail, like the full Taste workspace. */
 .setup-home { max-width: 82rem; margin-inline: auto; }
+.onboarding-welcome { position: relative; isolation: isolate; display: flex; align-items: flex-end;
+  min-height: clamp(32rem, 55vw, 46rem); overflow: hidden; border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong); background: var(--surface-inset); }
+.welcome-art { position: absolute; inset: 0; z-index: -2; }
+.welcome-art img { width: 100%; height: 100%; object-fit: cover; object-position: 65% center;
+  animation: arrival-room 24s ease-in-out infinite alternate; }
+.onboarding-welcome::after { content: ''; position: absolute; inset: 0; z-index: -1;
+  background: linear-gradient(0deg, color-mix(in srgb, var(--surface-inset) 98%, transparent),
+    color-mix(in srgb, var(--surface-inset) 85%, transparent) 30%, transparent 82%); }
+.welcome-copy { min-width: 0; padding: clamp(1.5rem, 5vw, 4.5rem);
+  animation: starter-arrive .8s ease both; }
+.welcome-eyebrow { color: var(--accent-2); font-size: var(--type-ui); }
+.welcome-copy h1 { margin: .75rem 0; max-width: 15ch; font-size: clamp(2.5rem, 5.5vw, 5.5rem);
+  line-height: 1.03; letter-spacing: -.045em; text-wrap: balance; }
+.welcome-invitation { margin: 1.25rem 0 2rem; color: var(--dim); font-size: clamp(1.25rem, 2vw, 1.75rem); }
+.welcome-copy .btn { display: inline-flex; gap: .75rem; align-items: center; }
 .listening-format { padding-block: clamp(1rem, 3vw, 3rem); }
 .listening-format h1 { margin: 0 0 1rem; font-size: clamp(2rem, 4vw, 3.5rem);
   line-height: 1.1; letter-spacing: -.035em; text-wrap: balance; }
@@ -31,7 +47,6 @@
   gap: .75rem; font-size: var(--type-xl); }
 .listening-format-copy .ui-arrow { width: 1.5rem; height: 1.5rem; flex: none; }
 .listening-format-copy > span { color: var(--dim); line-height: 1.6; }
-.listening-format-note { font-size: var(--type-ui); }
 @media (max-width: 48rem) {
   .listening-format-options { grid-template-columns: minmax(0, 1fr); }
 }
@@ -52,6 +67,19 @@
   background: linear-gradient(90deg, color-mix(in srgb, var(--surface-inset) 96%, transparent),
     color-mix(in srgb, var(--surface-inset) 83%, transparent) 22%, transparent 64%); }
 .arrival.is-importing .arrival-illustration { animation: arrival-room 24s ease-in-out infinite alternate; transform-origin: right center; }
+.arrival-next { margin-top: 1.5rem; }
+.arrival-progress { display: flex; align-items: center; gap: 1rem; min-height: 2rem;
+  font-size: var(--type-body); font-weight: 600; }
+.arrival-wave { display: flex; align-items: center; justify-content: center; gap: .22rem;
+  flex: none; width: 3rem; height: 2rem; color: var(--accent); }
+.arrival-wave > span { width: .24rem; height: 1.65rem; border-radius: .2rem; background: currentColor;
+  transform: scaleY(.28); opacity: .55; }
+.arrival-progress.is-working .arrival-wave > span { animation: presync-eq 1.2s ease-in-out var(--wave-delay, 0s) infinite; }
+.arrival-wave > span:nth-child(2n) { --wave-delay: -.35s; }
+.arrival-wave > span:nth-child(3n) { --wave-delay: -.7s; }
+.arrival-wave > span:nth-child(5n) { --wave-delay: -.95s; }
+.arrival-learning { margin: .75rem 0 0; color: var(--dim);
+  font-size: var(--type-ui); line-height: 1.6; }
 @media (min-width: 65rem) {
   body:not(:has(.page-clusters)) main.page-setup { width: calc(100% - 13.5rem); max-width: none;
     margin-inline: 13.5rem 0; padding: clamp(1.5rem, 3vw, 3.5rem); padding-bottom: 5rem; }
@@ -63,6 +91,24 @@
 .starter-head h2 { margin: 0; max-width: 14ch; font-size: clamp(1.375rem, 2vw, 1.75rem); letter-spacing: -.025em; line-height: 1.15; }
 .starter-context { max-width: 23ch; margin: .5rem 0 0; color: var(--dim); font-size: var(--type-ui); line-height: 1.5; }
 .starter-actions { display: flex; align-items: center; gap: .5rem; flex-shrink: 0; }
+.starter-album { display: grid; grid-template-columns: minmax(0, 16rem) minmax(0, 1fr);
+  align-items: center; gap: clamp(1.5rem, 3vw, 3rem); animation: starter-arrive .65s ease both; }
+.starter-album-art { display: block; aspect-ratio: 1; background: var(--surface-inset);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; }
+.starter-album-art img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.starter-album-art svg { width: 100%; height: 100%; fill: none; stroke: var(--accent); stroke-width: 2; }
+.starter-album-copy { min-width: 0; }
+.starter-album-copy h2 { font-size: clamp(1.75rem, 3vw, 2.75rem); line-height: 1.1;
+  letter-spacing: -.025em; margin: .75rem 0; overflow-wrap: anywhere; }
+.starter-album-copy h2 a { color: inherit; text-decoration: none; }
+.starter-album-artist { margin-bottom: 1.5rem; color: var(--dim); }
+.starter-album .starter-actions { flex-wrap: wrap; }
+.starter-album-play { display: inline-flex; align-items: center; gap: .6rem; }
+.starter-album .starter-context { max-width: none; }
+@media (max-width: 38rem) {
+  .starter-album { grid-template-columns: minmax(0, 1fr); }
+  .starter-album-art { width: min(100%, 16rem); }
+}
 .starter-play { display: inline-flex; align-items: center; justify-content: center; gap: .45rem; white-space: nowrap; }
 .starter-play svg { width: 1rem; height: 1rem; }
 .starter-tracks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); list-style: none;

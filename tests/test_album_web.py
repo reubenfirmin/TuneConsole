@@ -1,4 +1,5 @@
 """Album page: renders the track table, and creates a playlist from the album."""
+import pytest
 from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
@@ -42,7 +43,8 @@ def test_album_choices_serve_independently_of_missing_mix_preparation(store, mon
     response = c.get('/home/album-choices')
     assert response.status_code == 200
     assert 'aria-label="Play The Album"' in response.text
-    assert 'class="gtag">Jazz</span>' in response.text
+    assert 'class="gtag" title="Jazz"' in response.text
+    assert 'class="gtag-label">Jazz</span>' in response.text
     assert 'album-familiarity--unknown' in response.text and 'role="meter"' not in response.text
     assert 'hx-trigger' not in response.text.split('>', 1)[0]
     assert len(store.rec_ledger.evidence().records('opportunity')) == 1
@@ -76,6 +78,44 @@ def test_refresh_excludes_the_held_four_without_editing_their_ledger(store):
     assert store.rec_ledger.evidence().get('opportunity', original['id']) == original
     c.get('/home/album-choices')
     assert len(store.rec_ledger.evidence().records('opportunity')) == 2
+
+
+@pytest.mark.parametrize('endpoint', ['refresh', 'tune'])
+def test_album_refresh_closes_only_the_requesting_tabs_offer(store, endpoint):
+    from tests.rec.test_album_menu import records
+    c, _fc, _iid = _client(store)
+    payload = {'built_at': 1, 'context': {'revision': 'a'}, 'items': records()}
+    store.rec_proposals.put_proposals('album_prepared', payload, 1)
+    assert c.get('/home/album-choices').status_code == 200
+    first, = store.rec_ledger.evidence().records('opportunity')
+    store.rec_proposals.put_proposals('album_prepared', {**payload, 'context': {'revision': 'b'}}, 1)
+    assert c.get('/home/album-choices').status_code == 200
+    second, = [row for row in store.rec_ledger.evidence().records('opportunity') if row['id'] != first['id']]
+    assert store.rec_proposals.get_proposals('choice_window:albums')['opportunity_id'] == second['id']
+    for held in (first, second):
+        choice_evidence.respond(store, held['id'], 'visible', 1, visible=[held['options'][0]['id']])
+    form = {'opportunity_id': first['id']}
+    if endpoint == 'tune':
+        form['novelty'] = '50'
+    assert c.post('/home/album-choices/' + endpoint, data=form).status_code == 200
+    # Retrying this tab's request must neither close the other tab nor duplicate
+    # the close, even after the response has rendered a third offer.
+    assert c.post('/home/album-choices/' + endpoint, data=form).status_code == 200
+    closed = [row for row in store.rec_ledger.evidence().records('response') if row['kind'] == 'close']
+    assert [row['opportunity_id'] for row in closed] == [first['id']]
+    assert store.rec_ledger.evidence().get('opportunity', first['id']) == first
+    assert store.rec_ledger.evidence().get('opportunity', second['id']) == second
+
+
+@pytest.mark.parametrize('previous', ['', 'missing', 'x' * 65, 'wrong-format'])
+def test_album_refresh_without_a_valid_held_offer_does_not_close_latest(store, previous):
+    from tests.rec.test_album_menu import records
+    c, _fc, _iid = _client(store)
+    store.rec_proposals.put_proposals('album_prepared', {'built_at': 1, 'context': {}, 'items': records()}, 1)
+    assert c.get('/home/album-choices').status_code == 200
+    choice_evidence.issue(store, 'mixes', [{'id': 'mix'}], 1, context={}, opportunity_id='wrong-format')
+    assert c.post('/home/album-choices/refresh', data={'opportunity_id': previous}).status_code == 200
+    assert not store.rec_ledger.evidence().records('response')
 
 
 def test_album_controls_capture_policy_and_surface_effective_values_in_taste(store):
@@ -320,7 +360,7 @@ def test_unsaved_album_shows_full_live_tracks_not_incidental_library_subset(stor
     r = c.get("/album?browse=MPREb_x")
     assert r.status_code == 200
     assert "One" in r.text and "Two" in r.text   # BOTH live tracks, not just the incidental one
-    assert '1 of 2 tracks in your library. The album is not saved.' in r.text
+    assert 'tracks in your library. The album is not saved.' not in r.text
     assert 'aria-label="Save album to library"' in r.text
 
 
@@ -348,7 +388,8 @@ def test_album_play_requires_connection_and_confirms_exact_queue_separately(stor
     fc._albums['MPREb_x']['audioPlaylistId'] = 'OLAK5uy_album'
     oid = choice_evidence.issue(store, 'albums', [{'id': 'MPREb_x', 'score': 1}], 0, context={})
     sent = []
-    bridge = SimpleNamespace(connected=False, send_control=sent.append)
+    bridge = SimpleNamespace(connected=False, begin_playback_intent=lambda: 1,
+                             send_control=lambda message, **kwargs: sent.append(message))
     c.app.state.ctx.bridge = bridge
     response = c.post('/album/play', data={'browse_id': 'MPREb_x', 'opportunity_id': oid})
     assert response.status_code == 422
@@ -374,7 +415,8 @@ def test_successive_deliberate_album_selections_from_one_menu_are_retained(store
     oid = choice_evidence.issue(store, 'albums', [
         {'id': 'MPREb_x', 'keys': ['one|artist'], 'score': 1},
         {'id': 'MPREb_other', 'keys': ['two|artist'], 'score': .9}], 0, context={})
-    c.app.state.ctx.bridge = SimpleNamespace(connected=True, send_control=lambda message: None)
+    c.app.state.ctx.bridge = SimpleNamespace(connected=True, begin_playback_intent=lambda: 1,
+                                            send_control=lambda message, **kwargs: None)
     for browse, action, queue in [('MPREb_x', 'first', 'OLAK-one'),
                                   ('MPREb_other', 'second', 'OLAK-two'),
                                   ('MPREb_x', 'third', 'OLAK-one')]:

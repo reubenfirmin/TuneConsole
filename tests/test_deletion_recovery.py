@@ -1,5 +1,9 @@
 """Forward deletion keeps a discoverable recovery journal across uncertain writes and restarts."""
 import json
+import os
+import stat
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -7,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from tests.test_undo_recovery import RecoveryClient
 from yt_playlist.core.store import Store
-from yt_playlist.library import executor, playlist_deletion, playlist_undo, playlist_generated
+from yt_playlist.library import executor, playlist_backups, playlist_deletion, playlist_undo, playlist_generated
 from yt_playlist.web.app import create_app
 
 
@@ -29,6 +33,124 @@ def _reopen(database):
     store = Store(database)
     store.init_schema()
     return store
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory durability")
+def test_first_backup_syncs_directory_ancestors_and_file_before_intent_and_delete(deletion, monkeypatch, tmp_path):
+    store, _, _, source, _, client = deletion
+    home = tmp_path / 'new-parent' / 'data'
+    backups = home / 'backups'
+    monkeypatch.setenv('YT_PLAYLIST_HOME', str(home))
+    synced = set()
+    fsync = playlist_backups.os.fsync
+
+    def observe(fd):
+        info = os.fstat(fd)
+        fsync(fd)
+        if stat.S_ISDIR(info.st_mode):
+            for directory in (home.parent, home, backups):
+                if directory.exists() and os.path.samestat(info, directory.stat()):
+                    synced.add(directory)
+        else:
+            synced.add('file')
+
+    monkeypatch.setattr(playlist_backups.os, 'fsync', observe)
+    record_action = store.actions.record_action
+
+    def record(*args, **kwargs):
+        assert synced == {home.parent, home, backups, 'file'}
+        return record_action(*args, **kwargs)
+
+    monkeypatch.setattr(store.actions, 'record_action', record)
+    delete = client.delete_playlist
+
+    def delete_after_publication(playlist_id):
+        assert synced == {home.parent, home, backups, 'file'}
+        return delete(playlist_id)
+
+    client.delete_playlist = delete_after_publication
+    executor.delete_playlist(store, source, client, 3)
+    assert client.deleted == ['SOURCE']
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory durability")
+@pytest.mark.parametrize('ancestor', ['data', 'parent'])
+def test_parent_sync_failure_prevents_delete_and_retry_resyncs_existing_directory(
+        deletion, monkeypatch, tmp_path, ancestor):
+    store, _, _, source, _, client = deletion
+    home = tmp_path / 'new-parent' / 'data'
+    backups = home / 'backups'
+    target = home if ancestor == 'data' else home.parent
+    monkeypatch.setenv('YT_PLAYLIST_HOME', str(home))
+    fsync = playlist_backups.os.fsync
+    attempts = []
+
+    def fail_once(fd):
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode) and os.path.samestat(info, target.stat()):
+            attempts.append(target)
+            if len(attempts) == 1:
+                raise OSError('parent sync failed')
+        return fsync(fd)
+
+    monkeypatch.setattr(playlist_backups.os, 'fsync', fail_once)
+    with pytest.raises(OSError, match='parent sync failed'):
+        executor.delete_playlist(store, source, client, 3)
+    assert backups.is_dir()
+    assert client.deleted == []
+    assert store.actions.get_actions() == []
+    assert store.playlists.get_playlist(source) is not None
+
+    executor.delete_playlist(store, source, client, 4)
+    assert attempts == [target, target]
+    assert client.deleted == ['SOURCE']
+    action, = store.actions.get_actions()
+    assert action.status == 'executed'
+
+
+@pytest.mark.parametrize("contender", ["manual", "empty", "generated", "planned"])
+def test_deletion_admission_covers_lookup_backup_and_transport_across_stores(deletion, monkeypatch, contender):
+    store, database, identity, source, keeper, client = deletion
+    store.playlists.set_playlist_group("SOURCE", "Generated")
+    store.playlists.set_playlist_provenance("SOURCE", origin="tuneconsole", adopted=False)
+    if contender == "planned":
+        aid = executor.store_plan(store, executor.MergePlan(source, keeper, [], []), "delete", "SOURCE", 2)
+    entered, release = threading.Event(), threading.Event()
+    original = executor.backup_playlist
+
+    def pause_backup(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(executor, "backup_playlist", pause_backup)
+    reader = _reopen(database)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            first = pool.submit(executor.delete_playlist, store, source, client, 3)
+            try:
+                assert entered.wait(5)
+                assert reader.actions.get_pending_deletion(identity, "SOURCE") is None
+                if contender == "generated":
+                    assert playlist_generated.gc_generated_playlists(reader, {identity: client}, 10**9, grace_days=0) == []
+                else:
+                    with pytest.raises(ValueError, match="already running for this playlist"):
+                        if contender == "manual":
+                            executor.delete_playlist(reader, source, client, 4)
+                        elif contender == "empty":
+                            executor.delete_empty_playlist(reader, source, client, 4)
+                        else:
+                            executor.execute_planned(reader, aid, {identity: client}, 4)
+            finally:
+                release.set()
+            first.result(timeout=5)
+        owners = [a for a in reader.actions.get_actions() if json.loads(a.undo_json).get("deletions")]
+        owner, = owners
+        assert client.deleted == ["SOURCE"]
+        playlist_undo.undo_action(reader, owner.id, {identity: client}, 5)
+        assert len(client.created) == 1
+    finally:
+        reader.conn.close()
 
 
 @pytest.mark.parametrize("operation", ["manual", "empty", "planned", "generated"])

@@ -1,9 +1,39 @@
 """Visible radio offers retain the actual intent, scorer and cached musical inputs."""
 from copy import deepcopy
 
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
 from tests.radio_session_support import poc  # noqa: F401 - shared fixture
 from yt_playlist.rec import musical_character, musical_profiles
 from yt_playlist.rec.radio_candidates import POLICY_VERSION
+
+
+@pytest.mark.parametrize('profile', [None, {}, {'vibes': {'fits': {'energize': {}}}}])
+def test_radio_seed_route_preserves_unknown_provenance_when_profiles_are_incomplete(poc, monkeypatch, profile):
+    from yt_playlist.rec import measurement
+    from yt_playlist.web.routes import radio_session
+    controller, _remote, _frames, _workers, pool = poc
+    for track in pool:
+        track['musical'] = deepcopy(profile)
+    captured = []
+
+    def record(store, surface, items, now, **kwargs):
+        captured.extend(deepcopy(items))
+
+    monkeypatch.setattr(measurement, 'record_recommendations', record)
+    app = FastAPI()
+    app.include_router(radio_session.build(controller.ctx))
+    with TestClient(app) as client:
+        response = client.get('/radio/seeds')
+        assert response.status_code == 200
+        assert response.json()['tracks'] and response.json()['menu_id']
+    assert captured
+    for item in captured:
+        context = item['serving_context']
+        assert context['intensity'] is None and context['intensity_support'] == 0
+        assert context['intensity_vibe'] is None and context['intensity_source'] is None
 
 
 def test_seed_and_direction_measurement_preserve_profile_provenance_and_unknowns(poc, monkeypatch):

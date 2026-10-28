@@ -1,23 +1,16 @@
-"""Automatic, paired model selection and genuinely prospective measurement.
+"""Daily-selection presentation and follow-up for saved legacy model selections.
 
-Candidate fits never touch the serving vectors. Selection uses the same historical targets for
-every candidate, requires improvement in multiple windows, and corrects its paired sign test for
-the number of alternatives. Daily shadow forecasts are saved BEFORE their outcomes exist; later
-syncs score both setups against the same eligible, independently played tracks.
+New comparisons are prepared by daily_model_selection. Legacy saved runs retain
+their display, restoration, and prospective forecast measurements.
 """
-import math
 from datetime import datetime, timezone
 
-import numpy as np
-
-from yt_playlist.rec import embedding_training as training, eval_recs
-from yt_playlist.rec.model_setup import CONFIGS, MIN_HISTORY_DAYS, MIN_TRACKS, current_setup
+from yt_playlist.rec import embedding_training as training
+from yt_playlist.rec.model_setup import current_setup
+from yt_playlist.rec.vector_math import rank_by_context
 
 DAY = 86400
 MIN_TRIALS = 50
-MIN_WINDOWS = 2
-RECHECK_DAYS = 28
-MIN_FRESH_TRACKS = 30
 METHODS = {"svd": "Playlist patterns (SVD)", "item2vec": "Track co-occurrence (Item2Vec)"}
 
 
@@ -35,124 +28,8 @@ def _tracked_run(store, latest):
 
 
 def readiness(store, now):
-    runs = store.model_selection.selection_runs(limit=1)
-    last = runs[0] if runs else None
-    lo, hi = store.charts.history_bounds()
-    days = max(0, (min(hi, now) - lo) / DAY) if lo is not None and hi is not None else 0
-    tracks = store.rec_model.rec_vectors_count()
-    checks = [{"label": "Listening history", "value": min(int(days), MIN_HISTORY_DAYS), "total": MIN_HISTORY_DAYS,
-               "unit": "days"},
-              {"label": "Modeled tracks", "value": min(tracks, MIN_TRACKS), "total": MIN_TRACKS, "unit": "tracks"}]
-    if store.settings.get_setting("rec_selection_restore"):
-        return {"state": "restoring", "reason": "Restoring the previous model after the current update finishes.", "checks": checks}
-    if store.settings.get_setting("rec_selection_paused") == "1":
-        return {"state": "paused", "reason": "Automatic selection is paused. Your current model and regular training continue.", "checks": checks}
-    if last and last["status"] == "running":
-        return {"state": "running", "reason": last.get("progress", "Comparing model setups."), "checks": checks}
-    if days < MIN_HISTORY_DAYS or tracks < MIN_TRACKS:
-        return {"state": "waiting", "reason": "Another comparison needs at least 14 days of history and 100 modeled tracks." if last else "Waiting for enough listening history and modeled tracks to make a useful comparison.",
-                "checks": checks}
-    if last:
-        retry_days = {"failed": 1, "insufficient": 7}.get(last["status"], RECHECK_DAYS)
-        tracked = _tracked_run(store, last)
-        restored_at = tracked.get("restored_at", 0) if tracked else 0
-        next_at = max(last["ran_at"], restored_at) + retry_days * DAY
-        if now < next_at:
-            return {"state": "waiting", "reason": "Waiting before retrying the interrupted comparison." if last["status"] == "failed" else "Collecting listening evidence before the next comparison.",
-                    "next_at": next_at, "checks": checks}
-        if last["status"] == "failed":
-            return {"state": "ready", "reason": "Ready to retry automatically on the next model update.", "checks": checks}
-        since = max(last.get("evidence_end", last["ran_at"]), restored_at)
-        fresh = len(store.history.history_keys_between(since, now) - store.rec_evidence.generated_only_keys_between(since, now))
-        checks.append({"label": "Fresh listening since the last comparison", "value": min(fresh, MIN_FRESH_TRACKS),
-                       "total": MIN_FRESH_TRACKS, "unit": "distinct tracks"})
-        if fresh < MIN_FRESH_TRACKS:
-            return {"state": "waiting", "reason": "Waiting for fresh listening evidence; repeating the same test would not tell us more.",
-                    "checks": checks}
-    return {"state": "ready", "reason": "Ready to compare automatically on the next model update.", "checks": checks}
-
-
-def _windows(store, now):
-    """Freeze the input data once, before any candidate is fitted."""
-    _, hi = store.charts.history_bounds()
-    hi = min(hi, now)
-    span = eval_recs.best_holdout(store) * DAY
-    weighted = store.settings.get_setting("rec_cooc_weighting") == "1"
-    out = []
-    for i in range(3):
-        end = hi - i * span + 1e-6
-        cutoff = end - span
-        baskets, _ = store.rec_evidence.rec_baskets_as_of(cutoff)
-        before = store.history.history_keys_before(cutoff)
-        held = store.history.history_keys_between(cutoff, end) - before
-        generated = store.rec_evidence.generated_only_keys_between(cutoff, end)
-        weights = {k: 1 + math.log1p(v) for k, v in store.history.play_counts_before(cutoff).items()} if weighted else None
-        out.append({"baskets": baskets, "before": before, "held": held - generated,
-                    "cutoff": cutoff, "end": end, "weights": weights})
-    return out, hi
-
-
-def _rank(keys, vectors, context, eligible, k=20):
-    idx = {key: i for i, key in enumerate(keys)}
-    context = sorted(context & set(idx))
-    if not context or not eligible:
-        return set()
-    centroid = vectors[[idx[key] for key in context]].mean(0)
-    norm = np.linalg.norm(centroid)
-    if norm < 1e-9:
-        return set()
-    scores = vectors @ (centroid / norm)
-    # Stable ties make a retained setup produce exactly the same shadow forecast.
-    return set(sorted(eligible, key=lambda key: (-float(scores[idx[key]]), key))[:k])
-
-
-def _evaluate(setup, windows):
-    outcomes = []
-    for window in windows:
-        keys, vectors = training.build_vectors_from_baskets(window["baskets"], dim=setup["dim"],
-                                                        method=setup["method"], weights=window["weights"])
-        eligible = set(keys) - window["before"]
-        held = window["held"] & eligible
-        if not held or not (set(keys) & window["before"]) or len(eligible) <= 20:
-            outcomes.append({})
-            continue
-        ranked = _rank(keys, vectors, window["before"], eligible)
-        outcomes.append({key: int(key in ranked) for key in held})
-    return outcomes
-
-
-def _paired(previous, candidate, alternatives):
-    """Paired outcomes, stable gains across windows, and a family-wise 5% sign-test gate."""
-    n = old_hits = new_hits = wins = losses = 0
-    windows = []
-    for old, new in zip(previous, candidate):
-        common = old.keys() & new.keys()
-        if old and not common:
-            return {"eligible": False, "reason": "Incomplete test coverage", "trials": 0}
-        if not common:
-            continue
-        # A candidate cannot win by dropping harder-to-predict baseline targets.
-        if common != old.keys():
-            return {"eligible": False, "reason": "Incomplete test coverage", "trials": 0}
-        oh, nh = sum(old[k] for k in common), sum(new[k] for k in common)
-        windows.append({"trials": len(common), "previous_hits": oh, "selected_hits": nh})
-        n += len(common)
-        old_hits += oh
-        new_hits += nh
-        wins += sum(new[k] > old[k] for k in common)
-        losses += sum(new[k] < old[k] for k in common)
-    discordant = wins + losses
-    p = math.fsum(math.exp(math.lgamma(discordant + 1) - math.lgamma(j + 1)
-                         - math.lgamma(discordant - j + 1) - discordant * math.log(2))
-                  for j in range(wins, discordant + 1)) if discordant else 1.0
-    enough = n >= MIN_TRIALS and len(windows) >= MIN_WINDOWS
-    stable = sum(w["selected_hits"] > w["previous_hits"] for w in windows) >= MIN_WINDOWS
-    stable = stable and all(w["selected_hits"] >= w["previous_hits"] for w in windows)
-    promote = enough and stable and new_hits - old_hits >= 5 and (new_hits - old_hits) / n >= .02 and p <= .05 / max(1, alternatives)
-    return {"eligible": enough, "promote": promote, "trials": n, "windows": len(windows),
-            "previous_hits": old_hits, "selected_hits": new_hits,
-            "previous_score": old_hits / n if n else None, "score": new_hits / n if n else None,
-            "p": p, "reason": "Clear improvement" if promote else "No reliable improvement" if enough else "Not enough comparable test tracks"}
+    from yt_playlist.rec import daily_model_selection
+    return daily_model_selection.readiness(store, now)
 
 
 def _forecast(store, previous, selected, now):
@@ -170,8 +47,8 @@ def _forecast(store, previous, selected, now):
     eligible = (set(old_keys) & set(keys)) - context
     if len(eligible) <= 20 or not (context & set(old_keys)) or not (context & set(keys)):
         return None
-    return {"eligible": sorted(eligible), "previous": sorted(_rank(old_keys, old_vectors, context, eligible)),
-            "selected": sorted(_rank(keys, vectors, context, eligible))}
+    return {"eligible": sorted(eligible), "previous": sorted(rank_by_context(old_keys, old_vectors, context, eligible)),
+            "selected": sorted(rank_by_context(keys, vectors, context, eligible))}
 
 
 def update_followup(store, now, *, now_fn=None):
@@ -179,8 +56,10 @@ def update_followup(store, now, *, now_fn=None):
     run = _tracked_run(store, runs[0] if runs else None)
     if not run or run["status"] not in ("applied", "retained", "restored"):
         return
-    if run.get('kind') == 'product':
-        return  # Product decisions have their own observed serving comparison.
+    if run.get('kind') in ('product', 'daily'):
+        return  # Daily historical tests and old product trials have their own reports.
+    if (run.get('followup') or {}).get('frozen_at') is not None:
+        return  # Retained summary has an explicit cutoff; source forecasts expired.
     forecasts = store.model_selection.model_forecasts(run["id"])
     end = min(now, run.get("restored_at", now), run.get("ended_at", now))
     total = old_hits = new_hits = excluded = 0
@@ -221,65 +100,17 @@ def update_followup(store, now, *, now_fn=None):
             store.model_selection.save_selection(run["id"], run)
 
 
-def run(store, now, *, now_fn=None):
-    previous = current_setup(store)
-    result = {"ran_at": now, "status": "running", "previous": previous, "selected": previous,
-              "progress": "Preparing historical listening tests.", "grid": []}
-    run_id = store.model_selection.start_selection(now, result)
-    completed = False
-    try:
-        with store.read_snapshot() as snapshot:
-            windows, result["evidence_end"] = _windows(snapshot.store, now)
-        baseline = _evaluate(previous, windows)
-        candidates = [dict(method=method, dim=dim) for method, dim in CONFIGS if (method, dim) != (previous["method"], previous["dim"])]
-        baseline_check = _paired(baseline, baseline, len(candidates))
-        result["baseline"] = baseline_check
-        if not baseline_check["eligible"]:
-            result.update(status="insufficient", reason="Not enough reconstructable listening tests: need 50 comparable tracks across at least two periods.")
-        else:
-            for i, setup in enumerate(candidates):
-                result["progress"] = f"Comparing setup {i + 1} of {len(candidates)}. Your current model stays in use."
-                store.model_selection.save_selection(run_id, result)
-                try:
-                    measured = _paired(baseline, _evaluate(setup, windows), len(candidates))
-                    result["grid"].append({**setup, **measured})
-                except (ValueError, np.linalg.LinAlgError):
-                    result["grid"].append({**setup, "eligible": False, "reason": "Could not fit this setup"})
-            contenders = [g for g in result["grid"] if g.get("promote")]
-            best = max(contenders, key=lambda g: g["score"]) if contenders else None
-            if best:
-                # First-play recall is a representation diagnostic. It cannot establish
-                # quality of the menus actually served, or an album-format benefit.
-                result.update(status="retained", comparison=best,
-                    diagnostic_challenger={k: best[k] for k in ("method", "dim")},
-                    promotion_gate="diagnostic_only",
-                    reason="A setup improved first-play prediction. This diagnostic keeps the current model. "
-                           "Automatic selection compares observed choices and listening.")
-            else:
-                result.update(status="retained", comparison=baseline_check,
-                              reason="No alternative showed a reliable improvement. Your current setup was kept.")
-        store.model_selection.save_selection(run_id, result)
-        completed = True
-        update_followup(store, now_fn() if now_fn else now, now_fn=now_fn)
-    except Exception:
-        # If publication succeeded, never misreport that the old model is still live merely
-        # because the best-effort prospective forecast failed afterward.
-        if not completed:
-            result.update(status="failed", reason="The comparison could not finish. Your current model was kept.")
-            store.model_selection.save_selection(run_id, result)
-        raise
-    return result
-
-
 def maintain(store, now, *, now_fn=None):
     update_followup(store, now, now_fn=now_fn)
-    from yt_playlist.rec import comparison_preparation
-    return comparison_preparation.maintain(store, now)
+    from yt_playlist.rec import daily_model_selection
+    return daily_model_selection.maintain(store, now)
 
 
 def recover_interrupted(store):
     for run in store.model_selection.selection_runs(limit=1):
         if run["status"] == "running":
+            if run.get('kind') == 'daily':
+                continue  # Detached comparisons resume from their saved predictions.
             if run.get('kind') == 'product':
                 # Observing is durable work, not an interrupted fit. Preparation
                 # is also safe to retry because it never replaces live vectors.
@@ -327,17 +158,11 @@ def view(store, now, *, limit=6):
         run["followup"] = followup
     if state.get("next_at"):
         state["next_date"] = date(state["next_at"])
-    from yt_playlist.rec import product_comparison
-    live = product_comparison.state(store)
-    live['report'] = store.rec_proposals.get_proposals('model_live_report') or live.get('report')
-    if live.get('decision_at'):
-        live['decision_date'] = date(live['decision_at'])
-    if live.get('phase') in ('preparing', 'observing') and state['state'] not in ('restoring', 'paused'):
-        state.update(state='running', reason='Comparing complete recommendation menus and observed listening.')
-    elif live.get('retry_at') and state['state'] not in ('restoring', 'paused'):
-        state.update(state='waiting', reason=live.get('reason', 'Collecting listening before the next comparison.'),
-                     next_date=date(live['retry_at']))
-    return {**state, "runs": runs, "last": displayed or latest, "latest": latest, 'product': live if live.get('run_id') else {},
-            "current": current_setup(store), "min_trials": MIN_TRIALS, "min_windows": MIN_WINDOWS,
+    return {**state, "runs": runs, "last": displayed or latest, "latest": latest, 'product': {}, 'daily': True,
+            "current": current_setup(store), "min_trials": MIN_TRIALS, "min_windows": 1,
+            "min_active_days": 7,
             "restore_id": store.settings.get_setting("rec_selection_active_run"),
-            "version": f"{latest['id'] if latest else 0}:{latest['status'] if latest else 'waiting'}:{store.rec_model.rec_vectors_count()}:{current_setup(store)['dim']}:{state['state']}"}
+            "version": f"{latest['id'] if latest else 0}:{latest['status'] if latest else 'waiting'}:"
+                       f"{len(latest.get('_evaluations', [])) if latest else 0}:"
+                       f"{store.rec_model.rec_vectors_count()}:{current_setup(store)['dim']}:{state['state']}:"
+                       + ':'.join(str(check['value']) for check in state['checks'])}

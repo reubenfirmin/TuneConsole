@@ -4,7 +4,8 @@ function createRequestForwarder({origin, tabs, sensors}) {
   function isAllowed(url) {
     try {
       const parsed = new URL(url);
-      return parsed.origin === origin && parsed.pathname.startsWith("/youtubei/v1/");
+      return parsed.origin === origin && !parsed.username && !parsed.password && !parsed.hash &&
+        parsed.pathname.startsWith("/youtubei/v1/") && !/%|\\/.test(parsed.pathname);
     } catch (e) { return false; }
   }
 
@@ -54,7 +55,11 @@ function createRequestForwarder({origin, tabs, sensors}) {
           if (!result) throw new Error("no response from content script");
         } catch (retryError) { return failed(retryError); }
       }
-      return {id: frame.id, status: result.status, body: result.body, timeZone: result.timeZone};
+      // Never forward cookies, authorization, or arbitrary upstream headers.
+      const retry = result.headers?.["retry-after"];
+      const headers = typeof retry === "string" && retry.length <= 256 && !/[\r\n]/.test(retry)
+        ? {"retry-after": retry} : {};
+      return {id: frame.id, status: result.status, body: result.body, timeZone: result.timeZone, headers};
     } catch (e) {
       // Never put cookie, digest, URL, or arbitrary Chrome exception text on the wire.
       return errorReply(outcome === "not-dispatched" ? "request setup failed before dispatch" : uncertain);

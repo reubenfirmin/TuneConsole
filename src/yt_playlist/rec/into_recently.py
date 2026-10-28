@@ -9,7 +9,7 @@ import re
 
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.rec import transient
-from yt_playlist.util import genre_catalog, genre_map
+from yt_playlist.util import genre_catalog, genre_map, net
 from yt_playlist.util.matching import is_remix
 from yt_playlist.web import theme
 from yt_playlist.providers import wikipedia
@@ -480,12 +480,18 @@ def load(store, now, epoch=0, schedule=lambda: None):
 
 def refresh_summary(store, subj, now, fetch_fn):
     """Persist only confirmed answers, preserving any stale card during an outage."""
-    try:
-        payload = fetch_fn(subj["kind"], subj["display"])
-    except LookupUnavailable:
-        store.wiki.defer(subj["subject"], now)
-    else:
-        store.wiki.put(subj["subject"], subj["kind"], subj["display"], _matching_summary(subj, payload), now)
+    with wikipedia.access(store), net.probe_errors() as errors:
+        try:
+            payload = fetch_fn(subj["kind"], subj["display"])
+        except LookupUnavailable as exc:
+            store.wiki.defer(subj["subject"], now, retry_at=max([
+                getattr(exc, 'retry_at', 0), *(net.retry_after(error, now) for error in errors)]))
+            return
+    if errors:
+        store.wiki.defer(subj["subject"], now,
+                         retry_at=max(net.retry_after(error, now) for error in errors))
+        return
+    store.wiki.put(subj["subject"], subj["kind"], subj["display"], _matching_summary(subj, payload), now)
 
 
 def subject_color(subj) -> str:

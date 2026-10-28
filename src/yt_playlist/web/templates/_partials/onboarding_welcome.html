@@ -1,0 +1,14 @@
+<section class="onboarding-welcome" aria-labelledby="welcome-title">
+  <div class="welcome-art" aria-hidden="true">
+    <img src="/static/onboarding-arrival.png" alt="" fetchpriority="high" width="1536" height="1024">
+  </div>
+  <div class="welcome-copy">
+    <p class="welcome-eyebrow">Your music. A little closer.</p>
+    <h1 id="welcome-title">Welcome to TuneConsole.</h1>
+    <p class="welcome-invitation">Let's get listening!</p>
+    <form method="post" action="/home/onboard/welcome"
+          hx-post="/home/onboard/welcome" hx-target="#home" hx-select="#home" hx-swap="outerHTML">
+      <button class="btn btn-primary" type="submit">Get started {{ arrow_icon('right') }}</button>
+    </form>
+  </div>
+</section>

@@ -23,6 +23,7 @@ like - see layers.py). So this module exposes each layer on the axis it lives on
 Nothing hidden: this is the only place the transient model is ever surfaced (it otherwise only
 shapes ranking).
 """
+import time
 import numpy as np
 
 from yt_playlist.util import genre_map
@@ -54,6 +55,9 @@ def _axis_rows(prefix, shares, weights, standing, leans, fparams):
 
 def mix_choices(store, now=None):
     """Choice evidence with descriptions of the groups those choices actually train."""
+    from yt_playlist.rec import group_viz
+    if preview := group_viz.prepared(store):
+        return group_viz.choices(store, time.time() if now is None else now, preview)
     evidence = mode_eval.choice_evidence(store, now)
     profiles = mode_profiles.describe_modes(store)
     for row in evidence["rows"]:
@@ -64,7 +68,7 @@ def mix_choices(store, now=None):
 def generated_playlists(store, now):
     """Generation facts from prepared pools and saved settings; never rebuild a Home mix."""
     bundles = store.rec_proposals.get_proposals("mode_bundles") or {}
-    blocked = store.rec_model.suppressed_keys("for_you", now) | set(store.rec_eligibility.generated_track_keys())
+    blocked = store.rec_model.suppressed_keys("for_you", now)
     muted = store.rec_model.muted_artists()
     examples = {}
     for source in ("wheelhouse", "explore", "fresh", "comfort"):
@@ -120,8 +124,16 @@ def _graduation_change(entry):
 def overview(store, now, profiles=None):
     """Only the three Overview readings; no training baskets, pools, or ranking diagnostics."""
     bd = taste_analysis.taste_breadth(store)
-    shares, n, current_modes = layers.session_mode_mix(store, now)
-    modes = store.modes.list_modes(active_only=True)
+    from yt_playlist.rec import group_viz
+    preview = group_viz.prepared(store)
+    if preview:
+        grouped = group_viz.mode_layers(store, now, preview)
+        shares = {s['mode_id']: s['share'] for s in grouped['session']['segments']}
+        n = grouped['session']['n']
+        modes = current_modes = grouped['modes']
+    else:
+        shares, n, current_modes = layers.session_mode_mix(store, now)
+        modes = store.modes.list_modes(active_only=True)
     library = _permanent_mode_shares(modes)
     shifts = []
     if shares:
@@ -195,6 +207,9 @@ def mode_layers(store, now) -> dict:
     and SESSION are confidence-gated (`now_min_events` distinct played keys with a known sound);
     below the gate they report nothing rather than a weak guess, and `segments` is empty.
     """
+    from yt_playlist.rec import group_viz
+    if preview := group_viz.prepared(store):
+        return group_viz.mode_layers(store, now, preview)
     recent = layers.recent_evidence(store, now, window_h=max(24, rec_params.get_param(store, 'now_window_h')))
     now_shares, now_n, current_modes = layers.now_mode_mix(store, now, evidence=recent)
     session_shares, session_n, _ = layers.session_mode_mix(store, now, evidence=recent)

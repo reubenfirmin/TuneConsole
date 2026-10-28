@@ -4,6 +4,7 @@
   let nextPending = false;
 
   function command(action) {
+    if (window.tvPlaybackControls?.active()) return window.tvPlaybackControls.command(action);
     const status = window.playbackStatus?.snapshot;
     const playing = status?.connected && (status.now_playing || status.resumable_player);
     if (!playing?.video_id) return false;
@@ -53,6 +54,12 @@
   const session = window.navigator?.mediaSession;
   function updateMedia() {
     if (!session) return;
+    if (window.tvPlaybackControls?.active()) {
+      const video = window.tvPlaybackControls.snapshot();
+      session.playbackState = video.paused ? 'paused' : 'playing';
+      if (window.MediaMetadata) session.metadata = new window.MediaMetadata({title: video.title || '', artist: video.artist || ''});
+      return;
+    }
     const status = window.playbackStatus?.snapshot;
     const playing = status?.connected && (status.now_playing || status.resumable_player);
     const active = !!playing?.video_id;
@@ -67,6 +74,7 @@
       catch (_) { /* Browsers can support only a subset of media actions. */ }
     }
     window.addEventListener('bridge-status', updateMedia);
+    window.addEventListener('tv-playback-state', updateMedia);
     updateMedia();
   }
   window.playbackControls = {command};
@@ -102,6 +110,7 @@ function tcPlay(url) {
     if (!d || !d.ok) return failed();
     window.dispatchEvent(new CustomEvent('playback-settled', {detail: {requestId, ok: true}}));
     document.getElementById('playback-error')?.remove();
+    if (d.tv_url) window.location.assign(d.tv_url);
     return true;
   }).catch(failed);
 }
@@ -119,7 +128,8 @@ document.addEventListener('click', function (e) {
   // YouTube Music tab keeps playing. Play controls carry no marker and still route to that tab.
   if (a.hasAttribute('data-yt-info')) return;
   var u;
-  try { u = new URL(a.href || a.getAttribute('href'), location.href); } catch (err) { return; }
+  // SVG anchors expose .href as an SVGAnimatedString; the attribute works for both namespaces.
+  try { u = new URL(a.getAttribute('href'), location.href); } catch (err) { return; }
   if (u.hostname !== 'music.youtube.com') return;
   // Any content path (watch / playlist / browse / channel / ...) routes to the existing tab. Only the
   // bare origin (the "sign in" link) is left to open normally so you can actually see the sign-in page.

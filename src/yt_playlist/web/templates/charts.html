@@ -2,34 +2,50 @@
 {% from "_partials/song_menu_button.html" import song_menu %}
 {% block title %}Charts · TuneConsole{% endblock %}{% block page_class %}page-charts{% endblock %}
 {% block page_styles %}
+{% if listening_charts_enabled %}
 <link rel="stylesheet" href="/static/listening-analytics.css?v={{ asset_v }}">
 <script src="/static/listening-analytics.js?v={{ asset_v }}"></script>
+{% if listening_edition.available %}
+<link rel="stylesheet" href="/static/listening-editorial.css?v={{ asset_v }}">
+<script src="/static/listening-editorial.js?v={{ asset_v }}"></script>
+{% endif %}
+{% endif %}
 {% endblock %}
 {% block body %}
 {% set window_names = {'all': 'all recorded history', '90d': 'the last 90 days', '30d': 'the last 30 days', '7d': 'the last 7 days'} %}
-{% set requested_view = request.query_params.get('view', 'songs') %}
-{% set chart_view = requested_view if requested_view in ['analytics', 'songs', 'artists', 'genres', 'years', 'albums', 'playlists'] else 'songs' %}
-<div class="chart-shell" x-data="{ view: '{{ chart_view }}', keyOpen: false, analyticsOnly: {{ analytics_only|default(false)|tojson }},
-  loadRankings() { if (this.analyticsOnly) location.href = '/charts?' + new URLSearchParams({window: new URLSearchParams(location.search).get('window') || '{{ window }}', view: this.view}); } }">
+{% set chart_view = initial_view %}
+<div class="chart-shell" x-data="{ view: '{{ chart_view }}', keyOpen: false, preparedOnly: {{ prepared_only|default(false)|tojson }},
+  choose(next) {
+    if (this.preparedOnly &amp;&amp; !['home','analytics'].includes(next)) {
+      const selected = new URLSearchParams(location.search).get('window');
+      location.href = '/charts?' + new URLSearchParams({window:['all','90d','30d','7d'].includes(selected) ? selected : 'all',view:next}); return;
+    }
+    this.view = next;
+    const params = new URLSearchParams(location.search); params.set('view',next);
+    history.pushState(null,'','/charts?'+params);
+  } }" @popstate.window="view = new URLSearchParams(location.search).get('view') || '{{ chart_view }}'">
 <div class="page-head library-page-head">
   <div class="library-page-title">{{ library_icon('charts') }}<h1>Charts</h1></div>
   <p x-show="view === 'analytics'" x-cloak>Listening activity, discovery, formats and feedback.</p>
-  <p x-show="view !== 'analytics'">Ranked by listening days in your recorded history. Repeated plays on the same day count once.</p>
+  <p x-show="!['home','analytics'].includes(view)">Ranked by days heard. Repeated plays of the same song on one day count once per account.</p>
   <div class="library-head-actions card--toolbar toolbar">
     <span class="seg chart-views" aria-label="Chart view">
-      <button type="button" :class="{ on: view === 'songs' }" @click="view = 'songs'; loadRankings()">Top songs</button>
-      <button type="button" :class="{ on: view === 'artists' }" @click="view = 'artists'; loadRankings()">Artists</button>
-      <button type="button" :class="{ on: view === 'genres' }" @click="view = 'genres'; loadRankings()">Genres</button>
-      <button type="button" :class="{ on: view === 'years' }" @click="view = 'years'; loadRankings()">Years</button>
-      <button type="button" :class="{ on: view === 'albums' }" @click="view = 'albums'; loadRankings()">Albums</button>
-      <button type="button" :class="{ on: view === 'playlists' }" @click="view = 'playlists'; loadRankings()">Playlists</button>
-      {% if listening_available or chart_view == 'analytics' %}
-      <button type="button" :class="{ on: view === 'analytics' }" @click="view = 'analytics'">Listening analytics</button>
+      {% if listening_edition.available %}
+      <button type="button" :class="{ on: view === 'home' }" @click="choose('home')">Home</button>
+      {% endif %}
+      <button type="button" :class="{ on: view === 'songs' }" @click="choose('songs')">Top songs</button>
+      <button type="button" :class="{ on: view === 'artists' }" @click="choose('artists')">Artists</button>
+      <button type="button" :class="{ on: view === 'genres' }" @click="choose('genres')">Genres</button>
+      <button type="button" :class="{ on: view === 'years' }" @click="choose('years')">Years</button>
+      <button type="button" :class="{ on: view === 'albums' }" @click="choose('albums')">Albums</button>
+      <button type="button" :class="{ on: view === 'playlists' }" @click="choose('playlists')">Playlists</button>
+      {% if listening_charts_enabled and (listening_available or chart_view == 'analytics') %}
+      <button type="button" :class="{ on: view === 'analytics' }" @click="choose('analytics')">Listening analytics</button>
       {% endif %}
     </span>
-    <span class="chart-context-actions" x-show="view !== 'analytics'">
+    <span class="chart-context-actions" x-show="!['home','analytics'].includes(view)">
       <span class="chart-context-label">History</span>
-      <span class="seg chart-window" title="Limit to plays in this window of your sync history">
+      <span class="seg chart-window" title="Limit to listening days in this window of your sync history">
         <a :href="'/charts?window=all&amp;view=' + view" class="{{ 'on' if window == 'all' }}">All time</a>
         <a :href="'/charts?window=90d&amp;view=' + view" class="{{ 'on' if window == '90d' }}">90d</a>
         <a :href="'/charts?window=30d&amp;view=' + view" class="{{ 'on' if window == '30d' }}">30d</a>
@@ -40,9 +56,17 @@
   </div>
 </div>
 
+  {% if listening_edition.available %}
+  <section x-show="view === 'home'" x-cloak aria-label="Listening journal">
+    {% include "_partials/listening_editorial.html" %}
+  </section>
+  {% endif %}
+
+  {% if listening_charts_enabled %}
   <section x-show="view === 'analytics'" x-cloak aria-label="Listening analytics">
     {% with analytics_mode='charts' %}{% include "_partials/listening_analytics.html" %}{% endwith %}
   </section>
+  {% endif %}
 
   <template x-teleport="body">
     <div class="modal-backdrop" x-show="keyOpen" x-cloak x-transition.opacity
@@ -50,13 +74,13 @@
       <div class="modal chart-key-popup" @click.stop x-transition.scale.origin.center>
         <h3 x-text="view === 'songs' ? 'How to read Top songs' : 'How to read this chart'">How to read this chart</h3>
         <div class="chart-key" x-show="view === 'songs'">
-          <span class="chart-key-item"><i class="key-now"></i><span><b>Play count</b>Bar length relative to the #1 song</span></span>
+          <span class="chart-key-item"><i class="key-now"></i><span><b>Days heard</b>Bar length relative to the #1 song</span></span>
           <span class="chart-key-item"><i class="key-window"></i><span><b>Window</b>{{ window_names[window] }}</span></span>
-          <span class="chart-key-help">Point to any bar for its exact play count.</span>
+          <span class="chart-key-help">Point to any bar for its recorded listening-day count.</span>
         </div>
         <div class="chart-key" x-show="view !== 'songs'" x-cloak>
-          <p class="chart-key-intro">{% if window == 'all' %}All of your recorded plays are combined into one period.{% else %}The selected {{ window[:-1] }}-day range is compared with three equally long periods before it.{% endif %}</p>
-          <span class="chart-key-item"><i class="key-now"></i><span><b>Selected period</b>The colored bar shows this item’s share of all plays during the selected range.</span></span>
+          <p class="chart-key-intro">{% if window == 'all' %}All of your recorded listening days are combined into one period.{% else %}The selected {{ window[:-1] }}-day range is compared with three equally long periods before it.{% endif %}</p>
+          <span class="chart-key-item"><i class="key-now"></i><span><b>Selected period</b>The colored bar shows this item’s share of listening days during the selected range.</span></span>
           {% if window != 'all' %}
           <span class="chart-key-item"><i class="key-range"></i><span><b>How much it moved</b>The thin line runs from its lowest to highest share across all four periods.</span></span>
           <span class="chart-key-item"><i class="key-earlier"></i><span><b>Where it started</b>The diamond marks its share in the oldest of the four periods.</span></span>
@@ -73,7 +97,7 @@
   <div class="card card--data chart-panel" x-show="view === 'songs'">
     {% if songs %}{% set smax = songs[0].plays %}
     <table class="chart">
-      <thead><tr><th class="rank">#</th><th class="col-thumb"></th><th>Song</th><th>Artist</th><th class="barhead">relative play count</th><th class="num">Plays</th><th class="col-action"></th></tr></thead>
+      <thead><tr><th class="rank">#</th><th class="col-thumb"></th><th>Song</th><th>Artist</th><th class="barhead">relative listening days</th><th class="num">Days heard</th><th class="col-action"></th></tr></thead>
       <tbody>
       {% for s in songs %}
         <tr>

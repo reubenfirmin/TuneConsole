@@ -5,50 +5,103 @@ This creates no live exposure, promotion or purported future outcomes. Every wri
 and recovery exercise is confined to pytest's disposable copy.
 """
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import faulthandler
+import hashlib
 import json
 import logging
 from pathlib import Path
 import resource
+import subprocess
 import sys
 import time
 
 import pytest
 
 from tests.bench_svd_background import _backup_library, _saved_library_source
+from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core.numerics import limit_native_threads
 from yt_playlist.core.store import Store
-from yt_playlist.rec import album_choices, choice_evidence, model_selection as selection
+from yt_playlist.rec import comparison_preparation, daily_model_selection, model_selection as selection
+from yt_playlist.rec.comparison_storage import decode
 
 
-def test_saved_library_production_comparison_preparation(tmp_path, monkeypatch):
+def test_saved_library_production_comparison_preparation(tmp_path):
     """Exercise production candidate and serving preparation on a read-only backup."""
-    from yt_playlist.rec import comparison_preparation, model_setup, product_comparison
     backup = tmp_path / 'library.db'
     report = _backup_library(_saved_library_source(), backup)
+    command = [sys.executable, '-m', 'tests.bench_choice_evaluation', str(backup)]
+    # A stuck executor/loop must not hold the review test lock indefinitely.
+    # The child owns only this disposable database; timeout kills and reaps it.
+    try:
+        child = subprocess.run(command, cwd=Path(__file__).resolve().parents[1],
+                               capture_output=True, text=True, timeout=240)
+    except subprocess.TimeoutExpired as exc:
+        (tmp_path / 'comparison-stdout.log').write_bytes(exc.stdout or b'')
+        (tmp_path / 'comparison-stderr.log').write_bytes(exc.stderr or b'')
+        pytest.fail(f'Comparison audit exceeded 240 seconds; diagnostics in {tmp_path}')
+    (tmp_path / 'comparison-stdout.log').write_text(child.stdout)
+    (tmp_path / 'comparison-stderr.log').write_text(child.stderr)
+    destination = tmp_path / 'production-comparison.json'
+    print(json.dumps({'report': str(destination), 'backup': report,
+                      'returncode': child.returncode}), flush=True)
+    assert child.returncode == 0, f'{child.stdout}\n{child.stderr}'
+    print(destination.read_text(), flush=True)
+
+
+async def _concurrent_preparation(store, now, report):
+    lag, reads = [], []
+
+    def timed_read():
+        started = time.monotonic()
+        store.rec_model.rec_vectors_count()
+        return time.monotonic() - started
+
+    with ThreadPoolExecutor(2, thread_name_prefix='comparison-audit') as workers:
+        task = workers.submit(comparison_preparation.maintain, store, now)
+        read = None
+        # Poll raw worker futures on an event-loop timer. Completion/failure no
+        # longer depends on a thread-to-loop completion callback waking a waiter.
+        while not task.done() or read is not None:
+            if read is None:
+                read = workers.submit(timed_read)
+            due = time.monotonic() + .05
+            await asyncio.sleep(.05)
+            lag.append(max(0, time.monotonic() - due))
+            if read.done():
+                reads.append(read.result())  # Propagate foreground failures too.
+                read = None
+        report.update(event_loop_samples=len(lag), event_loop_max_ms=max(lag, default=0) * 1000,
+                      concurrent_read_samples=len(reads), concurrent_read_max_ms=max(reads, default=0) * 1000)
+        return task.result()
+
+
+def _production_comparison_preparation(backup, report, monkeypatch):
+    from yt_playlist.rec import comparison_preparation, comparison_storage, model_setup, product_comparison
     limit_native_threads()
     store = Store(backup)
     store.init_schema()
     try:
+        original_encode, encoded_values, encoded_payloads = comparison_storage.encode, [], []
+
+        def checked_encode(run_id, data):
+            value = original_encode(run_id, data)
+            payload = json.loads(value)
+            before = hashlib.sha256(canonical(data)).hexdigest()
+            encoded_payloads.append(payload)
+            encoded_values.append({key: payload[key] for key in ('codec', 'expanded_bytes', 'packed_bytes')})
+            encoded_values[-1].update(stored_bytes=len(value.encode()), sha256=before)
+            return value
+
+        monkeypatch.setattr(comparison_storage, 'encode', checked_encode)
+        report['encoded_values'] = encoded_values
         # These resets affect only the disposable copy, never the source library.
         store.settings.set_setting('rec_selection_paused', '0')
         store.conn.execute("DELETE FROM rec_proposals WHERE surface='model_live_comparison'")
         store.conn.commit()
         previous = store.rec_model.get_rec_vectors()
         now, started = time.time(), time.monotonic()
-        async def exercise():
-            task = asyncio.create_task(asyncio.to_thread(selection.maintain, store, now))
-            lag, reads = [], []
-            while not task.done():
-                due = time.monotonic() + .05
-                await asyncio.sleep(.05)
-                lag.append(max(0, time.monotonic() - due))
-                read_at = time.monotonic()
-                await asyncio.to_thread(store.rec_model.rec_vectors_count)
-                reads.append(time.monotonic() - read_at)
-            report.update(event_loop_samples=len(lag), event_loop_max_ms=max(lag, default=0) * 1000,
-                          concurrent_read_samples=len(reads), concurrent_read_max_ms=max(reads, default=0) * 1000)
-            return await task
-        result = asyncio.run(exercise())
+        result = asyncio.run(_concurrent_preparation(store, now, report))
         report['wall_seconds'] = time.monotonic() - started
         report['result'] = result
         print(json.dumps({'preparation': result}), flush=True)
@@ -57,12 +110,18 @@ def test_saved_library_production_comparison_preparation(tmp_path, monkeypatch):
         current = product_comparison.state(store)
         report['projected_bytes'] = sum(len(row[0]) for row in store.conn.execute(
             "SELECT payload FROM rec_proposals WHERE surface LIKE ?", (f"model_pair:{current['run_id']}:%",)))
+        assert report['projected_bytes'] <= comparison_preparation.MAX_PREPARED_BYTES, report
+        assert len(encoded_values) == 6, report
+        report['preparation_timings'] = store.model_selection.selection_run(current['run_id'])['preparation_timings']
         report['evidence_bytes'] = sum(path.stat().st_size for path in store.rec_ledger.evidence().directory.glob('*/*/*.json'))
         report['coverage'], pairs = {}, {}
+        expected_values = iter(encoded_values)
         for arm in ('incumbent', 'challenger'):
             report['coverage'][arm], pairs[arm] = {}, {}
             for format in product_comparison.FORMATS:
-                data = store.rec_proposals.get_proposals(product_comparison.pair_surface(current['run_id'], arm, format))['data']
+                data = decode(store.rec_proposals.get_proposals(product_comparison.pair_surface(current['run_id'], arm, format)))
+                expected = next(expected_values)
+                assert hashlib.sha256(canonical(data)).hexdigest() == expected['sha256']
                 pairs[arm][format] = data
                 report['coverage'][arm][format] = (len(data['menus']) if format == 'mixes' else len(data['items'])
                     if format == 'albums' else sum(map(len, data['bundles'].get('_radio', {}).get('members', {}).values())))
@@ -88,11 +147,16 @@ def test_saved_library_production_comparison_preparation(tmp_path, monkeypatch):
         assert refreshed['generation'] == current['generation']
         assert refreshed['decision_at'] == current['decision_at']
         assert store.rec_model.get_rec_vectors() == previous
+        assert len(encoded_values) == 12, report
+        for payload, expected in zip(encoded_payloads[6:], encoded_values[6:]):
+            assert hashlib.sha256(canonical(decode(payload))).hexdigest() == expected['sha256']
         report['daily_refresh_timings'] = store.model_selection.selection_run(current['run_id'])['preparation_timings']
-        destination = tmp_path / 'production-comparison.json'
+        report['peak_process_rss_mib'] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (
+            1 if sys.platform == 'darwin' else 1024) / 1024 ** 2
+    finally:
+        destination = backup.parent / 'production-comparison.json'
         destination.write_text(json.dumps(report, indent=2) + '\n')
         print(json.dumps({'report': str(destination), **report}), flush=True)
-    finally:
         store.conn.close()
 
 
@@ -176,109 +240,141 @@ def test_saved_library_separate_home_preparation_budgets(tmp_path, caplog):
         store.conn.close()
 
 
-def test_saved_library_choice_evaluation_cost_and_coverage(tmp_path, monkeypatch):
+def test_saved_library_choice_evaluation_cost_and_coverage(tmp_path):
     backup = tmp_path / 'library.db'
     report = _backup_library(_saved_library_source(), backup)
+    report['source'] = str(_saved_library_source())
+    command = [sys.executable, '-m', 'tests.bench_choice_evaluation', str(backup), '--daily']
+    try:
+        child = subprocess.run(command, cwd=Path(__file__).resolve().parents[1],
+                               capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired as exc:
+        (tmp_path / 'daily-stdout.log').write_bytes(exc.stdout or b'')
+        (tmp_path / 'daily-stderr.log').write_bytes(exc.stderr or b'')
+        pytest.fail(f'Daily selection exceeded 300 seconds; diagnostics in {tmp_path}')
+    (tmp_path / 'daily-stdout.log').write_text(child.stdout)
+    (tmp_path / 'daily-stderr.log').write_text(child.stderr)
+    destination = tmp_path / 'daily-comparison.json'
+    print(json.dumps({'report': str(destination), 'backup': report,
+                      'returncode': child.returncode}), flush=True)
+    assert child.returncode == 0, f'{child.stdout}\n{child.stderr}'
+    print(destination.read_text(), flush=True)
+
+
+def _daily_comparison(backup, monkeypatch):
+    """Exercise actual daily fits without inventing activity or lowering gates."""
     limit_native_threads()
     store = Store(backup)
     store.init_schema()
-    now = time.time()
+    report, fits, reads, lag = {'python': sys.version, 'copy': str(backup)}, [], [], []
+    report['sources'] = {
+        module.__name__: {'path': str(Path(module.__file__).resolve()),
+                         'sha256': hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()}
+        for module in (daily_model_selection, selection, selection.training,
+                       sys.modules[Store.__module__])}
     original_fit = selection.training.build_vectors_from_baskets
-    fits = []
 
     def fit(baskets, **kwargs):
         started, cpu = time.monotonic(), time.thread_time()
-        keys, vectors = original_fit(baskets, **kwargs)
-        fits.append({'method': kwargs.get('method'), 'dim': kwargs.get('dim'),
-                     'baskets': len(baskets), 'tracks': len(keys),
-                     'wall_s': time.monotonic() - started, 'cpu_s': time.thread_time() - cpu})
-        return keys, vectors
+        try:
+            return original_fit(baskets, **kwargs)
+        finally:
+            fits.append({'method': kwargs.get('method'), 'dim': kwargs.get('dim'),
+                         'baskets': len(baskets), 'wall_s': time.monotonic() - started,
+                         'cpu_s': time.thread_time() - cpu})
+
+    def vector_digest():
+        digest = hashlib.sha256()
+        for key, value in sorted(store.rec_model.get_rec_vectors()):
+            digest.update(key.encode() + b'\0' + value)
+        return digest.hexdigest()
+
+    async def step(now):
+        def timed_read():
+            started = time.monotonic()
+            store.rec_model.rec_vectors_count()
+            return time.monotonic() - started
+
+        with ThreadPoolExecutor(2, thread_name_prefix='daily-audit') as workers:
+            task = workers.submit(daily_model_selection.maintain, store, now)
+            read = None
+            while not task.done() or read is not None:
+                if read is None:
+                    read = workers.submit(timed_read)
+                due = time.monotonic() + .02
+                await asyncio.sleep(.02)
+                lag.append(max(0, time.monotonic() - due))
+                if read.done():
+                    reads.append(read.result())
+                    read = None
+            return task.result()
 
     monkeypatch.setattr(selection.training, 'build_vectors_from_baskets', fit)
+    started = time.monotonic()
     try:
-        report['readiness'] = selection.readiness(store, now)
-        report['counts'] = {table: store.conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
-                            for table in ('recordings', 'play_events', 'listening_observations',
-                                          'rec_vectors', 'rec_model_forecasts')}
-        report['precisions'] = dict(store.conn.execute(
-            'SELECT precision,COUNT(*) FROM listening_observations GROUP BY precision'))
-        report['exact_provenance'] = dict(store.conn.execute(
-            'SELECT COALESCE(is_generated,0),COUNT(*) FROM play_events GROUP BY COALESCE(is_generated,0)'))
-        windows, _ = selection._windows(store, now)
-        report['historical_windows'] = [{
-            'cutoff': window['cutoff'], 'end': window['end'], 'baskets': len(window['baskets']),
-            'prior_keys': len(window['before']), 'new_organic_day_keys': len(window['held'])}
-            for window in windows]
-        existing = store.model_selection.selection_runs(limit=1)
-        if existing:
-            before_forecasts = len(store.model_selection.model_forecasts(existing[0]['id']))
-            selection.update_followup(store, now)
-            report['existing_followup'] = {
-                'forecasts_before_audit': before_forecasts,
-                'result': store.model_selection.selection_run(existing[0]['id']).get('followup')}
-        before_vectors = store.rec_model.get_rec_vectors()
-        before_setup = selection.current_setup(store)
-        before_weights = store.rec_model.weight_records()
-
-        async def exercise():
-            started = time.monotonic()
-            task = asyncio.create_task(asyncio.to_thread(selection.run, store, now))
-            lag, reads = [], []
-            while not task.done():
-                due = time.monotonic() + .01
-                await asyncio.sleep(.01)
-                lag.append(max(0, time.monotonic() - due))
-                read_at = time.monotonic()
-                await asyncio.to_thread(store.rec_model.rec_vectors_count)
-                reads.append(time.monotonic() - read_at)
-            result = await task
-            report.update(selection_wall_s=time.monotonic() - started,
-                event_loop_samples=len(lag), event_loop_max_ms=max(lag, default=0) * 1000,
-                concurrent_read_samples=len(reads), concurrent_read_max_ms=max(reads, default=0) * 1000)
-            return result
-
-        result = asyncio.run(exercise())
-        assert result['status'] in {'retained', 'insufficient'}
-        assert store.rec_model.get_rec_vectors() == before_vectors
-        assert selection.current_setup(store) == before_setup
-        assert store.rec_model.weight_records() == before_weights
-        report['selection'] = result
-        # Measure prospective computation without creating or observing invented outcomes.
-        candidate = result.get('diagnostic_challenger') or {'method': 'svd', 'dim': 64}
-        started = time.monotonic()
-        forecast = selection._forecast(store, before_setup, candidate, now)
-        report['paired_forecast'] = {'wall_s': time.monotonic() - started,
-            'eligible': len(forecast['eligible']) if forecast else 0,
-            'previous_top': len(forecast['previous']) if forecast else 0,
-            'candidate_top': len(forecast['selected']) if forecast else 0,
-            'later_outcomes': 'Not observed by this audit'}
-        started = time.monotonic()
-        albums = album_choices.prepare(store, now, store.discovery.get_discovered_albums())
-        report['album_choices'] = {'wall_s': time.monotonic() - started, 'options': len(albums),
-            'scored': sum(album['score'] is not None for album in albums)}
-        started = time.monotonic()
-        choice_evidence.daily(store, now)
-        compiled = store.rec_proposals.get_proposals('listening_choices')
-        report['daily_choices'] = {'wall_s': time.monotonic() - started,
-            'captured_opportunities': compiled['source_opportunities'],
-            'captured_responses': compiled['source_responses'],
-            'note': 'The database backup does not import a live JSON choice ledger.'}
-        # A crash after admission keeps the real serving vectors and recovers as failed.
-        pending = store.model_selection.start_selection(now + 1, {'ran_at': now + 1,
-            'status': 'running', 'previous': before_setup, 'selected': before_setup})
-        store.conn.close()
-        store = Store(backup)
-        store.init_schema()
-        selection.recover_interrupted(store)
-        assert store.model_selection.selection_run(pending)['status'] == 'failed'
-        assert store.rec_model.get_rec_vectors() == before_vectors
-        report['restart_pending_recovered'] = True
-        report['fits'] = fits
-        report['database_bytes'] = backup.stat().st_size
-        report['peak_process_rss_mib'] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (
-            1 if sys.platform == 'darwin' else 1024) / 1024 ** 2
-        destination = tmp_path / 'choice-evaluation.json'
-        destination.write_text(json.dumps(report, indent=2) + '\n')
-        print(json.dumps({'report': str(destination), **report}), flush=True)
+        # Only the disposable copy is unpaused and admitted immediately. History,
+        # outcomes, setups and all minimum-activity thresholds remain untouched.
+        store.settings.set_setting('rec_selection_paused', '0')
+        store.settings.set_setting('rec_selection_restore', '')
+        store.rec_proposals.put_proposals(daily_model_selection.SCHEDULE, {}, time.time())
+        now = time.time()
+        report['controlled_copy_changes'] = ['unpause selection', 'clear pending restore', 'clear poll delay']
+        report['readiness'] = daily_model_selection.readiness(store, now)
+        with store.read_view() as reader:
+            captured, _ = daily_model_selection._capture(reader, now)
+        report['historical_comparison'] = {
+            'cutoff': captured['cutoff'], 'end': captured['end'], 'periods': 1,
+            'baskets': len(captured['baskets']), 'context_tracks': len(captured['context']),
+            'eligible_tracks': len(captured['eligible']), 'first_play_targets': len(captured['held']),
+            'active_days': len(set(captured['held'].values())), 'coverage': captured['coverage'],
+            'unavailable_targets': captured['unavailable_targets'],
+            'generated_excluded': captured['generated_excluded']}
+        del captured
+        before_vectors, before_setup = vector_digest(), selection.current_setup(store)
+        result = None
+        steps = []
+        for _ in range(len(daily_model_selection.model_setup.CONFIGS) + 8):
+            at = time.monotonic()
+            result = asyncio.run(step(now))
+            steps.append({'poll_at': now, 'wall_s': time.monotonic() - at,
+                          'status': result['status'] if result else 'waiting'})
+            if not result or result['status'] != 'running':
+                break
+            # Advance only the scheduler clock to its saved retry time. The
+            # holdout end remains fixed; no simulated listening is introduced.
+            now = max(time.time(), store.rec_proposals.get_proposals(daily_model_selection.SCHEDULE)['next_at'])
+        report.update(selection=result, steps=steps, fits=fits,
+                      workflow_completed=bool(result and result['status'] in ('applied', 'retained')))
+        assert not result or result['status'] != 'running', report
+        assert not result or result['status'] != 'failed', report
+        if not report['workflow_completed']:
+            assert vector_digest() == before_vectors
+            assert selection.current_setup(store) == before_setup
+            report['acceptance_gap'] = 'Actual history did not admit a complete comparison; switching remains unverified.'
+        elif result['status'] == 'applied':
+            assert store.model_selection.restore_model_selection(result['id'], now + 1)
+            assert vector_digest() == before_vectors
+            assert selection.current_setup(store) == before_setup
+            report['exact_restore_verified'] = True
+        report.update(wall_s=time.monotonic() - started,
+            foreground_samples=len(reads), foreground_max_ms=max(reads, default=0) * 1000,
+            foreground_p95_ms=sorted(reads)[min(len(reads) - 1, int(len(reads) * .95))] * 1000 if reads else None,
+            foreground_p99_ms=sorted(reads)[min(len(reads) - 1, int(len(reads) * .99))] * 1000 if reads else None,
+            event_loop_max_ms=max(lag, default=0) * 1000,
+            peak_process_rss_mib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (
+                1 if sys.platform == 'darwin' else 1024) / 1024 ** 2)
+        assert report['foreground_max_ms'] < 1000, report
+        assert report['event_loop_max_ms'] < 250, report
     finally:
+        destination = backup.parent / 'daily-comparison.json'
+        destination.write_text(json.dumps(report, indent=2) + '\n')
         store.conn.close()
+
+
+if __name__ == '__main__':
+    faulthandler.dump_traceback_later(90, repeat=True)
+    with pytest.MonkeyPatch.context() as patch:
+        if '--daily' in sys.argv:
+            _daily_comparison(Path(sys.argv[1]), patch)
+        else:
+            _production_comparison_preparation(Path(sys.argv[1]), {}, patch)

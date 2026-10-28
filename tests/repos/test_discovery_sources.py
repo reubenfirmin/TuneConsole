@@ -55,7 +55,7 @@ def test_orphan_album_does_not_remove_radio_supported_candidate(store):
     assert store.discovery.discovery_sources_for_track(key)[0]['source_type'] == 'radio'
 
 
-def test_populated_upgrade_backup_reopen_and_failure_rollback(tmp_path):
+def test_populated_upgrade_reopen_and_failure_rollback_without_backups(tmp_path):
     path = tmp_path / 'state.db'
     store = Store(path)
     migrate(store.conn, registry=MIGRATIONS[:17])
@@ -79,8 +79,5 @@ def test_populated_upgrade_backup_reopen_and_failure_rollback(tmp_path):
         ('album', 'album-a', None), ('radio', 'seed', 12)]
     store.init_schema()
     assert [dict(r) for r in store.conn.execute('SELECT * FROM discovery_sources ORDER BY source_token')] == rows
-    import sqlite3
-    for backup in (tmp_path / 'backups').glob('*.db'):
-        with sqlite3.connect(backup) as conn:
-            assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-            assert conn.execute('SELECT * FROM discovery_sources').fetchall() == original
+    assert not (tmp_path / 'backups').exists()
+    assert store.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'

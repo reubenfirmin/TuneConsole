@@ -10,23 +10,28 @@ from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.util.matching import identity_key
 
 
-def _outcomes(hits, n=40):
-    return {str(i): int(i < hits) for i in range(n)}
-
-
 def _result(now=1000, status="applied"):
     return {"ran_at": now, "status": status, "previous": {"method": "svd", "dim": 48},
             "selected": {"method": "svd", "dim": 64}, "reason": "Measured improvement", "grid": []}
 
 
-def test_switch_requires_reliable_paired_gain_across_multiple_periods():
-    previous = [_outcomes(5), _outcomes(5)]
-    assert ms._paired(previous, [_outcomes(25), _outcomes(25)], 5)["promote"]
-    assert not ms._paired(previous, [_outcomes(6), _outcomes(6)], 5)["promote"]
-    assert not ms._paired(previous, [_outcomes(40), _outcomes(4)], 5)["promote"]
-    assert not ms._paired(previous[:1], [_outcomes(40)], 5)["promote"]
-    assert not ms._paired(previous, [{}, _outcomes(40)], 5)["eligible"]
-    assert not ms._paired(previous, [{"0": 1}, _outcomes(40)], 5)["eligible"]
+def test_forecast_expiry_preserves_summary_and_active_exact_restore(store, monkeypatch):
+    store.rec_model.replace_rec_vectors([('old', b'exact incumbent')])
+    result = {**_result(), 'followup': {'trials': 10, 'selected_hits': 3, 'updated_at': 2000}}
+    run_id = store.model_selection.start_selection(1000, result)
+    store.model_selection.save_selection(run_id, result, rows=[('new', b'challenger')])
+    store.model_selection.save_model_forecast(run_id, 1000, {'eligible': ['song'], 'previous': [], 'selected': []})
+    now = 1000 + 181 * ms.DAY
+    store.model_selection.maintain_selection(now)
+    run = store.model_selection.selection_run(run_id)
+    assert run['followup']['trials'] == 10 and run['followup']['selected_hits'] == 3
+    assert run['followup']['updated_at'] == 2000 and run['followup']['frozen_at'] == now
+    assert not store.model_selection.model_forecasts(run_id)
+    monkeypatch.setattr(ms, '_forecast', lambda *args: pytest.fail('Expired diagnostic series restarted'))
+    ms.update_followup(store, now + 1)
+    assert store.model_selection.selection_run(run_id) == run
+    assert store.model_selection.restore_model_selection(run_id, now + 2)
+    assert store.rec_model.get_rec_vectors() == [('old', b'exact incumbent')]
 
 
 def test_readiness_explains_initial_wait_pause_cooldown_and_fresh_data(store):
@@ -34,75 +39,19 @@ def test_readiness_explains_initial_wait_pause_cooldown_and_fresh_data(store):
     assert ms.readiness(store, 1000)["state"] == "waiting"
     store.rec_model.replace_rec_vectors([(str(i), np.ones(2, dtype=np.float32).tobytes()) for i in range(100)])
     store.history.record_history_plays(iid, 0, ["context"], source_timezone="UTC")
-    store.history.record_history_plays(iid, 15 * ms.DAY, ["later"], source_timezone="UTC")
-    now = 16 * ms.DAY
+    store.history.record_history_plays(iid, 46 * ms.DAY, ["later"], source_timezone="UTC")
+    now = 47 * ms.DAY
     assert ms.readiness(store, now)["state"] == "ready"
     result = _result(now, "retained")
-    result["evidence_end"] = 15 * ms.DAY
+    result.update(kind='daily', evidence_end=now)
     store.model_selection.start_selection(now, result)
     assert "next_at" in ms.readiness(store, now)
-    later = now + 29 * ms.DAY
-    assert "fresh listening" in ms.readiness(store, later)["reason"]
+    later = now + 2 * ms.DAY
+    assert "freshly played" in ms.readiness(store, later)["reason"]
     store.history.record_history_plays(iid, later - 1, [f"fresh{i}" for i in range(30)], source_timezone="UTC")
     assert ms.readiness(store, later)["state"] == "ready"
     store.settings.set_setting("rec_selection_paused", "1")
     assert ms.readiness(store, later)["state"] == "paused"
-
-
-def test_diagnostic_winner_cannot_publish_without_validated_product_outcomes(store, monkeypatch):
-    old = [("old|artist", np.array([1, 0], dtype=np.float32).tobytes())]
-    store.rec_model.replace_rec_vectors(old)
-    store.rec_model.set_weight("genre:jazz", 1.4, now=1)
-    store.rec_model.record_like("liked|artist", now=1)
-    monkeypatch.setattr(ms, "_windows", lambda *a: ([{}, {}], 100))
-    calls = []
-
-    def evaluate(setup, windows):
-        assert store.rec_model.get_rec_vectors() == old
-        assert store.settings.get_setting("rec_dim") is None
-        calls.append(setup)
-        return [_outcomes(25 if setup["dim"] == 64 else 5)] * 2
-
-    monkeypatch.setattr(ms, "_evaluate", evaluate)
-    monkeypatch.setattr(model_setup, "build", lambda *a: pytest.fail("diagnostic fitted a serving model"))
-    monkeypatch.setattr(ms, "_forecast", lambda *a: None)
-    result = ms.run(store, 1000)
-    assert result["status"] == "retained"
-    assert result["diagnostic_challenger"] == {"method": "svd", "dim": 64}
-    assert result["promotion_gate"] == "diagnostic_only"
-    assert result["selected"] == result["previous"]
-    assert store.settings.get_setting("rec_dim") is None
-    assert store.rec_model.get_rec_vectors() == old
-    assert len(calls) == 5
-    assert store.rec_model.weight_records()["genre:jazz"]["weight"] == 1.4
-    assert store.rec_model.recent_liked_keys() == ["liked|artist"]
-    run_id = store.model_selection.selection_runs()[0]["id"]
-    assert not store.model_selection.restore_model_selection(run_id, 1100)
-    assert store.rec_model.get_rec_vectors() == old
-    assert store.settings.get_setting("rec_dim") is None
-
-
-def test_failure_during_candidate_fit_preserves_previous_model(store, monkeypatch):
-    old = [("old", b"original")]
-    store.rec_model.replace_rec_vectors(old)
-    monkeypatch.setattr(ms, "_windows", lambda *a: ([{}, {}], 100))
-    monkeypatch.setattr(ms, "_evaluate", lambda *a: (_ for _ in ()).throw(RuntimeError("fit failed")))
-    with pytest.raises(RuntimeError):
-        ms.run(store, 1000)
-    assert store.rec_model.get_rec_vectors() == old
-    assert store.settings.get_setting("rec_dim") is None
-    assert store.model_selection.selection_runs()[0]["status"] == "failed"
-
-
-def test_inconclusive_tests_keep_current_setup_and_record_reason(store, monkeypatch):
-    store.rec_model.replace_rec_vectors([("old", b"original")])
-    monkeypatch.setattr(ms, "_windows", lambda *a: ([{}, {}], 100))
-    monkeypatch.setattr(ms, "_evaluate", lambda *a: [_outcomes(5), _outcomes(5)])
-    monkeypatch.setattr(ms, "_forecast", lambda *a: None)
-    assert ms.run(store, 1000)["status"] == "retained"
-    assert store.rec_model.get_rec_vectors() == [("old", b"original")]
-    monkeypatch.setattr(ms, "_evaluate", lambda *a: [{}, {}])
-    assert ms.run(store, 2000)["status"] == "insufficient"
 
 
 def test_later_measurements_use_saved_forecasts_and_exact_future_play_times(store, monkeypatch):
@@ -182,24 +131,46 @@ def test_real_history_drives_automatic_comparison_without_manual_action(store, m
         all_keys.append(keys)
         store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"PL{group}", "Mix", 20, str(group), 0), tracks)
     for period in range(4):
-        store.history.record_history_plays(iid, period * 10 * ms.DAY,
-            [key for keys in all_keys for key in keys[period * 5:period * 5 + 5]], source_timezone="UTC")
+        batch = [key for keys in all_keys for key in keys[period * 5:period * 5 + 5]]
+        for offset in range(5):
+            at = (-100 if period == 0 else period * 10 - 5) * ms.DAY + offset * ms.DAY
+            store.history.record_history_plays(iid, at, batch[offset::5], source_timezone="UTC")
     store.settings.set_setting("rec_dim", "4")
     model_support.build_track_model(store)
     monkeypatch.setattr(model_setup, "CONFIGS", [("svd", 4), ("svd", 8)])
     now = 31 * ms.DAY
     assert ms.readiness(store, now)["state"] == "ready"
-    result = ms.maintain(store, now)
-    assert result['status'] == 'running', result
-    assert result['kind'] == 'product' and result['phase'] == 'observing'
-    assert result['challenger'] == {'method': 'svd', 'dim': 8}
-    from yt_playlist.rec import product_comparison
-    trial = product_comparison.state(store)
-    assert trial['decision_at'] > trial['exposure_until'] > now
-    assert trial['previous'] == {'method': 'svd', 'dim': 4}
+    for step in range(3):
+        result = ms.maintain(store, now + step * 5)
+    assert result['status'] in ('applied', 'retained'), result.get('reason', result)
+    assert result['kind'] == 'daily' and result['phase'] == 'complete'
+    assert result['holdout_days'] == 30 and len(result['grid']) == 1
+    assert result['previous'] == {'method': 'svd', 'dim': 4}
     assert store.rec_model.rec_vectors_count() == 160
     assert ms.maintain(store, now + 1) is None
     assert len(store.model_selection.selection_runs()) == 1
+
+
+def test_idle_worker_polls_daily_selection_without_library_changes(store, monkeypatch):
+    from yt_playlist.rec import choice_evidence, daily_model_selection
+    worker = RecWorker(SimpleNamespace(store=store, now_fn=lambda: 1000,
+                                      logger=logging.getLogger('test')))
+    scheduled = []
+    monkeypatch.setattr(worker, '_schedule', lambda **kwargs: scheduled.append(kwargs))
+    monkeypatch.setattr(choice_evidence, 'daily_due', lambda *args: False)
+    try:
+        worker._poll_choices()
+        assert scheduled == [{'full': False, 'choices': True}]
+        scheduled.clear()
+        store.rec_proposals.put_proposals(daily_model_selection.SCHEDULE, {'next_at': 2000}, 1000)
+        worker._poll_choices()
+        assert scheduled == []
+        store.rec_proposals.put_proposals(daily_model_selection.SCHEDULE, {}, 1000)
+        store.settings.set_setting('rec_selection_paused', '1')
+        worker._poll_choices()
+        assert scheduled == []
+    finally:
+        worker.shutdown()
 
 
 def test_measurement_and_restore_survive_later_checks_that_keep_the_selected_setup(store, monkeypatch):

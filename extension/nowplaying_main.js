@@ -5,7 +5,7 @@
 // classifies skips/completions/sessions from the raw stream.
 (function () {
   var SENSOR_VERSION = 4;
-  var SENSOR_REVISION = 10; // Implementation changes can replace a compatible, healthy sensor.
+  var SENSOR_REVISION = 12; // Implementation changes can replace a compatible, healthy sensor.
   var previous = window.__tcNowPoller;
   if (previous && previous.version === SENSOR_VERSION && Number.isSafeInteger(previous.revision) &&
       previous.revision >= SENSOR_REVISION && !previous.stopped &&
@@ -214,9 +214,12 @@
     try {
       var sr = shuffleRepeat();
       var identity = account();
+      var video = document.querySelector("video");
       var base = { kind: kind, videoId: last.videoId, position: last.position,
                    duration: last.duration, playlist: last.playlist,
                    shuffle: sr.shuffle, repeat: sr.repeat,
+                   paused: !video || video.paused, muted: !!video && (video.muted || video.volume === 0),
+                   volume: video ? video.volume : null,
                    brandId: identity.brandId, brandKnown: identity.brandKnown };
       if (extra) { for (var k in extra) base[k] = extra[k]; }
       window.postMessage({ __tcSensorVersion: SENSOR_VERSION, __tcPlayer: base }, "*");
@@ -265,7 +268,7 @@
       bindVideo(v);
       var info = observe(v);
       var now = Date.now();
-      if (info.videoId && v && !v.paused && now - lastTickAt >= TICK_MS) {
+      if (info.videoId && v && !v.paused && !v.muted && v.volume !== 0 && now - lastTickAt >= TICK_MS) {
         lastTickAt = now;
         post("tick", {});
       }
@@ -292,8 +295,22 @@
     var probe = ev.source === window && ev.data && ev.data.__tcSensorProbe;
     if (probe && probe.version === SENSOR_VERSION) sample(probe.id);
   }
+  function onNext(ev) {
+    // Observe real native button intent. App controls send their own explicit
+    // request in content.js; synthetic queue repair clicks are not user input.
+    if (!ev.isTrusted) return;
+    var control = document.querySelector("ytmusic-player-bar .next-button");
+    var path = ev.composedPath ? ev.composedPath() : [];
+    if (!control || (!control.contains(ev.target) && path.indexOf(control) < 0)) return;
+    var button = control.querySelector("button") || control;
+    if (control.disabled || button.disabled || control.getAttribute("aria-disabled") === "true" ||
+        button.getAttribute("aria-disabled") === "true") return;
+    var v = document.querySelector("video");
+    if (observe(v).videoId) post("next", {});
+  }
   var timer = setInterval(sample, 2000);
   window.addEventListener("message", onProbe);
+  window.addEventListener("click", onNext, true);
   // Future updates can replace this sensor without reloading a tab or leaving duplicate listeners.
   // A legacy boolean marker cannot stop its old interval; content.js ignores its unversioned frames.
   var poller = window.__tcNowPoller = { version: SENSOR_VERSION, revision: SENSOR_REVISION,
@@ -301,6 +318,7 @@
     poller.stopped = true;
     clearInterval(timer);
     window.removeEventListener("message", onProbe);
+    window.removeEventListener("click", onNext, true);
     bindings.forEach(function (b) { b.video.removeEventListener(b.event, b.handler); });
   } };
   sample(); // Reinjection can prove MAIN health immediately, before its first periodic tick.

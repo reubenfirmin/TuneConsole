@@ -100,7 +100,7 @@ class SearchRepo(Repo):
             "SELECT a.title album,p.provider_id browse,COALESCE(a.thumbnail,("
             " SELECT MIN(t.thumbnail) FROM album_tracks at JOIN tracks t ON t.id=at.entry_id "
             " WHERE at.album_id=a.id)) thumb FROM albums a "
-            "JOIN album_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
+            "JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
             "WHERE NULLIF(a.title,'') IS NOT NULL AND NULLIF(p.provider_id,'') IS NOT NULL AND ("
             " EXISTS (SELECT 1 FROM album_tracks at JOIN tracks t ON t.id=at.entry_id "
             " JOIN track_artists ta ON ta.entry_id=t.id WHERE at.album_id=a.id AND ta.artist_id=?) "

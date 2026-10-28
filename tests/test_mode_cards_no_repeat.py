@@ -1,12 +1,7 @@
-"""Generated playlists must not re-offer songs already bundled into one.
+"""Cached cards honor current feedback without banning generated playlist members.
 
-The mode bundles apply the generated-track exclusion when they are BUILT, but creating a playlist
-does not rebuild them. Every card rendered between one build and the next therefore kept offering the
-songs you had just bundled, so generating again that day handed back the same tracks. Verified on a
-real library: bundles built 05:24, and the cards were still offering 33 songs (15 wheelhouse, 17
-explore, 1 temporal) that were already in that day's two generated playlists.
-
-The exclusion has to be a fact at RENDER time, not a snapshot taken at build time.
+Generated membership quarantines learning evidence. It does not suppress a song
+that is independently eligible for recommendation.
 """
 import numpy as np
 import pytest
@@ -57,19 +52,20 @@ def _offered(cards):
     return {t["key"] for c in cards for t in c["tracks"]}
 
 
-def test_cards_do_not_reoffer_songs_already_in_a_generated_playlist(store):
-    """The reported bug: generate a playlist, then the very next card hands the same songs back."""
+def test_generated_membership_preserves_independently_eligible_cached_candidates(store):
     keys = [f"song{i}|artist{i}" for i in range(20)]
     _bundle(store, keys)
     bundled = keys[:6]
     _generated_playlist(store, bundled)
     offered = _offered(ms.assemble_cards(store, now=10.0, epoch=0))
     assert offered, "cards should still render"
-    assert not (offered & set(bundled)), "already bundled into a generated playlist, must not return"
+    assert offered & set(bundled), "generated membership alone must not suppress candidates"
+    store.rec_model.record_dislike(bundled[0], until=None, now=11)
+    assert bundled[0] not in _offered(ms.assemble_cards(store, now=12, epoch=0))
 
 
 def test_cards_still_offer_everything_else(store):
-    """The exclusion must not gut the cards: only the bundled songs go."""
+    """Creating a generated playlist preserves other eligible candidates too."""
     keys = [f"song{i}|artist{i}" for i in range(20)]
     _bundle(store, keys)
     _generated_playlist(store, keys[:6])

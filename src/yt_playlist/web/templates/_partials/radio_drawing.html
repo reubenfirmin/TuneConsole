@@ -16,9 +16,10 @@
       {# SVG template elements lack HTMLTemplateElement.content, which Alpine's
          x-for needs. Reserve the bounded set of SVG uses on the server instead. #}
       {% for i in range(24) %}
-      <use class="radio-record-echo" href="#radio-record-disc" x-show="recordEchoes.length > {{ i }}"
+      <use class="radio-record-echo" href="#radio-record-disc" x-show="recordEchoes[{{ i }}]?.opacity > .005"
            :transform="recordEchoes[{{ i }}]?.transform || ''"
-           :opacity=".7 / (recordEchoes[{{ i }}]?.depth || 1)"/>
+           :data-depth="recordEchoes[{{ i }}]?.depth" :data-parent="recordEchoes[{{ i }}]?.parent"
+           :opacity="(recordEchoes[{{ i }}]?.opacity || 0) * .7 / (recordEchoes[{{ i }}]?.depth || 1)"/>
       {% endfor %}
     </g>
     <g :transform="engravingTransform">

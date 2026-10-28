@@ -243,7 +243,8 @@ def test_track_alignment_centers_single_lines_and_anchors_wrapped_lines(song_app
     store.collection.add_saved_album({"browse": "MPRE_alignment", "title": "Album", "artist": "Artist"})
     if surface == "radio":
         monkeypatch.setattr(song_app["app"].state.ctx.radio, "status", lambda: {
-            "local_id": source, "playlist_id": "SOURCE", "history_count": 2, "title": "Radio Session"})
+            "local_id": source, "playlist_id": "SOURCE", "history_count": 2, "title": "Radio Session",
+            "history": [{"video_id": video_id} for video_id in ("single-line", "wrapped-line")]})
     path = "/album?browse=MPRE_alignment" if surface == "album" else f"/playlist/{source}"
     page.goto(song_app["base"] + path)
     if surface == "radio":
@@ -319,6 +320,91 @@ def test_keyboard_reuses_one_menu_after_metadata_save(song_app, page, popover_so
     expect(menu.get_by_role("menuitem", name="More like this", exact=False)).to_have_count(0)
     menu.get_by_role("menuitem", name="Create playlist from song").click()
     expect(page.get_by_label("Playlist name")).to_have_value("Second Song")
+
+
+@pytest.mark.parametrize("width,height,font_scale", [
+    (320, 950, 1), (320, 950, 1.5), (390, 950, 1), (390, 950, 1.5),
+    (480, 950, 1), (1280, 950, 1), (320, 480, 1.5), (320, 600, 2),
+])
+def test_loaded_suggestions_fit_viewport_with_long_metadata(
+        song_app, page, width, height, font_scale, tmp_path):
+    store = song_app["store"]
+    owned = store.playlists.get_playlist_track_ids(song_app["source"])[0]
+    title = "Starlight (Echospace Dub) [Mixed]"
+    artist = "Artist & Friends"
+    album = "Global Underground: A Journey Through Detroit's Electronic Music Classics (Continuous Mix)"
+    bonus = store.tracks.upsert_track("long-suggestion", title, artist, album, 300)
+    for track in (owned, bonus):
+        store.tracks.set_track_genre(track, "Techno")
+    store.playlists.set_playlist_tracks(song_app["destination"], [owned, bonus])
+    page.set_viewport_size({"width": width, "height": height})
+    # Use the real asynchronous endpoint and wait for its cards before measuring.
+    with page.expect_response(f"**/playlist/{song_app['source']}/suggestions") as response:
+        page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
+    assert response.value.ok
+    if font_scale != 1:
+        page.add_style_tag(content=f"html {{ font-size: {font_scale * 100}% !important; }}")
+    tile = page.locator(".tile-suggest").filter(has_text=title)
+    expect(tile).to_be_visible()
+    expect(tile.locator(".tile-cap-title")).to_have_text(title)
+    expect(tile.locator(".tile-cap-title")).to_have_attribute("title", title)
+    expect(tile.locator(".tile-cap-sub")).to_have_text(f"{artist} · {album}")
+    expect(tile.locator(".tile-cap-note")).not_to_be_empty()
+    payload = tile.locator('input[name="track"]').evaluate("el => JSON.parse(el.value)")
+    assert (payload["title"], payload["artist"], payload["album"]) == (title, artist, album)
+    page.evaluate("document.fonts.ready")
+    tile.scroll_into_view_if_needed()
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    # The main playlist table caused the 200% overflow before its suggestion
+    # menu was even opened. Its row action must also remain visible/reachable.
+    row_action = page.locator('#playlist-track-body .song-menu-trigger').first
+    row_action.scroll_into_view_if_needed()
+    bounds = row_action.bounding_box()
+    assert bounds and 0 <= bounds['x'] < bounds['x'] + bounds['width'] <= width + 1
+    row_action.focus()
+    row_action.press('Enter')
+    row_menu = page.get_by_role('menu', name='Song actions')
+    expect(row_menu).to_be_visible()
+    expect(row_menu.get_by_role('menuitem', name='Play on YouTube Music', exact=True)).to_be_focused()
+    page.keyboard.press('Escape')
+    expect(row_action).to_be_focused()
+    tile.scroll_into_view_if_needed()
+    for selector in (".tile-art", ".tile-cap", ".tile-cap-title", ".tile-cap-sub",
+                     ".tile-cap-note", ".tile-foot", ".tile-add", ".song-menu-trigger"):
+        # Captions may ellipsize, but the card and both actions must fit without page clipping.
+        control = tile.locator(selector)
+        bounds = control.bounding_box()
+        assert bounds and 0 <= bounds["x"] < bounds["x"] + bounds["width"] <= width + 1, selector
+    add = tile.get_by_role("button", name="+ Add", exact=True)
+    expect(add).to_be_visible()
+    add.focus()
+    expect(add).to_be_focused()
+    trigger = tile.get_by_role("button", name=f"More actions for {title}", exact=True)
+    trigger.click()
+    menu = page.get_by_role("menu", name="Song actions")
+    expect(menu).to_be_visible()
+    bounds = menu.bounding_box()
+    assert bounds and 0 <= bounds["x"] < bounds["x"] + bounds["width"] <= width + 1
+    assert 0 <= bounds["y"] < bounds["y"] + bounds["height"] <= height + 1
+    assert menu.evaluate("el => el.scrollWidth <= el.clientWidth")
+    items = menu.get_by_role("menuitem")
+    expect(items).to_have_count(11)  # Six song actions and all five dismissal reasons.
+    for item in items.all():
+        expect(item).to_be_focused()
+        expect(item).to_be_in_viewport()
+        assert item.evaluate("el => el.scrollWidth <= el.clientWidth")
+        page.keyboard.press("ArrowDown")
+    expect(items.first).to_be_focused()  # Navigation wraps after the last action.
+    page.keyboard.press("End")
+    expect(menu.get_by_role("menuitem", name="Not this artist", exact=True)).to_be_focused()
+    expect(items.last).to_be_in_viewport()
+    page.keyboard.press("Home")
+    expect(items.first).to_be_focused()
+    expect(items.first).to_be_in_viewport()
+    page.screenshot(path=tmp_path / f"loaded-suggestions-{width}-{height}-{font_scale}.png")
+    menu.get_by_role("menuitem", name="Edit Metadata", exact=True).click()
+    expect(page.get_by_role("dialog", name="Edit Metadata").get_by_label(
+        "Title", exact=True)).to_have_value(title)
 
 
 def test_suggestion_feedback_uses_shared_menu(song_app, page):

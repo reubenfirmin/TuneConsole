@@ -36,7 +36,7 @@ def test_home_is_default_route(store):
     assert "home-status" in r.text         # live status card is present
     assert "Extension connected" not in r.text  # connection alone is not useful Home content
     assert "Library synced" not in r.text  # freshness line only appears after a first sync
-    assert 'id="listening-format-title"' in r.text  # first-run format choice
+    assert 'id="welcome-title"' in r.text  # first-run welcome precedes the format choice
 
 
 def test_next_home_visit_expires_a_day_old_theme_menu(store):
@@ -59,20 +59,17 @@ def test_next_home_visit_expires_a_day_old_theme_menu(store):
     assert dao.card_views("cards") == views
 
 
-def test_home_rediscovers_unplayed_saved_albums(store):
-    # A saved album with no recent plays leads the memory-focused Rediscover surface and links to
-    # its in-app album page (rather than looking like another Discover catalog tile).
+def test_home_does_not_call_unheard_saved_albums_a_rediscovery(store):
     store.settings.set_setting("last_sync_at", "1.0")          # Rediscover only renders on a synced Home
     store.settings.set_setting("onboard_dismissed", "1")       # graduated user: testing the normal feed, not onboarding
     store.collection.add_saved_album({"browse": "MPREb_x", "title": "Kind of Blue", "artist": "Miles Davis",
                                       "year": "1959", "type": "Album", "thumbnail": "http://img/x.jpg"})
     c = _client(store)
     html = c.get("/").text
-    assert "Something you used to love" in html
-    assert "Kind of Blue" in html and "Miles Davis" in html
-    assert "Saved music that you haven't played recently" in html
-    assert "Bring this one back" not in html
-    assert "/album?browse=MPREb_x" in html            # tile links to the in-app album page
+    assert '<section id="rediscover">' not in html
+    from yt_playlist.rec import home_prepared
+    prepared = store.rec_proposals.get_proposals(home_prepared.SURFACE)
+    assert prepared['rediscover_albums'] == []
 
 
 def test_revisit_shows_full_current_playlist_in_saved_order(store):
@@ -242,7 +239,7 @@ def test_presync_shows_recs_placeholder_not_feed(store):
     c = TestClient(app, base_url="http://127.0.0.1")
 
     html = c.get("/").text
-    assert 'id="listening-format-title"' in html
+    assert 'id="welcome-title"' in html
     html = c.post('/home/onboard/format', data={'format': 'mixes'}).text
     assert 'class="arrival"' in html
     assert "personal mixes and find your next favorites" in html

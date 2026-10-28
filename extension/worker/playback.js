@@ -173,25 +173,35 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
     const tab = frame.resumeOnly ? (await musicTabs.list()).find(t => t.id === playbackTabId) : await pickTab();
     if (!tab) {
       if (frame.resumeOnly) send({type: "player-closed"});
-      return;
+      return {ok: false, error: "No music player is available"};
     }
-    const guarded = frame.resumeOnly || frame.action;
+    // A manual pause must win over startup recovery, including an in-flight nudge.
+    if (frame.action !== "play" && rescue?.tabId === tab.id &&
+        (!frame.videoId || !rescue.videoId || frame.videoId === rescue.videoId)) cancelRescue();
+    const confirmed = Number.isSafeInteger(frame.id) && frame.id > 0;
+    const guarded = confirmed || frame.resumeOnly || frame.action;
     if (guarded) {
+      const minimum = confirmed ? 14 : 9;
       let receiver = await sensors.ping(tab.id, false);
-      if (!(receiver.reply?.receiverRevision >= 9)) {
+      if (!(receiver.reply?.receiverRevision >= minimum)) {
         await sensors.inject(tab.id);
         receiver = await sensors.ping(tab.id, false);
       }
-      if (!(receiver.reply?.receiverRevision >= 9)) return;
+      if (!(receiver.reply?.receiverRevision >= minimum))
+        return {ok: false, error: "Reload YouTube Music to update its TuneConsole controls"};
     }
     const message = {type: guarded ? "player-control" : "playpause"};
     if (frame.action) message.action = frame.action;
+    if (confirmed) Object.assign(message, {confirm: true, videoId: frame.videoId});
     if (frame.resumeOnly) Object.assign(message, {resumeOnly: true, videoId: frame.videoId});
-    try { await chrome.tabs.sendMessage(tab.id, message); }
+    const deliver = async () => await chrome.tabs.sendMessage(tab.id, message) ||
+      {ok: false, error: "Playback was not confirmed. Check YouTube Music before trying again."};
+    try { return await deliver(); }
     catch (e) {
-      if (!isMissingReceiver(e)) return;
+      if (!isMissingReceiver(e)) return {ok: false, error: "Playback was not confirmed. Check YouTube Music before trying again."};
       await sensors.inject(tab.id);
-      try { await chrome.tabs.sendMessage(tab.id, message); } catch (e2) {}
+      try { return await deliver(); }
+      catch (e2) { return {ok: false, error: "The YouTube Music player is unavailable"}; }
     }
   }
 
@@ -205,7 +215,29 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
     }
   }
 
+  async function pauseForTv() {
+    // Cancel a pending playback rescue before it can resume audio behind TV.
+    cancelRescue();
+    return musicTabs.coordinate(async () => {
+      for (const tab of await musicTabs.list()) {
+        let receiver = await sensors.ping(tab.id, false);
+        if (!(receiver.reply?.receiverRevision >= 11)) {
+          await sensors.inject(tab.id);
+          receiver = await sensors.ping(tab.id, false);
+        }
+        if (!(receiver.reply?.receiverRevision >= 11))
+          return {ok: false, error: 'Reload the TuneConsole browser extension'};
+        const reply = await chrome.tabs.sendMessage(tab.id, {type: 'pause-for-tv'});
+        if (!reply?.ok || reply.paused !== true) return {ok: false, error: 'Audio pause was not confirmed'};
+        playingTabs.delete(tab.id);
+      }
+      return {ok: true, paused: true};
+    });
+  }
+
   async function relayMessage(msg, sender) {
+    if (msg.type === 'pevent' && ['rate', 'playlist_edit', 'feedback', 'subscription', 'share_intent'].includes(msg.kind)
+        && msg.brandKnown !== true) return;
     const srcTabId = sender && sender.tab && sender.tab.id;
     if ((msg.type === "play" || msg.type === "now-heartbeat") && srcTabId != null) {
       msg = Object.assign({}, msg, {muted: !!msg.muted || msg.volume === 0});
@@ -234,10 +266,16 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
         msg = Object.assign({}, msg, {type: "now-heartbeat"});
       }
     }
-    if (msg.type === "pevent" && ["state", "bye"].includes(msg.kind)) {
+    if (msg.type === "pevent" && ["state", "tick", "bye"].includes(msg.kind)) {
       const owner = await pickTab();
       if (owner) playbackTabId = owner.id;
-      if (playbackTabId != null && srcTabId !== playbackTabId) return;
+      if (!owner || srcTabId !== playbackTabId) return;
+      // Native events can arrive before the matching now-playing heartbeat.
+      // Use both their sampled media state and the last known state for legacy
+      // sensors. A muted sole tab can still be selected for controls.
+      if ((msg.kind === "tick" || (msg.kind === "state" && msg.state === "playing")) &&
+          (owner.mutedInfo?.muted || mediaMutedTabs.has(srcTabId) ||
+           msg.muted || msg.volume === 0 || msg.paused)) return;
     }
     if (msg.type === "play") {
       const delivered = send({type: "play", title: msg.title, artist: msg.artist,
@@ -278,6 +316,6 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
     if (rescue && rescue.tabId === tabId) cancelRescue();
   }
 
-  return {pickTab, navigate, rate: ratings.rate, next, playPause, refreshView, receive, removed, cancelRescue,
+  return {pickTab, navigate, rate: ratings.rate, next, playPause, pauseForTv, refreshView, receive, removed, cancelRescue,
     get drained() { return relay; }};
 }

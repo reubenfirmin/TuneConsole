@@ -376,6 +376,14 @@ class PlaylistRepo(Repo):
             row["last_seen"], row["last_changed"], row["thumbnail"], row["created_at"], row["created_at_source"])
 
     @synchronized
+    def get_playlist_for_account(self, identity_id, ytm_playlist_id) -> Playlist | None:
+        """Resolve a remote target afresh after sync may have replaced its local row."""
+        row = self.conn.execute(
+            "SELECT id FROM playlists WHERE identity_id=? AND ytm_playlist_id=?",
+            (identity_id, ytm_playlist_id)).fetchone()
+        return self.get_playlist(row[0]) if row else None
+
+    @synchronized
     def get_playlist_track_keys(self, playlist_id) -> set[str]:
         rows = self.conn.execute(
             "SELECT t.identity_key FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "

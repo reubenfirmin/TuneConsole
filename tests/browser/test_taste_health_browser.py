@@ -96,6 +96,8 @@ def test_model_health_groups_results_and_explains_tuning(live_app, store, page, 
     store.settings.set_setting("rec_selection_active_run", str(run_id))
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
+    from yt_playlist.rec import model_health
+    assert model_health.prepare(store, 1_792_512_000) is not None
     page.set_viewport_size({"width": width, "height": 1000})
     page.goto(live_app + "/taste#health")
     health = page.locator("#taste-health-panel")
@@ -155,7 +157,9 @@ def test_model_health_groups_results_and_explains_tuning(live_app, store, page, 
     assert errors == []
 
 
-def test_model_health_checks_can_retry_without_reloading_the_tab(live_app, page):
+def test_model_health_checks_can_retry_without_reloading_the_tab(live_app, store, page):
+    from yt_playlist.rec import model_health
+    assert model_health.prepare(store, 1_792_512_000) is not None
     page.route("**/taste/recall", lambda route: route.fulfill(status=503, body="Unavailable"))
     page.goto(live_app + "/taste#health")
     expect(page.get_by_text("No track similarity model has been built yet.", exact=False)).to_be_visible()

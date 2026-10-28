@@ -17,7 +17,10 @@
   <link rel="stylesheet" href="/static/song-actions.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/genre-controls.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/visualization-tooltips.css?v={{ asset_v }}">
-  <link rel="stylesheet" href="/static/playback.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/playback.css?v={{ asset_v }}" data-persistent>
+  <link rel="stylesheet" href="/static/onboarding-playback.css?v={{ asset_v }}" data-persistent>
+  <link rel="stylesheet" href="/static/storage-maintenance.css?v={{ asset_v }}">
+  <script defer src="/static/storage-maintenance.js?v={{ asset_v }}"></script>
   {% if path == '/' or path.startswith(('/playlist', '/album', '/artist', '/charts', '/generated', '/move', '/cleanup', '/merge', '/compare', '/dupe', '/taste', '/road_trip')) %}
   <link rel="stylesheet" href="/static/library-controls.css?v={{ asset_v }}">
   {% endif %}
@@ -102,6 +105,12 @@
   <!-- CSS token -> canvas bridge; must load before any script that paints. -->
   <script src="/static/theme.js?v={{ asset_v }}"></script>
   <script src="/static/playback-status.js?v={{ asset_v }}"></script>
+  {% if path != '/audio-preview' %}
+  <script type="module" src="/static/audio-vibe-collection.js?v={{ asset_v }}"></script>
+  {% endif %}
+  {% if audio_vibes_enabled is defined and audio_vibes_enabled() and path != '/audio-preview' %}
+  <link rel="stylesheet" href="/static/audio-vibe-banner.css?v={{ asset_v }}">
+  {% endif %}
   {% set setup_pending = initial_setup_pending() %}
   {% if setup_pending %}
   <link rel="stylesheet" href="/static/setup-status.css?v={{ asset_v }}">
@@ -110,8 +119,10 @@
   <script src="/static/playback-controls.js?v={{ asset_v }}"></script>
   {% if path == '/' or path.startswith('/album') %}<script src="/static/album-player.js?v={{ asset_v }}"></script>{% endif %}
   <script src="/static/app.js?v={{ asset_v }}"></script>
+  <script src="/static/app-navigation.js?v={{ asset_v }}"></script>
   {% if path == '/' or path.startswith('/album') %}<script src="/static/listening-choices.js?v={{ asset_v }}"></script>{% endif %}
   <script src="/static/player-card.js?v={{ asset_v }}"></script>
+  <script defer src="/static/onboarding-playback.js?v={{ asset_v }}"></script>
   <script src="/static/song-actions.js?v={{ asset_v }}"></script>
   {% if path.startswith('/track/') %}
   <link rel="stylesheet" href="/static/track-detail.css?v={{ asset_v }}">
@@ -158,6 +169,8 @@
   <script defer src="/static/vendor/alpine.min.js"></script>
 </head>
 <body>
+  {% set storage_status = storage_maintenance_status() %}
+  <div id="storage-maintenance" class="storage-maintenance" data-warning="{{ 'true' if storage_status.warning else 'false' }}" role="{{ 'alert' if storage_status.warning else 'status' }}" aria-live="{{ 'assertive' if storage_status.warning else 'polite' }}"{% if not storage_status.active and not storage_status.warning %} hidden{% endif %}>{% if storage_status.active or storage_status.warning %}{{ storage_status.message }}{% endif %}</div>
   {% if setup_pending %}{% include "_partials/setup_status.html" %}{% endif %}
   <header class="topbar">
     <a class="brand" href="/" aria-label="TuneConsole home">
@@ -181,7 +194,7 @@
       </div>
     </form>
     {% endif %}
-    {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/setup') or path.startswith('/network') or path.startswith('/enrich') or path.startswith('/discovery') %}
+    {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/setup') or path.startswith('/network') or path.startswith('/enrich') or path.startswith('/discovery') or path.startswith('/audio-preview') %}
     <nav>
       <div class="nav-group">
         <span class="nav-group-label">Library</span>
@@ -207,6 +220,9 @@
           {% endif %}
           <a href="/enrich" class="{{ 'active' if path.startswith('/enrich') else '' }}">Enrichment</a>
           <a href="/taste" class="{{ 'active' if path.startswith('/taste') else '' }}">Taste Model</a>
+          {% if audio_preview_available() %}
+          <a href="/audio-preview" class="{{ 'active' if path.startswith('/audio-preview') else '' }}">Audio analysis preview</a>
+          {% endif %}
           <a href="/discovery" class="{{ 'active' if path.startswith('/discovery') else '' }}">Discovery Pools</a>
           <a href="/network" class="{{ 'active' if path.startswith('/network') else '' }}">Network</a>
           <a href="/actions" class="{{ 'active' if path.startswith('/actions') else '' }}">Action Log</a>
@@ -219,7 +235,7 @@
   <div class="global-now-playing-slot">
     {% include "_partials/now_playing.html" %}
   </div>
-  <div class="authbar" x-data='authBanner({{ (auth_expired.values()|list)|tojson }})'
+  <div class="authbar" x-data='authBanner({{ ([] if storage_status.active else auth_expired.values()|list)|tojson }})'
        x-show="labels.length && !dismissed" x-cloak @auth-expired.window="add($event.detail.label)"
        @auth-checked.window="labels = $event.detail.labels">
     <span class="authbar-body">⚠ Not signed in to YouTube Music for <strong x-text="labels.join(', ')"></strong>.
@@ -229,7 +245,8 @@
   </div>
   {# `page_class` scopes page rules (e.g. .page-merge) so bare-element
    selectors like `table` cannot leak to every other page. #}
-  <main class="{% block page_class %}{% endblock %}">{% block body %}{% endblock %}</main>
+  <main id="app-page" class="{% block page_class %}{% endblock %}">{% block body %}{% endblock %}</main>
+  {% block persistent_content %}{% endblock %}
   {# Enrichment conflict resolver loads here, OUTSIDE <main>: main's entrance animation keeps a
      transform (its fill state), which would otherwise become this fixed modal's containing block
      and push it off-screen. At body level the backdrop is viewport-relative. #}
@@ -241,6 +258,12 @@
   <div id="genre-candidates-modal"></div>
   {% include "_partials/song_actions.html" %}
   <div id="toasts" class="toasts" aria-live="polite">{% block toasts %}{% endblock %}</div>
+  {% if path != '/audio-preview' %}
+  <div hidden data-audio-vibe-collection
+       data-extension-ids="{{ audio_vibe_extension_ids|join(',') }}"
+       data-taxonomy-version="{{ audio_vibe_taxonomy_version }}"></div>
+  {% if audio_vibes_enabled is defined and audio_vibes_enabled() %}{% include "_partials/audio_vibe_banner.html" %}{% endif %}
+  {% endif %}
   {% include "_partials/heartbeat.html" %}
 </body>
 </html>

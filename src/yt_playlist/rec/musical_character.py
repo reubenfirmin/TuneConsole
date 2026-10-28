@@ -18,7 +18,7 @@ def compact(profile):
             'dimensions': {name: {key: value for key, value in dimension.items()
                                   if key in ('value', 'support', 'override', 'conflict')}
                            for name, dimension in profile['dimensions'].items()},
-            'reliability': 'uncalibrated'}
+            'vibes': profile.get('vibes', {}), 'reliability': 'uncalibrated'}
 
 
 def load(store, keys):
@@ -41,14 +41,41 @@ def dimension(item, name):
     return number, support
 
 
+def _intensity_fit(item):
+    """Select the same usable learned input for scoring and served provenance."""
+    fits = ((item.get('musical') or {}).get('vibes') or {}).get('fits') or {}
+    if not isinstance(fits, dict):
+        return None
+    available = [(name, fit) for name in ('energize', 'release') if isinstance(fit := fits.get(name), dict)
+                 and fit.get('source') != 'heuristic' and type(fit.get('score')) in (int, float)
+                 and math.isfinite(fit['score']) and 0 <= fit['score'] <= 1]
+    return max(available, key=lambda row: row[1]['score']) if available else None
+
+
+def intensity_evidence(item):
+    """Momentum or force can make a song intense, including slow heavy music."""
+    chosen = _intensity_fit(item)
+    if chosen is not None:
+        _name, fit = chosen
+        return fit['score'], fit.get('support', 0)
+    return dimension(item, 'intensity')
+
+
 def intensity(item):
-    value, _support = dimension(item, 'intensity')
+    value, _support = intensity_evidence(item)
     return .5 if value is None else value
 
 
 def provenance(item):
     """Freeze the actual input, keeping missing evidence distinct from neutral scoring."""
     profile = item.get('musical') or {}
-    value, support = dimension(item, 'intensity')
+    chosen = _intensity_fit(item)
+    if chosen is None:
+        value, support = dimension(item, 'intensity')
+        name, source = None, None
+    else:
+        name, fit = chosen
+        value, support, source = fit['score'], fit.get('support', 0), fit.get('source')
     return {'musical_policy': VERSION, 'musical_version': profile.get('version'),
-            'musical_digest': profile.get('digest'), 'intensity': value, 'intensity_support': support}
+            'musical_digest': profile.get('digest'), 'intensity': value, 'intensity_support': support,
+            'intensity_source': source, 'intensity_vibe': name}

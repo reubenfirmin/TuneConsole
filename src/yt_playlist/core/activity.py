@@ -220,7 +220,9 @@ def check_cancellable_work():
 def work_budget(seconds):
     """Bound an entire disposable calculation, including its SQLite setup queries."""
     previous = _CANCELLATION.get()
-    token = _DEADLINE.set(time.monotonic() + seconds)
+    deadline = time.monotonic() + seconds
+    parent_deadline = _DEADLINE.get()
+    token = _DEADLINE.set(min(parent_deadline, deadline) if parent_deadline is not None else deadline)
     try:
         with cancellable_work(previous.should_stop if previous else lambda: False):
             yield

@@ -58,9 +58,9 @@ class RadioPlayback:
             raise PlaybackUnavailable(str(exc)) from exc
         return PlaybackObservation(result, time.monotonic())
 
-    def navigate(self, playlist: str, video: str):
-        self.bridge.send_control({"type": "navigate", "url":
-            "https://music.youtube.com/watch?" + urlencode({"v": video, "list": playlist})})
+    def navigate(self, playlist: str, video: str, *, intent=None):
+        return self.bridge.send_control({"type": "navigate", "url":
+            "https://music.youtube.com/watch?" + urlencode({"v": video, "list": playlist})}, intent=intent)
 
     def next(self, video: str):
         try:

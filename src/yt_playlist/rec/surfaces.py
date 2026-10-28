@@ -149,10 +149,10 @@ def for_you(store, now, limit=24, include_traces=False) -> list[ForYouItem]:
             rows.sort(key=lambda r: -sims.get(r["key"], -1.0))
 
     weights = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
-    # Never show these: dismissed/snoozed/muted, and anything already bundled into a generated
-    # playlist (don't re-offer what you just saved). Anti-staleness is per-card rotation, not here.
+    # Explicit feedback controls eligibility. Generated-playlist membership says
+    # nothing about taste fit; freshness belongs to per-card rotation.
     dao = store.rec_query
-    hard = store.rec_model.suppressed_keys("for_you", now) | store.rec_eligibility.generated_track_keys()
+    hard = store.rec_model.suppressed_keys("for_you", now)
     muted = store.rec_model.muted_artists()
     # weighted fair queuing: each lane gets turns ∝ its learned weight (default 1.0 => round-robin)
     queues = [[deque(rows), reason, lane, weights.get(f"lane:{lane}", 1.0), 0]
@@ -177,15 +177,15 @@ def comfort_listening(store, now, limit=24) -> list[ForYouItem]:
     Ranks your most-played tracks, demoted the more recently you've heard them (see
     rec_candidates.comfort_candidates), so the card surfaces reliable favorites that have gone quiet rather
     than whatever's already in heavy rotation. Single-source, so no lane fair-queuing; it still
-    honours the for_you suppression set (dismissed/snoozed/muted) and never re-offers a track
-    already bundled into a generated playlist. No erosion: the recency demotion is its own freshness.
+    honours the for_you suppression set (dismissed/snoozed/muted). No erosion:
+    the recency demotion is its own freshness.
     """
     gp = rec_params.get_param
     pool = limit * gp(store, "candidate_pool_factor")
     rows = store.rec_candidates.comfort_candidates(now, min_plays=gp(store, "comfort_min_plays"),
                                     recency_full_days=gp(store, "comfort_recency_full_days"), limit=pool)
     dao = store.rec_query
-    suppressed = store.rec_model.suppressed_keys("for_you", now) | store.rec_eligibility.generated_track_keys()
+    suppressed = store.rec_model.suppressed_keys("for_you", now)
     muted = store.rec_model.muted_artists()
     out: list[ForYouItem] = []
     for r in rows:
@@ -237,21 +237,40 @@ def rediscover_playlists(store, now, count=2, per=5, epoch=0, pool=8) -> list[di
 
 
 def rediscover_albums(store, now, count=3, epoch=0, pool=9) -> list[dict]:
-    """Spotlight saved albums you haven't played lately, to nudge a revisit, the album cousin of
-    rediscover_playlists. Ranks each saved album by its newest play across the album's tracks
-    (never-played counts as coldest), then rotates through the coldest `pool` like the other Home
-    cards: `count` at a time, advancing one page per rotation `epoch` (wrapping). Returns [] when
-    nothing is saved. Tiles carry just metadata + thumbnail (no track teaser)."""
+    """Previously heard saved albums, quiet for at least a month. Unheard saved
+    albums belong to discovery, not a claim about remembered favorites."""
     saved = store.collection.get_saved_albums()
     if not saved:
         return []
-    recency = store.collection.saved_albums_recency()               # {browse: newest play ts | None}
-    # Never-played (None) sorts older than any real timestamp -> coldest leads.
-    ranked = sorted(saved, key=lambda a: recency.get(a["browse"]) or 0.0)
+    recency = store.collection.saved_albums_recency(include_generated=True)
+    ranked = sorted((a for a in saved if recency.get(a['browse']) is not None
+                     and recency[a['browse']] <= now-30*86400), key=lambda a: recency[a['browse']])
     cold = ranked[:max(count, pool)]                      # rotate within the coldest tail only
     return [{"browse_id": a["browse"], "title": a["title"], "artist": a["artist"],
              "year": a["year"], "thumbnail": a["thumbnail"]}
             for a in rotate_page(cold, count, epoch)]
+
+
+def rediscover_tracks(store, now, *, keys=None, pool=90):
+    """Least-played liked/repeated songs after their required listening rest."""
+    rows = store.rec_candidates.revisit_candidates(now, keys=keys, limit=pool)
+    blocked = store.rec_model.suppressed_keys('for_you', now, keys=[r['key'] for r in rows])
+    muted = store.rec_model.muted_artists()
+    return [row for row in rows if row['key'] not in blocked and row['artist'] not in muted]
+
+
+def revisit_page(items, size, epoch, component):
+    """Shuffle a prepared pool once, then advance every visit, even a full page.
+
+    Rendering a fragment again within the same visit does not churn its contents.
+    A one-item pool stays honest rather than inventing alternatives.
+    """
+    items = list(items)
+    if not items:
+        return []
+    random.Random('revisit:' + component).shuffle(items)
+    start = epoch % len(items)
+    return [items[(start+i) % len(items)] for i in range(min(size, len(items)))]
 
 
 def taste_sample(store, now, limit=8, pool_factor=8) -> list[ForYouItem]:
@@ -282,7 +301,6 @@ def taste_comparison(store, now, keys=None, limit=24) -> list[dict]:
     wanted = list(dict.fromkeys([*(keys or []), *current]))
     meta = store.rec_query.tracks_by_keys([key for key in wanted if key in traces])
     suppressed = store.rec_model.suppressed_keys("for_you", now)
-    generated = store.rec_eligibility.generated_track_keys()
     muted = store.rec_model.muted_artists()
     weights = store.rec_model.get_weights(
         now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
@@ -298,7 +316,6 @@ def taste_comparison(store, now, keys=None, limit=24) -> list[dict]:
                           for token in (genre_map.family(genre), genre_map.subgenre(genre)) if token)
         reason = ("genre muted" if genre_muted else
                   "dismissed or snoozed" if key in suppressed else
-                  "already saved from a generated recommendation" if key in generated else
                   "artist muted" if artist in muted else None)
         lane = item.lane if item else ""
         rows.append({"key": key, "title": meta[key]["title"], "artist": artist,
@@ -537,7 +554,7 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
     # may have neither vector type; they can still make a catalog mix before the next rebuild.
     missing = dao.library_keys() - collab.keys() - content.keys()
     order.extend(sorted(missing, key=lambda k: (plays.get(k, 0), k)))
-    suppressed = store.rec_model.suppressed_keys("for_you", now) | store.rec_eligibility.generated_track_keys()
+    suppressed = store.rec_model.suppressed_keys("for_you", now)
     muted = store.rec_model.muted_artists()
     weights = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     genres = dao.track_genres(order)

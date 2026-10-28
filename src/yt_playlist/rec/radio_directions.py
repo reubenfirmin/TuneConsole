@@ -38,8 +38,6 @@ class RadioDirections:
 
     def _genres(self, history, *, current=None):
         theme = getattr(self.candidates, 'tuning', {}).get('theme', .5)
-        if getattr(self.candidates, 'cluster_members', None):
-            theme = .5  # Prepared style coordinates own navigation in indexed streams.
         return GenrePolicy(theme, history, current=current)
 
     def continue_sequence(self, history, prefix, anchor, excluded):

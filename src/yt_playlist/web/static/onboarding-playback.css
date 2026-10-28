@@ -1,0 +1,38 @@
+/* A slow travelling glint and a breathing halo follow the first playback action.
+   Only the outline moves; labels, controls and layout remain steady. */
+@property --onboarding-angle { syntax: '<angle>'; initial-value: 0deg; inherits: false; }
+html:not([data-onboarding-played]) :is([data-onboarding-play], [data-onboarding-album]):not(:disabled),
+.global-now-playing.is-onboarding-cue {
+  position: relative;
+  --onboarding-radius: var(--radius);
+}
+html:not([data-onboarding-played]) :is([data-onboarding-play], [data-onboarding-album]):not(:disabled)::after,
+.global-now-playing.is-onboarding-cue::after {
+  content: ''; position: absolute; inset: -5px; padding: 2px;
+  border-radius: calc(var(--onboarding-radius) + 5px); pointer-events: none;
+  background: conic-gradient(from var(--onboarding-angle),
+    color-mix(in srgb, var(--cta) 25%, transparent), var(--cta) 16%,
+    var(--light-source) 23%, var(--teal) 30%,
+    color-mix(in srgb, var(--accent) 30%, transparent) 50%,
+    var(--accent-2) 72%, var(--cta) 84%,
+    color-mix(in srgb, var(--cta) 25%, transparent));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: onboarding-orbit 5.6s linear infinite, onboarding-breathe 2.8s ease-in-out infinite;
+}
+html:not([data-onboarding-played]) :is([data-onboarding-play], [data-onboarding-album]):not(:disabled)::before,
+.global-now-playing.is-onboarding-cue::before {
+  content: ''; position: absolute; inset: -5px; border-radius: calc(var(--onboarding-radius) + 5px);
+  pointer-events: none; border: 1px solid color-mix(in srgb, var(--cta) 40%, transparent);
+  box-shadow: 0 0 18px 2px color-mix(in srgb, var(--cta) 20%, transparent),
+    0 0 30px 4px color-mix(in srgb, var(--accent) 14%, transparent);
+  animation: onboarding-breathe 2.8s ease-in-out infinite;
+}
+.global-now-playing.is-onboarding-cue { overflow: visible; }
+@keyframes onboarding-orbit { to { --onboarding-angle: 360deg; } }
+@keyframes onboarding-breathe {
+  0%, 100% { opacity: .42; }
+  50% { opacity: 1; }
+}

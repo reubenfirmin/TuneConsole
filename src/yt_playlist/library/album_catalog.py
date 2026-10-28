@@ -23,18 +23,24 @@ def remember_album(store, browse_id, album, fallback=None):
     def positive(value):
         return int(value) if str(value).isdigit() and int(value)>0 else None
 
-    entries = [dict(entry_id=store.tracks.observe_track_entry(
-        t.get('videoId'),t['title'],artists(t) or artist,album=title,
-        album_browse_id=browse_id,credits=t.get('artists') or album.get('artists'),
-        duration_s=parse_duration(t.get('duration')),
-        thumbnail=best_thumb(t.get('thumbnails')) or best_thumb(album.get('thumbnails'))),
-        disc_number=positive(t.get('discNumber',t.get('disc_number'))),
-        track_number=positive(t.get('trackNumber',t.get('track_number')))) for t in tracks]
     try:
         video_ids = [track["videoId"] for track in shareable_album_tracks(album)]
     except ValueError:
         video_ids = None
-    store.collection.cache_album_tracklist(
-        browse_id, title, artist, best_thumb(album.get("thumbnails")) or fallback.get("thumbnail"), [],
-        video_ids=video_ids,entries=entries,credits=album.get('artists'),
-        year=album.get('year'),album_type=album.get('type'))
+    # Another completed response can reconcile these IDs. Keep proof acceptance
+    # and its full cache publication together so an older accepted response
+    # cannot overwrite the newer shared release after that reconciliation.
+    with store._lock:
+        if not store.collection.observe_album_representation(browse_id, album):
+            return
+        entries = [dict(entry_id=store.tracks.observe_track_entry(
+            t.get('videoId'),t['title'],artists(t) or artist,album=title,
+            album_browse_id=browse_id,credits=t.get('artists') or album.get('artists'),
+            duration_s=parse_duration(t.get('duration')),
+            thumbnail=best_thumb(t.get('thumbnails')) or best_thumb(album.get('thumbnails'))),
+            disc_number=positive(t.get('discNumber',t.get('disc_number'))),
+            track_number=positive(t.get('trackNumber',t.get('track_number')))) for t in tracks]
+        store.collection.cache_album_tracklist(
+            browse_id, title, artist, best_thumb(album.get("thumbnails")) or fallback.get("thumbnail"), [],
+            video_ids=video_ids,entries=entries,credits=album.get('artists'),
+            year=album.get('year'),album_type=album.get('type'))

@@ -1,6 +1,6 @@
 """TrackRepo: track rows and their genre/year enrichment."""
 from yt_playlist.util.matching import identity_key, normalize, recording_title
-from yt_playlist.core import catalog
+from yt_playlist.core import catalog, metadata
 from yt_playlist.repos.base import Repo, synchronized
 
 
@@ -365,6 +365,15 @@ class TrackRepo(Repo):
         """Persist provider fallback using the same artwork precedence as ingestion."""
         with self.conn:
             catalog.update_artwork(self.conn, track_id, url, source=source)
+
+    @synchronized
+    def artwork_source(self, track_id):
+        """Current artwork origin; an explicit choice always belongs to the user."""
+        track_id = catalog.resolve_entry(self.conn, track_id)
+        if self.conn.execute("SELECT 1 FROM entry_field_choices WHERE entry_id=? AND field='thumbnail'",
+                             (track_id,)).fetchone():
+            return 'user'
+        return metadata.selected_source(self.conn, track_id, 'thumbnail')
 
     @synchronized
     def set_track_genre(self, track_id, genre) -> None:

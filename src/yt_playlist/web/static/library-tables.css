@@ -140,4 +140,20 @@
   .page-album .library-table-card .track-table :is(th, td) {
     padding-inline: .35rem;
   }
+  /* A playlist needs room for song/artist links, hearts and the row menu at
+     enlarged text sizes. Counts and duration remain available on song detail. */
+  .page-playlist .track-table :is(th, td) { padding-inline: .25rem; }
+  .page-playlist .track-table :is(.col-thumb, .col-like, .col-action) { width: auto; }
+  .page-playlist .track-table :is(.col-count, .col-length) { display: none; }
+}
+@media (max-width: 22.5rem) {
+  /* Keep the reorder handle and song controls on the smallest phones; playback
+     remains available from the song menu when row artwork is omitted. */
+  .page-playlist .track-table .col-artwork { display: none; }
+  /* At enlarged text sizes, intrinsic header/control widths can exceed the
+     whole card. Reserve the row controls and let both metadata columns wrap. */
+  .page-playlist .track-table { table-layout: fixed; }
+  .page-playlist .track-table .num.col-thumb { width: 1.5rem; }
+  .page-playlist .track-table .col-action { width: 2.5rem; }
+  .page-playlist .track-table th.sorth { white-space: normal; overflow-wrap: anywhere; }
 }

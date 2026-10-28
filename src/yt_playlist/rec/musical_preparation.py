@@ -39,8 +39,9 @@ def source_step(store, now, *, batch=32, seconds=2):
     return False
 
 
-def recordings(reader, rows):
-    inputs = reader.musical_profiles.recording_inputs([row[0] for row in rows])
+def recordings(reader, rows, *, inputs=None):
+    if inputs is None:
+        inputs = reader.musical_profiles.recording_inputs([row[0] for row in rows])
     result = []
     for key, _revision, raw, _digest, _different in rows:
         check_stopping()

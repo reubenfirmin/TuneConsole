@@ -25,7 +25,7 @@ def test_rate_command_matches_current_player(scenario):
         pytest.skip("Node.js is required for the extension command harness")
     script = r"""
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
-const scenario=process.argv[1],handlers=[],queue=[],clicks=[],snapshots=[],timers=new Map();
+const scenario=process.argv[1],handlers=[],queue=[],clicks=[],snapshots=[],timers=new Map(),events=[];
 const checkpoint = phase => fs.writeSync(2, JSON.stringify({scenario, phase,
   uptime: process.uptime(), usage: process.resourceUsage()}) + '\n');
 checkpoint('started');
@@ -73,7 +73,7 @@ const context=vm.createContext({window,document,navigator:{mediaSession:{metadat
  Date:class extends Date{static now(){return clock;}},Intl,
  location:{href:'https://music.youtube.com/'},console:{log(){},warn(){},debug(){}},
  chrome:{runtime:{onMessage:{addListener(fn){runtime=fn;runtimeCount++;},
-  removeListener(fn){assert.equal(runtime,fn);runtime=null;runtimeCount--;}},sendMessage(){}}},
+  removeListener(fn){assert.equal(runtime,fn);runtime=null;runtimeCount--;}},sendMessage(msg){events.push(msg);}}},
  setInterval(){},clearInterval(){},setTimeout(fn){const id=++timerSerial;timers.set(id,fn);return id;},
  clearTimeout(id){timers.delete(id);}});
 const flush=()=>{while(queue.length){const data=queue.shift();for(const fn of handlers)fn({source:window,data});}};
@@ -126,8 +126,10 @@ if(scenario==='unconfirmed_click'){
 }
 if(scenario==='delayed_binding'){
   assert.equal(reply.retryable,true);assert.equal(clicks.length,0);
-  assert.equal(reply.diagnostics.receiverRevision,10);
-  assert.equal(reply.diagnostics.mainRevision,10);
+  assert.equal(reply.diagnostics.receiverRevision,
+    Number(fs.readFileSync('extension/content.js','utf8').match(/const RECEIVER_REVISION = (\d+)/)[1]));
+  assert.equal(reply.diagnostics.mainRevision,
+    Number(fs.readFileSync('extension/nowplaying_main.js','utf8').match(/var SENSOR_REVISION = (\d+)/)[1]));
   assert.equal(reply.diagnostics.binding.renderer,true);
   assert.equal(reply.diagnostics.binding.targetIds.length,0);
   bindingReady=true;
@@ -155,7 +157,13 @@ else if(scenario==='dislike_skip_already_set' || scenario==='next')assert.deepEq
 else if(scenario==='dislike_auto_advance' || scenario==='dislike_no_next')
  assert.deepEqual(clicks,['#button-shape-dislike button']);
 else assert.equal(clicks.length,rejected || alreadySet?0:1);
-if(scenario.startsWith('next')){assert.equal(ratingStatus,'INDIFFERENT');process.exit(0);}
+if(scenario.startsWith('next')){
+ assert.equal(ratingStatus,'INDIFFERENT');
+ const requests=events.filter(m=>m.type==='pevent'&&m.kind==='next');
+ assert.equal(requests.length,scenario==='next_stale'?0:1);
+ if(requests.length){assert.equal(requests[0].videoId,'A');assert.equal(requests[0].brandKnown,true);}
+ process.exit(0);
+}
 if(reply.ok){
   assert.equal(ratingStatus,desiredStatus || (action==='like'?'LIKE':'DISLIKE'));
   if(clicks.length && scenario!=='dislike_skip_already_set')

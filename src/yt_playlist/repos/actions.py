@@ -125,6 +125,19 @@ class ActionRepo(Repo):
                       row["undo_json"], row["status"], row["created_at"], row["executed_at"])
 
     @synchronized
+    def get_failed_deletion(self, identity_id, ytm_playlist_id) -> Action | None:
+        """Find a failed owner for GC recovery without changing manual retry admission."""
+        row = self.conn.execute(
+            "SELECT a.* FROM actions a WHERE a.status='delete_failed' AND EXISTS ("
+            "SELECT 1 FROM json_each(a.undo_json,'$.deletions') d "
+            "WHERE json_extract(d.value,'$.identity')=? AND json_extract(d.value,'$.ytm')=?) "
+            "ORDER BY a.id DESC LIMIT 1", (identity_id, ytm_playlist_id)).fetchone()
+        if row is None:
+            return None
+        return Action(row["id"], row["kind"], row["params_json"], row["plan_json"],
+                      row["undo_json"], row["status"], row["created_at"], row["executed_at"])
+
+    @synchronized
     def get_pending_actions(self, kind) -> list[Action]:
         rows = self.conn.execute(
             "SELECT * FROM actions WHERE kind=? AND status='pending' ORDER BY id", (kind,)).fetchall()

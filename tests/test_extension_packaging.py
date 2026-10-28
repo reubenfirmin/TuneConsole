@@ -17,6 +17,9 @@ def test_store_package_loads_worker_modules_and_saved_playlist_radio(tmp_path, b
     if node is None:
         pytest.skip("Node.js is required for the packaged worker smoke check")
     shutil.copytree(ROOT / "extension", tmp_path / "extension")
+    research = tmp_path / 'extension/audio_model/unused-research.bin'
+    research.parent.mkdir(exist_ok=True)
+    research.write_bytes(b'research assets must never enter the store ZIP')
     if bootstrap != "current":
         background = tmp_path / "extension" / "background.js"
         source = background.read_text().replace("receiverRevision: TC_CONFIG.receiverRevision, ", "")
@@ -34,6 +37,7 @@ def test_store_package_loads_worker_modules_and_saved_playlist_radio(tmp_path, b
         manifest = json.loads(package.read("manifest.json"))
         assert manifest == {key: value for key, value in source.items() if key != "key"}
         assert "README.md" not in package.namelist()
+        assert not any(name.startswith('audio_model/') for name in package.namelist())
         package.extractall(tmp_path / "unpacked")
     script = r"""
 const assert = require('node:assert/strict');

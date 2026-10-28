@@ -184,3 +184,54 @@ def test_projection_recall_breakdown_by_family_and_coverage(store):
     assert bd["by_coverage"]["genre"]["trials"] == 15
 
 
+@pytest.mark.parametrize('new_width', [4, 7])
+def test_projection_recall_pins_reference_during_model_publication(store, monkeypatch, new_width):
+    import numpy as np
+    from yt_playlist.rec.discover import ContentProjection
+
+    for i in range(40):
+        track = store.tracks.upsert_track(f'v{i}', f'Song {i}', f'Artist {i}', None, 180)
+        store.tracks.set_track_genre(track, 'House' if i < 20 else 'Jazz')
+    keys = [store.tracks.identity_key_for_video(f'v{i}') for i in range(40)]
+    rng = np.random.default_rng(3)
+    store.rec_model.replace_rec_vectors([(key, rng.normal(size=4).astype(np.float32).tobytes())
+                                        for key in keys])
+    expected = eval_recs.projection_recall(store)
+    assert expected['trials'] == 40
+    fit = ContentProjection.fit_from_inputs
+    calls = []
+
+    def interrupted(cls, reference, content, audio, **kwargs):
+        calls.append(reference[1].shape)
+        if len(calls) == 1:
+            store.rec_model.replace_rec_vectors([
+                (key, rng.normal(size=new_width).astype(np.float32).tobytes()) for key in keys])
+        assert reference[1].shape == (40, 4)
+        return fit(reference, content, audio, **kwargs)
+
+    monkeypatch.setattr(ContentProjection, 'fit_from_inputs', classmethod(interrupted))
+    assert eval_recs.projection_recall(store) == expected
+    assert len(calls) == 5
+
+
+def test_historical_fit_checks_memory_before_training(store, monkeypatch):
+    from yt_playlist.rec import embedding_training, model_refresh
+    _two_cluster_playlists(store)
+    monkeypatch.setattr(embedding_training, 'build_vectors_from_baskets',
+                        lambda *a, **kw: pytest.fail('fit exceeded memory admission'))
+    with pytest.raises(model_refresh.MemoryBudgetExceeded):
+        eval_recs._causal_window(store, 100, 200, 20, 4, 'svd', memory_bytes=1)
+
+
+def test_projection_target_sample_is_bounded_and_repeatable(store):
+    for i in range(40):
+        track = store.tracks.upsert_track(f'v{i}', f'Track {i}', 'Artist', None, 180)
+        store.tracks.set_track_genre(track, 'House' if i < 20 else 'Jazz')
+    _two_cluster_playlists(store)
+    model_support.build_track_model(store, dim=4)
+    sampled = eval_recs.projection_recall(store, max_targets=7)
+    assert sampled['sampled'] and sampled['sample_size'] == 7
+    assert sampled['eligible'] > 7
+    assert sampled['trials'] + sampled['unscored'] + sampled['insufficient'] == 7
+    assert sum(row['eligible'] for row in sampled['breakdown']['by_coverage'].values()) == 7
+    assert eval_recs.projection_recall(store, max_targets=7) == sampled

@@ -8,7 +8,7 @@
     data-album="{{ t.album|lower }}" data-plays="{{ t.plays }}" data-len="{{ t.duration or 0 }}"
     data-year="{{ t.year or 0 }}" data-genre="{{ t.genre|lower }}" :class="{ rowdel: false }">
   <td class="num drag-handle" title="Drag to reorder"><div class="track-cell"><span class="rownum">{{ idx }}</span></div></td>
-  <td>
+  <td class="col-artwork">
     <div class="track-cell">
     <span class="pl-cover">
       {% if t.thumbnail %}<img class="pl-thumb" src="{{ t.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
@@ -37,11 +37,11 @@
   </td>
   <td class="mb-genre">
     <div class="track-cell">
-    <span class="genre-display-wrap">{% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted ghint">—</span>{% endif %}</span>
+    <span class="genre-display-wrap">{% if t.genre %}<span class="gtag" title="{{ t.genre }}"><span class="gtag-label">{{ t.genre }}</span></span>{% else %}<span class="muted ghint">—</span>{% endif %}</span>
     </div>
   </td>
-  <td class="num mono"><div class="track-cell">{{ t.plays or '' }}</div></td>
-  <td class="num mono"><div class="track-cell">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</div></td>
+  <td class="num mono col-count"><div class="track-cell">{{ t.plays or '' }}</div></td>
+  <td class="num mono col-length"><div class="track-cell">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</div></td>
   <td class="rowmenu"{% if is_generated and t.identity_key %} x-data="{ mood: {{ (mood_states|default({})).get(t.identity_key, 0) }} }"{% endif %}>
     <div class="track-cell">
     {{ song_menu(t, {"playlist": true, "play_url": play_url, "mood_key": t.identity_key if is_generated else ''}) }}

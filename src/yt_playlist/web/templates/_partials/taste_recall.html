@@ -1,4 +1,8 @@
-<div id="model-health-checks">
+<div id="model-health-checks"{% if health_pending %} hx-get="/taste/recall" hx-trigger="every 10s" hx-swap="outerHTML"{% endif %}>
+  {% if health_pending %}
+  <p role="status">{% if health_failed %}Prediction checks couldn't finish. They will retry in the background.{% else %}Preparing prediction checks in the background.{% endif %}{% if health_ready %} Showing the last prepared results while they update.{% endif %}</p>
+  {% endif %}
+  {% if health_ready %}
   <section class="model-health-section" aria-labelledby="model-predictions-title">
     <div class="model-health-section-head">
       <h2 id="model-predictions-title">How well it predicts</h2>
@@ -39,7 +43,7 @@
         <p class="model-health-reading">{{ '%.0f'|format(proj.recall * 100) }}%</p>
         <span class="model-health-meter" aria-hidden="true"><i style="width: {{ '%.1f'|format(proj.recall * 100) }}%"></i></span>
         {% else %}<p class="model-health-unavailable">Not enough track details</p>{% endif %}
-        <p>Predicts held-out tracks from genre, year, and available audio features using five training splits.</p>
+        <p>Predicts held-out tracks from genre, year, and available audio features using five training splits.{% if proj.sampled %} Uses a fixed random sample of {{ proj.sample_size }} eligible tracks.{% endif %}</p>
         {% if proj.recall is not none %}
         <p class="model-health-evidence">{{ proj.trials }} tracks scored{% if proj.eligible is defined %} of {{ proj.eligible }} eligible{% endif %}. Track identities are held out; artists may occur on both sides. Artist features are disabled. The reference similarity model stays fixed.</p>
         <details class="model-health-breakdown">
@@ -57,6 +61,7 @@
     </div>
   </section>
 
+  {% endif %}
   <section class="model-health-section" aria-labelledby="model-listening-title">
     <div class="model-health-section-head">
       <h2 id="model-listening-title">What happens when you listen</h2>

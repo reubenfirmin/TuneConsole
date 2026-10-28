@@ -15,6 +15,58 @@ def test_more_albums_excludes_only_the_same_release():
     assert _more_albums(discography, collection) == discography[1:]
 
 
+def test_more_albums_resolves_verified_aliases_without_collapsing_distinct_editions():
+    collection = [{'browse': 'old'}]
+    discography = [{'browse_id': 'alias'}, {'browse_id': 'edition'}, {'browse_id': 'edition-alias'}]
+    identities = {'old': 1, 'alias': 1, 'edition': 2, 'edition-alias': 2}
+    assert _more_albums(discography, collection, identities) == [discography[1]]
+
+
+def test_artist_page_verifies_dying_surfer_alias_but_preserves_uncertain_lightning(store, monkeypatch):
+    from types import SimpleNamespace
+    from tests.repos.test_album_aliases import ALIAS, OLD, release
+    from yt_playlist.rec import discover
+    from yt_playlist.core.album_aliases import _text
+    payload = release()
+    for bid, title, video in ((OLD, payload['title'], 'video-0'),
+            ('MPREb_old-lightning', 'Lightning at the Door', 'bonus'),
+            ('MPREb_current-lightning', 'LIGHTNING AT THE DOOR', 'current')):
+        store.tracks.upsert_track(video, video, 'All Them Witches', title, 181, album_browse_id=bid)
+    calls = []
+
+    class Client:
+        def get_artist(self, bid):
+            return {'name': 'All Them Witches', 'albums': {'results': [
+                {'browseId': ALIAS, 'title': payload['title'], 'year': '2015'},
+                {'browseId': 'MPREb_current-lightning', 'title': 'Lightning at the Door', 'year': '2013'}]}}
+
+        def get_album(self, bid):
+            calls.append(bid)
+            # Provider calls run after releasing both the serving lock and private reader.
+            assert not store.conn.in_transaction
+            if bid in (OLD, ALIAS):
+                return payload
+            raise ValueError('older edition unavailable')
+
+    monkeypatch.setattr(discover, 'time', SimpleNamespace(time=lambda: 1000))
+    app = create_app(store, lambda: {1: Client()}, background_work=False)
+    with TestClient(app, base_url='http://127.0.0.1') as client:
+        response = client.get('/artist', params={'name': 'All Them Witches', 'browse': 'UC_artist'})
+        assert response.status_code == 200
+        titles = [_text(album['album']) for album in response.context['albums']]
+        assert titles.count(_text(payload['title'])) == 1
+        assert titles.count('lightning at the door') == 2
+        assert store.collection.album_id(OLD) == store.collection.album_id(ALIAS)
+        assert calls == [OLD, ALIAS]
+        # The next visit may inspect the unresolved edition once; an unavailable
+        # response keeps both rows, then the comparison backoff suppresses repeats.
+        response = client.get('/artist', params={'name': 'All Them Witches', 'browse': 'UC_artist'})
+        assert response.status_code == 200
+        before = len(calls)
+        client.get('/artist', params={'name': 'All Them Witches', 'browse': 'UC_artist'})
+        assert len(calls) == before
+
+
 def test_artist_page_includes_album_tracks_when_following_artist_index_link(store, monkeypatch):
     monkeypatch.setattr("yt_playlist.web.routes.charts.fetch_artist_info", lambda *args: None)
     iid = store.identities.upsert_identity("me", "c", None, True)

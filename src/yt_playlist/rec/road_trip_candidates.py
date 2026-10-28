@@ -13,8 +13,9 @@ from time import monotonic
 from typing import Protocol
 
 from yt_playlist.providers import deezer, lastfm, musicbrainz
+from yt_playlist.integrations.base import IntegrationUnavailable
 from yt_playlist.rec.road_trip_axes import canonical_genre
-from yt_playlist.util import genre_map
+from yt_playlist.util import genre_map, net
 from yt_playlist.util.thumbnails import best_thumb
 
 ARTIST_SONGS_LIMIT = 30
@@ -74,7 +75,7 @@ def _rank_scores(cands, value_of):
 def own_candidates(store, now, state=None):
     songs = store.rec_query.library_songs()
     plays = store.rec_query.play_counts()
-    hard = store.rec_model.suppressed_keys("for_you", now) | store.rec_eligibility.generated_track_keys()
+    hard = store.rec_model.suppressed_keys("for_you", now)
     blocked = (state or {}).get("blacklist_genres") or []
     if blocked:
         hard |= store.rec_query.keys_in_genre_selection(blocked)
@@ -115,13 +116,19 @@ def _facts(title, artist):
 
     def load():
         facts = deezer.lookup(title, artist)
-        # Deezer returns a truthy, all-None dictionary for both errors and missing recordings.
-        # Keep useful partial facts, but retry missing fields after the short failure window.
+        # Domain facts retain their short incomplete-result window; vendor access,
+        # shared raw responses and retry admission belong to Deezer's IAO.
         complete = all(facts.get(field) not in (None, "")
                        for field in ("duration", "year", "genre", "popularity"))
         return facts, complete
 
     return dict(_metadata_cached(_FACTS_CACHE, key, load))
+
+
+def track_facts(store, title, artist):
+    """Obtain derived facts with the caller's durable vendor-access scope."""
+    with deezer.access(store):
+        return _facts(title, artist)
 
 
 def artist_genre(store, artist):
@@ -131,8 +138,9 @@ def artist_genre(store, artist):
     if not key:
         return None  # Missing credentials must never poison a later configured lookup.
     cache_key = (artist.casefold(), _credential_version(key))
-    return _metadata_cached(_ARTIST_GENRE_CACHE, cache_key,
-                            lambda: (lastfm.artist_genre(artist, key), True))
+    with lastfm.access(store):
+        return _metadata_cached(_ARTIST_GENRE_CACHE, cache_key,
+                                lambda: (lastfm.artist_genre(artist, key), True))
 
 
 def _credential_version(key):
@@ -142,20 +150,31 @@ def _credential_version(key):
 def _metadata_cached(cache, key, load):
     """Bounded LRU retention; ambiguous provider misses retry after one minute.
 
-    Providers currently collapse transport errors and confirmed absence to the same
-    value. Partial fallback results also use the retry window. Never hold the cache
-    lock across provider I/O, and never retain credentials themselves in cache keys.
+    These are derived domain results; raw Last.fm responses belong to its IAO.
+    Partial fallback results and unavailable refreshes use the retry window, and
+    their retry evidence survives a cache hit. Never hold this lock across I/O.
     """
     with _METADATA_CACHE_LOCK:
         cached = cache.get(key)
         if cached and monotonic() < cached[0]:
             cache.move_to_end(key)
+            for error in cached[2]:
+                net.record_probe_failure(error)
             return cached[1]
-        cache.pop(key, None)
-    value, complete = load()
-    ttl = _METADATA_TTL if value and complete else _METADATA_RETRY_TTL
+    with net.probe_errors() as errors:
+        value, complete = load()
+    for error in errors:
+        net.record_probe_failure(error)
+    if errors and not value and cached:
+        value = cached[1]
+    ttl = _METADATA_TTL if value and complete and not errors else _METADATA_RETRY_TTL
+    # Retain retry evidence without keeping exception tracebacks, response buffers
+    # or a Store alive through this bounded domain cache.
+    retained_errors = tuple(IntegrationUnavailable(error.provider, str(error), error.retry_at,
+                            outage=error.outage) if isinstance(error, IntegrationUnavailable)
+                            else str(error) for error in errors)
     with _METADATA_CACHE_LOCK:
-        cache[key] = (monotonic() + ttl, value)
+        cache[key] = (monotonic() + ttl, value, retained_errors)
         cache.move_to_end(key)
         while len(cache) > _METADATA_CACHE_LIMIT:
             cache.popitem(last=False)
@@ -238,15 +257,16 @@ def genre_artists(store, genre, decade=None, limit=GENRE_ARTISTS):
     key = lastfm.api_key(store)
     cache_key = (genre.casefold(), decade, limit, _credential_version(key))
     names = _metadata_cached(_GENRE_ARTIST_CACHE, cache_key,
-                             lambda: _load_genre_artists(genre, decade, limit, key))
+                             lambda: _load_genre_artists(genre, decade, limit, key, store))
     return list(names)  # Callers must not mutate a cached result.
 
 
-def _load_genre_artists(genre, decade, limit, key):
-    ranked = lastfm.tag_top_artists(genre, key, limit=limit * 2) if key else []
+def _load_genre_artists(genre, decade, limit, key, store):
+    with lastfm.access(store):
+        ranked = lastfm.tag_top_artists(genre, key, limit=limit * 2) if key else []
     complete = bool(ranked) or not key
     if decade:
-        dated = musicbrainz.tag_artists(genre, decade=decade, limit=limit * 2)
+        dated = musicbrainz.tag_artists(genre, decade=decade, limit=limit * 2, store=store)
         complete = complete and bool(dated)
         agreed = {name.lower() for name in dated}
         both = [name for name in ranked if name.lower() in agreed]
@@ -254,7 +274,7 @@ def _load_genre_artists(genre, decade, limit, key):
         rest_dated = [name for name in dated if name.lower() not in {other.lower() for other in both}]
         names = both + [name for pair in zip_longest(rest_ranked, rest_dated) for name in pair if name]
     else:
-        names = ranked or musicbrainz.tag_artists(genre, limit=limit)
+        names = ranked or musicbrainz.tag_artists(genre, limit=limit, store=store)
     out, seen = [], set()
     for name in names:
         low = (name or "").strip().lower()
@@ -289,7 +309,7 @@ def acquire_input(client: MusicClient, store, request: InputRequest) -> Candidat
 def to_candidates(rows, store=None):
     out = []
     for row in rows:
-        facts = _facts(row["title"], row["artist"])
+        facts = track_facts(store, row["title"], row["artist"])
         genre = artist_genre(store, row["artist"]) or row["genre"] or facts.get("genre") or ""
         candidate = _candidate(row["video_id"], row["title"], row["artist"], row["album"], row["thumbnail"],
                                row["duration"] or facts.get("duration"), "theirs", genre, facts.get("year"))
@@ -298,9 +318,9 @@ def to_candidates(rows, store=None):
     return out
 
 
-def rank_other(cands):
+def rank_other(cands, store=None):
     def popularity(candidate):
-        return _facts(candidate["title"], candidate["artist"]).get("popularity")
+        return track_facts(store, candidate["title"], candidate["artist"]).get("popularity")
     return _rank_scores(sorted(cands, key=lambda candidate: -(popularity(candidate) or 0)), popularity)
 
 

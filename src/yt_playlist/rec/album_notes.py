@@ -13,6 +13,7 @@ from yt_playlist.library.album_fetch import fetch_album
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.util.matching import recording_title
 from yt_playlist.util.thumbnails import best_thumb
+from yt_playlist.util import net
 
 _LOG = logging.getLogger(__name__)
 
@@ -67,6 +68,32 @@ def _artist_artwork(client, album):
     return None
 
 
+def _matching_credits(store, album, release):
+    """Use ordered canonical credits where available; never split display names."""
+    fetched = release.get('artists') or []
+    if not fetched or any(not artist.get('name') for artist in fetched):
+        return False
+    known = store.artists.album_credits(album['browse_id'])
+    display = _artist_key(', '.join(artist['name'] for artist in fetched))
+    if not known:
+        return _artist_key(album['artist']) in {display, _artist_key(fetched[0]['name'])}
+    if len(known) == 1 and not known[0]['browse_id'] and _artist_key(known[0]['credit']) == display:
+        # Legacy rows may contain one unresolved combined display credit. The
+        # exact fetched release can supply structured credits without parsing it.
+        return True
+    if len(fetched) < len(known) or len(known) > 1 and len(fetched) != len(known):
+        return False
+    for expected, actual in zip(known, fetched):
+        provider_id = actual.get('id') or actual.get('browseId')
+        if expected['browse_id'] and provider_id:
+            if expected['browse_id'] != provider_id:
+                return False
+        elif _artist_key(expected['credit']) != _artist_key(actual['name']):
+            return False
+    # A discovered primary credit may be enriched with additional collaborators.
+    return True
+
+
 def _catalog_metadata(client, album, store):
     """Complete tracklists inform familiarity; catalogue facts never become filler prose."""
     if client is None:
@@ -74,8 +101,7 @@ def _catalog_metadata(client, album, store):
     check_cancellable_work()
     release = fetch_album(client, album['browse_id'])
     if (recording_title(release.get('title')) != recording_title(album['title'])
-            or _artist_key(album['artist']) not in {
-                _artist_key(artist.get('name')) for artist in release.get('artists') or []}):
+            or not _matching_credits(store, album, release)):
         return None
     tracks = release.get('tracks') or []
     if (not tracks or any(not track.get('title') for track in tracks)
@@ -93,7 +119,7 @@ def _catalog_metadata(client, album, store):
 def prepare(store, now, albums=(), *, client=None, now_fn=None):
     """Keep menu publication ahead of optional network work, with bounded retries."""
     # A refresh can leave the previous set queued. Reconcile against the
-    # worker's current menu before spending on public lookups or paid copy.
+    # worker's current menu, preserving explicit album-page/held-menu demand.
     store.rec_proposals.request_album_notes(albums, now, current_only=True)
     queued = store.rec_proposals.get_proposals('album_note_requests') or {}
     if not queued:
@@ -131,13 +157,19 @@ def prepare(store, now, albums=(), *, client=None, now_fn=None):
     search_art = 'music.youtube.com/channel/' in (result['artwork'] or {}).get('source_url', '')
     if (not (editorial or {}).get('artwork') and (not result['artwork'] or search_art)
             and album['artist'].casefold() not in {'various', 'various artists'}):
-        try:
-            result['artwork'] = wikipedia.fetch_artwork(album['artist']) or result['artwork']
-        except (WorkClosing, WorkBudgetExceeded):
-            raise
-        except Exception:
+        with wikipedia.access(store), net.probe_errors() as errors:
+            try:
+                result['artwork'] = wikipedia.fetch_artwork(album['artist']) or result['artwork']
+            except (WorkClosing, WorkBudgetExceeded):
+                raise
+            except Exception as exc:
+                result['retry'] = True
+                result['retry_at'] = max(result.get('retry_at', 0), getattr(exc, 'retry_at', 0))
+                _LOG.debug('Public artist photograph upgrade deferred for %s', browse, exc_info=True)
+        if errors:
             result['retry'] = True
-            _LOG.debug('Public artist photograph upgrade deferred for %s', browse, exc_info=True)
+            result['retry_at'] = max([result.get('retry_at', 0),
+                                     *(net.retry_after(error, now) for error in errors)])
     if not result['artwork']:
         # Independent attempts: a public-provider outage must not suppress a
         # catalogue photograph, and a search miss must not erase retained art.
@@ -153,9 +185,12 @@ def prepare(store, now, albums=(), *, client=None, now_fn=None):
     raw = {'kind': 'album_editorial', 'album': album, 'at': now,
            'sources': result.pop('evidence')}
     retry = result.pop('retry')
+    provider_retry_at = result.pop('retry_at', 0)
     # Retain last-good facts through provider outages. A confirmed miss has a
     # seven-day negative cache; transient failures retry after an hour.
     retry_at = now + (3600 if retry else 7 * 86400)
+    if retry:
+        retry_at = max(retry_at, provider_retry_at)
     if not description and generation.get('retry_at', 0) > now:
         retry_at = min(retry_at, generation['retry_at'])
     note = _release_only({**cached, **result, 'editorial_version': 7, 'at': now,

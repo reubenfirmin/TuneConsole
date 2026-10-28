@@ -7,7 +7,7 @@
 (() => {
   const SENSOR_VERSION = 4;
   const MIN_SENSOR_REVISION = 8;
-  const RECEIVER_REVISION = 10;
+  const RECEIVER_REVISION = 14;
   const previous = window.__tcBridgeLoaded;
   if (Number.isSafeInteger(previous?.revision) && previous.revision >= RECEIVER_REVISION && !previous.stopped) return;
   // A legacy boolean guard owns anonymous listeners that cannot be removed safely. Let the
@@ -20,6 +20,7 @@
       if (receiver.stopped) return;
       receiver.stopped = true;
       ratingCommandSerial += 1;
+      playbackCommandSerial += 1;
       cleanups.forEach(cleanup => cleanup());
       for (const finish of sensorProbes.values()) finish(null);
     }};
@@ -27,13 +28,15 @@
   let mainRevision = null;
   let sensorProbeSerial = 0;
   let ratingCommandSerial = 0;
+  let playbackCommandSerial = 0;
   let activeRatingId = null;
   const sensorProbes = new Map();
 
   const isAllowed = (u) => {
     try {
       const x = new URL(u);
-      return x.origin === "https://music.youtube.com" && x.pathname.startsWith("/youtubei/v1/");
+      return x.origin === "https://music.youtube.com" && !x.username && !x.password && !x.hash &&
+        x.pathname.startsWith("/youtubei/v1/") && !/%|\\/.test(x.pathname);
     } catch (e) {
       return false;
     }
@@ -119,14 +122,25 @@
   // Drive YouTube Music's own play/pause control in the player bar, same shape as clickRate.
   const clickPlayPause = () => {
     const btn = document.querySelector("ytmusic-player-bar #play-pause-button");
-    if (!btn) return;
-    const inner = btn.querySelector("button") || btn;
+    const inner = btn && (btn.querySelector("button") || btn);
+    if (!inner || btn.disabled || inner.disabled ||
+        btn.getAttribute?.("aria-disabled") === "true" || inner.getAttribute?.("aria-disabled") === "true") {
+      return {ok: false, error: "The YouTube Music play/pause button is unavailable. Open YouTube Music and try again."};
+    }
     inner.click();
+    return {ok: true};
   };
 
   const clickNext = (videoId, snapshot) => {
     if (!videoId || !snapshot || snapshot.videoId !== videoId) {
       return {ok: false, error: "The playing song changed. Try again."};
+    }
+    if (snapshot.brandKnown === true) {
+      try {
+        chrome.runtime.sendMessage({type: "pevent", kind: "next", videoId,
+          position: snapshot.position, duration: snapshot.duration, playlist: snapshot.playlist || "",
+          brandId: snapshot.brandId || "", brandKnown: true});
+      } catch (e) {}
     }
     const control = document.querySelector("ytmusic-player-bar .next-button");
     const button = control && (control.querySelector("button") || control);
@@ -151,6 +165,45 @@
     sensorProbes.set(id, finish);
     try { window.postMessage({__tcSensorProbe: {version: SENSOR_VERSION, id}}, "*"); }
     catch (e) { finish(null); }
+  };
+
+  const controlPlayback = async (msg) => {
+    const serial = ++playbackCommandSerial;
+    const current = () => !receiver.stopped && serial === playbackCommandSerial;
+    const sample = () => new Promise(resolve => probePlayer(resolve));
+    const action = msg.action || "toggle";
+    if (!["toggle", "play", "pause"].includes(action)) return {ok: false, error: "Invalid playback action"};
+    if (msg.videoId || msg.resumeOnly) {
+      const snapshot = await sample();
+      if (!msg.videoId || snapshot?.videoId !== msg.videoId) {
+        return {ok: false, error: "The playing song changed. Try again."};
+      }
+    }
+    if (!current()) return {ok: false, error: "Playback command was superseded"};
+    const video = document.querySelector("video");
+    if (!video) return {ok: false, error: "No YouTube Music player is available"};
+    const paused = action === "pause" || (action === "toggle" && !video.paused);
+    const position = video.currentTime;
+    if (video.paused !== paused) {
+      const clicked = clickPlayPause();
+      if (!clicked.ok) return clicked;
+    }
+    const deadline = Date.now() + 2000;
+    while (current() && document.querySelector("video") === video) {
+      if (video.paused === paused && (paused || (!video.ended && video.readyState >= 2 &&
+          video.currentTime > position + .05))) {
+        const snapshot = msg.videoId ? await sample() : null;
+        if (!current() || document.querySelector("video") !== video || video.paused !== paused) break;
+        if (msg.videoId && snapshot?.videoId !== msg.videoId) {
+          return {ok: false, error: "The playing song changed. Try again."};
+        }
+        return {ok: true, paused, videoId: msg.videoId || snapshot?.videoId || ""};
+      }
+      if (Date.now() >= deadline) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    return {ok: false, error: paused ? "Pause was not confirmed. Open YouTube Music and try again." :
+      "Playback did not start. Click Play in YouTube Music, then try again."};
   };
 
   const confirmNext = (videoId, sendResponse, deadline = Date.now() + 2500) => {
@@ -217,6 +270,8 @@
   const playbackDelay = () => new Promise(resolve => setTimeout(resolve, 250));
   let pagePlaybackStart = null;
   const ensurePlaying = async (target = {}) => {
+    const serial = playbackCommandSerial;
+    const current = () => !receiver.stopped && serial === playbackCommandSerial;
     const identity = () => {
       const state = lastMainAt !== null && Date.now() - lastMainAt < 5000 ? lastMain : domNowPlaying();
       return {videoId: state?.videoId || '', playlist: state?.playlist || ''};
@@ -235,6 +290,7 @@
         (state.videoId !== pageStart.previous.videoId || state.playlist !== pageStart.previous.playlist));
     };
     const result = playing => ({playing, ...identity()});
+    if (!current()) return result(false);
     if (browse && !target.videoId) {
       // Starting a browse page must precede the player-identity check: the new
       // album cannot be the player's queue until its own Play button is clicked.
@@ -255,7 +311,7 @@
     }
     // A watch navigation can leave the preceding player alive while its new
     // queue loads. Do not resume or confirm that preceding song.
-    if (!matches()) return result(false);
+    if (!current() || !matches()) return result(false);
     const v = document.querySelector("video");
     const position = v?.currentTime || 0;
     const progressed = () => document.querySelector('video') === v && matches() &&
@@ -268,10 +324,11 @@
       } catch (e) {}
     }
     await playbackDelay();
+    if (!current()) return result(false);
     if (progressed()) return result(true);
     if (!browse || pageStart) clickPlaybackStart();
     await playbackDelay();
-    return result(progressed());
+    return result(current() && progressed());
   };
 
   const captureStatus = np => {
@@ -382,6 +439,11 @@
       return true;
     }
     if (msg.type === "playpause" || msg.type === "player-control") {
+      if (msg.confirm) {
+        controlPlayback(msg).then(sendResponse, error => sendResponse({ok: false, error: String(error)}));
+        return true;
+      }
+      playbackCommandSerial += 1;
       const control = snapshot => {
         const video = document.querySelector("video");
         if (!video || (msg.resumeOnly && (!msg.videoId || snapshot?.videoId !== msg.videoId))) return;
@@ -396,7 +458,25 @@
       ensurePlaying(msg).then(sendResponse, () => sendResponse({ playing: false }));
       return true; // keep the response channel open until playback has been checked
     }
+    if (msg.type === 'pause-for-tv') {
+      playbackCommandSerial += 1;
+      let attempts = 0;
+      const confirm = () => {
+        if (receiver.stopped) { sendResponse({ok: false}); return; }
+        const video = document.querySelector('video');
+        if (!video || video.paused) { sendResponse({ok: true, paused: true}); return; }
+        if (++attempts >= 30) { sendResponse({ok: false, paused: false}); return; }
+        setTimeout(confirm, 50);
+      };
+      try {
+        const video = document.querySelector('video');
+        if (video && !video.paused) clickPlayPause();
+        confirm();
+      } catch (error) { sendResponse({ok: false, error: String(error)}); }
+      return true;
+    }
     if (msg.type === "pause") {
+      playbackCommandSerial += 1;
       // Pause only a playing tab, so this never resumes an already-paused player.
       try {
         const v = document.querySelector("video");
@@ -440,7 +520,10 @@
           },
           body: msg.method === "POST" ? JSON.stringify(msg.body || {}) : undefined,
         });
-        sendResponse({ status: resp.status, body: await resp.text(),
+        const retry = resp.headers?.get("Retry-After");
+        const headers = typeof retry === "string" && retry.length <= 256 && !/[\r\n]/.test(retry)
+          ? {"retry-after": retry} : {};
+        sendResponse({ status: resp.status, body: await resp.text(), headers,
           timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone });
       } catch (e) {
         sendResponse({ status: 0, body: JSON.stringify({ error: String(e) }) });
@@ -522,6 +605,8 @@
       return;
     }
     if (ev.data.__tcCuration) {
+      // Legacy/unknown observers cannot prove which account made the action.
+      if (ev.data.__tcCuration.brandKnown !== true) return;
       try { chrome.runtime.sendMessage(Object.assign({ type: "pevent" }, ev.data.__tcCuration)); } catch (e) {}
       return;
     }

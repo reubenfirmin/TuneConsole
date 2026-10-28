@@ -126,6 +126,7 @@ def test_confirmed_rating_drives_both_hearts_and_survives_stale_player(store, st
     # A subsequent confirmed action made in YouTube Music remains authoritative.
     player_events.handle_player_event(ctx, {
         "kind": "rate", "url": "https://music.youtube.com/youtubei/v1/like/removelike",
+        "brandKnown": True,
         "body": json.dumps({"target": {"videoId": "v1"}}), "brandId": "",
         "phase": "settled", "success": True, "httpStatus": 200}, 1002)
     assert c.get("/bridge/status").json()["now_playing"]["likeStatus"] == "INDIFFERENT"

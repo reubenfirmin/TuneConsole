@@ -13,7 +13,7 @@ def healthy_providers(monkeypatch):
     monkeypatch.setattr(musicbrainz, 'tripped', lambda: False)
     monkeypatch.setattr(discogs, 'tripped', lambda: False)
     monkeypatch.setattr(album_editorial, 'lookup', lambda *args: None)
-    monkeypatch.setattr(deepseek, 'api_key', lambda *args: None)
+    monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: None)
     monkeypatch.setattr(wikipedia, 'fetch_artwork', lambda *args: None)
 
 
@@ -82,6 +82,13 @@ def test_notes_worker_publishes_json_evidence_and_preserves_last_good_on_outage(
     assert after['evidence'] == note['evidence']
     assert len(store.rec_ledger.evidence().records('artifact')) == 1
     assert not store.rec_proposals.get_proposals('album_note_requests')
+
+
+def test_notes_worker_honors_long_provider_retry_after(store, monkeypatch):
+    monkeypatch.setattr(release_notes, 'fetch', lambda *args: {
+        'evidence': [], 'retry': True, 'retry_at': 10000})
+    album_notes.prepare(store, 100, [ALBUM])
+    assert album_notes.read(store, ALBUM)['retry_at'] == 10000
 
 
 def test_old_cached_wikipedia_identity_and_unsafe_urls_are_not_shown(store):
@@ -208,6 +215,60 @@ def test_catalog_metadata_rejects_wrong_editions_artists_and_partial_tracklists(
     assert not store.collection.cached_album_tracklist_ids()
 
 
+@pytest.mark.parametrize('credits', [
+    [{'name': 'First', 'id': 'UCfirst'}, {'name': 'Second', 'id': 'UCsecond'}],
+    [{'name': 'Single, with comma', 'id': 'UCsingle'}],
+])
+def test_worker_enriches_uncached_saved_releases_with_ordered_credits(store, monkeypatch, credits):
+    from types import SimpleNamespace
+    artist = ', '.join(credit['name'] for credit in credits)
+    album = {'browse_id': 'MPREjoint', 'title': 'Joint record', 'artist': artist}
+    store.collection.add_saved_album({'browse': album['browse_id'], 'title': album['title'],
+                                      'artist': artist, 'credits': credits})
+    assert not store.collection.album_listening_summary([album['browse_id']])[album['browse_id']]['complete']
+    release = {'title': album['title'], 'artists': credits, 'trackCount': 1,
+               'tracks': [{'title': 'Opener', 'videoId': 'joint-track'}]}
+    monkeypatch.setattr(release_notes, 'fetch', lambda *args: {'evidence': [], 'retry': False})
+    client = SimpleNamespace(get_album=lambda browse: release, search=lambda *args, **kwargs: [])
+    assert not album_notes.prepare(store, 100, [album], client=client)
+    assert store.collection.album_listening_summary([album['browse_id']])[album['browse_id']] == {
+        'plays': 0, 'tracks': 1, 'complete': True}
+    assert [c['browse_id'] for c in store.artists.album_credits(album['browse_id'])] == [c['id'] for c in credits]
+
+
+@pytest.mark.parametrize('changed', [
+    {'artists': [{'name': 'First', 'id': 'UCdifferent'}, {'name': 'Second', 'id': 'UCsecond'}]},
+    {'artists': [{'name': 'Second', 'id': 'UCsecond'}, {'name': 'First', 'id': 'UCfirst'}]},
+    {'artists': [{'name': 'First', 'id': 'UCfirst'}]},
+    {'title': 'Joint record (Live)'},
+    {'trackCount': 2},
+])
+def test_joint_release_validation_preserves_identity_order_edition_and_completeness_checks(store, changed):
+    from types import SimpleNamespace
+    credits = [{'name': 'First', 'id': 'UCfirst'}, {'name': 'Second', 'id': 'UCsecond'}]
+    album = {'browse_id': 'MPREjoint', 'title': 'Joint record', 'artist': 'First, Second'}
+    store.collection.add_saved_album({'browse': album['browse_id'], 'title': album['title'],
+                                      'artist': album['artist'], 'credits': credits})
+    release = {'title': album['title'], 'artists': credits, 'trackCount': 1,
+               'tracks': [{'title': 'Opener', 'videoId': 'joint-track'}], **changed}
+    assert album_notes._catalog_metadata(SimpleNamespace(get_album=lambda _: release), album, store) is None
+    assert not store.collection.cached_album_tracklist_ids()
+
+
+def test_unresolved_combined_credit_and_discovered_primary_can_gain_structured_collaborators(store):
+    from types import SimpleNamespace
+    credits = [{'name': 'First', 'id': 'UCfirst'}, {'name': 'Second', 'id': 'UCsecond'}]
+    store.collection.add_saved_album({'browse': 'legacy', 'title': 'Joint', 'artist': 'First, Second'})
+    first = store.artists.ensure_artist('First', provider='youtube', provider_id='UCfirst')
+    store.discovery.upsert_discovered_album('discovery', 'First', 'Joint', None, None, 1, artist_id=first)
+    release = {'title': 'Joint', 'artists': credits, 'trackCount': 1,
+               'tracks': [{'title': 'Opener', 'videoId': 'joint-track'}]}
+    client = SimpleNamespace(get_album=lambda _: release)
+    for browse, artist in [('legacy', 'First, Second'), ('discovery', 'First')]:
+        assert album_notes._catalog_metadata(client, {'browse_id': browse, 'title': 'Joint', 'artist': artist}, store)
+        assert [c['browse_id'] for c in store.artists.album_credits(browse)] == ['UCfirst', 'UCsecond']
+
+
 def test_upgraded_copy_preserves_existing_art_and_previous_prose_on_outage(store, monkeypatch):
     art = {'url': 'https://example.com/artist.jpg', 'source_url': 'https://example.com/artist',
            'kind': 'artist', 'credit': 'Artist photograph'}
@@ -272,7 +333,7 @@ def test_hand_written_cache_is_excluded_and_worker_gets_automatic_copy(store, mo
         'editorial_version': 4, 'retry_at': 999999}, 1)
     assert not album_notes.read(store, ALBUM)['description']
     monkeypatch.setattr(release_notes, 'fetch', lambda *args: {'evidence': [], 'retry': False})
-    monkeypatch.setattr(deepseek, 'api_key', lambda *args: 'test-key')
+    monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'test-key')
     monkeypatch.setattr(deepseek, 'describe', lambda album, key: {
         'description': 'A generated, album-specific description.', 'confidence': 'moderate',
         'uncertainty': '', 'model': deepseek.MODEL, 'usage': {}, 'prompt_version': 1})
@@ -290,7 +351,7 @@ def test_old_catalogue_filler_is_hidden_and_replaced_by_persistent_generated_cop
         'editorial_version': 5, 'retry_at': 999999}, 1)
     assert not album_notes.read(store, ALBUM)['description']
     monkeypatch.setattr(release_notes, 'fetch', lambda *args: {'evidence': [], 'retry': False})
-    monkeypatch.setattr(deepseek, 'api_key', lambda *args: 'test-key')
+    monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'test-key')
     calls = []
     def generate(album, key):
         calls.append(album)
@@ -308,7 +369,7 @@ def test_refreshed_menu_discards_old_queue_without_paying_for_hidden_records(sto
     old = {**ALBUM, 'browse_id': 'previous', 'title': 'Previous album'}
     store.rec_proposals.request_album_notes([old], 1)
     monkeypatch.setattr(release_notes, 'fetch', lambda *args: {'evidence': [], 'retry': False})
-    monkeypatch.setattr(deepseek, 'api_key', lambda *args: 'test-key')
+    monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'test-key')
     calls = []
     def generate(album, key):
         calls.append(album['browse_id'])
@@ -323,3 +384,61 @@ def test_refreshed_menu_discards_old_queue_without_paying_for_hidden_records(sto
     # The discarded record has no fresh negative cache to suppress it later.
     assert not album_notes.prepare(store, 4, [old])
     assert calls == [ALBUM['browse_id'], old['browse_id']]
+
+
+@pytest.mark.parametrize('playing', [False, True])
+def test_home_worker_serves_explicit_album_page_demand_outside_its_menu(store, monkeypatch, playing):
+    from types import SimpleNamespace
+    from tests.test_album_web import _client
+    from yt_playlist.rec import album_choices, home_prepared
+    from yt_playlist.rec.worker_tasks import ServingTasks
+
+    client, _, _ = _client(store)
+    assert client.get('/album?browse=MPREb_x').status_code == 200
+    assert store.rec_proposals.get_proposals('album_note_requests')['MPREb_x']['requested_until'] > 1
+    old = {**ALBUM, 'browse_id': 'obsolete'}
+    store.rec_proposals.request_album_notes([old], 1)
+    calls = []
+    monkeypatch.setattr(release_notes, 'fetch', lambda album, _: calls.append(album['browse_id'])
+                        or {'evidence': [], 'retry': False})
+
+    def stage(name, target, *args, **kwargs):
+        if target is album_choices.prepare_cached:
+            return {'items': [ALBUM]}
+        if target is home_prepared.prepare:
+            return {'menus': [1], 'modes': [], 'play_exposure': []}
+        if target is album_notes.prepare:
+            return target(*args, **kwargs)
+
+    ctx = SimpleNamespace(store=store, now_fn=lambda: 2, client_provider=lambda: {},
+                          bridge=SimpleNamespace(now_playing={'album_browse_id': 'MPREb_x'} if playing else {}))
+    assert ServingTasks(ctx, stage).home()
+    assert calls == ['MPREb_x']
+    assert 'MPREb_x' not in store.rec_proposals.get_proposals('album_note_requests')
+    assert 'obsolete' not in store.rec_proposals.get_proposals('album_note_requests')
+    assert not ServingTasks(ctx, stage).home()
+    assert calls == ['MPREb_x', ALBUM['browse_id']]
+
+
+def test_visible_demand_is_coalesced_bounded_and_expires(store):
+    albums = [{**ALBUM, 'browse_id': f'visible-{i}'} for i in range(30)]
+    store.rec_proposals.request_album_notes(albums, 1, visible=True)
+    store.rec_proposals.request_album_notes([albums[-1]], 10, visible=True)
+    queued = store.rec_proposals.get_proposals('album_note_requests')
+    assert len(queued) == 24 and queued['visible-29']['requested_until'] == 910
+    store.rec_proposals.request_album_notes([], 902, current_only=True)
+    assert set(store.rec_proposals.get_proposals('album_note_requests')) == {'visible-29'}
+    store.rec_proposals.request_album_notes([], 911, current_only=True)
+    assert not store.rec_proposals.get_proposals('album_note_requests')
+
+
+def test_held_menu_poll_preserves_demand_after_preparation_changes(store):
+    from tests.test_album_web import _client
+    from yt_playlist.rec import choice_evidence
+    client, _, _ = _client(store)
+    opportunity = choice_evidence.present(store, 'albums', [{**ALBUM, 'id': ALBUM['browse_id']}], 1,
+                                          context={}, window=0)
+    assert client.get('/home/album-notes', params={
+        'browse': ALBUM['browse_id'], 'opportunity': opportunity}).status_code == 200
+    store.rec_proposals.request_album_notes([], 2, current_only=True)
+    assert ALBUM['browse_id'] in store.rec_proposals.get_proposals('album_note_requests')

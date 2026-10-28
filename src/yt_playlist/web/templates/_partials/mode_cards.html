@@ -1,5 +1,7 @@
+<p id="home-mix-status" class="mix-preference-note" role="status" {% if status_oob|default(False) %}hx-swap-oob="true"{% endif %}
+   {% if not preference_notice|default(None) %}hidden{% endif %}>{{ preference_notice|default('') or '' }}</p>
 <div id="home-mode-cards" class="gen-lanes" data-genre-notice="{{ genre_notice or '' }}"
-     {% if prepare_attempt %}hx-get="/home/cards?prepare_attempt={{ prepare_attempt }}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}
+     {% if prepare_attempt %}hx-get="/home/cards?prepare_attempt={{ prepare_attempt }}" hx-trigger="every {{ prepare_interval }}s" hx-swap="outerHTML"{% endif %}
      {% if swap_oob %}hx-swap-oob="outerHTML"{% endif %}
      data-genre-warning="{{ genre_warning or '' }}"
      data-vibe="{{ vibe|default('') }}"

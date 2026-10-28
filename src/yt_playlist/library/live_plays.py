@@ -30,6 +30,8 @@ def resolve_identity(store, brand_id):
 def handle_play_event(ctx, msg, now) -> bool:
     """Persist one {type:'play'} bridge frame. Returns True when a NEW play was recorded (a
     same-track re-report, e.g. a likeStatus change, merges into the previous event instead)."""
+    if getattr(ctx.store, 'activity_paused', False):
+        return False
     title = (msg.get("title") or "").strip()
     artist = (msg.get("artist") or "").strip()
     if (msg.get('brandKnown') is False or msg.get("paused")

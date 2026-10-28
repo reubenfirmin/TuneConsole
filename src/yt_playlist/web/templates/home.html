@@ -5,8 +5,9 @@
 <link rel="stylesheet" href="/static/generating.css?v={{ asset_v }}">
 <link rel="stylesheet" href="/static/radio.css?v={{ asset_v }}">
 <link rel="stylesheet" href="/static/album-choices.css?v={{ asset_v }}">
-<link rel="stylesheet" href="/static/listening-editorial.css?v={{ asset_v }}">
-<script src="/static/listening-editorial.js?v={{ asset_v }}"></script>
+<script src="/static/generating.js?v={{ asset_v }}"></script>
+<link rel="stylesheet" href="/static/tv.css?v={{ asset_v }}" data-persistent>
+<script src="/static/tv.js?v={{ asset_v }}"></script>
 <script src="/static/radio-artwork.js?v={{ asset_v }}"></script>
 <script src="/static/radio.js?v={{ asset_v }}"></script>
 <script src="/static/album-choices.js?v={{ asset_v }}"></script>
@@ -20,6 +21,9 @@
   <button type="button" class="toast-x" @click="show = false" aria-label="Dismiss">×</button>
 </div>
 {% endif %}{% endblock %}
+{% block persistent_content %}
+{% include "_partials/tv.html" %}
+{% endblock %}
 {% block body %}
 {% if flash %}
 <div class="notice ok banner" x-data="{ show: true }" x-show="show" x-cloak>
@@ -96,6 +100,13 @@
                 aria-hidden="true"></span></button>
       <button type="button" role="tab" :class="{ on: panel === 'album-choices' }" :aria-selected="panel === 'album-choices'"
               @click="go('album-choices')">Long play</button>
+      <button type="button" role="tab" :class="{ on: panel === 'tv' }" :aria-selected="panel === 'tv'"
+              :aria-description="tvPlaying && panel !== 'tv' ? 'TV is playing' : null"
+              @click="go('tv')">TV<span class="dash-tv-dot" x-show="tvPlaying && panel !== 'tv'" x-cloak aria-hidden="true"></span></button>
+      {% if not onboarding %}
+      <button type="button" role="tab" :class="{ on: panel === 'discover' }" :aria-selected="panel === 'discover'"
+              @click="go('discover')">Discover</button>
+      {% endif %}
       {% if not onboarding and (rediscover_albums or rediscover) %}
       <button type="button" role="tab" :class="{ on: panel === 'rediscover' }" :aria-selected="panel === 'rediscover'"
               @click="go('rediscover')">Revisit</button>
@@ -103,12 +114,6 @@
       {% if not onboarding %}
       <button type="button" role="tab" :class="{ on: panel === 'recent' }" :aria-selected="panel === 'recent'"
               @click="go('recent')">Into recently</button>
-      <button type="button" role="tab" :class="{ on: panel === 'discover' }" :aria-selected="panel === 'discover'"
-              @click="go('discover')">Discover</button>
-      {% if listening_edition.available %}
-      <button type="button" role="tab" :class="{ on: panel === 'portrait' }" :aria-selected="panel === 'portrait'"
-              @click="go('portrait')">Charts</button>
-      {% endif %}
       {% endif %}
       {% if has_notices %}
       <button type="button" role="tab" :class="{ on: panel === 'notices' }" :aria-selected="panel === 'notices'"
@@ -120,6 +125,10 @@
             aria-haspopup="dialog" title="Adjust parameters">
       <svg viewBox="0 0 32 24" aria-hidden="true"><path d="M3 5h5m6 0h15M3 12h16m6 0h4M3 19h8m6 0h12"/><circle cx="11" cy="5" r="3"/><circle cx="22" cy="12" r="3"/><circle cx="14" cy="19" r="3"/></svg>
     </button>
+    <button class="album-tune" type="button" x-show="panel === 'tv'" x-cloak
+            @click="$dispatch('tv-tuning-open')" aria-label="Adjust TV parameters" aria-haspopup="dialog" title="Adjust parameters">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="10" width="26" height="19" rx="4"/><path d="m10 4 6 6 6-6M8 29v2m16-2v2"/><circle cx="9" cy="3" r="2"/><circle cx="23" cy="3" r="2"/><rect x="7" y="14" width="14" height="11" rx="2"/><path d="M25 15v2m0 4v2"/></svg>
+    </button>
     </div>
 
     <section class="dash-panel dash-radio" data-dash="radio" role="tabpanel" x-show="panel === 'radio'" x-cloak>
@@ -127,6 +136,9 @@
     </section>
     <section class="dash-panel" data-dash="album-choices" role="tabpanel" x-show="panel === 'album-choices'" x-cloak>
       <div hx-get="/home/album-choices" hx-trigger="load" hx-swap="innerHTML"></div>
+    </section>
+    <section class="dash-panel dash-tv" data-dash="tv" role="tabpanel" x-show="panel === 'tv'" x-cloak>
+      <div class="tv-slot"></div>
     </section>
 
     {% if onboarding %}
@@ -148,11 +160,6 @@
     <section class="dash-panel dash-async" data-dash="discover" role="tabpanel" x-show="panel === 'discover'" x-cloak>
       {% include "_partials/home_discovery.html" %}
     </section>
-    {% if listening_edition.available %}
-    <section class="dash-panel" data-dash="portrait" role="tabpanel" aria-label="Your listening" x-show="panel === 'portrait'" x-cloak>
-      {% include "_partials/listening_editorial.html" %}
-    </section>
-    {% endif %}
     {% if muted_count %}
     <p class="section-note muted-note" x-show="panel === 'directions'" x-cloak>
       Hiding {{ muted_count }} muted artist{{ 's' if muted_count != 1 }} based on your feedback -

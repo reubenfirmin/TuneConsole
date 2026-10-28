@@ -21,9 +21,9 @@ def test_policy_fingerprint_tracks_preferences_parameters_and_actual_vectors(sto
 
 def test_policy_fingerprint_includes_temporary_home_ordering(store):
     baseline = measurement.serving_policy(store, 100)[0]
-    store.settings.set_setting("home_mix_vibe", "focus")
+    store.settings.set_setting("home_mix_vibe", "release")
     version, config = measurement.serving_policy(store, 100)
-    assert version != baseline and config["home"]["vibe"] == "focus"
+    assert version != baseline and config["home"]["vibe"] == "release"
 
 
 def test_cached_score_and_build_policy_survive_new_rendering_preferences(store):

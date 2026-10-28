@@ -11,6 +11,7 @@ import pytest
     "sole_tab_muted", "sole_media_muted", "sole_zero_volume", "selected_muted", "native_upload",
     "rating_handoff",
     "paused_resume", "paused_closed", "paused_legacy",
+    "tv_pause", "tv_pause_failed", "tv_pause_legacy", "tv_pause_no_music",
 ])
 def test_playlist_launch_reuses_and_controls_the_playing_tab(scenario):
     node = shutil.which("node")
@@ -36,7 +37,7 @@ if (scenario==='selected_muted') {old.active=true;browsing.active=false;}
 if (scenario === 'pending') {
   tabs = [app, {id: 2, url: 'about:blank', pendingUrl: old.url, status: 'loading'}];
 }
-if (['concurrent', 'no_music'].includes(scenario)) {
+if (['concurrent', 'no_music', 'tv_pause_no_music'].includes(scenario)) {
   tabs = [app, {id: 8, url: 'https://music.youtube.com.evil.example/'}];
 }
 if (scenario === 'leaving') tabs = [app, {...old, pendingUrl: 'https://example.org/'}];
@@ -75,7 +76,8 @@ const chrome = {
     },
     sendMessage: async (id, msg) => {
       messages.push({id, ...msg});
-      if(msg.type==='sensor-ping')return {ok:true,receiverRevision:scenario==='paused_legacy'?8:9,mainVersion:4,mainRevision:9,mainAgeMs:0};
+      if(msg.type==='sensor-ping')return {ok:true,receiverRevision:scenario==='paused_legacy'?8:scenario.startsWith('tv_pause') && scenario!=='tv_pause_legacy'?11:9,mainVersion:4,mainRevision:9,mainAgeMs:0};
+      if(msg.type==='pause-for-tv')return {ok:true,paused:scenario!=='tv_pause_failed'};
       if(scenario==='rating_handoff' && msg.type==='rate')
         return {ok:msg.videoId===(id===2?'A':'B'),error:'The playing song changed'};
       return {ok: true};
@@ -98,6 +100,15 @@ const report = async (id, msg) => {
 };
 const next = 'https://music.youtube.com/watch?list=PL_new';
 (async () => {
+  if (scenario.startsWith('tv_pause')) {
+    const result = await playback.pauseForTv();
+    assert.equal(result.ok, ['tv_pause','tv_pause_no_music'].includes(scenario));
+    const pauses = messages.filter(message => message.type === 'pause-for-tv');
+    if (scenario==='tv_pause') assert.deepEqual(pauses.map(message => message.id), [2,3]);
+    if (scenario==='tv_pause_no_music' || scenario==='tv_pause_legacy') assert.equal(pauses.length,0);
+    assert.equal(created.length,0); assert.equal(updated.length,0);
+    return;
+  }
   if (scenario.startsWith('paused_')) {
     browsing.active=false; old.active=true;
     await report(2,{type:'now-heartbeat',videoId:'paused-song',title:'Paused song',paused:true});

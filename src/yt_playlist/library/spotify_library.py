@@ -8,11 +8,13 @@ import logging
 import re
 import zipfile
 from copy import deepcopy
+from uuid import uuid4
 
 from yt_playlist.library.album_fetch import shareable_album_tracks
 from yt_playlist.library import album_writes
 from yt_playlist.library.playlist_mutation import _read as _read_playlist
 from yt_playlist.library.playlist_mutation import apply_playlist_permutation
+from yt_playlist.library.playlist_snapshot import http_status
 from yt_playlist.util.matching import fuzzy_ratio, identity_key, normalize, track_artist
 from yt_playlist.util.retry import with_retry
 from yt_playlist.util.thumbnails import best_thumb
@@ -368,18 +370,32 @@ def _transfer_playlist(store, client, identity_id, playlist, fingerprint, now):
     transfer = transfers.get(fingerprint)
     resumed = transfer is not None
     if transfer is None:
-        remote_id = client.create_playlist(playlist["name"], "Imported from Spotify by TuneConsole")
-        # Save the remote identity before the first add. A failed or lost batch response can then
-        # be reconciled against that same remote playlist, even after restarting the application.
-        transfer = {"ytm_playlist_id": remote_id, "complete": False, "updated_at": now, "last_run_added": 0}
+        transfer = {"creation_phase": "prepared", "marker": f"TuneConsole Spotify {uuid4().hex}",
+                    "complete": False, "updated_at": now, "last_run_added": 0}
         transfers[fingerprint] = transfer
         store.settings.set_setting(state_key, json.dumps(transfers))
-        tracks = []
-    else:
-        remote_id = transfer["ytm_playlist_id"]
-        transfer["last_run_added"] = 0
+    if not transfer.get("ytm_playlist_id"):
+        if transfer["creation_phase"] == "prepared":
+            transfer["creation_phase"] = "creating"
+            store.settings.set_setting(state_key, json.dumps(transfers))
+            try:
+                remote_id = client.create_playlist(
+                    playlist["name"], "Imported from Spotify by TuneConsole\n" + transfer["marker"])
+                if not isinstance(remote_id, str) or not remote_id.strip():
+                    raise ValueError("YouTube did not return the created playlist identity")
+            except Exception as exc:
+                if http_status(exc) in (400, 401, 403):
+                    transfer["creation_phase"] = "prepared"
+                    store.settings.set_setting(state_key, json.dumps(transfers))
+                raise
+        else:
+            remote_id = _find_import_creation(client, transfer["marker"])
+        transfer.update(ytm_playlist_id=remote_id, creation_phase="created")
         store.settings.set_setting(state_key, json.dumps(transfers))
-        tracks = _read_playlist(client, remote_id)
+    remote_id = transfer["ytm_playlist_id"]
+    transfer["last_run_added"] = 0
+    store.settings.set_setting(state_key, json.dumps(transfers))
+    tracks = _read_playlist(client, remote_id) if resumed else []
     # Retain the source slot for every accepted match, including across failed lookups on a retry.
     positions = transfer.setdefault("source_video_ids", [None] * len(playlist["resolution"]))
     for index, row in enumerate(playlist["resolution"]):
@@ -411,6 +427,25 @@ def _transfer_playlist(store, client, identity_id, playlist, fingerprint, now):
                                      for row in playlist["resolution"]), order_verified=True, updated_at=now)
     store.settings.set_setting(state_key, json.dumps(transfers))
     return remote_id, added, resumed
+
+
+def _find_import_creation(client, marker):
+    """Resolve an ambiguous create by its durable marker; never replay the write."""
+    playlists = client.get_library_playlists(limit=None)
+    if not isinstance(playlists, list):
+        raise ValueError("Couldn't read the library to recover the Spotify playlist")
+    matches = set()
+    for playlist in playlists:
+        remote_id = playlist.get("playlistId")
+        if not remote_id:
+            raise ValueError("Incomplete library response while recovering the Spotify playlist")
+        detail = client.get_playlist(remote_id, limit=None)
+        if marker in (detail.get("description") or "").splitlines():
+            matches.add(remote_id)
+    if len(matches) != 1:
+        raise ValueError("Spotify playlist creation is unconfirmed. Retry the import to locate "
+                         "its recovery marker; no new playlist was created.")
+    return matches.pop()
 
 
 def import_spotify_library(store, raw, client, identity_id, now, *, prepared=None) -> dict:
@@ -519,7 +554,8 @@ def import_spotify_library(store, raw, client, identity_id, now, *, prepared=Non
                       "tracks_found": len(playlist["tracks"]), "tracks_added": 0,
                       "tracks_unmatched": len(unmatched)}
             if fingerprint in current:
-                failed["ytm_playlist_id"] = current[fingerprint]["ytm_playlist_id"]
+                if current[fingerprint].get("ytm_playlist_id"):
+                    failed["ytm_playlist_id"] = current[fingerprint]["ytm_playlist_id"]
                 failed["tracks_added"] = current[fingerprint].get("last_run_added", 0)
                 report["tracks_imported"] += failed["tracks_added"]
             report["details"]["playlists"].append(failed)

@@ -10,6 +10,7 @@ import threading
 import time
 import re
 import json
+from pathlib import Path
 
 import pytest
 import uvicorn
@@ -73,6 +74,125 @@ def test_rename_playlist_updates_heading(live_playlist_app, page):
     # survives a reload (persisted, not just a DOM poke)
     page.goto(f"{base}/playlist/{pid}")
     expect(page.get_by_role("heading", name="Renamed Mix")).to_be_visible()
+
+
+@pytest.mark.parametrize('width,font_scale', [
+    (320, 1), (320, 1.5), (320, 2), (390, 1), (390, 1.5), (720, 1.5), (1440, 1)])
+def test_generated_heading_keeps_the_full_title_when_editing_and_after_rename(
+        live_playlist_app, page, width, font_scale, tmp_path):
+    base, pid, store = (live_playlist_app[key] for key in ('base', 'pid', 'store'))
+    original = 'Metal & "more" - More in your wheelhouse - October 26 2026 #12'
+    store.playlists.set_playlist_title(pid, original, 1)
+    store.playlists.mark_generated_playlist('PL1')
+    page.set_viewport_size({'width': width, 'height': 950})
+    page.goto(f'{base}/playlist/{pid}')
+    if font_scale != 1:
+        page.add_style_tag(content=f'html {{ font-size: {font_scale * 100}% !important; }}')
+    page.evaluate('document.fonts.ready')
+    heading = page.get_by_role('heading', name='Metal & "more"', exact=True)
+    expect(heading).to_be_visible()
+    expect(page.locator('.pl-type-badge')).to_have_text('More in your wheelhouse')
+    expect(page.locator('.pl-version')).to_have_text('Version 12')
+    expect(page.locator('time.pl-generated-date')).to_have_text('October 26, 2026')
+    expect(page.locator('time.pl-generated-date')).to_have_attribute('datetime', '2026-10-26')
+    expect(page.locator('.pl-generated-meta time')).to_have_count(1)
+    assert page.locator('.pl-generated-meta').bounding_box()['y'] < heading.bounding_box()['y']
+    page.screenshot(path=str(tmp_path / 'generated-playlist.png'), full_page=True)
+    layout = page.evaluate('''() => ({width:innerWidth,scrollWidth:document.documentElement.scrollWidth,
+      overflow:[...document.querySelectorAll('body *')].map(el => ({tag:el.tagName,
+        cls:typeof el.className === 'string' ? el.className : '',text:el.textContent.slice(0,80),
+        right:el.getBoundingClientRect().right,width:el.getBoundingClientRect().width}))
+        .filter(el => el.right > innerWidth + 1 && el.width)})''')
+    (tmp_path / 'generated-playlist-layout.json').write_text(json.dumps(layout, indent=2))
+    assert layout['scrollWidth'] <= width, layout
+    for selector in ('.topbar .brand', '.sidebar-privacy'):
+        bounds = page.locator(selector).bounding_box()
+        assert bounds and 0 <= bounds['x'] < bounds['x'] + bounds['width'] <= width
+    assert page.locator('.release-hero').evaluate('''hero => {
+      const bounds = hero.getBoundingClientRect();
+      const tools = hero.querySelector('.head-tools').getBoundingClientRect();
+      const contained = r => r.left >= bounds.left && r.right <= bounds.right + 1
+          && r.top >= bounds.top && r.bottom <= bounds.bottom + 1;
+      const controlsFit = [...hero.querySelectorAll('.head-tools,.head-icon')]
+        .filter(el => el.getClientRects().length).every(el => contained(el.getBoundingClientRect()));
+      return controlsFit && [...hero.querySelectorAll('h1,.pl-type-badge,.pl-version,.pl-generated-date')].every(el => {
+        const r = el.getBoundingClientRect();
+        const overlapsTools = Math.min(r.right, tools.right) > Math.max(r.left, tools.left)
+          && Math.min(r.bottom, tools.bottom) > Math.max(r.top, tools.top);
+        return contained(r) && !overlapsTools;
+      });
+    }''')
+    for name in ('app.css', 'library-tables.css', 'library-controls.css', 'library-entities.css'):
+        css = page.request.get(f'{base}/static/{name}')
+        assert css.status == 200
+        assert css.body() == (Path(__file__).resolve().parents[2]
+                              / 'src/yt_playlist/web/static' / name).read_bytes()
+    row = page.locator('#playlist-track-body tr').first
+    expect(row.locator('.drag-handle')).to_be_visible()
+    expect(row.locator('.like-btn')).to_be_visible()
+    menu_button = row.get_by_role('button', name='More actions for Song A', exact=True)
+    bounds = menu_button.bounding_box()
+    assert bounds and 0 <= bounds['x'] < bounds['x'] + bounds['width'] <= width
+    menu_button.click()
+    menu = page.get_by_role('menu')
+    expect(menu).to_be_visible()
+    expect(menu.get_by_role('menuitem', name='Edit Metadata', exact=True)).to_be_visible()
+    page.keyboard.press('Escape')
+    expect(menu).not_to_be_visible()
+    heading.focus()
+    heading.press('Enter')
+    editor = page.locator('input.title-input')
+    expect(editor).to_have_value(original)
+    editor.fill('Canceled draft')
+    editor.press('Escape')
+    expect(heading).to_be_visible()
+    assert store.playlists.get_playlist(pid).title == original
+    heading.click()
+    expect(editor).to_have_value(original)
+    renamed = 'Ambient - Comfort listening - October 27 2026 #2'
+    editor.fill(renamed)
+    editor.press('Enter')
+    expect(page.get_by_role('heading', name='Ambient', exact=True)).to_be_visible()
+    expect(page.locator('.pl-type-badge')).to_have_text('Comfort listening')
+    expect(page.locator('.pl-version')).to_have_text('Version 2')
+    expect(page.locator('time.pl-generated-date')).to_have_text('October 27, 2026')
+    assert store.playlists.get_playlist(pid).title == renamed
+    assert live_playlist_app['client'].edited == [('PL1', {'title': renamed})]
+    page.reload()
+    expect(page.get_by_role('heading', name='Ambient', exact=True)).to_be_visible()
+    if font_scale != 1:
+        page.add_style_tag(content=f'html {{ font-size: {font_scale * 100}% !important; }}')
+    page.evaluate('document.fonts.ready')
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+
+
+@pytest.mark.parametrize('width', [390, 1440])
+@pytest.mark.parametrize('video', [False, True])
+def test_playlist_header_groups_play_radio_and_counts(live_playlist_app, page, width, video):
+    base, pid, store = (live_playlist_app[key] for key in ('base', 'pid', 'store'))
+    store.identities.upsert_identity('Other', 'other-cred', 'other-brand', False)
+    if video:
+        playlist = store.playlists.get_playlist(pid)
+        store.playlist_recipes.set_recipe(playlist.scope_ref, {'media': 'video'})
+    page.set_viewport_size({'width': width, 'height': 950})
+    page.goto(f'{base}/playlist/{pid}')
+    actions = page.locator('.release-hero .pl-actions')
+    play = actions.get_by_role('link', name='Play on TV' if video else 'Play on YouTube Music', exact=True)
+    expect(play).to_be_visible()
+    expect(play.locator('svg')).to_have_count(1)
+    expect(play).to_have_text('')
+    expect(play).to_have_attribute('href', f'/?tv_playlist={pid}#tv' if video else
+                                  'https://music.youtube.com/playlist?list=PL1')
+    if not video:
+        expect(play).to_have_attribute('target', '_blank')
+    expect(page.locator('.release-hero')).not_to_contain_text('Account:')
+    counts = actions.locator('.pl-stats')
+    expect(counts).to_contain_text('2 tracks')
+    expect(counts).to_contain_text('0 total plays')
+    radio = actions.get_by_role('link', name='Start radio from this playlist', exact=True)
+    expect(radio).to_have_attribute('href', f'/?radio_playlist={pid}#radio')
+    assert counts.bounding_box()['x'] >= radio.bounding_box()['x'] + radio.bounding_box()['width']
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
 
 
 def test_set_year_from_song_menu(live_playlist_app, page):

@@ -3,11 +3,20 @@ function mountNowPlayingDock() {
   const slot = document.querySelector('.sidebar-dock-slot');
   const origin = document.querySelector('.global-now-playing-slot');
   if (!card || !slot || !origin) return;
-  const target = window.matchMedia('(min-width: 65rem)').matches ? slot : origin;
+  const standalone = document.body.classList.contains('app-standalone');
+  const target = !standalone && window.matchMedia('(min-width: 65rem)').matches ? slot : origin;
   if (card.parentElement !== target) target.appendChild(card);
+  const measure = () => {
+    const height = document.body.classList.contains('app-standalone') && card.getClientRects().length
+      ? origin.getBoundingClientRect().height : 0;
+    document.body.style.setProperty('--playback-dock-height', height + 'px');
+  };
+  measure();
   if (!window.__homeDockBound) {
     window.__homeDockBound = true;
     window.addEventListener('resize', mountNowPlayingDock);
+    window.addEventListener('app-page-changed', mountNowPlayingDock);
+    new ResizeObserver(measure).observe(card);
   }
 }
 
@@ -32,12 +41,13 @@ function playerStatus() {
       if (target.origin !== current.origin) return false;
       if (target.pathname.replace(/\/+$/, '') !== current.pathname.replace(/\/+$/, '')) return true;
       if (source.kind === 'radio') return current.hash !== '#radio';
+      if (source.kind === 'tv') return current.hash !== '#tv';
       return source.kind === 'album' &&
         target.searchParams.get('browse') !== current.searchParams.get('browse');
     },
     sourceName() {
       const kind = this.nowPlaying?.source?.kind || '';
-      return kind === 'radio' ? 'Radio' : kind;
+      return kind === 'radio' ? 'Radio' : kind === 'tv' ? 'TV' : kind;
     },
     init() {
       window.playbackStatus.start();
@@ -134,6 +144,7 @@ function playerStatus() {
             revert();
           } else {
             this.confirmedRatings[videoId] = likeStatus;
+            if (window.tvPlaybackControls?.active()) window.tvPlaybackControls.rated(videoId, likeStatus);
             if (d.player_error) console.debug('[Rating] native player update not confirmed', videoId, d.player_error);
           }
         }).catch(error => {
@@ -155,6 +166,7 @@ function playerStatus() {
     },
     async next() {
       if (!this.nowPlaying?.video_id || this.skipping) return;
+      if (window.tvPlaybackControls?.active()) return window.tvPlaybackControls.command('next');
       const videoId = this.nowPlaying.video_id;
       this.skipping = true;
       try {
@@ -170,6 +182,7 @@ function playerStatus() {
     },
     toggle() {
       if (!this.nowPlaying) return;
+      if (window.tvPlaybackControls?.active()) return window.tvPlaybackControls.command('toggle');
       this.nowPlaying.paused = !this.nowPlaying.paused;
       fetch('/now-playing/toggle', { method: 'POST' }).catch(() => {});
     },

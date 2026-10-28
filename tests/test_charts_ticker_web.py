@@ -50,9 +50,12 @@ def test_charts_ticker_tabs_render(store):
     r = c.get("/charts")
     assert r.status_code == 200
     body = r.text
-    # the four new tab buttons (match the Alpine binding so we don't catch the nav's /genres link)
-    for view in ("genres", "years", "albums", "playlists"):
-        assert f"view = '{view}'" in body, f"missing {view} tab button"
+    # Each ranking has a navigation button and its own table. Selection goes
+    # through choose() so prepared listening views can load rankings on demand.
+    for view, dimension in (("genres", "genre"), ("years", "year"),
+                            ("albums", "album"), ("playlists", "playlist")):
+        assert f'@click="choose(\'{view}\')"' in body, f"missing {view} tab button"
+        assert f'data-dimension="{dimension}"' in body
     assert "chart-toolbar" not in body
     assert 'class="chart-context-actions"' in body
     assert 'class="modal chart-key-popup"' in body

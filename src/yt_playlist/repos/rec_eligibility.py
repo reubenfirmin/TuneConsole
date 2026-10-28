@@ -52,11 +52,6 @@ class RecEligibilityRepo(Repo):
             "JOIN catalog_entries e ON e.id=ta.entry_id JOIN recordings r ON r.id=e.recording_id "
             f"WHERE r.identity_key IN ({qs}) AND f.kind='mute' AND (f.until IS NULL OR f.until>?)",
             [*keys, now]))
-        blocked.update(r[0] for r in self.conn.execute(
-            'SELECT DISTINCT t.identity_key FROM playlist_tracks pt '
-            'JOIN tracks t ON t.id=pt.track_id JOIN playlists p ON p.id=pt.playlist_id '
-            'JOIN quarantined_playlists g ON g.ytm=p.scope_ref '
-            f'WHERE g.name=? AND t.identity_key IN ({qs})', [GENERATED_GROUP, *keys]))
         return blocked
 
     @synchronized
@@ -66,7 +61,10 @@ class RecEligibilityRepo(Repo):
 
     @synchronized
     def generated_track_keys(self, group=GENERATED_GROUP) -> set:
-        """Keys held in unadopted generated playlists, already spoken for."""
+        """Keys held in unadopted generated playlists, for retention and provenance.
+
+        Membership does not suppress a recommendation or change taste fit.
+        """
         return {r["identity_key"] for r in self.conn.execute(
             "SELECT DISTINCT t.identity_key FROM playlist_tracks pt "
             "JOIN tracks t ON t.id=pt.track_id JOIN playlists p ON p.id=pt.playlist_id "

@@ -19,6 +19,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "rapidfuzz>=3.6",
     "numpy>=1.26",
+    "pillow>=12,<13",  # Decode the two timeline preview frames used by TV's static-video check.
     "scipy>=1.11",
     # Bound native numerical pools through their runtime APIs, including background threads.
     "threadpoolctl>=3.6,<4",

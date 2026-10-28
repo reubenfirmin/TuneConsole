@@ -9,7 +9,7 @@ import time
 import numpy as np
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import embedding_vectors as vectors, layers, mix_tuning, negative, rec_params, transient, vector_math
+from yt_playlist.rec import album_feedback, embedding_vectors as vectors, layers, mix_tuning, negative, rec_params, transient, vector_math
 from yt_playlist.rec.taste_analysis import taste_breadth
 from yt_playlist.rec.taste_context import PlaylistTaste
 
@@ -48,17 +48,6 @@ def _playlist_centroids(store, M, idx) -> PlaylistTaste:
     return PlaylistTaste(titles, np.asarray(cents), w, pids)
 
 
-# How much of the permanent taste signal is "what you actually play" vs how you've filed tracks into
-# playlists. 0.0 = playlist curation only. The #38 thin-data A/B (6.5 days, ~40-66 trials) suggested
-# 0.5 co-equal; the #56 re-run on 143 days of history (366/381 trials at 14d/30d holdouts) reversed
-# it decisively: a flat play-centroid averaged over months of genre-diverse listening collapses to a
-# direction that predicts nothing (0 hits vs 19 for playlist taste at both deep holdouts, monotone
-# harm from w=0.3 up), because it blurs distinct listening contexts into one gray vector, while each
-# playlist stays its own coherent context. Behavior-only remains the fallback when there are no
-# shaping playlists at all. Full experiment: #56 wrap-up (2026-07-03).
-BEHAVIOR_TASTE_W = 0.0
-
-
 def _behavior_centroid(store, M, idx):
     """Unit centroid of the tracks you've actually played, in vector space M (the behavior taste signal,
     #38). Flat membership: the A/B found play-count/like/save weighting added nothing over plain played-
@@ -79,7 +68,7 @@ def _with_albums(store, taste, matrix, index):
     contexts = list(getattr(taste, "sources", [{"kind": "playlist", "id": p} for p in pids]))
     base = rec_params.get_param(store, "album_saved_weight")
     returns = rec_params.get_param(store, "album_return_weight")
-    feedback = json.loads(store.settings.get_setting("album_feedback") or "{}")
+    feedback = album_feedback.state(store)
     confirmed = (store.rec_proposals.get_proposals('choice_interests') or {}).get('album_track_days', {})
     for album in store.collection.taste_album_contexts(
             include_browse=set(confirmed) | {browse for browse, item in feedback.items() if item["kind"] == "more"}):
@@ -150,11 +139,14 @@ def _with_choices(store, taste, matrix, index, *, content=False, now=None):
     pids = list(taste.pids)
     sources = list(getattr(taste, "sources", [{"kind": "playlist" if p is not None else "history"} for p in pids]))
     saved_albums = {source.get("browse") for source in sources if source["kind"] == "album"}
-    feedback = json.loads(store.settings.get_setting("album_feedback") or "{}")
+    album_ids = [interest['option_id'] for interest in interests if interest['format'] == 'albums']
+    preferred = store.collection.preferred_album_ids(set(album_ids) | saved_albums)
+    saved_albums = {preferred[browse] for browse in saved_albums}
+    feedback = album_feedback.state(store, album_ids)
     for interest in interests:
         # Saved releases already supply a deliberate collecting context. Do not count that
         # same album again merely because the listener launched it from our surface.
-        if interest["format"] == "albums" and (interest["option_id"] in saved_albums
+        if interest["format"] == "albums" and (preferred[interest["option_id"]] in saved_albums
                 or feedback.get(interest["option_id"], {}).get("kind") == "reject"):
             continue
         rows = [index[key] for key in interest["keys"] if key in index]
@@ -180,25 +172,21 @@ def _with_choices(store, taste, matrix, index, *, content=False, now=None):
 
 
 def playlist_taste(store, *, now=None) -> PlaylistTaste:
-    """Per-playlist taste from the co-occurrence embedding, blended with a behavior centroid (#38): the
-    tracks you actually play form one extra taste context weighted BEHAVIOR_TASTE_W, so taste leans on
-    listening, not only playlist curation. Falls back to behavior-only when you have no shaping playlists,
-    and to playlists-only when you've played nothing modeled."""
+    """Separate playlist, album and choice contexts in the co-occurrence embedding.
+
+    The #56 experiment rejected blending a flat lifetime listening centroid into
+    existing contexts. Listening supplies a fallback only when those contexts are empty.
+    """
     keys, V, idx = vectors.load_vectors(store)
     if V is None:
         return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
     pt = _with_choices(store, _with_albums(store, _playlist_centroids(store, V, idx), V, idx), V, idx, now=now)
+    if pt:
+        return pt
     bc = _behavior_centroid(store, V, idx)
     if bc is None:
         return pt
-    if not pt:                                           # played tracks but no shaping playlists
-        return PlaylistTaste(["Your listening"], bc[None, :], np.array([1.0]), [None])
-    if BEHAVIOR_TASTE_W == 0.0:                          # #56 verdict: curation wins; no dead context
-        return pt
-    titles = list(pt.titles) + ["Your listening"]        # behavior as one more context
-    cents = np.vstack([pt.centroids, bc[None, :]])
-    w = np.concatenate([pt.weights * (1.0 - BEHAVIOR_TASTE_W), [BEHAVIOR_TASTE_W]])
-    return PlaylistTaste(titles, cents, w, list(pt.pids) + [None])
+    return PlaylistTaste(["Your listening"], bc[None, :], np.array([1.0]), [None])
 
 
 def content_taste(store, *, snapshot=None, now=None) -> PlaylistTaste:

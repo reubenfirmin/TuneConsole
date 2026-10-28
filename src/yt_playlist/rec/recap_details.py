@@ -7,7 +7,7 @@ from collections import Counter
 from statistics import median
 from urllib.parse import quote
 
-from yt_playlist.rec.recap_metrics import baselines, month_bounds, shift_month, typical
+from yt_playlist.rec.recap_metrics import baselines, calendar_day, month_bounds, shift_month, typical
 
 MAX_FINDINGS = 3
 MIN_BASELINE_MONTHS = 3
@@ -16,7 +16,7 @@ SHARE_CHANGE = .15
 
 def new_this_month(data, month):
     since, until = month_bounds(month)
-    events = [p for p in data["plays"] if since <= p["played_at"] < until]
+    events = [p for p in data["plays"] if calendar_day(p)[:7] == month]
     counts = Counter(p["identity_key"] for p in events)
     # A new installation/import must not turn its entire first month into discoveries.
     established = bool(data["first"]) and min(data["first"].values()) <= since - 30 * 86400
@@ -53,7 +53,7 @@ def new_this_month(data, month):
     playlist_plays = Counter(p.get("playlist_ytm_id") for p in events)
     playlists = []
     for p in data["playlists"]:
-        if not since <= p["created_at"] < until:
+        if calendar_day(p, "created_at")[:7] != month:
             continue
         songs = p["track_count"]
         plays = playlist_plays[p["ytm_playlist_id"]]

@@ -33,21 +33,23 @@ def test_vibe_applies_persists_recovers_from_failure_and_resets(live_app, store,
     expect(dialog.get_by_role("radio", name="Take it as it comes", exact=True)).to_be_checked()
     expect(dialog.locator(".fp-vibe-card")).to_have_count(7)
     expect(dialog.get_by_role("radio")).to_have_count(7)
-    gentle = dialog.get_by_role("radio", name="Keep it gentle", exact=True)
+    for name in ['Relax', 'Focus', 'Cruise', 'Energize', 'Lift my mood', 'Let off steam']:
+        expect(dialog.get_by_role('radio', name=name, exact=True)).to_have_count(1)
+    gentle = dialog.get_by_role("radio", name="Relax", exact=True)
     with page.expect_response("**/home/vibe"):
         gentle.check()
-    expect(page.locator("#home-mode-cards")).to_have_attribute("data-vibe", "gentle")
+    expect(page.locator("#home-mode-cards")).to_have_attribute("data-vibe", "relax")
     expect(gentle).to_be_checked()
     expect(dialog).to_be_visible()
-    expect(dialog.locator("#home-vibe-status")).to_have_text("In the mix: Keep it gentle.")
-    assert store.settings.get_setting(home_vibe.SETTING) == "gentle"
+    expect(dialog.locator("#home-vibe-status")).to_have_text("In the mix: Relax.")
+    assert store.settings.get_setting(home_vibe.SETTING) == "relax"
     page.reload()
     expect(dialog).to_be_visible()
     expect(gentle).to_be_checked()
     expect(dialog.get_by_role("tab", name="Vibe", exact=True)).to_have_attribute("aria-selected", "true")
 
     page.route("**/home/vibe", lambda route: route.fulfill(status=500, body="Unavailable"))
-    dialog.get_by_role("radio", name="Pick me up", exact=True).check()
+    dialog.get_by_role("radio", name="Energize", exact=True).check()
     expect(dialog.locator("#home-vibe-status")).to_have_text("Couldn’t change the vibe. Try again.")
     expect(gentle).to_be_checked()
     expect(dialog.locator(".fp-vibe-fields")).to_be_enabled()
@@ -57,7 +59,7 @@ def test_vibe_applies_persists_recovers_from_failure_and_resets(live_app, store,
     expect(page.locator("#home-mode-cards")).to_have_attribute("data-vibe", "")
     expect(dialog.locator("#home-vibe-status")).to_have_text("In the mix: Take it as it comes.")
     gentle.check()
-    expect(page.locator("#home-mode-cards")).to_have_attribute("data-vibe", "gentle")
+    expect(page.locator("#home-mode-cards")).to_have_attribute("data-vibe", "relax")
     dialog.get_by_role("button", name="Reset mix adjustments", exact=True).click()
     expect(dialog).not_to_be_visible()
     page.get_by_role("button", name="Tune these mixes", exact=True).click()
@@ -81,6 +83,12 @@ def test_mix_tabs_fit_desktop_mobile_and_short_windows(live_app, store, page, tm
             assert dialog.evaluate("el => el.scrollWidth <= el.clientWidth")
             panel = dialog.locator('[role="tabpanel"]:visible')
             assert panel.evaluate("el => el.scrollWidth <= el.clientWidth")
+            if tab == "Vibe":
+                last = dialog.get_by_role("radio", name="Let off steam", exact=True)
+                last.scroll_into_view_if_needed()
+                expect(last).to_be_in_viewport()
+                expect(dialog.get_by_role("button", name="Reset mix adjustments", exact=True)).to_be_in_viewport()
+                expect(dialog.get_by_role("button", name="Close mix controls", exact=True)).to_be_in_viewport()
             page.screenshot(path=tmp_path / f"tuning-{tab.lower().replace(' ', '-')}-{width}.png")
         # Native disclosures keep genre adjustments handy and eras out of the initial view.
         genres = dialog.locator("details").filter(has=page.get_by_text("Your genre balance", exact=True))
@@ -126,8 +134,8 @@ def test_open_vibe_tab_resets_when_tuning_expires(live_app, store, page):
     page.get_by_role("button", name="Tune these mixes", exact=True).click()
     dialog = page.get_by_role("dialog", name="Tune these mixes", exact=True)
     dialog.get_by_role("tab", name="Vibe", exact=True).click()
-    dialog.get_by_role("radio", name="Headspace", exact=True).check()
-    expect(page.locator("#home-mode-cards")).to_have_attribute("data-vibe", "focus")
+    dialog.get_by_role("radio", name="Let off steam", exact=True).check()
+    expect(page.locator("#home-mode-cards")).to_have_attribute("data-vibe", "release")
     store.settings.set_setting(mix_tuning.VIBE_UPDATED_AT_SETTING, str(1 - mix_tuning.TTL_S))
     with page.expect_response("**/home/fingerprint"):
         page.clock.fast_forward(mix_tuning.TTL_S * 1000)
@@ -149,9 +157,9 @@ def test_vibe_respects_genre_focus_through_clear_and_expiry(live_app, store, pag
         dialog.get_by_role('button', name='Make mixes', exact=True).click()
     page.get_by_role('button', name='Tune these mixes', exact=True).click()
     dialog.get_by_role('tab', name='Vibe', exact=True).click()
-    dialog.get_by_role('radio', name='Keep it gentle', exact=True).check()
+    dialog.get_by_role('radio', name='Relax', exact=True).check()
     row = page.locator('#home-mode-cards')
-    expect(row).to_have_attribute('data-vibe', 'gentle')
+    expect(row).to_have_attribute('data-vibe', 'relax')
     assert store.rec_proposals.get_proposals('home_genre_request')['include_genres'] == ['jazz']
     assert row.locator('[data-genres]').evaluate_all(
         'els => els.length > 0 && els.every(el => JSON.parse(el.dataset.genres).every(g => g.toLowerCase() === "jazz"))')
@@ -163,8 +171,8 @@ def test_vibe_respects_genre_focus_through_clear_and_expiry(live_app, store, pag
     expect(row).to_have_attribute('data-vibe', '')
     assert row.locator('[data-genres]').evaluate_all(
         'els => els.length > 0 && els.every(el => JSON.parse(el.dataset.genres).every(g => g.toLowerCase() === "jazz"))')
-    dialog.get_by_role('radio', name='Keep it gentle', exact=True).check()
-    expect(row).to_have_attribute('data-vibe', 'gentle')
+    dialog.get_by_role('radio', name='Relax', exact=True).check()
+    expect(row).to_have_attribute('data-vibe', 'relax')
     store.rec_model.set_lean('genre:techno', 1.6, 1)
     store.settings.set_setting(mix_tuning.VIBE_UPDATED_AT_SETTING, str(1 - mix_tuning.TTL_S))
     with page.expect_response('**/home/fingerprint'):

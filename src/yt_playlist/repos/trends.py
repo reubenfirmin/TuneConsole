@@ -1,7 +1,10 @@
 """TrendsRepo: read/aggregation queries behind the Trends page + its precomputed rollup. Owns the
 first-play index (trend_first_play) and the day-model time-series and health queries. Aggregation
 happens in rec/trend_rollups.py; this repo only fetches raw material and upserts the index."""
-from yt_playlist.repos.base import Repo, synchronized, GENERATED_GROUP
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read, GENERATED_GROUP
 
 
 class TrendsRepo(Repo):
@@ -75,7 +78,7 @@ class TrendsRepo(Repo):
         Takeout import, where the coarse history day model is still the only evidence of listening."""
         return self.conn.execute("SELECT 1 FROM play_events LIMIT 1").fetchone() is not None
 
-    @synchronized
+    @snapshot_read
     def repetition_series(self, per_track) -> dict:
         """Latest exact timestamps per track, oldest first, using retained play-time policy.
 
@@ -93,7 +96,7 @@ class TrendsRepo(Repo):
             series.setdefault(row["identity_key"], []).append(row["played_at"])
         return series
 
-    @synchronized
+    @snapshot_read
     def ledger_day_counts(self, exclude_generated=True) -> list:
         """[(day, identity_key, plays)] from the play ledger: one row per (account day, track), plays =
         the number of REAL plays that day. Same shape as play_day_counts(), so the rollup consumes it
@@ -109,14 +112,15 @@ class TrendsRepo(Repo):
             f"FROM play_events pe JOIN play_event_calendar c ON c.event_id=pe.id {where} GROUP BY c.day,k", args).fetchall()
         return [(r["day"], r["k"], r["c"]) for r in rows]
 
-    @synchronized
-    def ledger_track_plays(self, since, until, exclude_generated=True) -> dict:
+    @snapshot_read
+    def ledger_track_plays(self, since, until, exclude_generated=True, *, calendar=False) -> dict:
         """{identity_key: plays} real plays in [since, until). Replaces month_track_plays, whose
         Counting coarse observations would mistake lingering history windows for repeat plays."""
         frag, args = self._generated_filter(exclude_generated)
+        join, period = self._period(calendar)
         rows = self.conn.execute(
-            f"SELECT pe.identity_key k, COUNT(*) c FROM play_events pe "
-            f"WHERE pe.played_at >= ? AND pe.played_at < ?{frag} GROUP BY pe.identity_key",
+            f"SELECT pe.identity_key k, COUNT(*) c FROM play_events pe {join} "
+            f"WHERE {period}{frag} GROUP BY pe.identity_key",
             [since, until, *args]).fetchall()
         return {r["k"]: r["c"] for r in rows}
 
@@ -131,12 +135,19 @@ class TrendsRepo(Repo):
             "GROUP BY identity_key").fetchall()
         return {r["k"]: {"energy": r["e"], "bpm": r["b"], "dance": r["d"]} for r in rows}
 
-    @synchronized
-    def play_hours(self, since, until, exclude_generated=True) -> list:
-        """24-bucket hour-of-day histogram (local? no -- UTC) of real plays in [since, until). Feeds the
-        recap personality's rhythm axis."""
+    @snapshot_read
+    def play_hours(self, since, until, exclude_generated=True, *, calendar=False) -> list:
+        """24 hour buckets of real plays. Calendar mode uses retained account-local days
+        and hours; the default uses UTC instants. Feeds the recap personality's rhythm axis."""
         frag, args = self._generated_filter(exclude_generated)
         hours = [0] * 24
+        if calendar:
+            join, period = self._period(True)
+            for row in self.conn.execute(
+                    f"SELECT pe.played_at,c.timezone FROM play_events pe {join} WHERE {period}{frag}",
+                    [since, until, *args]):
+                hours[datetime.fromtimestamp(row[0], ZoneInfo(row[1])).hour] += 1
+            return hours
         for r in self.conn.execute(
                 f"SELECT CAST(strftime('%H', pe.played_at, 'unixepoch') AS INTEGER) h, COUNT(*) c "
                 f"FROM play_events pe WHERE pe.played_at >= ? AND pe.played_at < ?{frag} GROUP BY h",
@@ -145,23 +156,33 @@ class TrendsRepo(Repo):
                 hours[r["h"]] = r["c"]
         return hours
 
-    @synchronized
-    def ledger_artist_plays(self, since, until, exclude_generated=True) -> dict:
+    @snapshot_read
+    def ledger_artist_plays(self, since, until, exclude_generated=True, *, calendar=False) -> dict:
         """{artist: plays} real plays in [since, until), artist resolved through tracks. Tracks with a
         blank or missing artist are skipped. Replaces charts.listen_distribution('artist', ...) inside
         the Trends rollup only; the charts/ticker consumers keep their own day-model semantics."""
         frag, args = self._generated_filter(exclude_generated)
+        join, period = self._period(calendar)
         rows = self.conn.execute(
             "WITH names AS MATERIALIZED ("
             "  SELECT identity_key,MIN(artist) artist FROM tracks GROUP BY identity_key) "
             "SELECT n.artist,COUNT(*) c FROM play_events pe "
             "JOIN names n ON n.identity_key=pe.identity_key "
-            f"WHERE pe.played_at>=? AND pe.played_at<?{frag} AND n.artist<>'' GROUP BY n.artist",
+            f"{join} WHERE {period}{frag} AND n.artist<>'' GROUP BY n.artist",
             [since, until, *args]).fetchall()
         return {r["artist"]: r["c"] for r in rows}
 
+    @staticmethod
+    def _period(calendar):
+        # UTC timestamps label the requested calendar dates, rather than shifting all
+        # accounts by one offset. Each retained event projection owns its listening day.
+        if calendar:
+            return ("JOIN play_event_calendar c ON c.event_id=pe.id",
+                    "c.day>=date(?,'unixepoch') AND c.day<date(?,'unixepoch')")
+        return "", "pe.played_at>=? AND pe.played_at<?"
+
     # -- the reconciled daily model ------------------------------------------------------------
-    @synchronized
+    @snapshot_read
     def history_track_first(self) -> dict:
         """Earliest listening day per recording.
 
@@ -172,7 +193,7 @@ class TrendsRepo(Repo):
             "SELECT identity_key k,MIN(day_ts) ts FROM listening_days GROUP BY identity_key").fetchall()
         return {r["k"]: (int(r["ts"] // 86400), r["ts"]) for r in rows}
 
-    @synchronized
+    @snapshot_read
     def play_event_track_first(self) -> dict:
         """{identity_key: (first_day, first_ts)} earliest real play from play_events (indexed on time)."""
         rows = self.conn.execute(
@@ -253,7 +274,7 @@ class TrendsRepo(Repo):
                               "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (imported,))
 
     @synchronized
-    def publish_rollup(self, rows, encoded_payload, now, imported, review_month):
+    def publish_rollup(self, rows, encoded_payload, now, imported):
         """Write prepared output inside ReadSnapshot.publish's checked transaction. No commit."""
         self.conn.execute('DELETE FROM trend_first_play')
         self.conn.executemany('INSERT INTO trend_first_play VALUES (?,?,?,?,?)', rows)
@@ -262,9 +283,6 @@ class TrendsRepo(Repo):
             "INSERT INTO rec_proposals(surface,payload,built_at) VALUES ('trend_rollups',?,?) "
             "ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at",
             (encoded_payload, now))
-        if review_month is not None:
-            self.conn.execute("INSERT INTO settings(key,value) VALUES ('trend_spotlight_review_month',?) "
-                              "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (review_month,))
 
     @synchronized
     def clear_first_play(self) -> None:
@@ -401,7 +419,7 @@ class TrendsRepo(Repo):
         COUNT(*) here is snapshot appearances, NOT plays, and it has no day grouping (unlike
         play_day_counts right above). A track lingering in the recently-played window is counted once
         per sync, so this over-reports: on the reference database it turned 2 real plays into 14.
-        Prefer ledger_track_plays(). trend_rollups.month_review only reaches here when
+        Prefer ledger_track_plays(). trend_payload.month_review only reaches here when
         has_play_ledger() is False.
         """
         rows = self.conn.execute(

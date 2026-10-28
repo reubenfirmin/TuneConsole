@@ -1,4 +1,6 @@
 """Requested intensity can change a stream's style without widening genre intent."""
+from types import SimpleNamespace
+
 import pytest
 
 from tests.musical_support import prepare_vibes
@@ -9,6 +11,7 @@ from yt_playlist.core import catalog
 from yt_playlist.rec import embedding_vectors, musical_character, radio_tuning
 from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, RadioCandidates
 from yt_playlist.rec.radio_directions import RadioDirections
+from yt_playlist.rec.radio_policy import RadioPolicy
 from yt_playlist.web import radio_session
 
 
@@ -40,7 +43,7 @@ def candidate(store, **tuning):
 
 
 @pytest.mark.parametrize('theme', [0, .5, 1])
-def test_intensity_escapes_nearby_and_pinned_styles_and_relabels_each_stream(store, distant_chill, monkeypatch, theme):
+def test_intensity_escapes_styles_within_the_genre_constraint_and_relabels_each_stream(store, distant_chill, monkeypatch, theme):
     pools, quiet = distant_chill
     seed = pools['1'][0]
     c = candidate(store, theme=theme, comfort=1)
@@ -58,9 +61,14 @@ def test_intensity_escapes_nearby_and_pinned_styles_and_relabels_each_stream(sto
     assert len(directions.public([])) == 4
     for branch in directions.slots:
         assert len(branch['tracks']) == 6
-        assert branch['cluster_id'] == '9' and branch['label'] == 'Ambient'
-        assert all(musical_character.intensity(t) == .04 for t in branch['tracks'])
-        assert c.fits(branch['tracks'][0], seed)
+        expected_intensity = .96 if theme == 1 else .04
+        assert branch['cluster_id'] in ({'1', '2', '3', '4', '5'} if theme == 1 else {'9'})
+        assert branch['label'] == ('Electronic' if theme == 1 else 'Ambient')
+        assert all(musical_character.intensity(t) == expected_intensity for t in branch['tracks'])
+        if theme == 1:
+            assert all(t['genre'] == seed['genre'] for t in branch['tracks'])
+        else:
+            assert c.fits(branch['tracks'][0], seed)
     before = directions.public([])
     assert not directions.update([seed], [], 0)
     assert directions.public([]) == before
@@ -69,7 +77,7 @@ def test_intensity_escapes_nearby_and_pinned_styles_and_relabels_each_stream(sto
 
 def test_intensity_refills_the_suitable_style_beyond_one_lookahead(store, distant_chill):
     pools, quiet = distant_chill
-    c, history = candidate(store), [pools['1'][0]]
+    c, history = candidate(store, theme=.5), [pools['1'][0]]
     for _ in quiet:
         track = c.next_track(history, target=history[0])
         assert track and musical_character.intensity(track) == .04
@@ -87,7 +95,7 @@ def test_equally_suitable_current_style_is_kept_and_midpoint_still_pins(store, d
     with store.conn:
         catalog.choose_field(store.conn, tid, 'energy', .04)
     prepare_vibes(store)
-    c = candidate(store)
+    c = candidate(store, theme=.5)
     assert c.next_track([seed])['key'] == local['key']
     # Once the current style has no remaining fit, only that stream changes.
     assert c.cluster_for(c.next_track([seed, local], target=seed)) == '9'
@@ -102,7 +110,7 @@ def test_explicit_genre_mute_cannot_be_escaped_for_intensity(store, distant_chil
     assert not c._allowed(quiet[0])
 
 
-def test_legacy_explicit_genre_pin_allows_style_switch_inside_genre(store, genre_pools):
+def test_unindexed_fully_themed_genre_pin_allows_style_switch_inside_genre(store, genre_pools):
     pools = genre_pools
     for mid, rows in pools.items():
         for track in rows:
@@ -117,7 +125,64 @@ def test_legacy_explicit_genre_pin_allows_style_switch_inside_genre(store, genre
     assert c.cluster_for(pick) == '5'
 
 
-def test_live_retune_switches_styles_without_restarting_current_playback(poc, distant_chill, monkeypatch):
+@pytest.mark.parametrize('energy', [0, .5, 1])
+@pytest.mark.parametrize('path', ['next', 'alternative', 'continuation'])
+def test_indexed_fully_themed_pins_genre_across_all_selection_paths(store, distant_chill, energy, path):
+    pools, quiet = distant_chill
+    seed = pools['1'][0]
+    c = candidate(store, energy=energy)
+    assert c.cluster_members
+    if path == 'next':
+        tracks = [c.next_track([seed], target=quiet[0], current=seed)]
+    elif path == 'alternative':
+        tracks = [c.direction_anchor([seed], [quiet[0]])]
+    else:
+        tracks = RadioDirections(c, seed).continue_sequence([seed], [quiet[0]], quiet[0], ())
+    assert tracks and all(track and track['genre'] == seed['genre'] for track in tracks)
+    assert not c.fits(quiet[0], seed)
+    view, history = SimpleNamespace(candidates=c), SimpleNamespace(current=seed)
+    assert RadioPolicy.genre_mismatch(view, history, quiet[0])
+    assert all(not RadioPolicy.genre_mismatch(view, history, track) for track in tracks)
+
+
+def test_indexed_genre_pin_follows_playback_instead_of_an_old_style_anchor(store, distant_chill):
+    pools, quiet = distant_chill
+    seed, playing = pools['1'][0], pools['7'][0]
+    c = candidate(store, energy=.5)
+    tracks = [c.next_track([seed, playing, quiet[0]], target=seed, current=playing),
+              c.direction_anchor([seed, playing], [seed])]
+    tracks += RadioDirections(c, seed).continue_sequence([seed, playing], [quiet[0]], seed, ())
+    assert tracks and all(track and track['genre'] == playing['genre'] for track in tracks)
+
+
+def test_indexed_intensity_can_switch_styles_inside_the_pinned_genre(store, distant_chill):
+    pools, _quiet = distant_chill
+    for track in pools['5']:
+        tid = store.tracks.track_ids_for_videos([track['video_id']])[track['video_id']]
+        with store.conn:
+            catalog.choose_field(store.conn, tid, 'energy', .04)
+    prepare_vibes(store)
+    c = candidate(store)
+    seed = pools['1'][0]
+    pick = c.next_track([seed], current=seed)
+    assert pick['genre'] == seed['genre']
+    assert c.cluster_for(pick) == '5'
+    assert musical_character.intensity(pick) == .04
+
+
+@pytest.mark.parametrize('energy', [0, .5, 1])
+def test_indexed_genre_pin_never_spills_on_exhaustion_or_unknown_genre(store, distant_chill, energy):
+    pools, _quiet = distant_chill
+    seed = pools['1'][0]
+    c = candidate(store, energy=energy)
+    excluded = {track['video_id'] for rows in pools.values() for track in rows if track['genre'] == seed['genre']}
+    assert c.next_track([seed], excluded=excluded) is None
+    assert c.direction_anchor([seed], [], excluded=excluded) is None
+    assert c.next_track([{**seed, 'genre': None}]) is None
+
+
+@pytest.mark.parametrize('theme', [.5, 1])
+def test_live_retune_respects_genre_without_restarting_current_playback(poc, distant_chill, monkeypatch, theme):
     controller, remote, frames, _, _ = poc
     pools, quiet = distant_chill
     monkeypatch.setattr(radio_session, 'RadioCandidates', RadioCandidates)
@@ -125,7 +190,7 @@ def test_live_retune_switches_styles_without_restarting_current_playback(poc, di
     play(controller, remote.ids[0])
     playlist, before_frames = controller.session.playlist, list(frames)
     heard, playing = list(controller.session.heard), controller.session.observed_video
-    assert controller.tune({**radio_tuning.DEFAULTS, 'theme': 1, 'energy': 0})['ok']
+    assert controller.tune({**radio_tuning.DEFAULTS, 'theme': theme, 'energy': 0})['ok']
     controller.advance(controller.session)
     assert not controller.status()['updating']
     assert controller.session.playlist == playlist
@@ -133,8 +198,11 @@ def test_live_retune_switches_styles_without_restarting_current_playback(poc, di
     assert controller.session.observed_video == playing
     assert frames == before_frames
     future = controller.session.tracks[controller.session.position + 1:]
-    assert future and all(musical_character.intensity(t) == .04 for t in future)
-    assert all(b['cluster_id'] == '9' for b in controller.session.directions.slots)
+    assert future and all(musical_character.intensity(t) == (.96 if theme == 1 else .04) for t in future)
+    if theme == 1:
+        assert all(t['genre'] == pools['1'][0]['genre'] for t in future)
+    else:
+        assert all(b['cluster_id'] == '9' for b in controller.session.directions.slots)
     play(controller, future[0]['video_id'])
     assert controller.session.observed_video == future[0]['video_id']
     assert not controller.session.rejected

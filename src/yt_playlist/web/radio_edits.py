@@ -1,6 +1,6 @@
 """One active playlist operation and one queued direction, with explicit ownership."""
 from dataclasses import dataclass, field
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from yt_playlist.web.radio_playlist_io import PendingWrite
 from yt_playlist.web.radio_playlist_tail import RadioPlaylistTail
@@ -19,6 +19,8 @@ class DirectionRequest(TypedDict):
     slot: int
     tracks: list[dict]
     choice: dict | None
+    play: NotRequired[dict]
+    excluded: NotRequired[list[str]]
 
 
 @dataclass

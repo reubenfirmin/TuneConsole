@@ -46,7 +46,8 @@ def build(ctx) -> APIRouter:
         ignored_merges = [m for m in ignored_merges if len(m["titles"]) > 1]   # need 2+ live members
         # Every cleanup edit HX-Refreshes back through here, so this is where the home card's cached
         # summary goes stale. Refresh it now so the home "Playlist cleanups" count stays honest.
-        refresh_cleanup(store, now_fn(), summary=result.summary())
+        if not getattr(store, 'activity_paused', False):
+            refresh_cleanup(store, now_fn(), summary=result.summary())
         identities = store.identities.get_identities()
         return templates.TemplateResponse(request, "cleanup.html", {
             "groups": groups, "near_pairs": near_pairs, "overlaps": overlaps,

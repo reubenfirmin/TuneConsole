@@ -75,6 +75,25 @@ def test_cards_route_renders_mode_cards(store):
     assert "Song" in r.text
 
 
+def test_mix_regeneration_submits_and_closes_the_requesting_views_offer(store):
+    from html import unescape
+    from yt_playlist.rec import choice_evidence
+    _seed_bundles(store)
+    client = _client(store)
+    first = client.get('/home/cards')
+    match = re.search(r'hx-vals=\'([^\']*opportunity_id[^\']*)\'', first.text)
+    assert match, 'Regeneration must send the ID from the rendered recipe'
+    held = json.loads(unescape(match[1]))['opportunity_id']
+    other = choice_evidence.present(store, 'mixes', [{'id': 'other'}], 1000,
+                                   context={}, window='another-tab')
+    assert client.post('/home/refresh-cards', data={'opportunity_id': held}).status_code == 200
+    assert client.post('/home/refresh-cards', data={'opportunity_id': held}).status_code == 200
+    assert client.post('/home/refresh-cards').status_code == 200
+    closes = [row for row in store.rec_ledger.evidence().records('response') if row['kind'] == 'close']
+    assert [row['opportunity_id'] for row in closes] == [held]
+    assert all(row['opportunity_id'] != other for row in closes)
+
+
 def test_mode_card_recipe_carries_a_journey(store):
     # A saved mode card must record a DJ journey in its recipe so the playlist page can show + tune
     # the Flow lever (parity with the per-lane _carded cards). Regression: the mode-card recipe was

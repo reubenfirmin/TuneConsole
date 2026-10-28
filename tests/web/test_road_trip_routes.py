@@ -513,11 +513,11 @@ def test_saving_plays_in_the_connected_youtube_tab_when_ready(store, monkeypatch
     c, _ = _app(store, client, monkeypatch)
     rid = _recipe(store)
     c.post(f"/road_trip/recipes/{rid}/build")
-    bridge = c.app.state.ctx.bridge = SimpleNamespace(connected=True)
+    bridge = c.app.state.ctx.bridge = SimpleNamespace(connected=True, begin_playback_intent=lambda: 7)
     navigated, calls = threading.Event(), []
 
-    def navigate(*args):
-        calls.append(args)
+    def navigate(*args, **kwargs):
+        calls.append((args, kwargs))
         navigated.set()
 
     monkeypatch.setattr(road_trip_route.playlist_navigation, "navigate_when_ready", navigate)
@@ -525,7 +525,7 @@ def test_saving_plays_in_the_connected_youtube_tab_when_ready(store, monkeypatch
     assert response.status_code == 200
     assert navigated.wait(2)
     ytm = store.road_trip.get_road_trip_recipe(rid)["last_playlist_id"]
-    assert calls == [(client, bridge, ytm, f"https://music.youtube.com/watch?list={ytm}")]
+    assert calls == [((client, bridge, ytm, f"https://music.youtube.com/watch?list={ytm}"), {"intent": 7})]
 
 
 @pytest.mark.parametrize("failure", ["youtube", "account", "missing"])

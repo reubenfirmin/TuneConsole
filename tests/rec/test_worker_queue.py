@@ -41,6 +41,26 @@ def test_measurement_bound_counts_offers_and_excludes_analytics_from_visible_bus
     assert len(queue.take_measurements()) == 8 and not queue
 
 
+def test_evidence_maintenance_runs_without_home_requests_and_is_coalesced(scheduled, monkeypatch):
+    from yt_playlist.rec import choice_evidence
+    worker, targets = scheduled
+    calls, now = [], [100]
+    monkeypatch.setattr(rec_worker.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(choice_evidence, 'maintain_storage', lambda *args: calls.append(True))
+    worker._poll_evidence_storage()
+    worker._poll_evidence_storage()
+    assert len(targets) == 1 and not worker.jobs.visible
+    targets.pop()()
+    assert calls == [True] and not worker.busy
+    now[0] = 399
+    worker._poll_evidence_storage()
+    assert not targets
+    now[0] = 400
+    worker._poll_evidence_storage()
+    targets.pop()()
+    assert calls == [True, True]
+
+
 def test_measurement_batches_preserve_fifo_and_leave_other_jobs_admitted():
     queue = PendingJobs()
     offers = [SimpleNamespace(work_units=units) for units in (3, 4, 2, 1)]
@@ -52,6 +72,26 @@ def test_measurement_batches_preserve_fifo_and_leave_other_jobs_admitted():
     assert queue.drain() == {Job.RATINGS: True}
     assert queue.take_measurements(limit=8) == offers[2:]
     assert not queue
+
+
+def test_inflight_capture_slots_stay_reserved_and_retries_precede_later_arrivals():
+    queue = PendingJobs()
+    offers = [SimpleNamespace(work_units=1, identity=index) for index in range(64)]
+    for offer in offers:
+        assert queue.merge(Job.MEASUREMENT, offer)
+    batch = queue.take_measurements(limit=8)
+    extra = SimpleNamespace(work_units=1, identity='extra')
+    assert not queue.merge(Job.MEASUREMENT, extra)
+    queue.finish_measurements(batch, retry=batch[2:])
+    assert list(queue.measurements) == offers[2:]
+    assert queue.merge(Job.MEASUREMENT, extra)
+    assert queue.merge(Job.MEASUREMENT, SimpleNamespace(work_units=1))
+    assert not queue.merge(Job.MEASUREMENT, SimpleNamespace(work_units=1))
+    next_batch = queue.take_measurements(limit=8)
+    assert next_batch == offers[2:10]
+    queue.finish_measurements(next_batch)
+    assert queue.merge(Job.MEASUREMENT, SimpleNamespace(work_units=8))
+    assert not queue.merge(Job.MEASUREMENT, SimpleNamespace(work_units=1))
 
 
 def test_worker_services_ratings_between_measurement_batches(scheduled, monkeypatch):
@@ -130,7 +170,7 @@ def test_model_backoff_preserves_retry_without_delaying_ratings(scheduled, monke
     monkeypatch.setattr(rec_worker.time, "monotonic", lambda: now[0])
     # Missing/expired candidates have an independent recovery job. This case
     # isolates the model failure clock; candidate recovery is covered separately.
-    monkeypatch.setattr(worker.ctx.store.rec_proposals, 'get_proposals', lambda *_: {'all': {}})
+    monkeypatch.setattr(worker.ctx.store.rec_proposals, 'has_proposals', lambda *_: True)
     monkeypatch.setattr(candidate_refresh, 'due', lambda *_: False)
 
     def fail():
@@ -171,6 +211,48 @@ def test_expiry_refreshes_pools_without_refitting_models(scheduled, monkeypatch)
     worker._poll_refresh()
     targets.pop()()
     assert calls == ['bundles']
+
+
+@pytest.mark.parametrize('bundles_pending', [False, True])
+@pytest.mark.parametrize('arrives_during_refresh', [False, True])
+def test_preparation_coalesces_refresh_without_losing_later_arrivals(
+        scheduled, monkeypatch, bundles_pending, arrives_during_refresh):
+    worker, targets = scheduled
+    calls = []
+    monkeypatch.setattr(worker.preparation, 'capture', lambda now: calls.append('capture') or True)
+    monkeypatch.setattr(worker.preparation, 'fit', lambda now: False)
+
+    def refresh():
+        calls.append('bundles')
+        if arrives_during_refresh and calls.count('bundles') == 1:
+            worker.trigger_candidate_refresh()
+
+    monkeypatch.setattr(worker, '_refresh_bundles', refresh)
+    worker._schedule(full=False, prepare=True, bundles=bundles_pending)
+    assert len(targets) == 1
+    targets.pop()()
+    assert calls == ['capture', 'bundles'] + (['bundles'] if arrives_during_refresh else [])
+    assert not targets and not worker.jobs and not worker.busy
+
+
+def test_prepared_refresh_survives_a_failed_full_rebuild(scheduled, monkeypatch):
+    worker, targets = scheduled
+    calls = []
+    monkeypatch.setattr(worker.preparation, 'capture', lambda now: calls.append('capture') or True)
+    monkeypatch.setattr(worker.preparation, 'fit', lambda now: False)
+    monkeypatch.setattr(worker.preparation, 'full_due', lambda now: True)
+
+    def fail():
+        calls.append('full')
+        raise RuntimeError('Model fit failed after preparation')
+
+    monkeypatch.setattr(worker, '_do_rebuild', fail)
+    monkeypatch.setattr(worker, '_refresh_bundles', lambda: calls.append('bundles'))
+    worker._schedule(full=True, prepare=True, bundles=True)
+    targets.pop()()
+    assert calls == ['capture', 'full', 'bundles']
+    assert worker.jobs.retry[Job.FULL].dirty
+    assert not targets and not worker.jobs and not worker.busy
 
 
 def test_deferred_builds_back_off_without_becoming_failures():
@@ -218,7 +300,8 @@ def test_successful_pool_build_coalesces_next_request_but_keeps_rating_work(sche
     assert not worker.jobs.retry[Job.BUNDLES].dirty
 
 
-def test_projection_admission_can_be_used_without_a_worker_and_releases_rejected_jobs(store):
+def test_projection_admission_can_be_used_without_a_worker_and_releases_rejected_jobs(store,monkeypatch):
+    monkeypatch.setenv('YT_PLAYLIST_LISTENING_CHARTS','1')
     scheduled_kinds = []
     accepting = [False]
 

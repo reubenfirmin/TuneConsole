@@ -1,0 +1,27 @@
+{% from '_album_actions.html' import album_play_control %}
+<div id="onboarding-start"{% if not album %}
+     hx-get="/home/onboard/start" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+  {% if album %}
+  <section class="starter-album" data-onboarding-starter aria-labelledby="starter-album-title">
+    <a class="starter-album-art" href="/album?browse={{ album.browse|urlencode }}" aria-label="Open {{ album.title }}">
+      {% if album.thumbnail %}
+      <img src="{{ album.thumbnail }}" alt="{{ album.title }} cover" referrerpolicy="no-referrer">
+      {% else %}
+      <svg viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="40"/><circle cx="50" cy="50" r="26"/><circle cx="50" cy="50" r="5"/></svg>
+      {% endif %}
+    </a>
+    <div class="starter-album-copy">
+      <p class="starter-context">{% if album.saved %}From your album collection{% else %}An album from an artist in your collection{% endif %}</p>
+      <h2 id="starter-album-title"><a href="/album?browse={{ album.browse|urlencode }}">{{ album.title }}</a></h2>
+      <p class="starter-album-artist">{{ album.artist }}{% if album.year %} · {{ album.year }}{% endif %}</p>
+      <div class="starter-actions">
+        {{ album_play_control(album.browse, album.title, css='btn btn-primary starter-album-play',
+             fallback=('https://music.youtube.com/browse/' ~ album.browse) if album.upload else '', onboarding=true) }}
+        <a class="btn btn-ghost" href="/album?browse={{ album.browse|urlencode }}">Open album</a>
+      </div>
+    </div>
+  </section>
+  {% else %}
+  <p class="section-note" role="status">Finding your first album as your collection arrives.</p>
+  {% endif %}
+</div>

@@ -54,6 +54,24 @@ def test_ignore_merge_round_trip(store):
     assert _count_after_reload(c, store) == 2                      # restored
 
 
+@pytest.mark.parametrize("near", [False, True])
+def test_dismissed_duplicate_members_still_show_unrelated_overlaps(store, near):
+    from yt_playlist.library.analysis import analyze_cleanup
+    iid, c = _app(store)
+    tracks = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(10)]
+    members = [tracks[:6], tracks[:5] + [tracks[6]], tracks[:2] + tracks[7:9]] if near else [
+        tracks[:4], tracks[:4], tracks[:2] + tracks[7:9]]
+    for remote, rows in zip(("PLA", "PLB", "PLC"), members):
+        pid = store.playlists.upsert_playlist(iid, remote, remote, len(rows), "h", 0)
+        store.playlists.set_playlist_tracks(pid, rows)
+    c.post("/cleanup/ignore-merge", data={"members": "PLA,PLB"})
+    result = analyze_cleanup(store)
+    assert not result.groups and not result.near_pairs
+    assert {frozenset((o.playlist_a.ytm_playlist_id, o.playlist_b.ytm_playlist_id))
+            for o in result.overlaps} == {frozenset(("PLA", "PLC")), frozenset(("PLB", "PLC"))}
+    assert _count_after_reload(c, store) == 3
+
+
 def _near_playlists(store, iid):
     tracks = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(10)]
     for n, ytm in enumerate(("PLA", "PLB", "PLC")):

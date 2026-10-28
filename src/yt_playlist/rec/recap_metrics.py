@@ -1,11 +1,11 @@
 """Pure monthly measurements from genuine, timestamped plays.
 
-UTC day buckets match Trends. Sessions are observed runs of plays separated by 30 minutes;
+Account calendar days match the recap totals. Sessions use real elapsed timestamps;
 they measure tracks per run, never listening duration. Missing months remain missing.
 """
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from statistics import median
 
 from yt_playlist.util import genre_map
@@ -25,6 +25,15 @@ def month_bounds(month):
     def stamp(value):
         return datetime.strptime(value, "%Y-%m").replace(tzinfo=timezone.utc).timestamp()
     return stamp(month), stamp(shift_month(month, 1))
+
+
+def calendar_day(row, field="played_at"):
+    """The account's projected date; detached UTC-only inputs use their UTC date."""
+    return row.get("day") or datetime.fromtimestamp(row[field], timezone.utc).date().isoformat()
+
+
+def day_number(row):
+    return (date.fromisoformat(calendar_day(row)) - date(1970, 1, 1)).days
 
 
 @dataclass
@@ -56,13 +65,13 @@ class MonthProfile:
 
 def profile(month, events, meta, spans, playlists):
     since, until = month_bounds(month)
-    rows = [p for p in events if since <= p["played_at"] < until]
+    rows = [p for p in events if calendar_day(p)[:7] == month]
     signature = frozenset((p["identity_id"], p["source"]) for p in rows)
     complete = bool(signature) and all(
         source in {"live", "takeout"} and spans[(identity, source)][0] < since
         and spans[(identity, source)][1] >= until for identity, source in signature)
     result = MonthProfile(month, round((until - since) / 86400), signature, complete,
-                          len(rows), len({int(p["played_at"] // 86400) for p in rows}))
+                          len(rows), len({calendar_day(p) for p in rows}))
     groups = {"artist": defaultdict(set), "family": defaultdict(set), "decade": defaultdict(set)}
     by_identity = defaultdict(list)
     for p in rows:
@@ -70,7 +79,7 @@ def profile(month, events, meta, spans, playlists):
         card = meta.get(key, {})
         if card.get("album_browse_ids") or card.get("album_browse_id"):
             result.album_covered_plays += 1
-        day = int(p["played_at"] // 86400)
+        day = day_number(p)
         result.tracks[key] += 1
         artist = card.get("artist")
         family = genre_map.family(card["genre"]) if card.get("genre") else None
@@ -94,7 +103,7 @@ def profile(month, events, meta, spans, playlists):
         def finish_run():
             if len({p["identity_key"] for p in run}) >= 3:
                 result.album_run_plays += len(run)
-                result.album_run_days.update(int(p["played_at"] // 86400) for p in run)
+                result.album_run_days.update(day_number(p) for p in run)
 
         for p in rows:
             gap = p["played_at"] - session[-1]["played_at"] if session else SESSION_GAP + 1
@@ -117,7 +126,7 @@ def profile(month, events, meta, spans, playlists):
         if session:
             sessions.append(len(session))
     result.sessions = tuple(sessions)
-    result.playlists = sum(since <= p["created_at"] < until for p in playlists)
+    result.playlists = sum(calendar_day(p, "created_at")[:7] == month for p in playlists)
     return result
 
 

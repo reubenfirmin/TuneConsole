@@ -82,7 +82,7 @@ PARAMS = [
               "Episode influence is capped; passive generated tracks add no separate support.",
               0, 2, .05, .3),
     ParamSpec("choice_retention_d", "Unanswered choice retention (days)", "discovery",
-              "Daily maintenance retires older menus with no choice, listening, save or feedback. "
+              "Maintenance retires older unanswered menus, or the oldest after an hour when capacity is tight. "
               "Chosen menus and corrections remain within the storage budget. Reports cover retained evidence.",
               7, 730, 1, 180, integer=True),
     ParamSpec("choice_halflife_d", "Choice memory half-life (days)", "discovery",

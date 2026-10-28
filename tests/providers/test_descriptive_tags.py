@@ -30,7 +30,10 @@ def test_lastfm_artist_fallback_retains_artist_scope_and_stable_id(monkeypatch):
 
 
 def test_musicbrainz_reuses_native_artist_cache_without_flattening_counts(monkeypatch):
-    monkeypatch.setattr(musicbrainz, '_artist_genre_cache', musicbrainz.OrderedDict())
+    import io
+    import json
+    from types import SimpleNamespace
+    from yt_playlist.integrations.musicbrainz import MusicBrainzIAO
     calls = []
     def get(path, params):
         calls.append(path)
@@ -38,9 +41,15 @@ def test_musicbrainz_reuses_native_artist_cache_without_flattening_counts(monkey
             return {'recordings': [{'id': 'recording-id', 'title': 'Song', 'score': 100,
                 'artist-credit': [{'artist': {'id': 'artist-id', 'name': 'Artist'}}]}]}
         if path.startswith('recording/'):
-            return {'tags': []}
-        return {'genres': [{'name': 'Metal', 'count': 7}], 'tags': [{'name': 'Ambient', 'count': 3}]}
-    monkeypatch.setattr(musicbrainz, '_get', get)
+            return {'id': 'recording-id', 'title': 'Song', 'tags': []}
+        return {'id': 'artist-id', 'name': 'Artist',
+                'genres': [{'name': 'Metal', 'count': 7}], 'tags': [{'name': 'Ambient', 'count': 3}]}
+    def open_request(request, **kwargs):
+        from urllib.parse import urlsplit
+        path = urlsplit(request.full_url).path.removeprefix('/ws/2/')
+        return io.StringIO(json.dumps(get(path, {})))
+    monkeypatch.setattr(musicbrainz, '_iao', MusicBrainzIAO(open_fn=open_request,
+                        pacer=SimpleNamespace(wait=lambda: None)))
     for _ in range(2):
         result = musicbrainz.probe({'title': 'Song', 'artist': 'Artist'})
         artist = next(row for row in result.observations if row.scope == 'artist')

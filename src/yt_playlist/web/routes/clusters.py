@@ -193,9 +193,11 @@ def build(ctx) -> APIRouter:
         keep_keys = every non-pruned track on the canvas; central_keys = the seed group's own tracks,
         always folded in when present."""
         form = await request.form()
-        return await activity_for(ctx).to_thread(_save_cluster, request, form)
+        bridge = getattr(ctx, "bridge", None)
+        intent = bridge.begin_playback_intent() if bridge is not None else None
+        return await activity_for(ctx).to_thread(_save_cluster, request, form, intent)
 
-    def _save_cluster(request, form):
+    def _save_cluster(request, form, intent):
         # Metadata, greedy ordering and save bookkeeping can all wait on substantial work.
         # Track the whole operation outside the event loop, including any remote mutation.
         name = (form.get("name") or "").strip()
@@ -239,7 +241,7 @@ def build(ctx) -> APIRouter:
                 if bridge is not None and getattr(bridge, "connected", False):
                     watch_url = f"https://music.youtube.com/watch?list={res['new_ytm']}"
                     activity_for(ctx).start_thread(playlist_navigation.navigate_when_ready,
-                        args=(client, bridge, res["new_ytm"], watch_url))
+                        args=(client, bridge, res["new_ytm"], watch_url), kwargs={"intent": intent})
                 # #48: stash the full canvas so this playlist can be reopened in Clusters and regrown a
                 # different way. Stored verbatim (validated as JSON); absent for older clients / failures.
                 state = form.get("state")

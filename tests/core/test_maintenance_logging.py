@@ -122,3 +122,97 @@ def test_bundle_failure_preserves_traceback_retry_and_last_good_pool(store, monk
         assert store.rec_proposals.get_proposals('mode_bundles') == {'last-good': True}
     finally:
         worker.shutdown()
+
+
+def test_job_progress_keeps_original_wait_until_explicit_completion(caplog):
+    clock = [0.]
+    diagnostics = work_diagnostics.MaintenanceDiagnostics(clock=lambda: clock[0])
+    caplog.set_level(logging.INFO)
+    with work_diagnostics.work_span('outer worker'):
+        with work_diagnostics.maintenance_job('requested job'):
+            diagnostics.record('deferred', reasons=('missing',))
+            clock[0] = 10.
+            diagnostics.record('published')
+            clock[0] = 20.
+            diagnostics.record('deferred', reasons=('budget',))
+            assert diagnostics.waiting == {'requested job': 0.}
+            clock[0] = 60.
+            diagnostics.flush()
+            summary = caplog.records[-1]
+            assert summary.args[1] == 1
+            assert summary.args[-1] == {'requested job': 60.}
+            diagnostics.record('completed')
+            assert not diagnostics.waiting
+        diagnostics.record('deferred')
+        diagnostics.record('published')
+        assert not diagnostics.waiting
+    assert diagnostics.phases['outer worker', 'published'] == 1
+
+
+def test_disabled_job_is_retired_once_and_context_is_restored_after_failure():
+    diagnostics = work_diagnostics.MaintenanceDiagnostics(clock=lambda: 0.)
+    diagnostics.record('deferred', phase='disabled job')
+    diagnostics.record('deferred', phase='pending job')
+    diagnostics.resolve_wait('disabled job', 'disabled')
+    diagnostics.resolve_wait('disabled job', 'disabled')
+    assert diagnostics.waiting == {'pending job': 0.}
+    assert diagnostics.phases['disabled job', 'obsolete'] == 1
+    assert diagnostics.reasons['disabled job', 'disabled'] == 1
+    with work_diagnostics.work_span('worker'):
+        with pytest.raises(RuntimeError), work_diagnostics.maintenance_job('failed job'):
+            raise RuntimeError('interrupted')
+        diagnostics.record('published')
+    assert diagnostics.phases['worker', 'published'] == 1
+
+
+def test_home_revisit_partial_publications_preserve_wait_then_complete(store, monkeypatch):
+    clock = [0.]
+    store.maintenance_diagnostics = work_diagnostics.MaintenanceDiagnostics(clock=lambda: clock[0])
+    attempts = []
+    fail = [True]
+
+    def albums(*args, **kwargs):
+        attempts.append('albums')
+        if fail[0]:
+            raise WorkBudgetExceeded('unfinished album summary')
+        return ['album']
+
+    monkeypatch.setattr(home_prepared.surfaces, 'rediscover_playlists', lambda *a, **kw: ['playlist'])
+    monkeypatch.setattr(home_prepared.surfaces, 'rediscover_albums', albums)
+    monkeypatch.setattr(home_prepared.surfaces, 'rediscover_tracks', lambda *a, **kw: ['track'])
+    with work_diagnostics.work_span('rec: different worker label'):
+        home_prepared.prepare_revisit(store, 1000)
+        assert store.rec_proposals.get_proposals('home_revisit')['rediscover'] == ['playlist']
+        assert store.maintenance_diagnostics.waiting == {home_prepared.REVISIT_PHASE: 0.}
+        clock[0] = 20.
+        home_prepared.prepare_revisit(store, 1060)
+        assert store.rec_proposals.get_proposals('home_revisit')['rediscover_tracks'] == ['track']
+        assert store.maintenance_diagnostics.waiting == {home_prepared.REVISIT_PHASE: 0.}
+        fail[0] = False
+        home_prepared.prepare_revisit(store, 1120)
+    assert len(attempts) == 3
+    assert not store.maintenance_diagnostics.waiting
+    assert store.maintenance_diagnostics.phases[home_prepared.REVISIT_PHASE, 'completed'] == 1
+
+
+def test_home_revisit_stale_slice_cannot_be_hidden_by_other_publications(store, monkeypatch):
+    store.settings.set_setting('revisit-input', 'old')
+    phase = home_prepared.REVISIT_PHASE
+    store.maintenance_diagnostics.record('deferred', phase=phase)
+    start = store.maintenance_diagnostics.waiting[phase]
+
+    def stale(reader, *args, **kwargs):
+        reader.settings.get_setting('revisit-input')
+        store.settings.set_setting('revisit-input', 'changed')
+        return ['stale']
+
+    monkeypatch.setattr(home_prepared.surfaces, 'rediscover_playlists', stale)
+    monkeypatch.setattr(home_prepared.surfaces, 'rediscover_albums', lambda *a, **kw: ['album'])
+    monkeypatch.setattr(home_prepared.surfaces, 'rediscover_tracks', lambda *a, **kw: ['track'])
+    home_prepared.prepare_revisit(store, 1000)
+    assert store.maintenance_diagnostics.waiting == {phase: start}
+    cached = store.rec_proposals.get_proposals('home_revisit')
+    assert 'rediscover' not in cached and cached['rediscover_tracks'] == ['track']
+    monkeypatch.setattr(home_prepared.surfaces, 'rediscover_playlists', lambda *a, **kw: ['current'])
+    home_prepared.prepare_revisit(store, 1060)
+    assert not store.maintenance_diagnostics.waiting

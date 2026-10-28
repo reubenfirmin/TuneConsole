@@ -23,15 +23,20 @@ def test_middle_stream_transition_bends_around_fixed_control(page, radio_ui):
         samples = page.evaluate('''() => new Promise(resolve => {
           const model = Alpine.$data(document.querySelector('.radio-home'));
           const paths = [...document.querySelectorAll('.radio-junction-line, .radio-junction-flow')];
-          const {x, y, rx, ry, insetX, insetY} = model.junctionHub;
+          const control = document.querySelector('.radio-tune').getBoundingClientRect();
+          const x = control.x + control.width / 2, y = control.y + control.height / 2;
           const frames = [];
           const sample = () => {
             let nearest = Infinity;
             for (const path of paths) {
-              const length = path.getTotalLength();
+              const length = path.getTotalLength(), matrix = path.getScreenCTM();
               for (let step = 0; step <= 400; step++) {
-                const at = path.getPointAtLength(length * step / 400);
-                nearest = Math.min(nearest, Math.hypot((at.x - x) / (rx - insetX), (at.y - y) / (ry - insetY)));
+                const at = path.getPointAtLength(length * step / 400).matrixTransform(matrix);
+                // Check the unmasked drawing against the actual control, with
+                // one screen pixel of clearance. The approved spline can round
+                // inside its routing padding without touching the button.
+                nearest = Math.min(nearest, Math.hypot((at.x - x) / (control.width / 2 + 1),
+                  (at.y - y) / (control.height / 2 + 1)));
               }
             }
             frames.push({nearest, x: model.junctionX, fork: model.junctionForkX,
@@ -40,7 +45,7 @@ def test_middle_stream_transition_bends_around_fixed_control(page, radio_ui):
           };
           requestAnimationFrame(sample);
         })''')
-        assert min(frame['nearest'] for frame in samples) >= .998
+        assert min(frame['nearest'] for frame in samples) >= 1
         assert len({round(frame['x'], 2) for frame in samples}) > 10
         assert max(abs(frame['x'] - frame['fork']) for frame in samples) > 10
         transitions.append(samples)

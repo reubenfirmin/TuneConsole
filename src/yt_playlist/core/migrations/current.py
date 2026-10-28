@@ -254,10 +254,17 @@ def bootstrap(conn, registry, now):
     validate(conn)
 
 
-def validate(conn, version=VERSION):
+def validate(conn, version=VERSION, *, replaced=frozenset()):
     objects = {r[0]: (r[1], r[2]) for r in conn.execute(
         "SELECT name,type,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")}
+    if version == VERSION and 'album_primary_provider_ids' in objects:
+        from . import v062_album_aliases
+        if not replaced:
+            v062_album_aliases.validate(conn)
+        replaced = set(replaced) | v062_album_aliases.REPLACED
     for name, (kind, expected) in contract(version).items():
+        if name in replaced:
+            continue
         actual = objects.get(name)
         if actual is None or actual[0] != kind:
             raise MigrationError(f'Missing current {kind}: {name}')

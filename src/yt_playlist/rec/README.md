@@ -1,14 +1,14 @@
 # Recommendation application boundaries
 
-Listening analytics uses three calculation owners. `trend_statistics` handles UTC
-calendar boundaries, distinct listening days, weekly/monthly folds and overlays.
-`trend_insights` accepts detached play counts and exact timestamp series, applies
-the existing editorial thresholds and ranks candidates without repository reads.
-`trend_payload` prepares recap, health and artwork fields on the private snapshot
-reader. `trend_rollups` reads quarantined inputs and publishes the assembled JSON
-and first-play index through the existing source-generation check. Expensive work
+Monthly recaps use each account's retained listening calendar. `trend_statistics`
+folds account dates into monthly totals, discovery, diversity and streaks.
+`trend_payload` prepares the recap on a private snapshot reader; `recap_metrics`
+and `recap_details` measure and select its optional detail screens. `trend_rollups`
+reads quarantined inputs and publishes only `built_at` and `story`, together with
+the first-play index, through the existing source-generation check. Expensive work
 stays in background maintenance; a stale or failed publication preserves the prior
-generation and cannot consume its month-review notification.
+generation. Home owns recap viewed/dismissed state. The retired Trends charts,
+weekly overlays, insight detectors, health payload and spotlight are no longer built.
 
 Radio's genre dial has explicit endpoints. Fully Eclectic actively chooses a
 different genre from the preceding song, favors genres heard less recently, and
@@ -60,6 +60,51 @@ board, tuning, discovery, onboarding and generation route groups. `home_views`
 shares request-cached prepared reads and fragment presentation across those groups,
 including response headers and audit points. Recommendation policy stays outside HTTP.
 Existing rankers, recipes and recommendation surfaces remain the policy engines.
+
+Vibe selection consumes one prepared score per listening purpose. Background
+`vibe_preparation` uses the recording's own captured excerpts and selected
+provider measurements (including AcousticBrainz), then conservative predictions
+from distinct measured recordings with the same canonical artist credit set and
+specific subgenre, then artist-only or subgenre-only evidence. The original
+musical heuristic fills missing evidence. Broad genres never form prediction
+cohorts, and predictions never become measurement evidence. Home uses these
+scores directly; radio's intensity control uses the greater prepared Energize
+or Let off steam fit, so slow forceful music does not masquerade as chill.
+
+Seven relations own this data: `sample_attributes` references immutable sample
+JSON files; `measurements` retains model scores, linked through `measurement_samples`;
+`predictions` retains projected scores, with `prediction_artists` for their exact
+conditioning credits and `prediction_inputs` for original contributing measurements.
+`recording_vibes` selects current scores for serving and indexed ranking. Musical
+profile JSON contains dimensions, without duplicating these scores. Cohort
+statistics are calculated from current original measurements in the background;
+`rec_vibe_pending` pages affected recordings through the existing preparation worker.
+New measurements, metadata/credit corrections and configured model
+changes refresh dependencies without a full content-model fit. Support increases
+with distinct recordings and agreement; one useful measurement already nudges a
+prediction. Replays and multiple uploads do not add votes. Missing or incomplete
+audio retains the provider/heuristic path, and last-good profiles remain readable
+through preparation, restart and failed publication.
+
+Migration 61 preserves prior scores and model versions. Legacy predictions have
+`lineage_complete=0`: their old JSON did not retain exact contributor IDs, so the
+migration does not invent them. Unknown historical measurement times are null.
+New predictions retain complete measurement links. Exact-video reassociation moves
+sample file references and retires obsolete measurement/sample links; original
+calculations and historical prediction inputs keep their original ownership.
+
+Human popup labels are **INTERNAL DEVELOPMENT ONLY**. They are targets for the
+local trainer and evaluation, never product preferences, per-recording overrides,
+runtime inference inputs or seeds for artist/subgenre predictions. The exported
+JSON coefficients may use both base metadata and captured audio; their feature
+normalization and regularization treat both sources equally.
+
+`group_home` assembles Home Mix tapes from the last complete versioned graph
+projection in `group_serving`; initial preparation and explicit rollback retain
+the previous path. Each offer freezes its exact definition and hierarchy for
+`group_learning`, and `group_viz` presents that same generation in Taste Model.
+See [the adaptive grouping design](../../../ADAPTIVE_TASTE_GROUPS.md) for serving,
+lineage, work budgets and isolated actual-library reproduction.
 
 Initial setup offers verified library songs as soon as they arrive. Leaving setup
 requires a completed import and usable prepared mixes; sparse accounts can receive
@@ -117,9 +162,18 @@ from detached ledger inputs after the private reporting snapshot is released.
 Trace policies and outcomes are loaded on the same snapshot, preserving historical
 ownership even after catalog changes. Repositories do not import scorecard policy.
 
+Bundle preparation first releases its private reader and calls
+`rec_proposals.stage_prepared_bundles`. Immutable UTF-8 chunks commit at most
+64 KiB per transaction, remaining hidden behind the previous serving heads.
+Identical retries resume their committed prefix; expired inactive builds are
+removed in bounded transactions. The first cutover retains the legacy payload
+without rewriting it. Direct legacy replacement or invalidation removes its head.
+Discovery pruning and policy retention read the active payloads.
+
 Bundle publication calls `rec_ledger.publish_prepared_policies`,
 `rec_proposals.publish_prepared_bundles` and `settings.publish_values` in one
-`ReadSnapshot.publish` transaction. None commits independently. Failure or stale
+`ReadSnapshot.publish` transaction. Only small cache references are switched in
+this transaction; none of these methods commits independently. Failure or stale
 inputs retain both last-good proposal sets and prevent partial policy publication.
 
 `model_refresh` prepares serialized model results on a private snapshot without
@@ -242,6 +296,24 @@ have a twenty-second cooperative budget and a 512 MiB working-set estimate check
 before collaborative matrix construction and content encoding. Deferred work keeps its durable inputs
 and last published output; retries continue even after capture drains its queue.
 These are resource admission limits, not a claim that the entire catalog is ready.
+The encoder fills one preallocated float32 matrix; clustering reuses it and keeps
+its existing float64 arithmetic, distance chunks, seed and ordering. Decoded
+inputs are released before clustering. Admission estimates the encoding,
+clustering and publication phases separately, including cluster-member copies
+and old serialized vectors. The 128 MiB estimate covers admitted working data,
+not the application's total RSS.
+
+The same preparation worker audits missing, unqueued inputs at startup and every
+15 minutes, requeueing at most 32 keys per guarded slice. Existing queue revisions,
+positions and accepted inputs are preserved. Memory/row-limit failures, and time
+limits repeated three times, retry every 15 minutes without requiring new writes.
+Other transient fit failures retain the one-minute retry interval. Fit status and
+retry deadlines survive restart. Model Health polls a cheap saved-status endpoint
+and warns when these limits still prevent progress; successful basis publication
+clears the warning atomically. A retry cannot guarantee that an arbitrarily large
+library fits the unchanged limits. Input publication and basis completion have
+separate diagnostic phases so catch-up cannot hide a blocked fit.
+
 The worker also retains up to 64 MiB of detached collaborative fits across deferred
 publications. A retry reads its baskets and weights again and reuses a fit only
 when their exact input fingerprint matches. This preserves SVD and SGNS objectives,

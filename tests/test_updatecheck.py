@@ -166,6 +166,35 @@ def test_check_latest_fetches_and_caches_when_never_checked(monkeypatch):
     assert store.settings.get_setting("latest_version_checked_at") == "1000.0"
 
 
+def test_fresh_install_defers_automatic_check_and_preserves_deadline_across_restart(monkeypatch):
+    calls = []
+    monkeypatch.setattr(uc, "_fetch_latest_release", lambda: calls.append(1) or "0.2.0")
+    store = FakeStore()
+    uc.schedule_first_check(store, 1000)
+    uc.check_latest(store, 1000)
+    assert calls == []
+    assert store.settings.get_setting("latest_version_checked_at") is None
+    assert store.settings.get_setting("latest_version_seen") is None
+    uc.schedule_first_check(store, 2000)  # a restart must not postpone the deadline
+    uc.check_latest(store, 1000 + 4 * 3600 - 1)
+    assert calls == []
+    uc.check_latest(store, 1000 + 4 * 3600)
+    assert calls == [1]
+    assert store.settings.get_setting("latest_version_seen") == "0.2.0"
+    uc.check_latest(store, 1000 + 4 * 3600 + 1)
+    assert calls == [1]
+
+
+def test_scheduling_first_check_preserves_existing_install_cadence(monkeypatch):
+    calls = []
+    monkeypatch.setattr(uc, "_fetch_latest_release", lambda: calls.append(1) or "0.3.0")
+    store = FakeStore({"latest_version_checked_at": "1000", "latest_version_seen": "0.2.0"})
+    uc.schedule_first_check(store, 1000 + 4 * 3600)
+    assert store.settings.get_setting("latest_version_check_after") is None
+    uc.check_latest(store, 1000 + 4 * 3600)
+    assert calls == [1]
+
+
 def test_check_latest_skips_when_checked_recently(monkeypatch):
     calls = []
     monkeypatch.setattr(uc, "_fetch_latest_release", lambda: calls.append(1) or "0.9.9")

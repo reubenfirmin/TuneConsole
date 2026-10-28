@@ -26,11 +26,13 @@ def test_credential_precedence_and_blank_fallbacks(resolve, env_name, setting_na
     assert resolve(store, config_path=path) is None
 
 
-def test_required_lastfm_key_and_optional_discogs_token(store, tmp_path, monkeypatch):
+def test_search_providers_require_credentials(store, tmp_path, monkeypatch):
     monkeypatch.delenv('LASTFM_API_KEY', raising=False)
     monkeypatch.delenv('DISCOGS_TOKEN', raising=False)
     monkeypatch.setattr(credentials.paths, 'config_path', lambda: tmp_path / 'absent.toml')
     assert not lastfm.available(store)
-    assert discogs.available(store)
+    assert not discogs.available(store)
     store.settings.set_setting('lastfm_api_key', 'key')
     assert lastfm.available(store)
+    store.settings.set_setting('discogs_token', 'token')
+    assert discogs.available(store)

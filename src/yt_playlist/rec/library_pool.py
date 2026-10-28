@@ -40,7 +40,7 @@ def pick(store, now, parameters, exclude_keys=()):
     if cached.get("parameters") != parameters:
         return []
     dao = store.rec_query
-    blocked = set(exclude_keys) | store.rec_eligibility.generated_track_keys() | store.rec_model.suppressed_keys("for_you", now)
+    blocked = set(exclude_keys) | store.rec_model.suppressed_keys("for_you", now)
     owned, muted = dao.library_keys(), store.rec_model.muted_artists()
     weights = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     tracks = home_themes.matching_genres(store, cached["tracks"], include=parameters["include_genres"],

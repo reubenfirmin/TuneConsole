@@ -9,7 +9,7 @@ def build(ctx):
     @router.get("/radio/status")
     def status():
         radio.prepare()
-        return radio.bootstrap()["state"]
+        return radio.state()
 
     @router.get("/radio/seeds")
     async def seeds():
@@ -18,8 +18,7 @@ def build(ctx):
     @router.get("/radio/playlist")
     def playlist(request: Request):
         state = radio.status()
-        pid = state["local_id"]
-        tracks = ctx.store.charts.video_tracks_detail([t["video_id"] for t in state["history"]]) if pid else []
+        tracks = radio.history_tracks(state)
         return ctx.templates.TemplateResponse(request, "_partials/radio_playlist.html", {
             "session": state, "tracks": tracks,
         })
@@ -38,8 +37,9 @@ def build(ctx):
         if playlist_id is not None and (type(playlist_id) is not int or not 0 < playlist_id < 2**63 or data.get("video_id")):
             return {"ok": False, "reason": "Choose a playlist to start radio."}
         try:
+            intent = ctx.bridge.begin_playback_intent()
             return await radio.work.to_thread(radio.start, data.get("video_id"), data.get("local_date"),
-                                              data.get("menu_id"), playlist_id=playlist_id)
+                                              data.get("menu_id"), playlist_id=playlist_id, intent=intent)
         except ValueError as exc:
             return {"ok": False, "reason": str(exc)}
 
@@ -53,7 +53,12 @@ def build(ctx):
             data = await request.json()
             if not isinstance(data, dict) or not all(isinstance(data.get(k), str) for k in ("proposal_id", "menu_id")):
                 raise ValueError("Choose one of the current radio directions.")
-            return await radio.work.to_thread(radio.select, data["proposal_id"], data["menu_id"])
+            video_id = data.get('video_id')
+            if 'video_id' in data and (not isinstance(video_id, str) or not video_id.strip()):
+                raise ValueError("Choose a current song from the stream.")
+            intent = ctx.bridge.begin_playback_intent() if video_id else None
+            return await radio.work.to_thread(radio.select, data["proposal_id"], data["menu_id"], video_id,
+                                              intent=intent)
         except ValueError as exc:
             return {"ok": False, "reason": str(exc)}
 

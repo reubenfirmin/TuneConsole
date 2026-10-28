@@ -1,6 +1,7 @@
 """Disposable musical profiles and durable, bounded source dependency work."""
 from contextlib import ExitStack
 import json
+import hashlib
 
 from yt_playlist.core.db_revisions import keyed_reads
 from yt_playlist.core.activity import WorkBudgetExceeded
@@ -131,15 +132,24 @@ class MusicalProfilesRepo(Repo):
     @synchronized
     def publish_recordings(self, rows, now):
         self._guard()
+        changed = False
         for key, payload, version, digest in rows:
             if payload is None:
-                self.conn.execute('DELETE FROM rec_musical_profiles WHERE identity_key=?', (key,))
+                cursor = self.conn.execute('DELETE FROM rec_musical_profiles WHERE identity_key=?', (key,))
             else:
-                self.conn.execute('INSERT INTO rec_musical_profiles VALUES (?,?,?,?,?) '
+                profile = json.loads(payload)
+                if 'vibes' in profile:
+                    profile.pop('vibes')
+                    payload = json.dumps(profile, sort_keys=True, separators=(',', ':'), allow_nan=False)
+                    digest = hashlib.sha256(payload.encode()).hexdigest()
+                cursor = self.conn.execute('INSERT INTO rec_musical_profiles VALUES (?,?,?,?,?) '
                     'ON CONFLICT(identity_key) DO UPDATE SET payload=excluded.payload,version=excluded.version,'
                     'digest=excluded.digest,prepared_at=excluded.prepared_at '
                     'WHERE digest<>excluded.digest OR version<>excluded.version',
                     (key, payload, version, digest, now))
+            changed = changed or cursor.rowcount > 0
+        if changed:
+            self._store.rec_refresh.publish_notification()
 
     @synchronized
     def by_keys(self, keys):
@@ -147,8 +157,9 @@ class MusicalProfilesRepo(Repo):
             raise ValueError('Musical profile page exceeds 512 identities')
         with keyed_reads(self._store, 'rec_musical_profiles', keys):
             qs = ','.join('?' for _ in keys)
-            return {r[0]: json.loads(r[1]) for r in self.conn.execute(
+            result = {r[0]: json.loads(r[1]) for r in self.conn.execute(
                 f'SELECT identity_key,payload FROM rec_musical_profiles WHERE identity_key IN ({qs})', keys)}
+        return self._store.vibe_predictions.overlay(result)
 
     @synchronized
     def provenance_sources(self, key, digests, *, limit=16, max_bytes=256 * 1024):

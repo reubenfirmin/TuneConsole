@@ -59,7 +59,8 @@ function clusterCanvas() {
       });
       this._fg = fg;
 
-      this._resize(); window.addEventListener('resize', () => this._resize());
+      this._resizing = () => this._resize();
+      this._resize(); window.addEventListener('resize', this._resizing);
       this._layoutObserver = new ResizeObserver(() => {
         this._resize();
         const h = this.$refs.center.offsetHeight;
@@ -72,7 +73,8 @@ function clusterCanvas() {
       });
       this._layoutObserver.observe(document.getElementById('cluster-canvas'));
       this._layoutObserver.observe(this.$refs.center);
-      window.addEventListener('pagehide', () => this._flushState());
+      this._leaving = () => this._flushState();
+      window.addEventListener('pagehide', this._leaving);
       // Mid-edge info dot clicks, intercepted at pointerdown in the CAPTURE phase — BEFORE force-graph's
       // own canvas handler. A dot often sits over a card, where force-graph would otherwise start a node
       // drag (so no click ever fires). Catching it here guarantees the dot opens its "why connected?".
@@ -110,6 +112,18 @@ function clusterCanvas() {
       }
       fetch('/clusters/genres').then(r => r.json())
         .then(d => { this.families = d.families || []; this.genres = d.genres || []; }).catch(() => {});
+    },
+    destroy() {
+      this._flushState();
+      this._searchToken = this._deepLinkToken = this._loadStateToken = this._seedChangeToken = null;
+      this._canvasRevision++;
+      this._layoutObserver?.disconnect();
+      window.removeEventListener('resize', this._resizing);
+      window.removeEventListener('pagehide', this._leaving);
+      clearTimeout(this._hoverT);
+      cancelAnimationFrame(this._boostRAF);
+      this._fg?._destructor();
+      this._fg = null;
     },
     _afterInit(restored) {
       const context = this._graphContext();

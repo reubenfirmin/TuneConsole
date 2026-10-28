@@ -118,16 +118,18 @@ def build_library_content(inputs: ContentInputs) -> EncodedLibrary:
     """Fit and encode detached library inputs in one shared content space."""
     _, content, audio = inputs
     model = build_content_model(content, audio)
-    keys, vecs = [], []
-    for i, k in enumerate(sorted(set(content) | set(audio))):
+    candidates = sorted(set(content) | set(audio))
+    matrix = np.empty((len(candidates), model['ncat'] + len(model['cont'])), dtype=np.float32)
+    keys = []
+    for i, k in enumerate(candidates):
         if i % 256 == 0:
             check_stopping()
         genre, year = content.get(k, (None, None))
         v = encode_content(model, genre, year, audio.get(k))
         if v is not None:
+            matrix[len(keys)] = v
             keys.append(k)
-            vecs.append(v)
-    V = np.stack(vecs).astype(np.float32) if keys else np.zeros((0, 0), dtype=np.float32)
+    V = matrix[:len(keys)] if keys else np.zeros((0, 0), dtype=np.float32)
     return EncodedLibrary(keys, V, model)
 
 

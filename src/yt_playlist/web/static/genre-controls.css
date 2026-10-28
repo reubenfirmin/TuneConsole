@@ -8,7 +8,7 @@
 /* Genre display and metadata suggestions. */
 .mb-genre { position: relative; }
 .genre-display-wrap { display: inline-flex; align-items: center; flex-wrap: nowrap; white-space: nowrap;
-  color: inherit; }
+  min-width: 0; max-width: 100%; color: inherit; }
 .genre-candidates { width: min(28rem, calc(100vw - 2rem)); max-width: none; }
 .genre-track-artist { margin-top: -.3rem; }
 .genre-picker { margin-top: .9rem; }
@@ -57,8 +57,11 @@
   min-height: 1.5rem; min-width: 2.5rem; }
 /* Tight horizontal chrome so all four year digits fit the narrow year column (4rem on albums). */
 td.mb-year { padding-left: 0.25rem; padding-right: 0.3rem; }
-.gtag { display: inline-block; font-size: var(--type-xs); padding: 0.08rem 0.4rem; border-radius: 999px;
+.gtag { display: inline-flex; font-size: var(--type-xs); padding: 0.08rem 0.4rem; border-radius: 999px;
+  box-sizing: border-box; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: clip;
   background: var(--surface-2); border: 1px solid var(--border-2); color: var(--dim); white-space: nowrap; }
+/* Clip the label inside the content box so overflow cannot consume the badge's right padding. */
+.gtag-label { min-width: 0; overflow: hidden; text-overflow: clip; }
 
 /* genre whitelist editor */
 .genre-add { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }

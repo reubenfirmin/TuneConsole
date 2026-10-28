@@ -11,6 +11,15 @@ from yt_playlist.util.matching import track_artist
 from yt_playlist.util.retry import with_retry
 
 
+def _sync_directory(path):
+    if os.name != "nt":
+        directory = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
 def backup_playlist(store, playlist_id, now, client, *, snapshot=None) -> str:
     """Publish a durable, ordered remote snapshot before any playlist deletion.
 
@@ -44,6 +53,11 @@ def backup_playlist(store, playlist_id, now, client, *, snapshot=None) -> str:
     path = (backups / filename).resolve()
     if path.parent != backups:  # belt-and-suspenders: must stay inside backups dir
         raise ValueError(f"refusing to write backup outside {backups}")
+    # mkdir does not durably publish its entry in the parent. Include every
+    # ancestor, even on retries: an earlier failed sync may have left it present
+    # without making it durable. Finish this before authorizing any deletion.
+    for parent in reversed(backups.parents):
+        _sync_directory(parent)
     # A failed write must never replace a previous recovery artifact or authorize deletion.
     temporary = path.with_suffix(".tmp")
     try:
@@ -52,12 +66,7 @@ def backup_playlist(store, playlist_id, now, client, *, snapshot=None) -> str:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
-        if os.name != "nt":
-            directory = os.open(backups, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+        _sync_directory(backups)
     finally:
         temporary.unlink(missing_ok=True)
     return str(path)

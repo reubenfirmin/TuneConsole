@@ -57,7 +57,7 @@ def test_enrich_none_when_no_data(monkeypatch):
         raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
     monkeypatch.setattr(ab, "_get_json", fake_get_json)
     assert ab.enrich("mbid-unknown") == ab._empty()
-    assert not ab._breaker.tripped()   # a 404 is "reachable", must not trip the breaker
+    assert not ab.tripped()   # Endpoint absence does not impose a host cooldown.
 
 
 def test_waterfall_resolves_mbid_then_fills_and_records_evidence(store, monkeypatch):
@@ -74,7 +74,7 @@ def test_waterfall_resolves_mbid_then_fills_and_records_evidence(store, monkeypa
     monkeypatch.setattr(ab, '_get_json', lambda url: high if url.endswith('/high-level')
                         else {'rhythm': {'bpm': 130}})
     events = []
-    monkeypatch.setattr(musicbrainz, "recording_mbid", lambda *args: "mbid-live")
+    monkeypatch.setattr(musicbrainz, "recording_mbid", lambda *args, **kwargs: "mbid-live")
     run_waterfall(store, store.tracks.tracks_for_waterfall(pid),
                   [{"name": "acousticbrainz", "enabled": True}], events.append)
     assert store.tracks.get_track_audio(t1) == (130.0, 0.6, 0.8)
@@ -169,7 +169,7 @@ def test_partial_failure_keeps_previous_evidence_and_retries_for_both_catalogs(s
         store.discovery.upsert_discovered_track('song|artist', 'video', 'Song', 'Artist', '',
                                                 '', None, None, None, 10)
         tid = store.conn.execute("SELECT id FROM catalog_entries WHERE video_id='video'").fetchone()[0]
-    monkeypatch.setattr(ab.musicbrainz, 'recording_mbid', lambda *args: 'mbid')
+    monkeypatch.setattr(ab.musicbrainz, 'recording_mbid', lambda *args, **kwargs: 'mbid')
     phase = ['healthy']
 
     def get(url):
@@ -208,7 +208,7 @@ def test_malformed_endpoint_is_retryable_without_losing_successful_half(store, m
     from yt_playlist.providers.waterfall import run_waterfall
 
     tid = store.tracks.upsert_track('video', 'Song', 'Artist', '', 200)
-    monkeypatch.setattr(ab.musicbrainz, 'recording_mbid', lambda *args: 'mbid')
+    monkeypatch.setattr(ab.musicbrainz, 'recording_mbid', lambda *args, **kwargs: 'mbid')
     monkeypatch.setattr(ab, '_get_json', lambda url: [] if url.endswith('/high-level') else LOWLEVEL)
     assert run_waterfall(store, [store.tracks.track_for_waterfall(tid)],
                          [{'name': 'acousticbrainz', 'enabled': True}], lambda e: None) == []

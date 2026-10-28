@@ -32,6 +32,39 @@ def test_saved_album_only_library_seeds_both_spaces_without_history(store):
     assert all(context["source"]["return_days"] == 0 for context in panel["contexts"])
 
 
+def test_album_day_counts_keep_lifetime_cross_account_deduplication(store):
+    keys = album(store, 'release', 'Record', 'Jazz', 2)
+    store.collection.cache_album_tracklist('release', 'Record', 'Record', None, keys)
+    first = store.identities.upsert_identity('first', 'cred', None, True)
+    second = store.identities.upsert_identity('second', 'cred', None, False)
+    unrelated = store.tracks.upsert_track('other', 'Unrelated', 'Elsewhere', None, 100)
+    other_key = store.conn.execute('SELECT identity_key FROM tracks WHERE id=?', (unrelated,)).fetchone()[0]
+    at = 1_000_000_000
+    store.history.import_listening_events(first,
+        [(keys[0], None, at), (keys[0], None, at + 86400)]
+        + [(other_key, None, at + day * 86400) for day in range(300)], source_timezone='UTC')
+    store.history.import_listening_events(second, [(keys[0], None, at)], source_timezone='UTC')
+    context, = store.collection.taste_album_contexts()
+    assert context['track_days'] == {keys[0]: 2, keys[1]: 0}
+    assert context['return_days'] == 2 and context['return_coverage'] == .5
+    assert context['tracklist_complete']
+
+
+def test_album_preparation_reuses_one_day_aggregate_across_both_spaces(store):
+    keys = album(store, 'release', 'Record', 'Jazz', 2)
+    store.rec_model.replace_rec_vectors([(key, np.array([1., 0.], dtype=np.float32).tobytes()) for key in keys])
+    model_support.build_content_model(store)
+    with store.read_snapshot() as snapshot:
+        statements = []
+        snapshot.store.conn.set_trace_callback(statements.append)
+        prepared = album_choices.prepare(snapshot.store, 100, [])
+        assert [row['browse_id'] for row in prepared] == ['release']
+        assert sum('COUNT(DISTINCT d.day)' in sql for sql in statements) == 1
+        # Inclusion is a consumer filter; it must not poison the shared context memo.
+        assert snapshot.store.collection.taste_album_contexts(include_browse={'missing'})
+        assert sum('COUNT(DISTINCT d.day)' in sql for sql in statements) == 1
+
+
 def test_context_allocation_does_not_prefer_the_average_of_separated_interests():
     taste = PlaylistTaste(["Dance", "Acoustic"], np.eye(2), np.array([.5, .5]))
     candidates = np.array([[1., 0.], [0., 1.], [1., 1.]])
@@ -56,6 +89,48 @@ def test_album_recommendations_use_interest_ranking_for_new_releases(store):
     # Saved membership alone cannot establish a familiar recommendation reference.
     assert next(row for row in result if row['browse_id'] == 'new-techno')['rationale'] is None
     assert {row["classification"] for row in result} == {"discovery", "rediscovery", "familiar_artist"}
+
+
+def test_companion_work_is_limited_to_the_frontier_with_identical_track_selection(store, monkeypatch):
+    keys = []
+    for i in range(40):
+        keys.extend(album(store, f'saved-{i}', f'Artist {i}', 'Jazz' if i % 2 else 'Techno', 1))
+    model_support.build_content_model(store)
+    discoveries = [{'browse_id': f'new-{i}', 'artist': f'New artist {i}', 'title': f'New record {i}',
+                    'genre': 'Jazz' if i % 2 else 'Techno', 'year': '2020'} for i in range(40)]
+    pool = [{'key': key, 'video_id': f'video-{i}', 'artist': f'Track artist {i // 3}'}
+            for i, key in enumerate(keys)]
+    store.rec_proposals.put_proposals('mode_bundles', {'all': {'wheelhouse': pool}}, 1)
+    # The reference evaluates all 80 candidate rows using the existing companion algorithm.
+    from yt_playlist.rec import content_model
+    import json
+    snapshot = store.rec_model.content_generation()
+    _, matrix, index = embedding_vectors.load_content_vectors(store, snapshot=snapshot)
+    model = json.loads(snapshot['model'])
+    all_albums = [{**a, 'browse_id': a['browse']} for a in store.collection.taste_album_contexts()] + discoveries
+    features = []
+    for item in all_albums:
+        rows = [index[key] for key in item.get('keys', []) if key in index]
+        vector = matrix[rows].mean(0) if rows else content_model.encode_content(model, item['genre'], item['year'], {})
+        features.append(vector / np.linalg.norm(vector))
+    original = album_choices._companions
+    expected = dict(zip([a['browse_id'] for a in all_albums],
+                        original(store, all_albums, np.asarray(features), matrix, index)))
+    calls = []
+
+    def bounded(store, albums, features, matrix, index):
+        assert len(albums) == len(features) <= 24
+        calls.extend(a['browse_id'] for a in albums)
+        return original(store, albums, features, matrix, index)
+
+    monkeypatch.setattr(album_choices, '_companions', bounded)
+    prepared = album_choices.prepare(store, 100, discoveries)
+    assert len(prepared) == len(calls) == 24
+    assert set(calls) == {a['browse_id'] for a in prepared}
+    assert sum(a['classification'] == 'rediscovery' for a in prepared) == 12
+    for item in prepared:
+        assert item['companion'] == expected[item['browse_id']]
+        assert not set(item.get('keys') or []) & {track['key'] for track in item['companion']}
 
 
 def test_album_reason_uses_other_positive_model_contexts_not_its_own_saved_seed():

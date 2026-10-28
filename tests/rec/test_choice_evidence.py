@@ -160,3 +160,106 @@ def test_prepared_context_reference_survives_maintenance_and_issues_exact_captur
     ledger = store.rec_ledger.evidence()
     capture = choices.resolve_context(store, {'artifact': ledger.get('opportunity', oid)['context']})
     assert capture == {**context, 'radio': {'fingerprint': 'actual-direction-pool'}}
+
+
+def test_unchanged_home_retry_skips_inventory_and_preserves_memo_dependencies(store, monkeypatch):
+    from yt_playlist.core.evidence_ledger import EvidenceLedger
+    oid = offer(store)
+    choices.respond(store, oid, 'choice', 102, option_id='a')
+    report = choices.refresh_report(store, 110)
+    projection = store.rec_proposals.get_proposals('choice_interests')
+    prepared = []
+
+    def cached_input():
+        with store.read_snapshot() as snapshot:
+            def read():
+                prepared.append(True)
+                return snapshot.store.rec_proposals.get_proposals('choice_interests')
+            return snapshot.store.memoized_read('album-choice-input', read)
+
+    assert cached_input() == projection
+    with monkeypatch.context() as patch:
+        patch.setattr(EvidenceLedger, 'records', lambda *args: pytest.fail('Unchanged retry inventoried evidence'))
+        assert choices.refresh_report(store, 140) == report
+    # A scheduled decay refresh may update reporting, but not unchanged taste inputs.
+    later = choices.refresh_report(store, report['refresh']['next_at'])
+    assert later['at'] > report['at']
+    assert cached_input() == projection
+    assert prepared == [True]
+
+
+def test_home_storage_inventory_belongs_to_daily_maintenance(store, monkeypatch):
+    import logging
+    from types import SimpleNamespace
+    from yt_playlist.rec.worker_tasks import ServingTasks
+    stages = []
+
+    def stage(name, target, *args, **kwargs):
+        stages.append(target)
+        if target is choices.refresh_report:
+            return target(*args, **kwargs)
+
+    ctx = SimpleNamespace(store=store, now_fn=lambda: 110, client_provider=lambda: {},
+                          logger=logging.getLogger(__name__))
+    assert ServingTasks(ctx, stage).home()
+    assert choices.refresh_report in stages and choices.maintain_storage not in stages
+
+
+def test_new_and_withdrawn_evidence_from_another_store_refreshes_projection(tmp_path):
+    path = tmp_path / 'shared.db'
+    first, second = Store(path), Store(path)
+    try:
+        first.init_schema()
+        second.init_schema()
+        oid = offer(first)
+        choices.refresh_report(first, 110)
+        choices.respond(second, oid, 'choice', 111, option_id='a')
+        assert choices.refresh_report(first, 112)['formats']['albums']['choices'] == 1
+        assert first.rec_proposals.get_proposals('choice_interests')['contexts']
+        choices.respond(second, oid, 'withdraw', 113, details={'action_id': f'{oid}:choice:a'})
+        assert choices.refresh_report(first, 114)['formats']['albums']['choices'] == 0
+        assert not first.rec_proposals.get_proposals('choice_interests')['contexts']
+    finally:
+        first.conn.close()
+        second.conn.close()
+
+
+def test_projection_deadlines_admit_future_evidence_and_parameter_changes(store):
+    from yt_playlist.rec import rec_params
+    offer(store, now=200)
+    before = choices.refresh_report(store, 100)
+    assert before['source_opportunities'] == 0 and before['refresh']['next_at'] == 200
+    assert choices.refresh_report(store, 199) == before
+    assert choices.refresh_report(store, 200)['source_opportunities'] == 1
+    rec_params.set_param(store, 'choice_halflife_d', 14)
+    assert choices.refresh_report(store, 201)['home_format']['half_life_days'] == 14
+    # An explicit past-cutoff diagnostic must not reuse a future report.
+    assert choices.refresh_report(store, 100)['source_opportunities'] == 0
+
+
+def test_bandit_expiry_preempts_periodic_refresh_and_mode_changes_refresh_immediately(store):
+    from tests.rec.test_choice_bandit import modes, menu
+    modes(store)
+    oid = menu(store)
+    choices.respond(store, oid, 'visible', 101, visible=['one', 'two'])
+    choices.respond(store, oid, 'choice', 102, option_id='one')
+    report = choices.refresh_report(store, 103)
+    expiry = report['bandit']['expires_at']
+    near_expiry = choices.refresh_report(store, expiry - 30)
+    assert near_expiry['bandit']['rows']
+    assert near_expiry['refresh']['next_at'] == expiry
+    assert not choices.refresh_report(store, expiry)['bandit']['rows']
+    choices.refresh_report(store, 104)
+    modes(store, flipped=True)
+    assert not choices.refresh_report(store, 105)['bandit']['rows']
+
+
+def test_unrelated_visibility_does_not_republish_effectively_unchanged_interest(store):
+    oid = offer(store)
+    choices.respond(store, oid, 'choice', 102, option_id='a')
+    choices.refresh_report(store, 110)
+    original = store.rec_proposals.get_proposals('choice_interests')
+    offer(store, identity='unseen', now=111)
+    report = choices.refresh_report(store, 112)
+    assert report['source_opportunities'] == 2
+    assert store.rec_proposals.get_proposals('choice_interests') == original

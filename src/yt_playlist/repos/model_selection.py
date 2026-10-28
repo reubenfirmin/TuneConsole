@@ -5,10 +5,23 @@ selection/report consumers do not depend on taste feedback or embedding storage.
 """
 import json
 
-from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 
 
 class ModelSelectionRepo(Repo):
+    @synchronized
+    def latest_daily_selection(self):
+        row = self.conn.execute("SELECT id,result_json FROM rec_model_selection_runs "
+            "WHERE json_extract(result_json,'$.kind')='daily' ORDER BY id DESC LIMIT 1").fetchone()
+        return {"id": row["id"], **json.loads(row["result_json"])} if row else None
+
+    @snapshot_read
+    def comparison_activity(self, start, end):
+        """One first timestamp per independently played key in a half-open interval."""
+        return {row[0]: row[1] for row in self.conn.execute(
+            'SELECT identity_key,MIN(at) FROM listening_activity WHERE at>=? AND at<? '
+            'GROUP BY identity_key', (start, end))}
+
     @synchronized
     def maintain_selection(self, now):
         """Bound disposable pair/forecast storage, preserving live and held versions."""
@@ -37,8 +50,21 @@ class ModelSelectionRepo(Repo):
                     self.conn.execute('DELETE FROM rec_proposals WHERE surface=?', (surface,))
             qs = ','.join('?' for _ in keep) or 'NULL'
             self.conn.execute(f'DELETE FROM rec_model_previous_vectors WHERE run_id NOT IN ({qs})', tuple(keep))
-            self.conn.execute(f'DELETE FROM rec_model_forecasts WHERE run_id NOT IN ({qs}) AND made_at<?',
-                              (*keep, now - 180 * 86400))
+            # Legacy diagnostic forecasts carry full candidate universes. An
+            # active restore point protects vectors, not an endless forecast log.
+            # Freeze the last published summary before retiring an entire source
+            # series; never recompute a misleading partial history from its tail.
+            expired = [row[0] for row in self.conn.execute(
+                'SELECT DISTINCT run_id FROM rec_model_forecasts WHERE made_at<?', (now - 180 * 86400,))]
+            for run_id in expired:
+                run = self.selection_run(run_id)
+                if run:
+                    followup = run.setdefault('followup', {})
+                    followup.update(frozen_at=now, reprocessing_available=False,
+                                    retention_days=180)
+                    self.conn.execute('UPDATE rec_model_selection_runs SET result_json=? WHERE id=?',
+                                      (json.dumps(run), run_id))
+                self.conn.execute('DELETE FROM rec_model_forecasts WHERE run_id=?', (run_id,))
 
     @synchronized
     def selection_runs(self, limit=6):
@@ -85,6 +111,9 @@ class ModelSelectionRepo(Repo):
 
     @synchronized
     def save_model_forecast(self, run_id, now, forecast):
+        run = self.selection_run(run_id)
+        if run and (run.get('followup') or {}).get('frozen_at') is not None:
+            return
         self.conn.execute("INSERT OR IGNORE INTO rec_model_forecasts VALUES (?,?,?)",
                           (run_id, now, json.dumps(forecast)))
         self.conn.commit()

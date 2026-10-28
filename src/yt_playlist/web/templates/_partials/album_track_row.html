@@ -32,7 +32,7 @@
   </td>
   <td class="mb-genre">
     <div class="track-cell">
-    <span class="genre-display-wrap">{% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted ghint">—</span>{% endif %}</span>
+    <span class="genre-display-wrap">{% if t.genre %}<span class="gtag" title="{{ t.genre }}"><span class="gtag-label">{{ t.genre }}</span></span>{% else %}<span class="muted ghint">—</span>{% endif %}</span>
     </div>
   </td>
   <td class="num mono track-plays"><div class="track-cell">{{ t.plays or '' }}</div></td>

@@ -110,7 +110,7 @@ def test_album_status_track_links_and_save_from_artist(live_artist_app, page, wi
     save = page.get_by_role('button', name='Save album to library', exact=True)
     expect(save).to_be_visible()
     expect(save).to_be_in_viewport(ratio=1)
-    expect(page.get_by_text('1 of 2 tracks in your library. The album is not saved.', exact=True)).to_be_visible()
+    expect(page.get_by_text('1 of 2 tracks in your library. The album is not saved.', exact=True)).to_have_count(0)
     rows = page.locator('.track-table tbody tr.srow')
     expect(rows).to_have_count(2)
     expect(rows.locator('a.ptitle')).to_have_count(2)

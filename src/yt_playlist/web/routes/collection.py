@@ -28,8 +28,9 @@ def build(ctx) -> APIRouter:
         view = "playlists" if request.query_params.get("view") == "playlists" else "saved"
         data = {"view": view}
         if view == "saved":
-            data["saved"] = store.collection.get_saved_albums()   # populated by sync (get_library_albums)
-            data["saved_owners"] = store.collection.saved_album_owners()
+            with store.read_view() as reader:
+                data["saved"] = reader.collection.get_saved_albums()   # populated by sync (get_library_albums)
+                data["saved_owners"] = reader.collection.saved_album_owners()
         else:
             data["albums"] = store.collection.collection_albums()
         return templates.TemplateResponse(request, "albums.html", data)

@@ -1,5 +1,3 @@
-import sqlite3
-
 import pytest
 
 from yt_playlist.core.migrations import Migration,MigrationError,migrate
@@ -47,11 +45,7 @@ def test_populated_v28_upgrade_preserves_rows_and_allows_a_new_unidentified_name
     assert list(s.conn.iterdump())==state
     assert s.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
     s.conn.close()
-    backups = list((tmp_path/'backups').glob('*.db'))
-    assert backups
-    with sqlite3.connect(backups[-1]) as conn:
-        assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]==28
-        assert 'UNIQUE' in conn.execute("SELECT sql FROM sqlite_master WHERE name='ix_artist_provisional_name'").fetchone()[0]
+    assert not (tmp_path/'backups').exists()
 
 
 def test_failed_v29_upgrade_restores_original_unique_index_and_rows(tmp_path):

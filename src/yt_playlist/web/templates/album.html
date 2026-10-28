@@ -33,9 +33,6 @@
     <div class="pl-actions">
       {% include '_partials/album_controls.html' %}
     </div>
-    {% if not in_library and library_track_count %}
-    <p class="section-note">{{ library_track_count }} of {{ album.tracks|length }} tracks in your library. The album is not saved.</p>
-    {% endif %}
   </div>
   {# Enrichment runs over the album's tracks once they're folded into the library, which happens when
      you save it (or immediately, if it's your own upload), so the icons are always shown (parity

@@ -42,6 +42,9 @@ WHAT THIS DOES *NOT* COVER (stated honestly, also shown on /network)
 Cover-art thumbnails in the UI are loaded by your *browser*, straight from
 Google's image CDNs; they never pass through the server, so they do not appear in
 this log. No credentials are attached to those image loads.
+TV's static-video check separately fetches timeline preview frames on the
+server. Only bodyless HTTPS GETs to YouTube's storyboard image paths are allowed;
+these requests are logged, and their signed query strings are omitted.
 
 PRIVACY OF THE LOG ITSELF
 -------------------------
@@ -53,6 +56,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import re
 import ssl
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -108,6 +112,15 @@ def host_allowed(host: str) -> bool:
     """True iff `host` is an allowed domain or a subdomain of one (case-insensitive)."""
     host = (host or "").lower().rstrip(".")
     return any(host == d or host.endswith("." + d) for d in ALLOWED_DOMAINS)
+
+
+def storyboard_url_allowed(url: str) -> bool:
+    """Only YouTube's signed timeline sheets, without broad image-CDN access."""
+    parts = urlsplit(url)
+    return (len(url) <= 4096 and parts.scheme == 'https' and parts.netloc == 'i.ytimg.com'
+            and not parts.fragment and re.fullmatch(
+                r'/sb/[A-Za-z0-9_-]{11}/storyboard\d+_L\d+/[A-Za-z0-9_-]{1,40}\.jpg',
+                parts.path) is not None)
 
 
 class EgressGuard:
@@ -188,7 +201,8 @@ class EgressGuard:
         host, path = parts.hostname or "", parts.path or "/"
         exact_request_allowed = ((body is None and (method.upper(), url) in ALLOWED_REQUESTS)
                                  or (method.upper(), url) in ALLOWED_POST_REQUESTS)
-        if not host_allowed(host) and not exact_request_allowed:
+        preview_allowed = body is None and method.upper() == 'GET' and storyboard_url_allowed(url)
+        if not host_allowed(host) and not exact_request_allowed and not preview_allowed:
             # Record the block, shout about it on the main log too, then refuse.
             self.record(verdict="BLOCK", method=method, host=host, path=path, via=via)
             logger.warning("egress BLOCKED: %s %s%s", method, host, path)

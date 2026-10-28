@@ -22,6 +22,16 @@
 .page-home .dash-directions .home-mixes > .section-note:not([role="status"]) {
   display: none;
 }
+.page-home .home-mixes:has(.gen-row) > .mix-preparation-note { display: none; }
+.mix-preference-note {
+  margin: 0 0 .9rem;
+  padding: .8rem 1rem;
+  border-inline-start: 3px solid var(--accent);
+  border-radius: 4px;
+  background: var(--surface-card);
+  color: var(--text);
+  line-height: 1.5;
+}
 .page-home .dash-directions .gen-lanes {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   grid-template-rows: repeat(2, minmax(0, 1fr));
@@ -294,6 +304,8 @@
 .page-home .dash-directions .gen-lanes {
   position: relative;
   isolation: isolate;
+  /* Contain the staggered card entrance while the panel also slides in. */
+  overflow-x: clip;
 }
 .page-home .dash-directions .gen-lanes:not(.has-focus) > .gen-card {
   z-index: 1;

@@ -1,9 +1,9 @@
-"""#38 behavior-oriented taste: the tracks you actually play form a co-equal context in playlist_taste
-(via _behavior_centroid), so taste leans on listening, not only playlist curation."""
+"""Listening is the fallback for libraries without playlist, album or choice contexts."""
 import numpy as np
+import pytest
 
 from yt_playlist.rec import scoring
-from yt_playlist.rec.scoring import PlaylistTaste, _behavior_centroid, BEHAVIOR_TASTE_W
+from yt_playlist.rec.scoring import _behavior_centroid
 
 
 def test_behavior_centroid_from_played_tracks(monkeypatch, store):
@@ -20,29 +20,34 @@ def test_behavior_centroid_none_when_nothing_played(monkeypatch, store):
     assert _behavior_centroid(store, np.eye(2, dtype=np.float32), {"a|x": 0, "b|y": 1}) is None
 
 
-def test_playlist_taste_ignores_behavior_at_zero_weight(monkeypatch, store):
-    # #56 verdict (143d re-run): the flat play-centroid actively hurts at 14d/30d holdouts, so
-    # BEHAVIOR_TASTE_W is 0.0 and playlist_taste must NOT append a dead "Your listening" context.
-    assert BEHAVIOR_TASTE_W == 0.0
+@pytest.mark.parametrize('source', ['playlist', 'album', 'choice'])
+def test_populated_contexts_do_not_read_behavior_evidence(monkeypatch, store, source):
     V = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
     monkeypatch.setattr(scoring.vectors, "load_vectors", lambda s: (["a|x", "b|y"], V, {"a|x": 0, "b|y": 1}))
-    monkeypatch.setattr(scoring, "_playlist_centroids",
-                        lambda s, M, idx: PlaylistTaste(["P"], np.array([[1.0, 0.0]]), np.array([1.0]), [7]))
-    monkeypatch.setattr(store.rec_query, "play_counts", lambda: {"b|y": 3}, raising=False)
-    pt = scoring.playlist_taste(store)
-    assert pt.titles == ["P"]
+    if source == 'playlist':
+        iid = store.identities.upsert_identity('main', 'cred', None, True)
+        tid = store.tracks.upsert_track('v', 'A', 'X', None, 100)
+        pid = store.playlists.upsert_playlist(iid, 'PL', 'Curated', 1, 'hash', 1)
+        store.playlists.set_playlist_tracks(pid, [tid])
+    elif source == 'album':
+        store.collection.add_saved_album({'browse': 'record', 'artist': 'X', 'title': 'Saved'})
+        store.tracks.upsert_track('v', 'A', 'X', 'Saved', 100, album_browse_id='record')
+    else:
+        store.rec_proposals.put_proposals('choice_interests', {'contexts': [{
+            'format': 'mixes', 'option_id': 'mix', 'keys': ['a|x'], 'at': 100,
+            'days': 1, 'episodes': 1, 'episode_support': 1}]}, 100)
+    monkeypatch.setattr(store.rec_query, 'play_counts', lambda: pytest.fail('Populated taste loaded listening fallback'))
+    pt = scoring.playlist_taste(store, now=110)
+    assert pt and pt.titles != ['Your listening']
+    assert pt.centroids == pytest.approx(np.array([[1., 0.]]))
     assert abs(pt.weights.sum() - 1.0) < 1e-9
 
 
-def test_playlist_taste_behavior_blend_composition(monkeypatch, store):
-    # The blend machinery stays correct for any future nonzero weight: contexts and normalization.
+def test_empty_contexts_keep_the_listening_fallback(monkeypatch, store):
     V = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
     monkeypatch.setattr(scoring.vectors, "load_vectors", lambda s: (["a|x", "b|y"], V, {"a|x": 0, "b|y": 1}))
-    monkeypatch.setattr(scoring, "_playlist_centroids",
-                        lambda s, M, idx: PlaylistTaste(["P"], np.array([[1.0, 0.0]]), np.array([1.0]), [7]))
     monkeypatch.setattr(store.rec_query, "play_counts", lambda: {"b|y": 3}, raising=False)
-    monkeypatch.setattr(scoring, "BEHAVIOR_TASTE_W", 0.5)
     pt = scoring.playlist_taste(store)
-    assert pt.titles == ["P", "Your listening"]
-    assert abs(pt.weights[-1] - 0.5) < 1e-9
-    assert abs(pt.weights.sum() - 1.0) < 1e-9          # weights still normalized
+    assert pt.titles == ["Your listening"]
+    assert pt.centroids == pytest.approx(np.array([[0., 1.]]))
+    assert pt.weights == pytest.approx([1.])

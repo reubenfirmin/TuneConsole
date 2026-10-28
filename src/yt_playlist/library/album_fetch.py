@@ -33,7 +33,7 @@ def shareable_album_tracks(album):
     """
     tracks = album.get("tracks") if isinstance(album, dict) else None
     if not isinstance(tracks, list) or not tracks or album.get("continuation") or album.get("continuations"):
-        raise ValueError("The full album track list is unavailable. Reconnect to YouTube Music and try sharing again.")
+        raise ValueError("The full album track list is unavailable. Reconnect to YouTube Music and try again.")
     count = album.get("trackCount")
     if count is not None:
         try:
@@ -41,7 +41,7 @@ def shareable_album_tracks(album):
         except (TypeError, ValueError):
             complete = False
         if not complete:
-            raise ValueError("The album track list is incomplete. Refresh the album and try sharing again.")
+            raise ValueError("The album track list is incomplete. Refresh the album and try again.")
     if any(not isinstance(track, dict) or not isinstance(track.get("videoId"), str)
            or not track["videoId"].strip() for track in tracks):
         raise ValueError("Some album tracks have no shareable video link. Try again when all tracks are available.")

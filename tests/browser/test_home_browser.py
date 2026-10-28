@@ -284,15 +284,103 @@ def test_two_ready_mixes_show_clickable_skeletons_for_the_missing_slots(live_app
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize('width', [1440, 390])
+def test_saving_wheelhouse_keeps_all_four_mixtapes(live_app, store, page, monkeypatch, width):
+    import json
+    from playwright.sync_api import expect
+    from tests.rec.test_home_prepared import seed, service
+    from tests.conftest import FakeClient
+    from yt_playlist.rec import home_prepared
+
+    seed(store)
+    payload = home_prepared.prepare(store, 1)
+    initial = home_prepared.cards(store, payload, 1, service(store))
+    wheelhouse = next(p for p in initial.protos if p['lane'] == 'wheelhouse')
+    add = FakeClient.add_playlist_items
+
+    def add_known_videos(client, pid, videos, **kwargs):
+        client._catalog.update({t['video_id']: {'videoId': t['video_id'], 'title': t['title'],
+            'artists': [{'name': t['artist']}]} for t in wheelhouse['tracks']})
+        return add(client, pid, videos, **kwargs)
+
+    monkeypatch.setattr(FakeClient, 'add_playlist_items', add_known_videos)
+    store.settings.set_setting('last_sync_at', '1')
+    store.settings.set_setting('onboard_dismissed', '1')
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.goto(live_app + '/')
+    board = page.locator('#home-mode-cards')
+    expect(board.locator(':scope > .gen-card')).to_have_count(4)
+    expect(board.locator('#gen-wheelhouse .gen-poster')).to_be_visible()
+    before = board.locator('.gen-row').all_text_contents()
+    response = page.request.post(live_app + '/home/generate', form={
+        'name': wheelhouse['name'], 'tracks': json.dumps(wheelhouse['tracks']),
+        'recipe': json.dumps(wheelhouse['recipe'])})
+    assert response.ok and 'Saved' in response.text()
+    page.reload()
+    expect(board.locator(':scope > .gen-card')).to_have_count(4)
+    expect(board.locator('#gen-wheelhouse .gen-row')).to_have_count(len(wheelhouse['tracks']))
+    assert board.locator('.gen-row').all_text_contents() == before
+    expect(board.locator('#gen-wheelhouse .gen-poster')).to_be_visible()
+    board.screenshot(path=f'/tmp/tuneconsole-428-saved-wheelhouse-{width}.png')
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), page.evaluate('''
+        [...document.querySelectorAll('body *')].filter(el => {
+          const r=el.getBoundingClientRect(); return r.width && r.right>innerWidth+1 && getComputedStyle(el).display!=='none';
+        }).slice(0,12).map(el => [el.tagName,el.className,el.getBoundingClientRect().right])''')
+
+
+@pytest.mark.parametrize('width', [1440, 390])
+def test_lost_held_mix_keeps_its_slot_then_recovers_after_preparation(live_app, store, page, width):
+    from copy import deepcopy
+    from playwright.sync_api import expect
+    from tests.rec.test_home_prepared import seed, service
+    from yt_playlist.rec import home_prepared
+
+    seed(store)
+    payload = home_prepared.prepare(store, 1)
+    payload['menus'] = [payload['menus'][0]]
+    store.rec_proposals.put_proposals(home_prepared.SURFACE, payload, 1)
+    first = home_prepared.cards(store, payload, 1, service(store))
+    wheelhouse = next(p for p in first.protos if p['lane'] == 'wheelhouse')
+    old_keys = {t['key'] for t in wheelhouse['tracks']}
+    for key in old_keys:
+        store.rec_model.record_dislike(key, until=None, now=1)
+    store.settings.set_setting('last_sync_at', '1')
+    store.settings.set_setting('onboard_dismissed', '1')
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.goto(f'{live_app}/')
+    board = page.locator('#home-mode-cards')
+    expect(board.locator(':scope > .gen-card')).to_have_count(4)
+    expect(board.locator('#gen-wheelhouse.fresh-pool')).to_be_visible()
+    expect(board.get_by_role('button', name='Build more in your wheelhouse', exact=True)).to_be_visible()
+    assert page.locator('#gen-more').count() == 0
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    board.screenshot(path=f'/tmp/tuneconsole-428-skeleton-{width}.png')
+
+    replacement = deepcopy(payload)
+    offer = next(p for p in replacement['menus'][0]['protos'] if p['lane'] == 'wheelhouse')
+    bundles = store.rec_proposals.get_proposals('mode_bundles')
+    offer['tracks'] = [t for t in bundles['all']['wheelhouse'] if t['key'] not in old_keys][:12]
+    next(s for s in replacement['menus'][0]['slots'] if s['proto']['lane'] == 'wheelhouse')['proto'] = offer
+    store.rec_proposals.put_proposals(home_prepared.SURFACE, replacement, 2)
+    expect(board.locator('#gen-wheelhouse.fresh-pool')).to_have_count(0, timeout=8000)
+    expect(board.locator('#gen-wheelhouse .gen-row')).to_have_count(12)
+    expect(board.locator(':scope > .gen-card')).to_have_count(4)
+    assert not old_keys.intersection(board.locator('#gen-wheelhouse .gen-row').evaluate_all(
+        'rows => rows.map(row => row.dataset.key)'))
+    board.screenshot(path=f'/tmp/tuneconsole-428-recovered-{width}.png')
+
+
 def test_home_is_landing_with_status_and_sections(live_app, page):
     from playwright.sync_api import expect
 
     page.goto(f"{live_app}/")
     # Home is the default tab. Syncing is automatic in the background now, so there is no manual
     # sync button. On this live_app (no extension, never synced) the landing is the
-    # format picker; the feed and the freshness line wait for a first sync.
+    # welcome; the feed and the freshness line wait for a first sync.
     assert page.get_by_role("button", name="Full sync").count() == 0
     assert page.get_by_role("button", name="Sync plays").count() == 0
+    expect(page.get_by_role('heading', name='Welcome to TuneConsole.')).to_be_visible()
+    page.get_by_role('button', name='Get started').click()
     expect(page.get_by_role('heading', name='How do you like to listen?')).to_be_visible()
     page.get_by_role('button', name='Start with Mix tapes').click()
     expect(page.get_by_role("heading", name="Welcome to TuneConsole")).to_be_visible()

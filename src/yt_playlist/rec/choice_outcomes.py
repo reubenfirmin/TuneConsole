@@ -8,6 +8,8 @@ logger = logging.getLogger(__name__)
 
 
 def bind(store, identity_id, playlist, video, opportunity, option, now):
+    if getattr(store, 'activity_paused', False):
+        return
     if identity_id is None or not playlist or not video:
         return
     try:
@@ -23,6 +25,8 @@ def bind(store, identity_id, playlist, video, opportunity, option, now):
 
 
 def observe(store, identity_id, playlist, video, kind, position, duration, event_id, now):
+    if getattr(store, 'activity_paused', False):
+        return False
     if kind not in {'track_exit', 'ended', 'bye'} or not playlist or not video:
         return False
     try:
@@ -44,6 +48,8 @@ def observe(store, identity_id, playlist, video, kind, position, duration, event
 
 def continue_playback(store, identity_id, playlist, video, now):
     """An observed Radio continuation stays in its last confirmed chosen context."""
+    if getattr(store, 'activity_paused', False):
+        return
     try:
         previous = store.rec_ledger.choice_playback(identity_id, playlist, None, now,
             rec_params.get_param(store, 'choice_attribution_h') * 3600)

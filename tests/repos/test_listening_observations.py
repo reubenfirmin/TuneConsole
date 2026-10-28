@@ -183,10 +183,8 @@ def test_failed_draft_upgrade_rolls_back_and_backup_is_installed_v25(tmp_path):
     with pytest.raises(MigrationError,match='interrupted listening'):
         migrate(s.conn,registry=(*registry.MIGRATIONS[:25],Migration(26,'listening_observations',fail)))
     assert list(s.conn.iterdump())==before
-    for path in (tmp_path/'backups').glob('*.db'):
-        with sqlite3.connect(path) as backup:
-            assert backup.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]==25
-            assert backup.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
+    assert not (tmp_path/'backups').exists()
+    assert s.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
     s.conn.close()
 
 
@@ -278,7 +276,7 @@ def test_successful_draft_upgrade_reopens_without_rewriting_data(tmp_path):
     upgrade.validate(reopened.conn)
     assert list(reopened.conn.iterdump())==before
     assert reopened.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
-    assert list((tmp_path/'backups').glob('*.db'))
+    assert not (tmp_path/'backups').exists()
     reopened.conn.close()
 
 

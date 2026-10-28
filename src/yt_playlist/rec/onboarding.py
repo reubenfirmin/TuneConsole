@@ -4,6 +4,40 @@ import random
 
 from yt_playlist.rec import rec_params
 
+SETUP_COMPLETE = 'onboard_setup_complete'
+
+
+def setup_completed(store) -> bool:
+    """First-run completion survives disposable offers and model rebuilds.
+
+    Older installations retain actual mix offers or a presented listening menu.
+    Use that evidence to graduate them without treating fitted modes, imported
+    likes or a dismissed introduction as a usable first offer.
+    """
+    if store.settings.get_setting(SETUP_COMPLETE) == '1':
+        return True
+    for surface in ('home_shown', 'choice_window:mixes', 'choice_window:albums'):
+        try:
+            shown = store.rec_proposals.get_proposals(surface) or {}
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(shown, dict):
+            continue
+        if surface == 'home_shown':
+            signatures = shown.get('signatures')
+            if isinstance(signatures, list) and any(isinstance(value, str) and value for value in signatures):
+                return True
+        elif isinstance(shown.get('opportunity_id'), str) and shown['opportunity_id']:
+            return True
+    return False
+
+
+def _remember_completion(store, complete):
+    if (complete and not getattr(store, '_read_only', False)
+            and not getattr(store, 'activity_paused', False)
+            and store.settings.get_setting(SETUP_COMPLETE) != '1'):
+        store.settings.set_setting(SETUP_COMPLETE, '1')
+
 
 def feedback_count(store) -> int:
     """Likes + dislikes recorded so far (the explicit taste signal onboarding collects)."""
@@ -38,10 +72,11 @@ def arrival_status(store, now=None) -> dict:
         imported = reader.settings.get_setting("last_sync_at") is not None
         mixes_ready = prepared_mixes_ready(reader, now)
         albums_ready = prepared_albums_ready(reader, now)
-        complete = _setup_complete(imported=imported, has_library=coverage["total"] > 0,
-                                   mixes_ready=mixes_ready, albums_ready=albums_ready)
+        complete = setup_completed(reader) or _setup_complete(
+            imported=imported, has_library=coverage["total"] > 0,
+            mixes_ready=mixes_ready, albums_ready=albums_ready)
         phase = "ready" if complete else "import" if not imported else "learn"
-        return {"songs": songs, "playlists": len(reader.playlists.get_playlists()),
+        result = {"songs": songs, "playlists": len(reader.playlists.get_playlists()),
                 "albums": len(reader.collection.get_saved_albums()),
                 "covers": list(dict.fromkeys(row["thumbnail"] or
                     f"https://i.ytimg.com/vi/{row['video_id']}/hqdefault.jpg" for row in covers)),
@@ -51,6 +86,8 @@ def arrival_status(store, now=None) -> dict:
                           "genres": coverage["genre"], "model_tracks": model_tracks,
                           "modes": modes, "mixes_ready": mixes_ready, "albums_ready": albums_ready,
                           "offers_ready": mixes_ready or albums_ready, "discoveries": discoveries}}
+    _remember_completion(store, complete)
+    return result
 
 
 def prepared_albums_ready(store, now=None) -> bool:
@@ -84,11 +121,16 @@ def prepared_mixes_ready(store, now=None) -> bool:
 
 
 def initial_setup_pending(store, now=None) -> bool:
-    """Keep setup until import and usable offers arrive, independently of modes."""
-    return not _setup_complete(
+    """Keep setup until useful offers arrive once, independently of modes."""
+    if setup_completed(store):
+        _remember_completion(store, True)
+        return False
+    complete = _setup_complete(
         imported=store.settings.get_setting("last_sync_at") is not None,
         has_library=library_size(store) > 0, mixes_ready=prepared_mixes_ready(store, now),
         albums_ready=prepared_albums_ready(store, now))
+    _remember_completion(store, complete)
+    return not complete
 
 
 def cleanup_count(store) -> int:
@@ -115,7 +157,7 @@ def _taste_ready(store) -> bool:
 def onboarding_active(store, now) -> bool:
     """True while a synced account is still thin and has not graduated (ready / enough feedback /
     dismissed). The inverse of the graduation condition."""
-    if store.settings.get_setting("onboard_dismissed") == "1":
+    if setup_completed(store) or store.settings.get_setting("onboard_dismissed") == "1":
         return False
     if not _has_synced(store):
         return False
@@ -154,6 +196,41 @@ def library_sample(store, n=12) -> list[dict]:
         if not any(fams):
             break
     return out
+
+
+def starter_album(store):
+    """Choose a real release immediately, without models or provider requests.
+
+    Saved albums need no materialized tracks: the existing album player obtains
+    the complete release at play time. Otherwise prefer known releases by artists
+    with several owned songs or listening days. An incidental track is never
+    presented as a complete album tracklist.
+    """
+    from yt_playlist.library.album_fetch import is_upload_album
+
+    def usable(album):
+        browse = album.get('browse') or ''
+        return (browse.startswith('MPRE') or is_upload_album(browse)) and bool(album.get('title'))
+
+    with store.read_snapshot() as snapshot:
+        reader = snapshot.store
+        saved = [album for album in reader.collection.get_saved_albums() if usable(album)]
+        if saved:
+            album = next((album for album in saved if album.get('type') != 'Single'), saved[0])
+            return {**album, 'saved': True, 'upload': is_upload_album(album['browse'])}
+        # Count distinct owned recordings, not playlist occurrences or partial
+        # imports. Catalog releases need not have been saved to be worth trying.
+        rows = reader.conn.execute(
+            "WITH familiar AS (SELECT t.artist,COUNT(DISTINCT t.identity_key) songs,"
+            "SUM(COALESCE(d.plays,0)) plays FROM playable_library_tracks t "
+            "LEFT JOIN listening_day_counts d ON d.identity_key=t.identity_key GROUP BY t.artist) "
+            "SELECT p.provider_id browse,a.title,a.artist,a.year,a.type,a.thumbnail,f.songs,f.plays "
+            "FROM albums a JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
+            "JOIN familiar f ON f.artist=a.artist COLLATE NOCASE "
+            "ORDER BY (f.songs>=2 OR f.plays>=2) DESC,f.plays DESC,f.songs DESC,a.title COLLATE NOCASE"
+        ).fetchall()
+        album = next((dict(row) for row in rows if usable(dict(row))), None)
+    return {**album, 'saved': False, 'upload': is_upload_album(album['browse'])} if album else None
 
 
 def _home_tracks(client, n):

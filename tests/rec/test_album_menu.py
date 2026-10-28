@@ -127,3 +127,31 @@ def test_prepared_familiarity_does_not_survive_its_current_state_or_lose_its_ori
     assert album_choices.eligible(store, prepared, 102)[0]['classification'] == 'known'
     album_choices.set_feedback(store, prepared[0]['browse_id'], 'clear', 103)
     assert album_choices.eligible(store, prepared, 104)[0]['classification'] == 'familiar_artist'
+
+
+def test_album_mutes_use_canonical_homonyms_and_recheck_cached_frontiers(store):
+    first = store.artists.ensure_artist('Same', provider='youtube', provider_id='UCfirst')
+    second = store.artists.ensure_artist('Same', provider='youtube', provider_id='UCsecond')
+    for browse, artist in [('first', first), ('second', second)]:
+        store.discovery.upsert_discovered_album(browse, 'Same', 'Record', None, None, 1, artist_id=artist)
+    prepared = [{'browse_id': browse, 'artist': 'Same', 'title': 'Record'} for browse in ('first', 'second')]
+    assert len(album_choices.eligible(store, prepared, 2)) == 2
+    store.rec_model.record_feedback('for_you', f'artist:@artist:{first}', 'mute', now=3, until=10)
+    assert store.rec_model.muted_artists() == {f'@artist:{first}'}
+    assert [a['browse_id'] for a in album_choices.eligible(store, prepared, 4)] == ['second']
+    assert [a['browse_id'] for a in album_choices.eligible(store, prepared, 10)] == ['first', 'second']
+    assert len(prepared) == 2
+
+
+def test_album_mutes_include_individual_collaboration_credits(store):
+    credits = [{'name': 'First', 'id': 'UCfirst'}, {'name': 'Second, with comma', 'id': 'UCsecond'}]
+    store.collection.add_saved_album({'browse': 'joint', 'title': 'Joint',
+                                      'artist': 'First, Second, with comma', 'credits': credits})
+    store.collection.add_saved_album({'browse': 'solo', 'title': 'Solo', 'artist': 'First',
+                                      'credits': credits[:1]})
+    prepared = [{'browse_id': 'joint', 'artist': 'First, Second, with comma', 'title': 'Joint'},
+                {'browse_id': 'solo', 'artist': 'First', 'title': 'Solo'}]
+    muted = store.artists.resolve('Second, with comma')
+    store.rec_model.record_feedback('for_you', f'artist:@artist:{muted}', 'mute', now=3)
+    assert [a['browse_id'] for a in album_choices.eligible(store, prepared, 4)] == ['solo']
+    assert not store.rec_model.muted_album_ids([], 4)

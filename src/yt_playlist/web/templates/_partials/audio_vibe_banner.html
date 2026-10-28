@@ -1,0 +1,45 @@
+<aside class="audio-vibe-banner" data-audio-vibe-banner
+       data-taxonomy-version="{{ audio_vibe_taxonomy_version }}"
+       data-choices="{{ audio_vibe_choices|tojson|forceescape }}"
+       aria-label="Song vibe predictions" hidden>
+  <div data-vibe-cards></div>
+  <div class="audio-vibe-deck" data-vibe-deck hidden>
+    <span data-vibe-count></span>
+    <button type="button" data-vibe-next>Next song</button>
+  </div>
+  <template data-vibe-card-template>
+    <article class="audio-vibe-card" data-vibe-card>
+      <div class="audio-vibe-heading">
+        <div class="audio-vibe-song">
+          <h2 class="audio-vibe-track" data-vibe-track></h2>
+          <p class="audio-vibe-artist" data-vibe-artist></p>
+        </div>
+        <button type="button" class="audio-vibe-dismiss" data-vibe-dismiss aria-label="Dismiss vibe check for this song">×</button>
+      </div>
+      <div class="audio-vibe-guess">
+        <p class="audio-vibe-prediction" data-vibe-prediction></p>
+        <div class="audio-vibe-checks" data-vibe-checks role="group" aria-label="Completed audio checks"></div>
+      </div>
+      <p class="audio-vibe-prompt">Your take <span>Choose all that fit</span></p>
+      <div class="audio-vibe-choices" role="group" aria-label="Listening session descriptions">
+        {% for key, preset in audio_vibe_choices.items() %}
+        <button type="button" class="audio-vibe-choice" data-vibe-choice="{{ key }}"
+                aria-pressed="false" title="{{ preset.description }}"><strong>{{ preset.attribute_label }}</strong></button>
+        {% endfor %}
+      </div>
+      <div class="audio-vibe-footer">
+        <p data-vibe-feedback-status role="status" aria-live="polite">Click to label</p>
+        <button type="button" data-vibe-inspect>Audio details</button>
+      </div>
+    </article>
+  </template>
+  <dialog class="audio-vibe-diagnostics" data-vibe-diagnostics aria-label="Song audio details">
+    <div class="audio-vibe-heading">
+      <h2 data-vibe-inspect-title></h2>
+      <button type="button" class="audio-vibe-dismiss" data-vibe-inspect-close aria-label="Close audio details">×</button>
+    </div>
+    <p data-vibe-evidence></p>
+    <p data-vibe-alternatives></p>
+    <div data-vibe-attributes></div>
+  </dialog>
+</aside>

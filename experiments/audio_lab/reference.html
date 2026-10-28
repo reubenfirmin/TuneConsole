@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TuneConsole audio lab</title><link rel="stylesheet" href="reference.css"></head>
+<body><main>
+  <p class="eyebrow">TuneConsole · Experiment #406</p>
+  <h1>Listen, then measure.</h1>
+  <p>Try a recording you have permission to analyse. This lab measures short windows during playback.
+    Results stay here until you export them. They do not change On Air or Mix Tapes.</p>
+  <section aria-labelledby="source-heading">
+    <h2 id="source-heading">Reference recording</h2>
+    <label>Audio file <input id="file" type="file" accept="audio/*"></label>
+    <p>Up to 64 MiB. Local files only.</p>
+    <button id="demo" type="button">Use generated test tone</button>
+    <label>Title <input id="title" maxlength="300"></label>
+    <label>Artist <input id="artist" maxlength="300"></label>
+    <label>Album <input id="album" maxlength="300"></label>
+    <label>Source and permission or licence <input id="permission-note" maxlength="1000"
+      placeholder="Source URL and licence, or your own recording"></label>
+    <label class="check"><input id="permitted" type="checkbox">
+      I have permission to use this recording for this local experiment.</label>
+    <audio id="player" controls preload="metadata"></audio>
+    <p id="identity">No reference loaded.</p>
+  </section>
+  <section aria-labelledby="capture-heading">
+    <h2 id="capture-heading">Capture during playback</h2>
+    <p>On this tab, click the audio lab’s toolbar icon to enable capture. Click it again to stop.
+      The extension shortcut is Ctrl+Shift+Y if available. Capture never starts automatically.</p>
+    <p id="status" role="status">Analysis off</p>
+    <label class="check"><input id="model" type="checkbox" disabled>
+      Try the optional local MusiCNN research model.</label>
+    <p id="model-status">Checking for local model assets…</p>
+    <button id="stop" type="button" disabled>Stop analysis</button>
+    <p>Seeking and playback changes discard incomplete windows. No raw audio is saved or sent to a server.</p>
+  </section>
+  <section aria-labelledby="results-heading">
+    <h2 id="results-heading">Signal measurements</h2>
+    <p>Loudness and zero crossings describe the signal. They do not establish perceived intensity,
+      vocal presence or a vibe. The generated tone only checks the capture path.</p>
+    <ol id="results"></ol>
+    <button id="export" type="button" disabled>Export measurements</button>
+  </section>
+</main><script type="module" src="reference.js"></script></body></html>

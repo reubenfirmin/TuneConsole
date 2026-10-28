@@ -15,6 +15,7 @@ from yt_playlist.web.app import create_app
 
 def _event(action="like", **outcome):
     return {"kind": "rate", "url": f"https://music.youtube.com/youtubei/v1/like/{action}",
+            "brandKnown": True,
             "body": json.dumps({"target": {"videoId": "unseen"}}), "phase": "settled",
             "success": True, "httpStatus": 200, **outcome}
 

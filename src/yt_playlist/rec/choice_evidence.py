@@ -7,12 +7,13 @@ import hashlib
 import json
 import logging
 import math
+import time
 import uuid
 from copy import deepcopy
 
 from yt_playlist.core.activity import check_cancellable_work, WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.evidence_ledger import canonical
-from yt_playlist.rec.choice_context import context_manifest as _context_manifest, resolve_context
+from yt_playlist.rec.choice_context import context_manifest as _context_manifest, learning_context, resolve_context
 
 logger = logging.getLogger(__name__)
 FORMATS = {"albums", "mixes", "radio"}
@@ -21,6 +22,8 @@ ACTIONS = {"visible", "open", "choice", "start", "save", "promote", "return", "e
 
 def present(store, format, options, now, *, context, window, episode_id=None):
     """Rerenders reuse one complete menu; edits or new model inputs create another opportunity."""
+    if getattr(store, 'activity_paused', False):
+        return None
     identity = hashlib.sha256(canonical([format, window, options, context])).hexdigest()[:32]
     if issue(store, format, options, now, context=context, episode_id=episode_id,
              opportunity_id=identity, reuse=True) is None:
@@ -39,15 +42,20 @@ def opportunity(store, identity):
     return pending or store.rec_ledger.evidence().get('opportunity', identity)
 
 
-def close_window(store, format, now):
-    """An explicit request for alternatives closes the visible previous offer.
+def close_window(store, format, now, *, opportunity_id):
+    """An explicit request for alternatives closes the requesting view's offer.
 
     Reloads, background refreshes and expired caches never imply rejection.
+    Missing or invalid view identity must not close another view's latest menu.
     """
-    held = store.rec_proposals.get_proposals('choice_window:' + format) or {}
-    if held.get('opportunity_id'):
-        safe_respond(store, held['opportunity_id'], 'close', now,
-                     details={'reason': 'requested_alternatives'})
+    if not isinstance(opportunity_id, str) or not 0 < len(opportunity_id) <= 64:
+        return None
+    held = opportunity(store, opportunity_id)
+    if not held or held.get('format') != format:
+        return None
+    safe_respond(store, opportunity_id, 'close', now,
+                 details={'reason': 'requested_alternatives'})
+    return held
 
 
 def model_context(store, now, *, facet_leans=None):
@@ -64,7 +72,7 @@ def prepare_context(store, now):
     try:
         with work_budget(progressive.Budget().fit_seconds), store.read_snapshot() as snapshot:
             reader = snapshot.store
-            model_context(reader, now, facet_leans=transient.facet_leans(reader, now))
+            model_context(reader, now, facet_leans=transient.prepared_facet_leans(reader, now))
         return True
     except WorkBudgetExceeded:
         store.maintenance_diagnostics.record('deferred', reasons=('time_budget',),
@@ -73,19 +81,28 @@ def prepare_context(store, now):
 
 
 def freeze_context(store, context):
-    """Keep large immutable model captures out of disposable SQLite menus."""
+    """Retain the original preparation inputs or defer its publication.
+
+    Reclaim for each missing component and the manifest separately: an earlier
+    component may fit while the final manifest still needs optional space.
+    """
     from yt_playlist.core.evidence_ledger import EvidenceBudgetExceeded
-    try:
-        ledger = store.rec_ledger.evidence()
-        return {'artifact': ledger.artifact(_context_manifest(ledger, context))}
-    except EvidenceBudgetExceeded:
-        logger.warning('Listening context capture deferred: evidence storage is full')
-        return {'capture_status': 'storage_full'}
-    except (WorkBudgetExceeded, WorkClosing):
-        raise
-    except Exception:
-        logger.warning('Listening context capture failed', exc_info=True)
-        return {'capture_status': 'unavailable'}
+    ledger = store.rec_ledger.evidence()
+    pinned = {context['artifact']} if context.get('artifact') else set()
+
+    def publish(value):
+        try:
+            identity = ledger.artifact(value)
+        except EvidenceBudgetExceeded as exc:
+            maintain_storage(store, context.get('at', time.time()), required_bytes=exc.required_bytes,
+                             protected_artifacts=pinned)
+            identity = ledger.artifact(value)
+        # Reused components may be old enough for collection. Keep every input
+        # already shared by this capture through any later allocation recovery.
+        pinned.add(identity)
+        return identity
+
+    return {'artifact': publish(_context_manifest(ledger, context, publish=publish))}
 
 
 def _model_context(store, now, *, facet_leans=None):
@@ -111,8 +128,10 @@ def _model_context(store, now, *, facet_leans=None):
     def taste(value):
         return {"titles": value.titles, "centroids": value.centroids.tolist(),
                 "weights": value.weights.tolist(), "sources": getattr(value, "sources", [])}
+    from yt_playlist.rec.group_versions import legacy_definition
     return {"schema": 1, "at": now, "policy": policy,
-        "groups": [{**mode, "centroid": mode["centroid"].tolist()}
+        "groups": [{**mode, "centroid": mode["centroid"].tolist(),
+                    "definition_version": legacy_definition(mode)[0], "grouping_policy": "legacy"}
                    for mode in store.modes.list_modes(active_only=True)],
         "layers": {"now": {"modes": current, "events": count,
                            "window_h": rec_params.get_param(store, "now_window_h")},
@@ -125,6 +144,8 @@ def _model_context(store, now, *, facet_leans=None):
 
 def issue(store, format, options, now, *, context, episode_id=None, opportunity_id=None, reuse=False):
     """Freeze the complete actual menu and its pre-response state, with optional scored forecast."""
+    if getattr(store, 'activity_paused', False):
+        return None
     if format not in FORMATS or not math.isfinite(now):
         raise ValueError("Unknown listening format")
     options, context = deepcopy(list(options)), deepcopy(context)
@@ -172,6 +193,8 @@ def _issue(store, record, context, *, reuse=False):
 
 def respond(store, opportunity_id, kind, now, *, option_id=None, action_id=None, visible=(), details=None):
     """Queue a frozen observation; the worker validates it against the actual issued menu."""
+    if getattr(store, 'activity_paused', False):
+        return None
     if kind not in ACTIONS or not math.isfinite(now):
         raise ValueError("Unknown listening response")
     if kind not in {"visible", "withdraw", "close"} and option_id is None:
@@ -180,7 +203,11 @@ def respond(store, opportunity_id, kind, now, *, option_id=None, action_id=None,
                'action_id': action_id, 'visible': tuple(map(str, visible)), 'details': deepcopy(details)}
     capture = getattr(store, 'choice_capture', None)
     if capture is not None:
-        return capture.enqueue('listening:response', _respond, store, opportunity_id, kind, now, **options)
+        ledger = store.rec_ledger.evidence()
+        return capture.enqueue('listening:response', _respond, store, opportunity_id, kind, now,
+            references=(opportunity_id,),
+            validate=lambda: capture.get(opportunity_id) is not None
+                or ledger.get('opportunity', opportunity_id) is not None, **options)
     return _respond(store, opportunity_id, kind, now, **options)
 
 
@@ -283,11 +310,38 @@ def record_playback(store, msg, now, *, identity_id=None):
         logger.warning("listening playback attribution failed", exc_info=True)
 
 
-def compile_report(store, now):
+def refresh_report(store, now):
+    """Home retries reuse unchanged evidence until an explicit projection deadline.
+
+    Full storage inventory/retention belongs to daily maintenance. Continuous usage
+    decay is refreshed at most every 15 minutes; event admission and bandit expiry
+    can bring that deadline forward. Raw replay remains available independently.
+    """
+    from yt_playlist.rec import choice_bandit, group_learning, rec_params
+    generation = store.rec_ledger.evidence().generation()
+    inputs = hashlib.sha256(canonical({
+        'bandit': choice_bandit.parameters(store),
+        'modes': choice_bandit.generation(store.modes.list_modes(active_only=True)),
+        'groups': store.taste_groups.serial(),
+        'group_learning': group_learning.POLICY,
+        'halflife': rec_params.get_param(store, 'choice_halflife_d'),
+        'attribution': rec_params.get_param(store, 'choice_attribution_h'),
+        'album_identity': [2, store.collection.album_alias_revision()],
+    })).hexdigest()
+    previous = store.rec_proposals.get_proposals('listening_choices') or {}
+    refresh = previous.get('refresh') or {}
+    if (refresh.get('generation') == generation and refresh.get('inputs') == inputs
+            and previous['at'] <= now < refresh['next_at']):
+        return previous
+    return compile_report(store, now, refresh={'generation': generation, 'inputs': inputs})
+
+
+def compile_report(store, now, *, refresh=None):
     """Rebuild compact descriptive/predictive findings; never infer missing actions as rejection."""
     ledger = store.rec_ledger.evidence()
-    offers = {row["id"]: row for row in ledger.records("opportunity") if row["observed_at"] <= now}
-    responses = sorted((r for r in ledger.records("response") if r["observed_at"] <= now),
+    all_offers, all_responses = ledger.records('opportunity'), ledger.records('response')
+    offers = {row["id"]: row for row in all_offers if row["observed_at"] <= now}
+    responses = sorted((r for r in all_responses if r["observed_at"] <= now),
                        key=lambda r: (r["observed_at"], r["id"]))
     withdrawn = {r["details"].get("action_id") for r in responses if r["kind"] == "withdraw"}
     rows = {format: {"offered": 0, "visible": 0, "opens": 0, "choices": 0, "predicted_choices": 0,
@@ -366,8 +420,14 @@ def compile_report(store, now):
         rec_params.get_param(store, 'choice_halflife_d'))
     # A bounded operational projection, never one positive training row for every generated song.
     from yt_playlist.rec.choice_learning import interest_key
+    album_ids = store.collection.preferred_album_ids({str(option['id'])
+        for offer in offers.values() if offer['format'] == 'albums' for option in offer['options']})
     groups, episode_groups = {}, {}
     for interest in interests:
+        # Only the derived projection follows verified release identity. Dates
+        # union before thresholding, while historical choices keep their IDs.
+        if interest['format'] == 'albums':
+            interest = {**interest, 'option_id': album_ids[interest['option_id']]}
         identity = interest_key(interest)
         group = groups.setdefault(identity, {"latest": interest, "days": set(), "episodes": set()})
         group["latest"] = interest
@@ -383,7 +443,7 @@ def compile_report(store, now):
         "contexts": serving_contexts}
     album_days = choice_summary.album_track_days(offers, [event for event in responses
         if event['id'] not in withdrawn and event['kind'] != 'withdraw' and event['at'] <= now],
-        rec_params.get_param(store, 'choice_attribution_h') * 3600)
+        rec_params.get_param(store, 'choice_attribution_h') * 3600, album_ids=album_ids)
     # Share the existing bounded operational projection. The raw source evidence
     # remains in the ledger, and recompilation applies withdrawals and corrections.
     projection['album_track_days'] = {row['option_id']: album_days[row['option_id']]
@@ -394,7 +454,18 @@ def compile_report(store, now):
     bandit = choice_bandit.compile(store, offers, [r for r in responses
         if r['id'] not in withdrawn and r['kind'] != 'withdraw'], now)
     report['bandit'] = bandit
-    store.rec_proposals.publish_choice_findings(report, projection, now, bandit=bandit)
+    from yt_playlist.rec import group_learning
+    head = store.taste_groups.head()
+    group_bandit = group_learning.compile(store, offers, [r for r in responses
+        if r['id'] not in withdrawn and r['kind'] != 'withdraw'], now, head) if head else None
+    if refresh is not None:
+        deadlines = [now + 900]
+        deadlines.extend(row[field] for row in all_offers + all_responses
+                         for field in ('at', 'observed_at') if row[field] > now)
+        deadlines.extend(state['expires_at'] for state in (bandit, group_bandit)
+                         if state and state.get('expires_at') is not None and state['expires_at'] > now)
+        report['refresh'] = {**refresh, 'next_at': min(deadlines)}
+    store.rec_proposals.publish_choice_findings(report, projection, now, bandit=bandit, group_bandit=group_bandit)
     return report
 
 
@@ -419,7 +490,8 @@ def replay(store, now, predictor=None):
     withdrawn = {event["details"].get("action_id") for event in events if event["kind"] == "withdraw"}
     forecasts, visible, choices, episodes = {}, {}, set(), {}
     counts = {format: {"choices": 0, "scored": 0, "hits": 0, "unseen": 0,
-                       "unscored": 0, "future_context": 0} for format in FORMATS}
+                       "unscored": 0, "future_context": 0, "missing_context": 0,
+                       "released_context": 0} for format in FORMATS}
     # Predict at issue time, rather than on first response. A menu opened tomorrow must
     # not benefit from choices observed after it was originally prepared/issued.
     timeline = [(offer["observed_at"], 0, oid, offer) for oid, offer in offers.items()]
@@ -429,14 +501,20 @@ def replay(store, now, predictor=None):
         if phase == 0:
             offer, oid = event, event["id"]
             try:
-                context = resolve_context(store, {'artifact': offer['context']})
+                context = (resolve_context(store, {'artifact': offer['context']}) if predictor
+                           else learning_context(store, offer['context']))
             except ValueError:
                 context = None
             valid = context is not None and context.get("at", offer["at"]) <= offer["at"]
             forecasts[oid] = ((predictor.predict(context, offer["options"]) if predictor else offer["prediction"])
                               if valid else None)
             if not valid:
-                counts[offer["format"]]["future_context"] += 1
+                reason = 'future_context' if context is not None else 'missing_context'
+                if predictor and context is None:
+                    from yt_playlist.rec.choice_context import checkpoint
+                    if checkpoint(ledger, offer['context']):
+                        reason = 'released_context'
+                counts[offer["format"]][reason] += 1
             continue
         if event["id"] in withdrawn or event["kind"] == "withdraw":
             continue
@@ -484,27 +562,45 @@ def replay(store, now, predictor=None):
             "source_ids": sorted(choices)}
 
 
-def maintain_storage(store, now):
-    """Reclaim abandoned captures before preparing more; keep active and chosen contexts.
+def maintain_storage(store, now, *, required_bytes=0, protected_artifacts=()):
+    """Release acknowledged diagnostic contexts; preserve serving and correction inputs.
 
     The short grace protects in-flight preparation between artifact publication
     and its proposal transaction. Durable evidence uses its independent retention.
     """
-    from yt_playlist.rec import rec_params
-    protected = set()
+    from yt_playlist.rec import choice_retention, rec_params
+    store = getattr(store, '_evidence_source', store)
+    ledger = store.rec_ledger.evidence()
+    compacted = choice_retention.acknowledge(store, now, compile_report)
+    protected = set(protected_artifacts)
+    opportunities = set()
     capture = getattr(store, 'choice_capture', None)
     if capture is not None:
         protected.update(capture.artifacts())
+        opportunities.update(capture.opportunities())
+    for format in FORMATS:
+        window = store.rec_proposals.get_proposals('choice_window:' + format) or {}
+        if window.get('opportunity_id'):
+            opportunities.add(window['opportunity_id'])
     from yt_playlist.rec import product_comparison
     live = product_comparison.state(store)
-    if live.get('vectors'):
+    if live.get('phase') in ('preparing', 'observing') and live.get('vectors'):
         protected.add(live['vectors'])
+    try:
+        radio = json.loads(store.settings.get_setting('radio_current_session') or '{}')
+        if not radio.get('stopped'):
+            direction = radio.get('directions') or {}
+            if direction.get('menu_id'):
+                opportunities.add(direction['menu_id'])
+    except (TypeError, ValueError):
+        pass
     with store._lock:
         surfaces = [row[0] for row in store.conn.execute(
             "SELECT surface FROM rec_proposals WHERE surface LIKE 'model_pair:%'")]
     for surface in surfaces:
         pair = store.rec_proposals.get_proposals(surface) or {}
-        context = (pair.get('data') or {}).get('context') or (pair.get('data') or {}).get('choice_context') or {}
+        data = pair.get('data') if isinstance(pair.get('data'), dict) else pair
+        context = data.get('context') or data.get('choice_context') or {}
         if context.get('artifact'):
             protected.add(context['artifact'])
     runs = store.model_selection.selection_runs(limit=12)
@@ -525,11 +621,16 @@ def maintain_storage(store, now):
             context = payload.get(field) or {}
             if context.get('artifact'):
                 protected.add(context['artifact'])
-    return store.rec_ledger.evidence().maintain(
+    monitor = store.rec_proposals.get_proposals(product_comparison.MONITOR) or {}
+    return ledger.maintain(
         now - rec_params.get_param(store, "choice_retention_d") * 86400,
-        protected_artifacts=protected, protected_runs={live.get('run_id'),
-            (store.rec_proposals.get_proposals(product_comparison.MONITOR) or {}).get('run_id')} - {None},
-        orphan_before=now - 600)
+        protected_artifacts=protected, protected_runs={live.get('run_id') if live.get('phase') == 'observing' else None,
+            monitor.get('run_id') if not monitor.get('complete') else None} - {None},
+        protected_opportunities=opportunities, orphan_before=now - 600, pressure_before=now - 3600,
+        compacted_contexts=compacted, context_before=now - choice_retention.DIAGNOSTIC_DAYS * 86400,
+        context_byte_budget=int(ledger.byte_budget * choice_retention.DIAGNOSTIC_FRACTION),
+        required_bytes=required_bytes,
+        pending_protection=capture.protection if capture is not None else None)
 
 
 def daily(store, now):

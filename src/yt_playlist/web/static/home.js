@@ -4,7 +4,20 @@ function onboardingArrival() {
     // Import progress belongs to this view, separate from Home's SSE attachment.
     running: false,
     imported: false, analyzed: 0, total: 0, genres: 0, model_tracks: 0, modes: 0, discoveries: 0,
+    listening_format: 'mixes', activity: '', current: null, target: null, starterReady: false,
     _timer: null, _disposed: false,
+    get progressLabel() {
+      if (this.statusError) return this.statusError;
+      if (!this.connected && !this.running) return 'Open YouTube Music to continue setup';
+      if (this.running && this.current && this.target && ['playlists', 'albums'].includes(this.activity)) {
+        return 'Reading ' + (this.activity === 'albums' ? 'album ' : 'playlist ')
+          + this.current + ' of ' + this.target;
+      }
+      if (!this.imported && !this.songs) return 'Bringing in your music';
+      if (this.listening_format === 'albums') return 'Finding your first album';
+      if (this.listening_format === 'radio') return 'Preparing your first Radio Session';
+      return 'Finding your first mix tape';
+    },
     applyArrival(data) {
       this.songs = data.songs; this.playlists = data.playlists; this.albums = data.albums;
       this.outcome = data.outcome;
@@ -36,6 +49,10 @@ function onboardingArrival() {
       }
     },
     init() {
+      // The starter arrives independently through HTMX, often before sync finishes.
+      this._onStarter = () => { this.starterReady = !!this.$el.querySelector('.starter-mix, [data-onboarding-starter]'); };
+      this.$el.addEventListener('htmx:afterSwap', this._onStarter);
+      this._onStarter();
       if (window.setupStatus) {
         this._onSetup = event => this.applyArrival(event.detail);
         window.addEventListener('setup-status', this._onSetup);
@@ -45,6 +62,7 @@ function onboardingArrival() {
     destroy() {
       this._disposed = true; clearTimeout(this._timer);
       window.removeEventListener('setup-status', this._onSetup);
+      this.$el.removeEventListener('htmx:afterSwap', this._onStarter);
     },
   };
 }
@@ -57,6 +75,10 @@ function homeStatus() {
     nowPlaying: null,
     radioActive: false,
     radioReady: false,
+    get tvPlaying() {
+      return this.connected && this.nowPlaying?.source?.kind === 'tv'
+        && !!this.nowPlaying.video_id && this.nowPlaying.paused === false;
+    },
     get radioPlaybackState() {
       const song = this.nowPlaying;
       if (!this.connected || !this.radioActive || !this.radioReady || !song?.video_id
@@ -67,7 +89,7 @@ function homeStatus() {
     sensorHealth: null,
     running: false,
     failed: false,
-    _job: null,            // guards against attaching to the same job twice
+    _job: null, _completedJob: null, _checkingJob: false,
     _scan: null, _stream: null, _disposed: false, _initialized: false,
     destroy() {
       this._disposed = true;
@@ -89,35 +111,70 @@ function homeStatus() {
       window.playbackStatus.start();
       if (window.playbackStatus.snapshot) this.applyBridgeStatus(window.playbackStatus.snapshot);
       // Watch completion without surfacing routine background retries as user actions.
-      const scan = () => { if (this._disposed || this.running) return; fetch('/sync/active').then(r => r.json())
+      const scan = () => { if (this._disposed) return;
+        if (this.running) {
+          if (!this._stream) this.checkJob(this._job);
+          return;
+        }
+        fetch('/sync/active').then(r => r.json())
         .then(d => { if (d && d.job_id) this.attach(d.job_id); }).catch(() => {}); };
       scan();
       this._scan = setInterval(scan, 3000);
     },
     attach(jobId) {
-      if (this._disposed || this.running || this._job === jobId) return;
+      if (this._disposed || this.running || this._completedJob === jobId) return;
       this._job = jobId; this.running = true; this.failed = false;
       this._stream?.close();
       const es = this._stream = new EventSource(`/sync/events/${jobId}`);
+      let errors = 0;
       es.onmessage = (m) => {
+        if (this._disposed || this._stream !== es) return;
+        errors = 0;
         const ev = JSON.parse(m.data);
         if (ev.type === 'err' || ev.type === 'auth_expired') this.failed = true;
         if (ev.type === 'end') {
-          es.close(); this.running = false;
-          if (ev.outcome === 'complete' && !ev.error && !this.failed) {
-            // Setup advances through prepared offers, not import completion. Keep
-            // its current screen, shared player and open Details mounted.
-            if (!this.$el.querySelector('#onboarding-feed')) {
-              htmx.ajax('GET', '/', {target: '#home', select: '#home', swap: 'outerHTML'})
-                .catch(() => {});
-            }
-          } else {
-            this.failed = true;
-          }
+          this.finishJob(jobId, ev);
           return;
         }
       };
-      es.onerror = () => { es.close(); this.running = false; this.failed = true; };
+      es.onerror = () => {
+        if (this._disposed || this._stream !== es) return;
+        // Native reconnect retains Last-Event-ID and can replay completion while
+        // /sync/active is already empty. Transport loss is not a failed sync.
+        if (es.readyState === EventSource.CLOSED || ++errors >= 5) {
+          es.close(); this._stream = null;
+          // Keep the known job until its terminal status or expiry is observed.
+          // The existing scan polls status after the bounded stream retries.
+          this.checkJob(jobId);
+        }
+      };
+    },
+    async checkJob(jobId) {
+      if (this._disposed || this._checkingJob || this._job !== jobId) return;
+      this._checkingJob = true;
+      try {
+        const response = await fetch(`/sync/status/${jobId}`);
+        if (this._disposed || this._job !== jobId) return;
+        if (response.status === 404) {
+          this.running = false; this._completedJob = jobId;
+        } else if (response.ok) {
+          const state = await response.json();
+          if (!this._disposed && this._job === jobId && state.done) this.finishJob(jobId, state);
+        }
+      } catch (_) { /* The next scan retries this same known job. */ }
+      finally { this._checkingJob = false; }
+    },
+    finishJob(jobId, ev) {
+      if (this._disposed || this._job !== jobId || this._completedJob === jobId) return;
+      this._stream?.close(); this._stream = null;
+      this.running = false; this._completedJob = jobId;
+      if (ev.outcome === 'complete' && !ev.error && !this.failed) {
+        if (!this.$el.querySelector('#onboarding-feed')) {
+          htmx.ajax('GET', '/', {target: '#home', select: '#home', swap: 'outerHTML'}).catch(() => {});
+        }
+      } else {
+        this.failed = true;
+      }
     },
   };
 }

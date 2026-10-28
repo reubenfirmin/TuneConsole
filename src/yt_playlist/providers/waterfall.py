@@ -1,8 +1,9 @@
 """The enrichment waterfall: run the configured providers, in order, over a set of tracks.
 
 This is the reusable orchestrator the background worker will call. For each track it walks the
-enabled providers in the user's configured order; each provider's read-only ``probe`` returns what it
-found, which the harness (a) writes to the parseable ``enrichment_log``, (b) applies to the canonical
+enabled providers in the user's configured order; each provider's ``probe`` returns what it
+found without applying catalog metadata. Its IAO owns operational access state. The harness
+(a) writes to the parseable ``enrichment_log``, (b) applies to the canonical
 track fill-only (so a later provider sees an MBID an earlier one resolved) and (c) compares across
 providers to record disagreements as ``enrichment_conflict`` rows.
 
@@ -15,6 +16,7 @@ import time
 from collections.abc import Mapping
 
 from yt_playlist.core.metadata_observations import SubjectChanged
+from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
 from yt_playlist.providers import musicbrainz, lastfm, discogs, deezer, acousticbrainz
 from yt_playlist.providers import base, coverart
 from yt_playlist.providers.enrich_queue import PriorityGate
@@ -114,7 +116,8 @@ def _resolve_art(sink, track, results, now_fn=time.time):
     outcome = coverart.CoverResult("found", art) if art else coverart.CoverResult("absent")
     if not art:
         if release_ids:
-            outcome = coverart.lookup(release_ids)
+            with coverart.access(getattr(sink, 'store', None)):
+                outcome = coverart.lookup(release_ids)
     sink.set_art(outcome.url, source='deezer' if art else 'coverart')
     sink.record_artwork(release_ids, outcome, now_fn())
     return outcome
@@ -275,12 +278,16 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                     except SubjectChanged:
                         stale = True
                         break
+                    except (WorkClosing, WorkBudgetExceeded):
+                        raise
                     except Exception as exc:
                         # One malformed answer must not abort healthy providers or later tracks.
                         fields = {}
-                        net.record_probe_failure(exc)
+                        if not any(error is exc for error in errors):
+                            net.record_probe_failure(exc)
                 retry = bool(errors) or m.tripped()
-                outage = m.tripped() or any(net.provider_outage(e) for e in errors)
+                outage = m.tripped() or any(net.provider_outage(e) and
+                    getattr(e, 'provider', m.name) == m.name for e in errors)
                 now = now_fn()
                 error = "; ".join(str(e) or type(e).__name__ for e in errors)
                 if m.tripped() and not error:
@@ -291,7 +298,8 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                             key, m.name, fields, retry=retry, video_id=t.get("video_id"), now=now,
                             error=error, cooldown=outage,
                             retry_after=max((net.retry_after(e, now) for e in errors), default=0),
-                            providers=[mod.name for mod in chosen])
+                            providers=[mod.name for mod in chosen],
+                            manage_cooldown=not getattr(m, 'manages_availability', False))
                 except SubjectChanged:
                     stale = True
                     break

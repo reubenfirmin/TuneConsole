@@ -59,16 +59,16 @@ class RadioPolicy:
 
     @staticmethod
     def genre_mismatch(view: CandidateView, history: PlaybackHistory, track):
-        if getattr(view.candidates, 'cluster_members', None):
-            return False  # Indexed streams navigate styles; explicit exclusions are checked separately.
         return not GenrePolicy(view.candidates.tuning["theme"], [], current=history.current).allows(track)
 
-    @staticmethod
-    def pick(view: CandidateView):
+    def pick(self, view: CandidateView):
+        view.candidates.refresh_exclusions(self.now_fn())
         if view.directions:
             used = {t["video_id"] for t in view.selected} | view.directions.blocked | view.rejected
             active = view.directions.slots[view.directions.active]
-            pick = next((t for t in active["tracks"] if t["video_id"] not in used), None)
+            pick = next((t for t in active["tracks"] if t["video_id"] not in used
+                         and t['key'] not in view.candidates.blocked
+                         and (t.get('artist') or '').casefold() not in view.candidates.muted), None)
         else:
             pick = view.candidates.next_track(list(view.selected), excluded=view.rejected)
         return pick
@@ -111,11 +111,10 @@ class RadioPolicy:
         directions = view.directions
         seen, strengths = set(context.seen), dict(directions.feedback)
         changed = False
-        disliked = store.rec_model.disliked_identity_keys()
-        muted = {a.casefold() for a in store.rec_model.muted_artists()}
-        suppressed = store.rec_model.suppressed_keys("for_you", now)
+        view.candidates.refresh_exclusions(now)
         blocked = view.rejected | view.metadata_rejected | {t["video_id"] for t in view.candidates.by_video.values()
-            if t["key"] in disliked | suppressed or (t.get("artist") or "").casefold() in muted}
+            if t["key"] in view.candidates.blocked
+            or (t.get("artist") or "").casefold() in view.candidates.muted}
         if directions.blocked != blocked:
             changed = True
         ratings = [(key, at, .45, "like") for key, at in store.rec_model.recent_liked_with_ts(limit=200)]
@@ -146,6 +145,7 @@ class RadioPolicy:
     @staticmethod
     def invalid(view: CandidateView, history: PlaybackHistory, track):
         if (RadioPolicy.genre_mismatch(view, history, track) or track["video_id"] in view.directions.blocked
+                or track['key'] in view.candidates.blocked
                 or track["key"] not in view.candidates.by_key):
             return True
         negative = sum(-strength * max(0, (view.candidates.similarity(
@@ -155,10 +155,10 @@ class RadioPolicy:
         return negative >= .32
 
     @staticmethod
-    def replenish(view: CandidateView, history: PlaybackHistory, proposed, slot):
+    def replenish(view: CandidateView, history: PlaybackHistory, proposed, slot, *, excluded=()):
         anchor = view.directions.slots[slot]["anchor"]
         valid = [t for t in proposed if t["video_id"] not in view.directions.blocked]
-        return view.directions.continue_sequence(list(history.heard or history.tracks[:1]), valid, anchor, ())
+        return view.directions.continue_sequence(list(history.heard or history.tracks[:1]), valid, anchor, excluded)
 
     @staticmethod
     def upgrade_directions(view: CandidateView, history: PlaybackHistory, candidates, *, force=False):

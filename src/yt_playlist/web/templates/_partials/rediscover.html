@@ -1,9 +1,9 @@
 {# A return surface, deliberately unlike Discover's catalog grid. One dormant album becomes the
    memory to step back into; the rest form a small trail, followed by old personal playlists. #}
-{% if rediscover_albums or rediscover %}
+{% if rediscover_albums or rediscover or rediscover_tracks %}
 <section id="rediscover">
   <header class="redis-intro">
-    <h2>Something you used to love</h2>
+    <h2>Back in your orbit</h2>
     <p>Saved music that you haven't played recently</p>
   </header>
   {% if rediscover_albums %}
@@ -68,6 +68,22 @@
       </table>
     </div>
     {% endfor %}
+  </div>
+  {% endif %}
+  {% if rediscover_tracks %}
+  <div class="redis-song-shelf">
+    <header class="redis-song-intro"><h3>A little out of rotation</h3><p>Familiar songs, given room to return.</p></header>
+    <div class="redis-song-grid" aria-label="Songs to revisit">
+      {% for t in rediscover_tracks %}
+      <a class="redis-song" href="https://music.youtube.com/watch?v={{ t.video_id|urlencode }}" target="_blank" rel="noopener" aria-label="Play {{ t.title }} by {{ t.artist }}">
+        <span class="redis-song-art art-track{{ ' no-art' if not t.thumbnail }}">
+          {% if t.thumbnail %}<img src="{{ t.thumbnail }}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentElement.classList.add('no-art'); this.remove()">{% endif %}
+          <svg class="redis-song-play" viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M8 4.5v15L20 12Z"/></svg>
+        </span>
+        <span class="redis-song-copy"><strong>{{ t.title }}</strong><small>{{ t.artist }}</small></span>
+      </a>
+      {% endfor %}
+    </div>
   </div>
   {% endif %}
 </section>

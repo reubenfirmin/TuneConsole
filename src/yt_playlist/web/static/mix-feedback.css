@@ -86,6 +86,7 @@
   stroke-linecap: round;
   stroke-linejoin: round;
   opacity: 0;
+  transform: translate(-50%, -50%);
 }
 .mood-spill svg:nth-child(1) {
   left: 3%; top: 45%; --spill-x: -3rem; --spill-y: -.8rem; --spill-turn: -24deg;
@@ -201,8 +202,9 @@
 .fb-detailed { display: grid; gap: 1.125rem; margin-top: 1rem; padding-top: 1rem;
   border-top: 1px solid var(--border); }
 .fb-toggle { display: inline-flex; align-items: center; gap: .35rem; min-height: 1.875rem;
+  max-width: 100%;
   padding: .25rem .125rem; background: none; border: none; box-shadow: none; color: var(--accent-2);
-  font-weight: 500; font-size: var(--type-ui); white-space: nowrap; cursor: pointer; }
+  font-weight: 500; font-size: var(--type-ui); white-space: normal; text-align: left; cursor: pointer; }
 .fb-toggle:is(:hover, :focus-visible) { background: none; color: var(--text); box-shadow: none; }
 .fb-toggle svg { flex: none; fill: currentColor; transition: transform .18s ease; }
 .fb-toggle svg.is-open { transform: rotate(180deg); }

@@ -78,7 +78,7 @@ def _calculate_arm(reader, rows, setup, now, progress):
     breadth = taste_analysis.taste_breadth(reader, genre_plays=facets['genres'])
     eras = taste_analysis.era_distribution(reader, era_plays=facets['eras'])
     selection_data = {'plays': plays,
-        'preparation': {'leans': transient.facet_leans(reader, now),
+        'preparation': {'leans': transient.facet_leans(reader, now), 'bundles': bundles,
                         'dists': (breadth['families'], dict(eras)), 'vibe_rank': home_vibe.ranker(reader, now)}}
     service = home_cards.HomeCards(reader, home_prepared._NoJobs(), home_prepared._LOG,
         genre_options=home_themes.genre_options(reader, genre_plays=facets['genres']), selection_data=selection_data)
@@ -100,7 +100,7 @@ def _calculate_arm(reader, rows, setup, now, progress):
     if not bundles.get('_radio', {}).get('members'):
         from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT
         radio_bundles['all'] = {lane: pool[:CLUSTER_POOL_LIMIT] for lane, pool in bundles.get('all', {}).items()}
-    return {'_policies': list(policies.rows.values()),
+    return {'_policies': list(policies.rows.values()), '_policy_bases': list(policies.bases.values()),
             'mixes': {'menus': menus, 'choice_context': context, 'tuning': home_prepared.tuning_key(reader, now)},
             'albums': {'built_at': now, 'items': albums, 'context': context},
             'radio': {'bundles': radio_bundles, 'context': context,
@@ -109,9 +109,11 @@ def _calculate_arm(reader, rows, setup, now, progress):
 
 
 def prepare(store, current, now, checkpoint=None):
+    measurement.maintain_storage(store, now)
     started = time.monotonic()
     refreshing = current.get('phase') == 'observing'
     timings, phase, phase_started = {}, 'candidate fit', started
+    projection_sizes = {}
     def progress(next_phase):
         nonlocal phase, phase_started
         check_cancellable_work()
@@ -146,12 +148,12 @@ def prepare(store, current, now, checkpoint=None):
                 if (model_setup.current_setup(reader) != current['previous']
                         or product_comparison.constraints(reader) != current['constraints']):
                     raise ValueError('Model or standing preferences changed during preparation')
-                pairs, policy_rows = {}, []
+                pairs, policy_rows, policy_bases = {}, [], []
                 for arm, rows, setup in (('incumbent', incumbent, current['previous']),
                                           ('challenger', challenger, current['challenger'])):
                     pairs[arm] = _arm(reader, rows, setup, now, lambda name: progress(f'{arm}: {name}'))
                     policy_rows.extend(pairs[arm].pop('_policies'))
-                progress('publication')
+                    policy_bases.extend(pairs[arm].pop('_policy_bases'))
                 if not refreshing:
                     current = {**current, 'started_at': now,
                         'exposure_until': now + current['policy']['horizon_days'] * product_comparison.DAY,
@@ -160,18 +162,31 @@ def prepare(store, current, now, checkpoint=None):
                         'vectors': artifact, 'generation': hashlib.sha256(canonical([artifact, current['policy']])).hexdigest()}
                 current = {**current, 'phase': 'observing', 'prepared_at': now, 'last_prepare_attempt': now,
                            'runtime_seconds': time.monotonic() - started}
-                encoded = {product_comparison.pair_surface(current['run_id'], arm, format):
-                           json.dumps({'run_id': current['run_id'], 'data': data})
-                       for arm, formats in pairs.items() for format, data in formats.items()}
-                if sum(len(value.encode()) for value in encoded.values()) > MAX_PREPARED_BYTES:
+                from yt_playlist.rec import comparison_storage
+                encoded = {}
+                for arm, formats in pairs.items():
+                    for format, data in formats.items():
+                        progress(f'{arm}: {format} storage')
+                        surface = product_comparison.pair_surface(current['run_id'], arm, format)
+                        value = comparison_storage.encode(current['run_id'], data)
+                        envelope = json.loads(value)
+                        encoded[surface] = value
+                        projection_sizes[surface] = {key: envelope[key] for key in
+                            ('codec', 'expanded_bytes', 'packed_bytes')}
+                        projection_sizes[surface]['stored_bytes'] = len(value.encode())
+                progress('publication')
+                stored_bytes = sum(value['stored_bytes'] for value in projection_sizes.values())
+                if stored_bytes > MAX_PREPARED_BYTES:
                     raise ValueError('Paired serving projections exceeded their storage budget')
+                current['runtime_seconds'] = time.monotonic() - started
                 run = reader.model_selection.selection_run(current['run_id'])
                 run.pop('preparation_error', None)
                 run.update(phase='observing', progress='Comparing complete menus and Radio episodes on observed listening.',
                            policy=current['policy'], decision_at=current['decision_at'],
-                           runtime_seconds=current['runtime_seconds'], preparation_timings=timings)
+                           runtime_seconds=current['runtime_seconds'], preparation_timings=timings,
+                           preparation_bytes={'total': stored_bytes, 'projections': projection_sizes})
                 def publish():
-                    store.rec_ledger.publish_prepared_policies(policy_rows)
+                    store.rec_ledger.publish_prepared_policies(policy_rows, policy_bases)
                     for surface, value in encoded.items():
                         store.rec_proposals.publish_prepared_home(value, now, surface=surface)
                     store.rec_proposals.publish_prepared_home(json.dumps(current), now,
@@ -186,6 +201,9 @@ def prepare(store, current, now, checkpoint=None):
         reason = (f'Comparison preparation exceeded its time budget during {phase}.' if isinstance(exc, WorkBudgetExceeded)
                   else f'Comparison preparation deferred: {exc}')
         run = store.model_selection.selection_run(current['run_id'])
+        if projection_sizes:
+            run['preparation_bytes'] = {'total': sum(row['stored_bytes'] for row in projection_sizes.values()),
+                                        'projections': projection_sizes}
         current['last_prepare_attempt'] = now
         if refreshing:
             run.update(preparation_error=reason, preparation_timings=timings)

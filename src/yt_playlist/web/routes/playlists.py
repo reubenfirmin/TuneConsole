@@ -20,6 +20,7 @@ from yt_playlist.library.playlist_writes import PlaylistAddUncertain
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.library.live_plays import resolve_identity
 from yt_playlist.web.jobs import start_playlist_enrichment
+from yt_playlist.web.playlist_heading import generated_heading
 
 
 def build(ctx) -> APIRouter:
@@ -62,6 +63,10 @@ def build(ctx) -> APIRouter:
     def _is_generated(pid):
         pl = store.playlists.get_playlist(pid)
         return pl is not None and store.playlists.is_quarantined_playlist(pl.scope_ref)
+
+    def _heading(pl):
+        origin = store.playlists.playlist_provenance(pl.scope_ref)['origin']
+        return generated_heading(pl.title, is_generated=origin == 'tuneconsole')
 
     def _feedback_version(tracks):
         fields = sorted((t['identity_key'], t.get('genre') or '', t.get('year') or '') for t in tracks)
@@ -130,7 +135,7 @@ def build(ctx) -> APIRouter:
         labels = {i.id: i.label for i in store.identities.get_identities()}
         groups = store.playlists.get_playlist_groups()                 # ytm -> group name
         recipe_dates = store.playlist_recipes.get_recipe_created_ats()
-        stats = store.charts.get_playlist_listen_stats()            # pid -> (last_ts, count)
+        stats = store.charts.get_playlist_playback_stats()          # pid -> (last_ts, sessions)
         thumbnails = store.playlists.get_playlist_thumbnails()         # cover or first song artwork
         hidden = store.playlists.get_hidden_playlists()                # ytm of playlists hidden from this tab
         now = now_fn()
@@ -158,6 +163,7 @@ def build(ctx) -> APIRouter:
                 "id": p.id, "ytm": p.ytm_playlist_id, "title": p.title,
                 "identity": labels.get(p.identity_id, "?"), "thumbnail": thumbnails.get(p.id),
                 "count": p.track_count, "kind": store.playlists.playlist_kind(p.id),
+                "is_video": (store.playlist_recipes.get_recipe(p.scope_ref) or {}).get('media') == 'video',
                 "group": group,
                 "is_generated": quarantined,
                 "last": last, "listens": listens,
@@ -186,21 +192,21 @@ def build(ctx) -> APIRouter:
         pl = store.playlists.get_playlist(pid)
         if pl is None:
             raise HTTPException(status_code=404, detail="playlist not found")
-        labels = {i.id: i.label for i in store.identities.get_identities()}
         tracks = store.charts.playlist_tracks_detail(pid)
         from yt_playlist.rec import measurement
         measurement.record_action(store, "open", now_fn(), playlist_id=pid)
         is_generated = store.playlists.is_quarantined_playlist(pl.scope_ref)
         recipe = store.playlist_recipes.get_recipe(pl.scope_ref) if is_generated else None
         return templates.TemplateResponse(request, "playlist.html", {
-            "pl": pl, "tracks": tracks, "identity": labels.get(pl.identity_id, "?"),
-            "show_identity": len(labels) > 1,
+            "pl": pl, "tracks": tracks,
             "is_generated": is_generated,
+            "generated_heading": _heading(pl),
             "facets": taste_analysis.playlist_facets(store, pid) if is_generated else None,
             "feedback_version": _feedback_version(tracks) if is_generated else None,
             "mood_state": taste_analysis.playlist_mood_state(store, pid, now_fn()) if is_generated else 0,
             "mood_states": taste_analysis.track_mood_states(store, now_fn()) if is_generated else {},
             "recipe": recipe,
+            "is_video": (store.playlist_recipes.get_recipe(pl.scope_ref) or {}).get('media') == 'video',
             # #48: a cluster-derived playlist whose canvas we saved can be reopened and regrown
             "has_cluster_canvas": bool(store.playlist_recipes.get_cluster_canvas(pl.scope_ref)) if is_generated else False,
             "journey_label": journeys.JOURNEY_LABELS.get((recipe or {}).get("journey")) if is_generated else None,
@@ -433,8 +439,9 @@ def build(ctx) -> APIRouter:
             logger.exception("rename of playlist %s failed", pid)
             return _toast(request, "YouTube returned an unexpected response")
         _refresh_ytm_view(ctx, store, pid)
+        pl = store.playlists.get_playlist(pid)
         return templates.TemplateResponse(request, "_partials/playlist_head.html",
-                                          {"pl": store.playlists.get_playlist(pid)})
+            {"pl": pl, "generated_heading": _heading(pl)})
 
     @router.post("/settings/lastfm-key")
     async def set_lastfm_key(request: Request):

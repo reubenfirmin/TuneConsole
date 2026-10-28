@@ -40,6 +40,7 @@ class Session:
     title: str
     phase: Phase = Phase.PREPARING
     stop: threading.Event = field(default_factory=threading.Event)
+    wake: threading.Event = field(default_factory=threading.Event)
     selected: list = field(default_factory=list)
     playlist: str | None = None
     local_id: int | None = None
@@ -50,6 +51,7 @@ class Session:
     initial_tracks: list = field(default_factory=list)
     initial_handles: dict = field(default_factory=dict)
     error: str | None = None
+    selection_error: str | None = None
     exhausted: bool = False
     browser: dict | None = None
     browser_seen_at: float | None = None
@@ -74,6 +76,7 @@ class Session:
     preparation_snapshot: tuple[str, ...] | None = None
     preparation_seen_at: float = 0
     playback_confirmed: bool = False
+    playback_intent: int | None = None
     metadata_checked_at: float = 0
     metadata_revision: int = 0
     metadata_rejected: set = field(default_factory=set)
@@ -150,7 +153,8 @@ class Session:
         return TailView(tuple(self.tracks), self.position, self.furthest,
                         frozenset(self.directions.blocked) if self.directions else frozenset(),
                         self.candidates.by_video,
-                        tuple(tuple(state['ids']) for state in self.edits.recent_states), self.skip_requested)
+                        tuple(tuple(state['ids']) for state in self.edits.recent_states), self.skip_requested,
+                        frozenset(t['video_id'] for t in self.heard))
 
     @property
     def starting(self):
@@ -189,6 +193,7 @@ class Session:
         if not self.stopped_by_user:
             self.move(Phase.STOPPING)
         self.stop.set()
+        self.wake.set()
 
 
 def selected_slot(s: Session):

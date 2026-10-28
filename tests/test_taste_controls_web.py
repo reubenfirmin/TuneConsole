@@ -118,7 +118,20 @@ def test_taste_controls_round_trip(store):
 def test_taste_recall_fragment(store):
     c = _client(store)
     r = c.get("/taste/recall")
-    assert r.status_code == 200   # no vectors -> "build first", still 200
+    assert r.status_code == 200
+    assert 'Preparing prediction checks in the background.' in r.text
+    assert '1-day test period' not in r.text
+    assert store.rec_proposals.get_proposals('model_health') is None
+
+
+def test_taste_recall_fragment_uses_prepared_results(store):
+    from yt_playlist.rec import model_health
+
+    c = _client(store)
+    assert model_health.prepare(store, 1.0)
+    r = c.get('/taste/recall')
+    assert r.status_code == 200
+    assert 'Preparing prediction checks in the background.' not in r.text
     assert "1-day test period" in r.text
 
 
@@ -228,7 +241,8 @@ def test_recommendation_controls_are_all_available_and_rendered_once(store):
                 expected = 0 if p.name.startswith("radio_") else 1
                 assert panel.ids.count(f"param-{p.name}") == expected, p.name
         assert 'id="param-radio_' not in html.lower()
-        assert '<option value="radio"' in html  # Remembered format preference includes On air.
+        assert 'taste-home-format' not in html
+        assert 'Start Home with' not in html
         assert 'hx-get="/taste/panels/recommendations"' in client.get("/taste" + query).text
 
 

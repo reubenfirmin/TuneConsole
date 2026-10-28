@@ -48,7 +48,7 @@ def test_clear_resets_genre_selections_and_all_biases_together(store):
 
 
 @pytest.mark.parametrize("path,data", [
-    ("/home/vibe", {"vibe": "gentle"}),
+    ("/home/vibe", {"vibe": "relax"}),
     ("/home/mix-genres", {"genres": "jazz"}),
     ("/home/other-genres", {"genres": '["Jazz"]'}),
     ("/home/breadth", {"breadth_bias": ".8"}),
@@ -102,7 +102,7 @@ def test_vibe_expiry_restores_still_active_genre_controls_without_resetting_them
     seed_genres(store)
     clock = [1000.0]
     client = client_at(store, clock)
-    client.post('/home/vibe', data={'vibe': 'gentle'})
+    client.post('/home/vibe', data={'vibe': 'relax'})
     clock[0] += 3600
     client.post('/home/mix-genres', data={'genres': 'jazz'})
     client.post('/home/steer', data={'axis': 'genre:techno', 'weight': '2'})
@@ -119,11 +119,11 @@ def test_ordinary_expiry_keeps_a_newer_vibe_and_clearing_vibe_keeps_newer_contro
     client = client_at(store, clock)
     client.post('/home/steer', data={'axis': 'genre:jazz', 'weight': '2'})
     clock[0] += 3600
-    client.post('/home/vibe', data={'vibe': 'move'})
+    client.post('/home/vibe', data={'vibe': 'cruise'})
     clock[0] = 1000 + mix_tuning.TTL_S
     client.get('/home/cards')
     assert not store.rec_model.get_leans()
-    assert store.settings.get_setting('home_mix_vibe') == 'move'
+    assert store.settings.get_setting('home_mix_vibe') == 'cruise'
     assert mix_tuning.remaining(store, clock[0]) == 3600
     client.post('/home/breadth', data={'breadth_bias': '.8'})
     deadline = store.settings.get_setting(mix_tuning.UPDATED_AT_SETTING)

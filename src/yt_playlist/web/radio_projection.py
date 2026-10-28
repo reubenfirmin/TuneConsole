@@ -36,6 +36,8 @@ def status_view(s: Session | None, *, active: bool, connected: bool, now: float)
     for branch in directions:
         branch["active"] = branch["slot"] == selected
     return {
+        "can_play_songs": True,
+        "song_play_version": 4,
         "active": active, "starting": bool(s and (s.starting or now < s.launch_deadline)),
         "playlist_id": s.playlist if s else None, "local_id": s.local_id if s else None,
         "title": s.title if s else None,
@@ -45,6 +47,7 @@ def status_view(s: Session | None, *, active: bool, connected: bool, now: float)
         "tracks": list(s.tracks) if s else [],
         "history": history, "history_count": len(history),
         "error": s.error if s else None, "observer_error": s.observer_error if s else None,
+        "selection_error": s.selection_error if s else None,
         "exhausted": bool(s and s.exhausted), "connected": connected,
         "browser": s.browser if s else None,
         "browser_age": now - s.browser_seen_at if s and s.browser_seen_at is not None else None,
@@ -64,7 +67,7 @@ def saved_view(saved: dict, *, active: bool) -> dict:
     scheduled = {t["video_id"] for t in tracks[max(0, saved.get("furthest", -1)) + 1:]}
     replacement = saved.get("requested_direction") or saved.get("replacement")
     selected = replacement["slot"] if replacement else plan.get("active", 0)
-    return {"active": active,
+    return {"active": active, "can_play_songs": True, "song_play_version": 4,
         "starting": bool(active and saved.get("initial_tracks")), "local_id": saved.get("local_id"),
         "playlist_id": saved.get("playlist"), "title": saved.get("title"), "tracks": tracks,
         "position": saved.get("position", -1), "menu_id": plan.get("menu_id"),
