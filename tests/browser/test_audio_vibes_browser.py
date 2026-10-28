@@ -52,18 +52,20 @@ def fake_result():
                 'models': {key: {'version': version} for key, version in value['mood_versions'].items()}}}}
 
 
-def fake_extension(page, fail_capture=False, result=None):
+def fake_extension(page, fail_capture=False, result=None, initially_stale=False):
     page.add_init_script('''
       window.vibeCaptures=[];
+      window.vibeExtensionReady=!INITIALLY_STALE;
       window.Worker=class {constructor(){throw Error('No app-side inference');}};
       window.AudioContext=class {constructor(){throw Error('No audio output');}};
       navigator.mediaDevices.getDisplayMedia=()=>{throw Error('No sharing dialog');};
       navigator.mediaDevices.getUserMedia=()=>{throw Error('No microphone');};
       window.chrome ||= {};
       chrome.runtime={connect() {
-        const listeners=[];
+        const listeners=[],disconnects=[];
         const port={onMessage:{addListener(fn){listeners.push(fn)}},
-          onDisconnect:{addListener(){}},disconnect(){},postMessage(message) {
+          onDisconnect:{addListener(fn){disconnects.push(fn)}},
+          disconnect(){disconnects.forEach(fn=>fn())},postMessage(message) {
             if(message.type!=='capture') return;
             if (message.not_before && (playbackStatus.audioSnapshot?.now_playing?.position ??
                 playbackStatus.snapshot?.now_playing?.position ?? 0) < message.not_before) {
@@ -87,15 +89,31 @@ def fake_extension(page, fail_capture=False, result=None):
                   playbackStatus.snapshot?.now_playing?.position ?? 30}};
             setTimeout(()=>listeners.forEach(fn=>fn(result)),60);
           }};
-        setTimeout(()=>listeners.forEach(fn=>fn({type:'ready'})),0);
+        setTimeout(()=>window.vibeExtensionReady
+          ? listeners.forEach(fn=>fn({type:'ready'})) : port.disconnect(),0);
         return port;
       }};
-    '''.replace('FAIL_CAPTURE', json.dumps(fail_capture)).replace('RESULT', json.dumps(result or fake_result())))
+    '''.replace('INITIALLY_STALE', json.dumps(initially_stale))
+        .replace('FAIL_CAPTURE', json.dumps(fail_capture)).replace('RESULT', json.dumps(result or fake_result())))
 
 
 def wait_samples(page, count, timeout=15000):
     page.wait_for_function('''count => JSON.parse(localStorage.getItem(
       'tuneconsole.audio-vibes.view.1'))?.samples.length === count''', arg=count, timeout=timeout)
+
+
+def test_stale_extension_explains_zero_checks_and_recovers_after_reload(vibes_enabled, live_app, page, store):
+    fake_extension(page, initially_stale=True)
+    page.route('**/bridge/status', lambda route: playback_route(route, {'position': 35, 'duration': 240}))
+    page.goto(live_app + '/playlists')
+    expect(page.locator('[data-vibe-card]:visible [data-vibe-prediction]')).to_have_text(
+        'Reload the TuneConsole extension, then reload this page to resume audio checks.')
+    assert not page.evaluate('vibeCaptures')
+    assert not store.conn.execute('SELECT 1 FROM sample_attributes').fetchone()
+    page.evaluate('window.vibeExtensionReady=true')
+    wait_samples(page, 1)
+    expect(page.locator('[data-vibe-card]:visible [data-vibe-prediction]')).to_have_text('1 of 3 audio checks complete')
+    assert len(page.evaluate('vibeCaptures')) == 1
 
 
 def test_normal_collection_predicts_and_propagates_without_rating_ui(live_app, page, store, monkeypatch):

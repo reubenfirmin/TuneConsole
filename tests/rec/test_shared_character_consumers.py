@@ -145,7 +145,8 @@ def test_live_and_reused_offers_preserve_current_explicit_exclusions(store, oppo
     remaining = vibe_pools.pick(store, 1000, 'relax', 'wheelhouse')
     assert not {first['key'], second['key'], third['key']} & {track['key'] for track in remaining}
     assert all(track['genre'] != 'Metal' for track in remaining)
-    protos = home_prepared._eligible_protos(store, [{'lane': 'wheelhouse', 'tracks': deepcopy(pool[:24]),
+    protos = home_prepared._eligible_protos(store, [{'lane': 'wheelhouse', 'label': 'Familiar',
+                                                   'name': 'Familiar - Test', 'tracks': deepcopy(pool[:24]),
                                                    'recipe': {'vibe': 'relax'}}], 1000)
     assert protos
     assert not {first['key'], second['key'], third['key']} & {t['key'] for p in protos for t in p['tracks']}
@@ -199,7 +200,7 @@ def test_prepared_set_from_another_vibe_is_served_with_a_preference_notice(store
     assert fallback.protos and fallback.preparing
     assert fallback.preference_notice == "Heads up - we're unable to create energize mix tapes right now."
     assert all(p['recipe'].get('vibe') != 'energize' for p in fallback.protos)
-    assert scheduled == [True]
+    assert scheduled  # Partial menus and stale tuning can each request the same coalesced preparation.
     with mix_tuning.adjusting_vibe(store, 1000):
         store.settings.delete_setting(home_vibe.SETTING)
     assert home_prepared.cards(store, payload, 1000, service, record=False).protos

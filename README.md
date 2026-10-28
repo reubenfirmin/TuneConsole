@@ -1,15 +1,34 @@
 # TuneConsole
 
-A privacy-first tool that allows you to manage your YouTube playlists & albums, and find new songs to listen to. Includes a layered recommendation engine that you can fine tune. Also includes the ability to import from Spotify.
+**A better algorithm.**
 
-I built this because:
+Works with your existing YouTube Music account. TuneConsole learns from your library
+and listening history to bring you new discoveries, neglected records, and old
+favorites. Shape your next mix, follow connections between songs, or switch between
+four radio streams as you listen.
 
-a) I find YouTube's recommendations OK but not great
+Free app and extension. Recommendations run on your computer, and your YouTube Music
+sign-in stays in your browser. Bring your Spotify playlists and saved albums along
+with the included import.
 
-b) And I find YouTube's discovery and playlist management to be pretty bad
+[**Get TuneConsole**](https://tuneconsole.com/#install) ·
+[Explore tuneconsole.com](https://tuneconsole.com) ·
+[Privacy policy](https://tuneconsole.com/privacy)
 
-**Website: [tuneconsole.com](https://tuneconsole.com)** — overview, install guide, and
-[privacy policy](https://tuneconsole.com/privacy).
+[![Personalized mix tapes: music close to your taste, overlooked records, new discoveries, and old favorites.](https://tuneconsole.com/shots/home.webp)](https://tuneconsole.com)
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="https://tuneconsole.com/shots/radio.webp"><img src="https://tuneconsole.com/shots/radio.webp" alt="TuneConsole Radio with a playing song and four streams to choose from." width="100%"></a>
+      <strong>Radio that follows your taste.</strong> Four streams to explore and switch between.
+    </td>
+    <td width="50%" valign="top">
+      <a href="https://tuneconsole.com/shots/clusters.webp"><img src="https://tuneconsole.com/shots/clusters.webp" alt="An interactive map connecting songs from M83, Shpongle, Pink Floyd, and other artists." width="100%"></a>
+      <strong>Find a new path through your music.</strong> Explore connections and turn your discoveries into playlists.
+    </td>
+  </tr>
+</table>
 
 ## Features
 

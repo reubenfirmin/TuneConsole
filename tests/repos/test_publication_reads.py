@@ -130,9 +130,9 @@ def test_radio_inputs_are_coherent_and_reader_closes_before_decode(tmp_path, mon
 
     space_id = radio_candidates.vectors.content_space_id
 
-    def publish_during_read(view):
+    def publish_during_read(view, **kwargs):
         assert view.conn is not store.conn
-        result = space_id(view)
+        result = space_id(view, **kwargs)
         # A real commit while the input reader is pinned must not mix generations.
         with store._lock, store.conn:
             store.conn.execute('BEGIN IMMEDIATE')

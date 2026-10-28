@@ -51,6 +51,7 @@ class Bridge:
         self.now_playing_seen_at = None  # monotonic heartbeat; expires stale state after a tab vanishes
         self.resumable_player = None  # last owned player; paused controls survive throttled heartbeats
         self.sensor_health = None  # latest extension probe of YTM tab/content-script health
+        self.playback_confirmation: bool | None = None  # unknown until this worker reports its capability
         self.source_timezone = None  # browser timezone for YouTube's local-day history shelves
 
     @property
@@ -68,6 +69,8 @@ class Bridge:
             self._send = send_coro_fn
             self._loop = loop
             self.source_timezone = None
+            self.sensor_health = None
+            self.playback_confirmation = None
             return self._conn_id
 
     def disconnect(self, conn_id: int | None = None) -> bool:
@@ -85,6 +88,7 @@ class Bridge:
             self.now_playing_seen_at = None
             self.resumable_player = None
             self.sensor_health = None
+            self.playback_confirmation = None
             pending, self._pending = self._pending, {}
         for fut in pending.values():
             if not fut.done():

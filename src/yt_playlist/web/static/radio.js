@@ -7,7 +7,7 @@ function radioHome(initial = {}) {
   const seeds = initial.seeds?.length ? initial.seeds : cached.seeds || [];
   return Object.defineProperties({
     state, seeds, visible: false, loading: !seeds.length, busy: false, resolving: !!state.resolving,
-    loaded: false, seedsLoading: false, timer: null, playlistKey: '', playlistSessionId: null, destroyed: false,
+    loaded: !!(initial.seeds?.length && initial.seedMenu), seedsLoading: false, timer: null, playlistKey: '', playlistSessionId: null, destroyed: false,
     preparingKey: '',
     busyAction: '', seedMenu: initial.seedMenu || cached.seedMenu, seenMenu: null, currentVideo: null, requestSerial: 0,
     recordPlayback: null, pendingRecord: null, recordCoverFailed: '',

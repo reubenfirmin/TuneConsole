@@ -31,6 +31,7 @@ function playerStatus() {
     ratingTail: null,
     confirmedRatings: {},
     skipping: false,
+    toggling: false,
     artworkFailed: '',
     currentLocation: location.href,
     sourceLinkVisible() {
@@ -180,11 +181,36 @@ function playerStatus() {
         this.skipping = false;
       }
     },
-    toggle() {
-      if (!this.nowPlaying) return;
+    async toggle() {
+      if (!this.nowPlaying || this.toggling) return;
       if (window.tvPlaybackControls?.active()) return window.tvPlaybackControls.command('toggle');
-      this.nowPlaying.paused = !this.nowPlaying.paused;
-      fetch('/now-playing/toggle', { method: 'POST' }).catch(() => {});
+      if (!this.nowPlaying.video_id) {
+        window.tcPlaybackError('The playing song is still loading. Try again in a moment.');
+        return;
+      }
+      const videoId = this.nowPlaying.video_id;
+      const action = this.nowPlaying.paused ? 'play' : 'pause';
+      this.toggling = true;
+      const controller = new AbortController();
+      const deadline = setTimeout(() => controller.abort(), 12000);
+      let errorMessage = 'Playback was not confirmed. Check YouTube Music before trying again.';
+      try {
+        const response = await fetch('/now-playing/toggle?' + new URLSearchParams({
+          action, videoId, confirm: 'true'}), {method: 'POST', signal: controller.signal});
+        if (!response.ok) throw new Error('Playback was not confirmed. Open YouTube Music and try again.');
+        const result = await response.json();
+        if (!result.ok) {
+          errorMessage = result.error || errorMessage;
+          throw new Error(errorMessage);
+        }
+        document.getElementById('playback-error')?.remove();
+      } catch (error) {
+        window.tcPlaybackError(errorMessage);
+      } finally {
+        clearTimeout(deadline);
+        this.toggling = false;
+        window.playbackStatus.refresh();
+      }
     },
   };
 }

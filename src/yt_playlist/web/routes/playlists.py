@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from yt_playlist.providers import lastfm
-from yt_playlist.rec import actions, journeys, rec_params, taste_analysis
+from yt_playlist.rec import actions, home_preferences, journeys, onboarding, rec_params, taste_analysis
 from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.library.playlist_metadata import PROMOTED_DESCRIPTION
 from yt_playlist.library.playlist_positions import pending_insertions
@@ -200,6 +200,8 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(request, "playlist.html", {
             "pl": pl, "tracks": tracks,
             "is_generated": is_generated,
+            "show_playlist_radio": not is_generated or not (
+                home_preferences.choice_pending(store) or onboarding.initial_setup_pending(store, now_fn())),
             "generated_heading": _heading(pl),
             "facets": taste_analysis.playlist_facets(store, pid) if is_generated else None,
             "feedback_version": _feedback_version(tracks) if is_generated else None,

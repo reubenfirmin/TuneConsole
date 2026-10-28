@@ -43,6 +43,10 @@ def dimension(item, name):
 
 def _intensity_fit(item):
     """Select the same usable learned input for scoring and served provenance."""
+    correction = ((item.get('musical') or {}).get('dimensions') or {}).get('intensity') or {}
+    if (isinstance(correction, dict) and correction.get('override') is True
+            and dimension(item, 'intensity')[0] is not None):
+        return None
     fits = ((item.get('musical') or {}).get('vibes') or {}).get('fits') or {}
     if not isinstance(fits, dict):
         return None

@@ -83,6 +83,9 @@ def test_charts_home_and_analytics_filtering_and_shared_styles(live_app,store,pa
     page.evaluate('document.fonts.ready')
     icon=play.locator('.le-play-icon, svg')
     expect(icon).to_have_css('opacity','0')
+    # The app scrolls smoothly. Finish positioning before measuring hover so
+    # the link cannot scroll away from the stationary pointer mid-transition.
+    play.evaluate("el => el.scrollIntoView({behavior: 'instant', block: 'center'})")
     play.hover()
     expect(icon).to_have_css('opacity','1')
     page.mouse.move(0,0)

@@ -49,6 +49,48 @@ def fits(store, key):
     return store.musical_profiles.by_keys([key])[key]['vibes']['fits']
 
 
+def test_explicit_intensity_stays_authoritative_after_audio_and_a_later_correction(store, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from yt_playlist.rec import audio_vibe_model
+    from yt_playlist.web.app import create_app
+
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1')
+    monkeypatch.setenv(audio_vibe_model.ENVIRONMENT_KEY, '')
+    entry, key = track(store, 'override-song')
+    with store.conn:
+        catalog.choose_field(store.conn, entry, 'energy', .1, now=10)
+    drain(store)
+    item = {'musical': musical_character.load(store, [key])[key]}
+    assert musical_character.intensity_evidence(item) == (.1, 1)
+
+    run = str(uuid4())
+    app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
+    with TestClient(app, base_url='http://127.0.0.1') as client:
+        for point in ('thirty', 'middle', 'two_thirds'):
+            value = sample(run_id=run, point=point, relaxed=.05, aggressive=.95)
+            value['video_id'] = 'override-song'
+            response = client.post('/audio-vibes/samples', json=value)
+            assert response.status_code == 200, response.text
+    frozen = store.audio_vibes.samples(run)
+    assert len(frozen) == 3
+
+    for correction in (.1, .2):
+        if correction == .2:
+            with store.conn:
+                catalog.choose_field(store.conn, entry, 'energy', correction, now=1001)
+        drain(store)
+        item = {'musical': musical_character.load(store, [key])[key]}
+        assert item['musical']['dimensions']['intensity']['override'] is True
+        assert {fit['source'] for fit in item['musical']['vibes']['fits'].values()} == {'audio_measurement'}
+        assert musical_character.intensity_evidence(item) == (correction, 1)
+        assert musical_character.intensity(item) == correction
+        context = musical_character.provenance(item)
+        assert context['intensity'] == correction and context['intensity_support'] == 1
+        assert context['intensity_source'] is None and context['intensity_vibe'] is None
+    assert store.audio_vibes.samples(run) == frozen
+
+
 def test_consistent_distinct_songs_strengthen_sparse_prediction_and_disagreement_weakens_it():
     group = policy.groups('canonical artist', 'psybient')[0]
     calm = {'fits': {'relax': {'score': .95, 'support': 1}}}

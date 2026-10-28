@@ -148,10 +148,22 @@ def test_genre_requests_restrict_vibes_and_survive_clear(store):
     assert 'data-vibe=""' in response.text
     assert store.settings.get_setting(home_vibe.SETTING) is None
     assert store.rec_model.get_lean("genre:jazz") == 1.5
+    assert response.headers['X-Mix-Tuning-Active'] == 'true'
     assert offered(response) == {'jazz'}
     client.post("/home/vibe", data={"vibe": "cruise"})
     client.post("/home/fingerprint/reset")
     assert store.settings.get_setting(home_vibe.SETTING) is None
+
+
+def test_clearing_the_only_vibe_clears_tuning_indicator_and_deadline(store):
+    seed_sounds(store)
+    client = client_at(store, [1000.0])
+    client.post('/home/vibe', data={'vibe': 'relax'})
+    response = client.post('/home/vibe', data={'vibe': ''})
+    assert response.status_code == 200
+    assert response.headers['X-Mix-Tuning-Active'] == 'false'
+    assert float(response.headers['X-Mix-Tuning-Remaining']) == 0
+    assert 'data-tuning-active="false"' in client.get('/home/fingerprint').text
 
 
 def test_invalid_vibe_does_not_change_controls_or_deadline(store):
@@ -159,6 +171,22 @@ def test_invalid_vibe_does_not_change_controls_or_deadline(store):
     assert client.post("/home/vibe", data={"vibe": "unknown"}).status_code == 400
     assert store.settings.get_setting(home_vibe.SETTING) is None
     assert mix_tuning.remaining(store, 1000) == 0
+
+
+def test_vibe_render_failure_returns_error_instead_of_replacing_ready_cards(store, monkeypatch):
+    from yt_playlist.web.routes.home_views import HomeViews
+
+    client = client_at(store, [1000.0])
+
+    def fail(*args, **kwargs):
+        raise RuntimeError('controlled rendering failure')
+
+    monkeypatch.setattr(HomeViews, 'card_context', fail)
+    response = client.post('/home/vibe', data={'vibe': 'relax'})
+    assert response.status_code == 503
+    assert not response.content
+    # The choice was saved; a later retry or reload can finish rendering it.
+    assert store.settings.get_setting(home_vibe.SETTING) == 'relax'
 
 
 @pytest.mark.parametrize('removed', ['focus', 'bright', 'unwind', 'gentle', 'boost', 'intense', 'move'])

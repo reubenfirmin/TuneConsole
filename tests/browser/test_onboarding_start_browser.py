@@ -1,4 +1,7 @@
 """The first mix arrives through local polling while the initial library sync is unfinished."""
+import json
+import re
+
 from playwright.sync_api import expect
 import pytest
 
@@ -393,6 +396,86 @@ def test_setup_banner_follows_navigation_and_finishes_when_models_are_ready(live
     page.keyboard.press("Escape")
     page.reload()
     expect(page.locator(".setup-banner")).to_have_count(0)
+    assert errors == []
+
+
+@pytest.mark.parametrize('width', [320, 1280])
+def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, store, page, width, tmp_path):
+    from urllib.parse import parse_qs
+
+    store.settings.set_setting('onboard_listening_format', 'albums')
+    store.collection.add_saved_album({'browse': 'MPRE_starter', 'title': 'The first record',
+                                      'artist': 'An artist', 'year': '2001'})
+    status = {'connected': True, 'now_playing': {'video_id': 'other', 'title': 'Other song',
+        'artist': 'Another artist', 'paused': False, 'playlist_ytm_id': 'OTHER'}}
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.route('**/bridge/status', lambda route: route.fulfill(json=status))
+    page.route('**/album/play', lambda route: route.fulfill(status=204))
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto(live_app)
+    card = page.locator('.starter-album')
+    expect(card).to_be_visible()
+    expect(card).to_contain_text('The first record')
+    expect(card.locator('.starter-context')).to_have_text(
+        "Here's an album to listen to while we perform initial customization.")
+    expect(page.locator('.starter-mix')).to_have_count(0)
+    expect(page.locator('.arrival-progress')).to_be_hidden()
+    play = card.get_by_role('button', name='Play The first record', exact=True)
+    assert play.evaluate("el => getComputedStyle(el, '::after').animationName") == 'onboarding-orbit, onboarding-breathe'
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    card.evaluate('''el => Promise.all(el.getAnimations({subtree:true})
+        .filter(a => a.effect.getComputedTiming().iterations !== Infinity).map(a => a.finished))''')
+    page.screenshot(path=str(tmp_path / f'onboarding-first-album-{width}.png'), full_page=True)
+    player = page.locator('.global-now-playing')
+    with page.expect_request('**/album/play') as request:
+        play.click()
+    assert parse_qs(request.value.post_data)['browse_id'] == ['MPRE_starter']
+    assert page.evaluate("JSON.parse(sessionStorage.getItem('tc-onboarding-playback')).album") == 'MPRE_starter'
+    expect(player).not_to_have_class(re.compile('is-onboarding-cue'))
+    # A song with album metadata in an unrelated playlist cannot satisfy the handoff.
+    status['now_playing'].update(title='An album song', album_browse_id='MPRE_starter',
+        source={'kind': 'playlist', 'url': '/playlist/1'})
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(player).not_to_have_class(re.compile('is-onboarding-cue'))
+    status['now_playing'].update(playlist_ytm_id='ALBUM_QUEUE', paused=True,
+        source={'kind': 'album', 'url': '/album?browse=MPRE_starter', 'title': 'The first record'})
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(player).not_to_have_class(re.compile('is-onboarding-cue'))
+    status['now_playing']['paused'] = False
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(player).to_have_class(re.compile('is-onboarding-cue'))
+    assert store.settings.get_setting('last_sync_at') is None
+    assert errors == []
+
+
+def test_ready_radio_starter_uses_existing_session_controls(live_app, store, page):
+    from tests.conftest import seed_catalog_track
+
+    store.settings.set_setting('onboard_listening_format', 'radio')
+    seed_catalog_track(store, 'radio seed|artist', 'First radio song', 'Artist', video_id='radio-seed')
+    store.settings.set_setting('radio_seed_offer', json.dumps({'menu_id': 'starter-radio-offer',
+        'tracks': [{'key': 'radio seed|artist', 'video_id': 'radio-seed',
+                    'title': 'First radio song', 'artist': 'Artist'}]}))
+    page.route('**/bridge/status', lambda route: route.fulfill(json={'connected': True, 'now_playing': None}))
+    page.route('**/radio/status', lambda route: route.fulfill(json={'active': False, 'connected': True}))
+    # Rendering an existing offer must not refit or replace its seed suggestions.
+    seed_requests = []
+    page.route('**/radio/seeds', lambda route: (seed_requests.append(route.request.url),
+        route.fulfill(json={'tracks': []})))
+    page.route('**/radio/start', lambda route: route.fulfill(json={'ok': False, 'reason': 'Controlled launch rejection'}))
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto(live_app)
+    expect(page.locator('.onboarding-radio')).to_be_visible()
+    expect(page.locator('.starter-mix')).to_have_count(0)
+    expect(page.locator('.arrival-progress')).to_be_hidden()
+    with page.expect_request('**/radio/start') as request:
+        page.get_by_role('button', name='Start radio with First radio song by Artist').click()
+    assert request.value.post_data_json['video_id'] == 'radio-seed'
+    assert request.value.post_data_json['menu_id'] == 'starter-radio-offer'
+    expect(page.get_by_role('button', name='Start radio with First radio song by Artist')).to_be_visible()
+    assert seed_requests == []
     assert errors == []
 
 

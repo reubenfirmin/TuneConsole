@@ -115,7 +115,6 @@ h2.section .scope-tag, h3.section .scope-tag {
 }
 .card--status {
   border-color: var(--border-strong);
-  border-inline-start: 3px solid var(--accent);
 }
 .card--data {
   border-color: var(--border-strong);

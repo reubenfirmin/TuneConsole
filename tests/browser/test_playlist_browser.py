@@ -11,6 +11,7 @@ import time
 import re
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import uvicorn
@@ -177,14 +178,13 @@ def test_playlist_header_groups_play_radio_and_counts(live_playlist_app, page, w
     page.set_viewport_size({'width': width, 'height': 950})
     page.goto(f'{base}/playlist/{pid}')
     actions = page.locator('.release-hero .pl-actions')
-    play = actions.get_by_role('link', name='Play on TV' if video else 'Play on YouTube Music', exact=True)
+    play = actions.get_by_role('link' if video else 'button',
+                               name='Play on TV' if video else 'Play on YouTube Music', exact=True)
     expect(play).to_be_visible()
     expect(play.locator('svg')).to_have_count(1)
     expect(play).to_have_text('')
-    expect(play).to_have_attribute('href', f'/?tv_playlist={pid}#tv' if video else
-                                  'https://music.youtube.com/playlist?list=PL1')
-    if not video:
-        expect(play).to_have_attribute('target', '_blank')
+    if video:
+        expect(play).to_have_attribute('href', f'/?tv_playlist={pid}#tv')
     expect(page.locator('.release-hero')).not_to_contain_text('Account:')
     counts = actions.locator('.pl-stats')
     expect(counts).to_contain_text('2 tracks')
@@ -193,6 +193,129 @@ def test_playlist_header_groups_play_radio_and_counts(live_playlist_app, page, w
     expect(radio).to_have_attribute('href', f'/?radio_playlist={pid}#radio')
     assert counts.bounding_box()['x'] >= radio.bounding_box()['x'] + radio.bounding_box()['width']
     assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+
+
+@pytest.mark.parametrize('width', [390, 1440])
+def test_playlist_header_follows_only_its_confirmed_queue_without_relaunching(live_playlist_app, page, width):
+    base, pid = (live_playlist_app[key] for key in ('base', 'pid'))
+    status = {'connected': True, 'now_playing': {
+        'video_id': 'v0', 'title': 'Song A', 'artist': 'Artist X',
+        'playlist_ytm_id': 'PL1', 'paused': False}}
+    pending, launches, errors = [], [], []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.route('**/bridge/status', lambda route: route.fulfill(json=status))
+    page.route('**/now-playing/toggle?*', lambda route: pending.append(route))
+
+    def launch(route):
+        launches.append(route.request.post_data_json)
+        route.fulfill(json={'ok': True})
+
+    page.route('**/play', launch)
+    page.set_viewport_size({'width': width, 'height': 950})
+    page.goto(f'{base}/playlist/{pid}')
+    header = page.locator('.pl-actions .playlist-play')
+    player = page.locator('.global-now-playing')
+
+    def assert_state(playing):
+        label = 'Pause' if playing else 'Play'
+        expect(header).to_have_attribute('aria-label', label + ' on YouTube Music')
+        expect(header).to_have_attribute('title', label + ' on YouTube Music')
+        expect(header.locator('path')).to_have_attribute('d',
+            'M6 4h4v16H6zm8 0h4v16h-4z' if playing else 'M7 3.5v17l14-8.5Z')
+        expect(player.get_by_role('button', name=label, exact=True)).to_be_visible()
+
+    assert_state(True)
+    for index, action in enumerate(['pause', 'play']):
+        header.click()
+        expect(header).to_be_disabled()
+        expect(header).to_have_attribute('aria-busy', 'true')
+        assert_state(action == 'pause')  # Wait for observation; no optimistic icon flip.
+        header.evaluate('el => Alpine.$data(el).play()')
+        assert len(pending) == index + 1
+        assert parse_qs(urlsplit(pending[-1].request.url).query) == {
+            'action': [action], 'videoId': ['v0'], 'confirm': ['true']}
+        status['now_playing']['paused'] = action == 'pause'
+        pending[-1].fulfill(json={'ok': True, 'paused': action == 'pause'})
+        expect(header).to_be_enabled()
+        assert_state(action == 'play')
+    assert launches == []
+    page.reload()
+    assert_state(True)
+
+    # A shared song does not identify the displayed queue. Each must launch normally.
+    for queue in [
+        {'playlist_ytm_id': 'OTHER'},
+        {'playlist_ytm_id': 'ALBUM', 'source': {'kind': 'album'}},
+        {'playlist_ytm_id': 'PL1', 'source': {'kind': 'radio'}},
+        {},
+    ]:
+        status['now_playing'] = {'video_id': 'v0', 'title': 'Song A', 'artist': 'Artist X',
+                                 'paused': False, **queue}
+        page.evaluate('window.playbackStatus.refresh()')
+        expect(header).to_have_attribute('aria-label', 'Play on YouTube Music')
+        expect(player.get_by_role('button', name='Pause', exact=True)).to_be_visible()
+        with page.expect_response('**/play'):
+            header.click()
+        expect(header).to_be_enabled()
+    assert launches == [{'url': 'https://music.youtube.com/playlist?list=PL1'}] * 4
+    assert len(pending) == 2
+
+    status.update(connected=False, now_playing={
+        'video_id': 'v0', 'playlist_ytm_id': 'PL1', 'paused': False})
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(header).to_have_attribute('aria-label', 'Play on YouTube Music')
+
+    # A paused background player's last confirmed queue resumes through its owned player.
+    status.update(connected=True, now_playing=None, resumable_player={
+        'video_id': 'v0', 'playlist_ytm_id': 'PL1', 'paused': True})
+    page.evaluate('window.playbackStatus.refresh()')
+    header.click()
+    expect(header).to_be_disabled()
+    assert parse_qs(urlsplit(pending[-1].request.url).query) == {
+        'action': ['play'], 'videoId': ['v0'], 'confirm': ['true'], 'resume': ['true']}
+    status.update(now_playing={
+        'video_id': 'v0', 'title': 'Song A', 'artist': 'Artist X',
+        'playlist_ytm_id': 'PL1', 'paused': False}, resumable_player=None)
+    pending[-1].fulfill(json={'ok': True, 'paused': False})
+    expect(header).to_be_enabled()
+    assert_state(True)
+    assert len(pending) == 3 and len(launches) == 4
+    expect(page).to_have_url(f'{base}/playlist/{pid}')
+    assert len(page.context.pages) == 1
+    assert errors == []
+
+
+@pytest.mark.parametrize('failure', ['rejected', 'network', 'invalid_json', 'unconfirmed'])
+def test_playlist_header_retains_observed_state_when_control_is_not_confirmed(live_playlist_app, page, failure):
+    base, pid = (live_playlist_app[key] for key in ('base', 'pid'))
+    status = {'connected': True, 'now_playing': {
+        'video_id': 'v0', 'title': 'Song A', 'artist': 'Artist X',
+        'playlist_ytm_id': 'PL1', 'paused': False}}
+    pending, launches = [], []
+    page.route('**/bridge/status', lambda route: route.fulfill(json=status))
+    page.route('**/now-playing/toggle?*', lambda route: pending.append(route))
+    page.on('request', lambda request: launches.append(request.url) if request.url.endswith('/play') else None)
+    page.goto(f'{base}/playlist/{pid}')
+    header = page.get_by_role('button', name='Pause on YouTube Music', exact=True)
+    header.click()
+    expect(header).to_be_disabled()
+    if failure == 'network':
+        pending[0].abort()
+    elif failure == 'invalid_json':
+        pending[0].fulfill(content_type='text/plain', body='unavailable')
+    else:
+        pending[0].fulfill(json={'ok': failure == 'unconfirmed', 'paused': False})
+    expect(page.locator('#playback-error')).to_contain_text('Playback was not confirmed')
+    expect(header).to_be_enabled()
+    expect(page.locator('.global-now-playing').get_by_role('button', name='Pause', exact=True)).to_be_visible()
+    assert len(pending) == 1 and launches == []
+    header.click()
+    expect(header).to_be_disabled()
+    status['now_playing']['paused'] = True
+    pending[-1].fulfill(json={'ok': True, 'paused': True})
+    expect(page.get_by_role('button', name='Play on YouTube Music', exact=True)).to_be_enabled()
+    expect(page.locator('#playback-error')).to_have_count(0)
+    assert len(pending) == 2 and launches == []
 
 
 def test_set_year_from_song_menu(live_playlist_app, page):

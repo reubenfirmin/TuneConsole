@@ -113,10 +113,12 @@ export class AudioVibeCards {
     const card = this.cards.get(id);
     // A delayed GET cannot erase completed checks. Each saved excerpt is immutable.
     if (state.samples.length >= card.state.samples.length) card.state = state;
+    else if ('collection_status' in state) card.state.collection_status = state.collection_status;
     const current = card.state;
     const guess = current.prediction && (current.prediction.vibe || current.prediction.ranking[0]?.vibe);
     card.find('prediction').textContent = guess
       ? 'Prediction: ' + current.choices[guess].attribute_label
+      : current.collection_status?.phase === 'unavailable' ? current.collection_status.message
       : `${current.samples.length} of 3 audio checks complete`;
     const checks = card.find('checks');
     checks.replaceChildren();

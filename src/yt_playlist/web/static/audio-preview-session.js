@@ -34,7 +34,8 @@ export class AudioPreviewSession {
       return;
     }
     if (!globalThis.chrome?.runtime?.connect) {
-      this.changed({phase: 'idle', message: 'Reload the TuneConsole extension, then reload this page in Chrome or Chromium.'});
+      this.changed({phase: this.portName === 'tc-audio-collection' ? 'unavailable' : 'idle',
+        message: 'Reload the TuneConsole extension, then reload this page in Chrome or Chromium.'});
       this.reconnect = setTimeout(() => this.connect(), 2000);
       return;
     }
@@ -56,6 +57,7 @@ export class AudioPreviewSession {
             // No automatic recording when this extension build has no model.
             // Keep the retry quiet and infrequent; an extension update may add it.
             this.retryConnectionAt = Date.now() + 60000;
+            port.collectionUnavailable = true;
             clearTimeout(timeout);
             port.disconnect();
           } else if (this.port === port) this.receive(data);
@@ -69,12 +71,17 @@ export class AudioPreviewSession {
             this.port = null;
             this.fail('Audio preview disconnected. Waiting for the TuneConsole extension…');
           }
+          if (!this.port && !this.destroyed && !this.connecting.size && this.portName === 'tc-audio-collection') {
+            this.changed({phase: 'unavailable', message: port.collectionUnavailable
+              ? 'Audio checks need the extension’s audio model. Reload the extension after installing it.'
+              : 'Reload the TuneConsole extension, then reload this page to resume audio checks.'});
+          }
           if (!this.port && !this.destroyed) this.reconnect = setTimeout(() => this.connect(), 2000);
         });
       } catch (e) {}
     }
     if (!this.port) {
-      this.changed({phase: 'idle', message: 'Connecting to the TuneConsole extension…'});
+      this.changed({phase: 'connecting', message: 'Connecting to the TuneConsole extension…'});
       this.reconnect = setTimeout(() => this.connect(), 3500);
     }
   }

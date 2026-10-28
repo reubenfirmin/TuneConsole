@@ -20,6 +20,21 @@ from tests.web.test_setup_identities import CheckedClient
 pytestmark = pytest.mark.browser
 
 
+def test_home_starting_mode_saves_in_setup(live_app, store, page):
+    page.goto(f'{live_app}/setup?tab=home')
+    expect(page.get_by_role('tab', name='Home', exact=True)).to_have_attribute('aria-selected', 'true')
+    choice = page.get_by_label('Start Home with', exact=True)
+    expect(choice).to_be_visible()
+    with page.expect_response('**/home/format') as response:
+        choice.select_option('albums')
+    assert response.value.status == 204
+    expect(page.get_by_role('status').filter(has_text='Saved.')).to_be_visible()
+    assert store.settings.get_setting('home_format') == 'albums'
+    page.reload()
+    expect(choice).to_have_value('albums')
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+
+
 def _free_port():
     s = socket.socket()
     s.bind(("127.0.0.1", 0))

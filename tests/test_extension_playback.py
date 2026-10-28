@@ -12,6 +12,7 @@ import pytest
     "rating_handoff",
     "paused_resume", "paused_closed", "paused_legacy",
     "tv_pause", "tv_pause_failed", "tv_pause_legacy", "tv_pause_no_music",
+    "confirmed_pause", "confirmed_lost_reply", "confirmed_missing_receiver", "confirmed_legacy",
 ])
 def test_playlist_launch_reuses_and_controls_the_playing_tab(scenario):
     node = shutil.which("node")
@@ -76,6 +77,16 @@ const chrome = {
     },
     sendMessage: async (id, msg) => {
       messages.push({id, ...msg});
+      if (scenario.startsWith('confirmed_')) {
+        if (msg.type==='sensor-ping') return {ok:true,receiverRevision:scenario==='confirmed_legacy'?13:14};
+        if (msg.type==='player-control') {
+          const attempts = messages.filter(message=>message.type==='player-control').length;
+          if (scenario==='confirmed_lost_reply') throw Error('The message port closed before a response was received.');
+          if (scenario==='confirmed_missing_receiver' && attempts===1)
+            throw Error('Could not establish connection. Receiving end does not exist.');
+          return {ok:true,paused:true,videoId:'song'};
+        }
+      }
       if(msg.type==='sensor-ping')return {ok:true,receiverRevision:scenario==='paused_legacy'?8:scenario.startsWith('tv_pause') && scenario!=='tv_pause_legacy'?11:9,mainVersion:4,mainRevision:9,mainAgeMs:0};
       if(msg.type==='pause-for-tv')return {ok:true,paused:scenario!=='tv_pause_failed'};
       if(scenario==='rating_handoff' && msg.type==='rate')
@@ -100,6 +111,18 @@ const report = async (id, msg) => {
 };
 const next = 'https://music.youtube.com/watch?list=PL_new';
 (async () => {
+  if (scenario.startsWith('confirmed_')) {
+    await sockets[0].onmessage({data:JSON.stringify({id:88,type:'playpause',action:'pause',videoId:'song'})});
+    const result = JSON.parse(frames.at(-1).body);
+    assert.equal(frames.at(-1).id,88);
+    assert.equal(result.ok,['confirmed_pause','confirmed_missing_receiver'].includes(scenario));
+    const controls = messages.filter(message=>message.type==='player-control');
+    assert.equal(controls.length,scenario==='confirmed_legacy'?0:scenario==='confirmed_missing_receiver'?2:1);
+    for (const control of controls) assert.deepEqual(control,
+      {id:3,type:'player-control',action:'pause',confirm:true,videoId:'song'});
+    assert.equal(created.length,0); assert.equal(updated.length,0);
+    return;
+  }
   if (scenario.startsWith('tv_pause')) {
     const result = await playback.pauseForTv();
     assert.equal(result.ok, ['tv_pause','tv_pause_no_music'].includes(scenario));

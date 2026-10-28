@@ -1,5 +1,11 @@
 # Emotify product checkpoint, 28 October 2026
 
+**Reopened #507:** see [the input comparison and cleanup evidence](EMOTIFY_INPUT_COMPARISON.md)
+for the rerun, actual-library coverage, correction precedence fix and collection
+status fix. The 69.1% embedding result reproduces; it does not measure provider-only
+inference or propagated accuracy. Live collection after an extension reload remains
+unverified. The original integration notes below are historical evidence.
+
 Related issue: #507. The user requested a stopping point with a useful model
 wired into the product, followed by a plan for further data use. The broad
 experiment campaign is paused, not exhausted. Its caches remain available.

@@ -49,6 +49,8 @@ def test_starter_cue_follows_only_its_playback_and_expires(starter_mix, store, p
     page.wait_for_url(re.compile(r"/playlist/\d+$"))
     pid = int(page.url.rsplit("/", 1)[1])
     playlist = store.playlists.get_playlist(pid).ytm_playlist_id
+    header = page.locator('.pl-actions .playlist-play')
+    expect(header).to_have_attribute('aria-label', 'Play on YouTube Music')
     assert page.evaluate("JSON.parse(sessionStorage.getItem('tc-onboarding-playback')).playlist") == playlist
     expect(player).not_to_have_class(re.compile("is-onboarding-cue"))
 
@@ -57,15 +59,18 @@ def test_starter_cue_follows_only_its_playback_and_expires(starter_mix, store, p
                                  video_id="ready", title="First playable song")
     page.evaluate("window.playbackStatus.refresh()")
     expect(player).not_to_have_class(re.compile("is-onboarding-cue"))
+    expect(header).to_have_attribute('aria-label', 'Play on YouTube Music')
     status.update(connected=False)
     status["now_playing"]["paused"] = False
     page.evaluate("window.playbackStatus.refresh()")
     expect(player).not_to_have_class(re.compile("is-onboarding-cue"))
+    expect(header).to_have_attribute('aria-label', 'Play on YouTube Music')
 
     status["connected"] = True
     page.evaluate("window.playbackStatus.refresh()")
     expect(player).to_have_class(re.compile("is-onboarding-cue"))
     expect(player).to_contain_text("First playable song")
+    expect(header).to_have_attribute('aria-label', 'Pause on YouTube Music')
     assert player.evaluate("el => getComputedStyle(el, '::after').animationName") == "onboarding-orbit, onboarding-breathe"
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     page.screenshot(path=str(tmp_path / f"player-cue-{width}.png"), full_page=True)
@@ -76,6 +81,7 @@ def test_starter_cue_follows_only_its_playback_and_expires(starter_mix, store, p
     page.clock.run_for(1000)
     page.reload()
     expect(player).to_have_class(re.compile("is-onboarding-cue"))
+    expect(header).to_have_attribute('aria-label', 'Pause on YouTube Music')
     assert page.evaluate("JSON.parse(sessionStorage.getItem('tc-onboarding-playback')).until") == until
     page.clock.fast_forward(8000)
     page.evaluate("window.playbackStatus.refresh()")

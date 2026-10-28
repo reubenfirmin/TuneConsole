@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import shutil
 import socket
+import time
 
 import pytest
 from playwright.sync_api import expect
@@ -120,6 +121,75 @@ def test_connecting_while_waiting_for_prompt_lock_does_not_spend_a_display(page)
     page.clock.fast_forward(5000)
     page.evaluate("tcStatus(true); tcReleasePromptLock()")
     expect(page.locator("#tuneconsole-setup")).to_have_count(0)
+    assert page.evaluate("localStorage.getItem('tuneconsole-setup-shown')") is None
+
+
+def _wait_prompt_locks(page, *, pending, held):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        locks = page.evaluate("async () => await navigator.locks.query()")
+        queued = sum(lock['name'] == 'tuneconsole-setup-shown' for lock in locks['pending'])
+        owned = any(lock['name'] == 'tuneconsole-setup-shown' for lock in locks['held'])
+        if queued == pending and owned == held:
+            return
+    raise AssertionError(f'Unexpected prompt lock state: {locks}')
+
+
+@pytest.mark.parametrize('release_after_grace', [False, True])
+def test_reconnect_cancels_old_prompt_and_preserves_new_disconnect_grace(page, release_after_grace):
+    _music(page, pending=True)
+    page.clock.pause_at(page.evaluate('Date.now() + 1000'))
+    page.evaluate("""() => new Promise(acquired => {
+      navigator.locks.request('tuneconsole-setup-shown', () => {
+        const held = new Promise(resolve => window.tcReleasePromptLock = resolve);
+        acquired();
+        return held;
+      });
+    })""")
+    page.evaluate('tcResolveStatus({connected: false})')
+    page.clock.fast_forward(5000)
+    _wait_prompt_locks(page, pending=1, held=True)
+    page.evaluate('tcStatus(true); tcStatus(false)')
+    _wait_prompt_locks(page, pending=0, held=True)
+    reminder = page.locator('#tuneconsole-setup')
+    expect(reminder).to_have_count(0)
+    assert page.evaluate("localStorage.getItem('tuneconsole-setup-shown')") is None
+    if not release_after_grace:
+        page.evaluate('tcReleasePromptLock()')
+        _wait_prompt_locks(page, pending=0, held=False)
+    page.clock.fast_forward(4999)
+    expect(reminder).to_have_count(0)
+    assert page.evaluate("localStorage.getItem('tuneconsole-setup-shown')") is None
+    # Repeated reports of the same disconnect must not restart its deadline.
+    page.evaluate('tcStatus(false)')
+    page.clock.fast_forward(1)
+    if release_after_grace:
+        _wait_prompt_locks(page, pending=1, held=True)
+        page.evaluate('tcReleasePromptLock()')
+    _wait_prompt_locks(page, pending=0, held=False)
+    expect(reminder.locator('section')).to_be_visible()
+    assert page.evaluate("localStorage.getItem('tuneconsole-setup-shown')") == '1'
+
+
+def test_stopping_cancels_queued_automatic_prompt(page):
+    _music(page, pending=True)
+    page.clock.pause_at(page.evaluate('Date.now() + 1000'))
+    page.evaluate("""() => new Promise(acquired => {
+      navigator.locks.request('tuneconsole-setup-shown', () => {
+        const held = new Promise(resolve => window.tcReleasePromptLock = resolve);
+        acquired();
+        return held;
+      });
+    })""")
+    page.evaluate('tcResolveStatus({connected: false})')
+    page.clock.fast_forward(5000)
+    _wait_prompt_locks(page, pending=1, held=True)
+    page.evaluate('window.__tcMusicSetup.stop()')
+    _wait_prompt_locks(page, pending=0, held=True)
+    page.evaluate('tcReleasePromptLock()')
+    _wait_prompt_locks(page, pending=0, held=False)
+    page.clock.fast_forward(10000)
+    expect(page.locator('#tuneconsole-setup')).to_have_count(0)
     assert page.evaluate("localStorage.getItem('tuneconsole-setup-shown')") is None
 
 

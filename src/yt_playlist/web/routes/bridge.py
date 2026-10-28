@@ -289,7 +289,8 @@ def build(ctx) -> APIRouter:
             return {"ok": False, "error": str(exc)}
 
     @router.post("/now-playing/toggle")
-    async def now_playing_toggle(action: str = "toggle", resume: bool = False, videoId: str = ""):
+    async def now_playing_toggle(action: str = "toggle", resume: bool = False, videoId: str = "",
+                                 confirm: bool = False):
         if action not in ("toggle", "play", "pause"):
             return {"ok": False, "error": "invalid playback action"}
         frame = {"type": "playpause"}
@@ -301,6 +302,46 @@ def build(ctx) -> APIRouter:
                     player.get("video_id") != videoId:
                 return {"ok": False, "error": "Paused player is no longer available"}
             frame.update(resumeOnly=True, videoId=videoId)
+        if confirm:
+            if action not in ("play", "pause") or not videoId:
+                return {"ok": False, "error": "A displayed song and playback action are required"}
+            player = bridge.resumable_player if resume else bridge.now_playing
+            if not player or player.get("video_id") != videoId:
+                return {"ok": False, "error": "The playing song changed. Try again."}
+            frame["videoId"] = videoId
+            paused = action == "pause"
+            started = time.monotonic()
+            connection_id = bridge.connection_id
+            command = asyncio.create_task(bridge.request_control(frame, timeout=5))
+            try:
+                while True:
+                    done, _ = await asyncio.wait({command}, timeout=.05)
+                    if done:
+                        status, body = command.result()
+                        result = json.loads(body)
+                        if (status == 200 and result.get("ok") and result.get("paused") is paused
+                                and result.get("videoId") == videoId):
+                            return {"ok": True, "paused": paused}
+                        return {"ok": False, "error": result.get("error") or "Playback was not confirmed"}
+                    # Identified store builds without control acknowledgements report actual media
+                    # state. Accept a fresh matching observation, never just a queued send, and
+                    # never resend a toggle whose delivery is uncertain. A new connection's
+                    # unreported capability must still wait for its native acknowledgement.
+                    observed = bridge.now_playing
+                    if (bridge.playback_confirmation is False and bridge.connection_id == connection_id
+                            and bridge.connected and observed
+                            and observed.get("video_id") == videoId and observed.get("paused") is paused
+                            and (bridge.now_playing_seen_at or 0) > started):
+                        return {"ok": True, "paused": paused}
+            except Exception:
+                logger.warning("playback not confirmed: action=%s video=%s", action, videoId, exc_info=True)
+                return {"ok": False, "error": "Playback was not confirmed. Open YouTube Music and try again."}
+            finally:
+                command.cancel()
+                try:
+                    await command
+                except (asyncio.CancelledError, Exception):
+                    pass
         try:
             bridge.send_control(frame)
             return {"ok": True}
@@ -374,6 +415,7 @@ def build(ctx) -> APIRouter:
                     except (TypeError, ValueError):
                         logger.warning("malformed sensor-health frame, ignoring: %r", msg)
                         continue
+                    bridge.playback_confirmation = msg.get("playbackConfirmation") is True
                     bridge.sensor_health = {**counts, "healthy": bool(msg.get("healthy")),
                         "recovering": bool(msg.get("recovering")), "error": str(msg.get("error") or "")[:500]}
                     if counts["ytm_tabs"] == 0:

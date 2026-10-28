@@ -183,20 +183,32 @@ for(const mode of ['missing','failed','malformed','present']) {
 const timers=[],originalSetTimeout=globalThis.setTimeout,originalClearTimeout=globalThis.clearTimeout;
 globalThis.setTimeout=(fn,delay)=>{timers.push({fn,delay});return timers.length};
 globalThis.clearTimeout=()=>{};
-const p=port(),connections=[];
+const p=port(),connections=[],changes=[];
 globalThis.chrome={runtime:{connect:(id,options)=>{connections.push({id,options});return p}}};
 const session=new AudioPreviewSession({playback:()=>({video_id:'playing',position:30,paused:false,at:Date.now()}),
-  changed:()=>{},result:()=>{throw Error('unexpected result')},automatic:false,portName:'tc-audio-collection'});
+  changed:value=>changes.push(value),result:()=>{throw Error('unexpected result')},automatic:false,portName:'tc-audio-collection'});
 session.extensionIds=['fixture'];session.connect();
 assert.equal(connections[0].options.name,'tc-audio-collection');
 for(const listener of p.onMessage.listeners) listener({type:'unavailable'});
 assert.equal(session.port,null);
+assert.equal(changes.at(-1).phase,'unavailable');
+assert.match(changes.at(-1).message,/audio model/);
 session.start();
 assert.equal(p.sent.length,0,'an unavailable extension cannot start recording');
 session.connect();
 assert.equal(connections.length,1);
 assert(timers.at(-1).delay>=59000,'unavailable models back off for a minute');
 session.destroy();
+const old=port(),oldChanges=[];
+globalThis.chrome.runtime.connect=()=>old;
+const stale=new AudioPreviewSession({playback:()=>null,changed:value=>oldChanges.push(value),
+  result:()=>{},automatic:false,portName:'tc-audio-collection'});
+stale.extensionIds=['old-extension'];stale.connect();
+old.disconnect();
+assert.equal(oldChanges.at(-1).phase,'unavailable');
+assert.match(oldChanges.at(-1).message,/Reload the TuneConsole extension/);
+assert.equal(stale.port,null);
+stale.destroy();
 globalThis.setTimeout=originalSetTimeout;globalThis.clearTimeout=originalClearTimeout;
 """
     result = subprocess.run([node, '--input-type=module', '-e', script],

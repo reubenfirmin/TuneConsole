@@ -16,12 +16,20 @@
       {% if is_video %}
       <a class="playlist-play btn-primary" href="/?tv_playlist={{ pl.id }}#tv"
          title="Play on TV" aria-label="Play on TV">
-      {% else %}
-      <a class="playlist-play btn-primary" href="https://music.youtube.com/playlist?list={{ pl.ytm_playlist_id }}"
-         target="_blank" rel="noopener" title="Play on YouTube Music" aria-label="Play on YouTube Music">
-      {% endif %}
         <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M7 3.5v17l14-8.5Z"/></svg>
       </a>
+      {% else %}
+      <button type="button" class="playlist-play btn-primary" x-data='playlistPlayback({{ pl.ytm_playlist_id|tojson }})'
+              @bridge-status.window="apply($event.detail)" @click="play()" :disabled="busy" :aria-busy="busy"
+              :title="playing ? 'Pause on YouTube Music' : 'Play on YouTube Music'"
+              :aria-label="playing ? 'Pause on YouTube Music' : 'Play on YouTube Music'"
+              title="Play on YouTube Music" aria-label="Play on YouTube Music">
+        <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true">
+          <path :d="playing ? 'M6 4h4v16H6zm8 0h4v16h-4z' : 'M7 3.5v17l14-8.5Z'" d="M7 3.5v17l14-8.5Z"/>
+        </svg>
+      </button>
+      {% endif %}
+      {% if show_playlist_radio %}
       <a class="playlist-radio" href="/?radio_playlist={{ pl.id }}#radio"
          title="Start radio from this playlist" aria-label="Start radio from this playlist">
         <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor"
@@ -29,6 +37,7 @@
           <circle cx="12" cy="9" r="2"/><path d="m12 11-4 10m4-10 4 10M10 16h4M6.3 3.3a8 8 0 0 0 0 11.4M17.7 3.3a8 8 0 0 1 0 11.4M9.2 6.2a4 4 0 0 0 0 5.6M14.8 6.2a4 4 0 0 1 0 5.6"/>
         </svg>
       </a>
+      {% endif %}
       <p class="pl-stats">
         <span class="stat"><strong id="playlist-track-count">{{ tracks|length }}</strong>&nbsp;track{{ '' if tracks|length == 1 else 's' }}</span>
         <span class="stat"><strong>{{ total_plays }}</strong>&nbsp;total plays</span>

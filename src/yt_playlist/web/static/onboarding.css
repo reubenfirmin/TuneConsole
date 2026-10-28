@@ -23,8 +23,7 @@
     color-mix(in srgb, var(--surface-inset) 85%, transparent) 30%, transparent 82%); }
 .welcome-copy { min-width: 0; padding: clamp(1.5rem, 5vw, 4.5rem);
   animation: starter-arrive .8s ease both; }
-.welcome-eyebrow { color: var(--accent-2); font-size: var(--type-ui); }
-.welcome-copy h1 { margin: .75rem 0; max-width: 15ch; font-size: clamp(2.5rem, 5.5vw, 5.5rem);
+.welcome-copy h1 { margin: .75rem 0; max-width: 15ch; font-size: clamp(2rem, 5.5vw, 5.5rem);
   line-height: 1.03; letter-spacing: -.045em; text-wrap: balance; }
 .welcome-invitation { margin: 1.25rem 0 2rem; color: var(--dim); font-size: clamp(1.25rem, 2vw, 1.75rem); }
 .welcome-copy .btn { display: inline-flex; gap: .75rem; align-items: center; }
@@ -105,6 +104,9 @@
 .starter-album .starter-actions { flex-wrap: wrap; }
 .starter-album-play { display: inline-flex; align-items: center; gap: .6rem; }
 .starter-album .starter-context { max-width: none; }
+/* Setup embeds Radio outside the dashboard's viewport-height layout. */
+.onboarding-radio .radio-seeds { grid-template-rows: none; grid-auto-rows: minmax(8rem, auto); }
+.onboarding-radio .radio-seed { aspect-ratio: 1; }
 @media (max-width: 38rem) {
   .starter-album { grid-template-columns: minmax(0, 1fr); }
   .starter-album-art { width: min(100%, 16rem); }

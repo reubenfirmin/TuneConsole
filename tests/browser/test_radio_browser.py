@@ -438,17 +438,18 @@ def test_playlist_radio_button_starts_through_transition_without_relaunching_on_
     store.playlists.set_playlist_tracks(source.id, ids)
     page.set_viewport_size({"width": width, "height": 900})
     page.goto(f"{live_app}/playlist/{source.id}")
-    play = page.get_by_role("link", name="Play on YouTube Music")
+    play = page.get_by_role("button", name="Play on YouTube Music", exact=True)
     radio = page.get_by_role("link", name="Start radio from this playlist", exact=True)
     expect(play).to_be_visible()
-    expect(play.locator("svg")).to_have_count(0)
+    expect(play.locator("svg")).to_have_count(1)
     expect(radio).to_be_visible()
     expect(play).to_be_in_viewport(ratio=1)
     expect(radio).to_be_in_viewport(ratio=1)
     radio_box, play_box = radio.bounding_box(), play.bounding_box()
     assert radio_box["x"] > play_box["x"] + play_box["width"]
     assert radio_box["width"] < play_box["width"]
-    assert abs(radio_box["height"] - play_box["height"]) < 1
+    assert abs(radio_box["y"] + radio_box["height"] / 2
+               - play_box["y"] - play_box["height"] / 2) < 1
     assert abs(radio_box["width"] - radio_box["height"]) < 1
     page.screenshot(path=f"/tmp/tuneconsole-playlist-radio-{width}.png")
     radio.click()

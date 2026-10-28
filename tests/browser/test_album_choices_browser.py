@@ -137,7 +137,8 @@ def test_album_tab_visibility_and_remembered_default(live_app, store, page, widt
     expect(page).to_have_url(live_app + target)
 
 
-def test_album_tuner_keyboard_apply_reset_and_recorded_policy(live_app, store, page):
+@pytest.mark.parametrize('delayed', [False, True])
+def test_album_tuner_keyboard_apply_reset_and_recorded_policy(live_app, store, page, delayed):
     from playwright.sync_api import expect
     from tests.rec.test_album_menu import records
     from yt_playlist.rec import album_tuning, choice_evidence
@@ -150,9 +151,17 @@ def test_album_tuner_keyboard_apply_reset_and_recorded_policy(live_app, store, p
         store.collection.add_saved_album({**album, 'browse': album['browse_id']})
     store.rec_proposals.put_proposals('album_prepared', {
         'built_at': 1, 'context': {}, 'items': records()}, 1)
+    pending = []
+    if delayed:
+        page.route('**/home/album-choices', lambda route: pending.append(route))
     page.set_viewport_size({'width': 390, 'height': 1100})
     page.goto(live_app + '/#album-choices')
     tune = page.get_by_role('button', name='Adjust album parameters')
+    if delayed:
+        expect(tune).to_be_visible()
+        expect(tune).to_be_disabled()
+        assert len(pending) == 1
+        pending[0].continue_()
     tune.click()
     dialog = page.get_by_role('dialog', name='Long play')
     expect(dialog).to_be_visible()

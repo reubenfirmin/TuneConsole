@@ -17,7 +17,7 @@ def test_space_controls_playback_without_intercepting_search_or_focused_buttons(
         commands.append(route.request.url)
         status['now_playing']['paused'] = not status['now_playing']['paused']
         route.fulfill(json={'ok':True})
-    page.route('**/now-playing/toggle',toggle)
+    page.route('**/now-playing/toggle*',toggle)
     page.goto(live_app+'/artists')
     player = page.locator('.global-now-playing')
     expect(player).to_be_visible()
@@ -509,7 +509,7 @@ def test_failed_playback_does_not_open_an_uncontrolled_music_tab(live_app, store
     page.route("**/play", play)
     playlist = store.playlists.get_playlists()[0]
     page.goto(f"{live_app}/playlist/{playlist.id}")
-    control = page.get_by_role("link", name="Play on YouTube Music")
+    control = page.get_by_role("button", name="Play on YouTube Music", exact=True)
     control.click()
     error = page.locator("#playback-error")
     expect(error).to_contain_text("Couldn’t start playback")

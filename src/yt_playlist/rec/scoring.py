@@ -9,7 +9,7 @@ import time
 import numpy as np
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import album_feedback, embedding_vectors as vectors, layers, mix_tuning, negative, rec_params, transient, vector_math
+from yt_playlist.rec import album_feedback_state, embedding_vectors as vectors, layers, mix_tuning, negative, rec_params, transient, vector_math
 from yt_playlist.rec.taste_analysis import taste_breadth
 from yt_playlist.rec.taste_context import PlaylistTaste
 
@@ -68,7 +68,7 @@ def _with_albums(store, taste, matrix, index):
     contexts = list(getattr(taste, "sources", [{"kind": "playlist", "id": p} for p in pids]))
     base = rec_params.get_param(store, "album_saved_weight")
     returns = rec_params.get_param(store, "album_return_weight")
-    feedback = album_feedback.state(store)
+    feedback = album_feedback_state.state(store)
     confirmed = (store.rec_proposals.get_proposals('choice_interests') or {}).get('album_track_days', {})
     for album in store.collection.taste_album_contexts(
             include_browse=set(confirmed) | {browse for browse, item in feedback.items() if item["kind"] == "more"}):
@@ -142,7 +142,7 @@ def _with_choices(store, taste, matrix, index, *, content=False, now=None):
     album_ids = [interest['option_id'] for interest in interests if interest['format'] == 'albums']
     preferred = store.collection.preferred_album_ids(set(album_ids) | saved_albums)
     saved_albums = {preferred[browse] for browse in saved_albums}
-    feedback = album_feedback.state(store, album_ids)
+    feedback = album_feedback_state.state(store, album_ids)
     for interest in interests:
         # Saved releases already supply a deliberate collecting context. Do not count that
         # same album again merely because the listener launched it from our surface.

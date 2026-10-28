@@ -40,6 +40,7 @@
                       :aria-valuetext="timeLabel(timing.position) + ' of ' + timeLabel(timing.duration)"></progress>
           </span>
           <button type="button" class="hs-playpause btn-primary" @click="toggle()"
+                  :disabled="toggling" :aria-busy="toggling"
                   :title="nowPlaying.paused ? 'Play (Space)' : 'Pause (Space)'"
                   :aria-label="nowPlaying.paused ? 'Play' : 'Pause'">
             <svg x-show="!nowPlaying.paused" x-cloak viewBox="0 0 24 24" aria-hidden="true" focusable="false">

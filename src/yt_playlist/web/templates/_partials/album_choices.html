@@ -1,6 +1,7 @@
 {% from '_album_actions.html' import album_play_control %}
 <section id="home-album-choices" class="album-choice-board" aria-label="Albums to play"
-         x-data='albumMenu({{ tuning|tojson }}, {{ tuning_defaults|tojson }}, {{ opportunity_id|tojson }})' @album-tuning-open.window="openTuning()"{% if preparing %}
+         x-data='albumMenu({{ tuning|tojson }}, {{ tuning_defaults|tojson }}, {{ opportunity_id|tojson }})'
+         x-init="$nextTick(() => $dispatch('album-tuning-ready'))" @album-tuning-open.window="openTuning()"{% if preparing %}
          hx-get="/home/album-choices" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
   {% if albums %}
   <div class="album-editorial">

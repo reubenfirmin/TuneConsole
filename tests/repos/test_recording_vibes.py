@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from tests.conftest import seed_catalog_track
 from tests.rec.test_vibe_prediction import capture, drain, fits, track
 from tests.test_audio_vibes import sample
 from yt_playlist.core import catalog, sample_files
@@ -212,10 +213,18 @@ def test_dense_cohort_finishes_one_recording_with_exact_inputs(store):
     stamp = vibe_preparation.version()
     # Controlled density fixture: 2,000 provider-measured recordings, six vibes
     # each, shared by all three cohorts. No synthetic raw audio or human labels.
+    for i in range(2000):
+        seed_catalog_track(store, f'dense-{i}', f'Dense {i}', 'Shared artist',
+                           video_id=f'dense-{i}', genre='Psybient', mood_relaxed=.8)
+    # Donors already have accepted library inputs. A startup audit must not
+    # turn the timed one-target capture into repair of incomplete donor rows.
+    with store.read_snapshot() as snapshot:
+        reader = snapshot.store
+        rows = reader.prepared_content.capture(reader.prepared_content.pending(2001))
+        assert snapshot.publish(lambda: store.prepared_content.publish_capture(rows, 1))
+    assert not store.prepared_content.missing_unqueued(1)
     with store.conn:
         store.conn.execute("INSERT OR IGNORE INTO genre_catalog(key,name,source) VALUES ('psybient','Psybient','custom')")
-        store.conn.executemany('INSERT INTO recordings(identity_key,title,artist,created_at) VALUES (?,?,?,1)',
-                              [(f'dense-{i}', f'Dense {i}', 'Shared artist') for i in range(2000)])
         for rid, in store.conn.execute("SELECT id FROM recordings WHERE identity_key LIKE 'dense-%'").fetchall():
             for vibe in home_vibe.PRESETS:
                 mid = store.conn.execute('INSERT INTO measurements(recording_id,vibe,score,support,source,model_version,input_digest,measured_at) '

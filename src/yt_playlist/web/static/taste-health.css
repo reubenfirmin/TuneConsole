@@ -64,7 +64,7 @@
 .model-health-activity .model-health-metric { display: flex; flex-direction: column; align-items: flex-start; }
 .model-health-activity .model-health-breakdown-list { align-self: stretch; }
 .model-health-activity .taste-detail-link { margin-top: 1rem; }
-.taste-health .model-health-caution { padding: .75rem 1rem; border-inline-start: 3px solid var(--warn);
+.taste-health .model-health-caution { padding: .75rem 1rem;
   background: color-mix(in srgb, var(--warn) 6%, var(--surface-card)); color: var(--text); font-size: var(--type-ui); }
 .model-health-breakdown { margin-top: 1rem; }
 .model-health-breakdown > summary { padding-block: .5rem; font-size: var(--type-ui); cursor: pointer; }

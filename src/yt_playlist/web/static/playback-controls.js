@@ -82,26 +82,32 @@
 // Route every YouTube Music play/open link through the extension so it plays in the EXISTING YouTube
 // Music tab (in the background, you stay on TuneConsole). A bridge failure must not create another
 // player that cannot stop the existing music. Ctrl/meta/middle-click still open a new tab.
+function tcPlaybackError(message) {
+  document.getElementById('playback-error')?.remove();
+  const toast = document.createElement('div');
+  toast.id = 'playback-error';
+  toast.className = 'toast toast-err';
+  toast.setAttribute('role', 'alert');
+  const text = document.createElement('span');
+  text.className = 'toast-body';
+  text.textContent = message;
+  const dismiss = document.createElement('button');
+  dismiss.type = 'button';
+  dismiss.className = 'toast-x';
+  dismiss.setAttribute('aria-label', 'Dismiss');
+  dismiss.textContent = '×';
+  dismiss.onclick = () => toast.remove();
+  toast.append(text, dismiss);
+  document.getElementById('toasts')?.prepend(toast);
+}
+window.tcPlaybackError = tcPlaybackError;
+
 function tcPlay(url) {
   const requestId = window.tcPlaybackRequestSequence = (window.tcPlaybackRequestSequence || 0) + 1;
   window.dispatchEvent(new CustomEvent('playback-requested', {detail: {url, requestId}}));
   const failed = () => {
     window.dispatchEvent(new CustomEvent('playback-settled', {detail: {requestId, ok: false}}));
-    document.getElementById('playback-error')?.remove();
-    const toast = document.createElement('div');
-    toast.id = 'playback-error';
-    toast.className = 'toast toast-err';
-    const message = document.createElement('span');
-    message.className = 'toast-body';
-    message.textContent = 'Couldn’t start playback. Check that TuneConsole and its browser extension are connected, then try again.';
-    const dismiss = document.createElement('button');
-    dismiss.type = 'button';
-    dismiss.className = 'toast-x';
-    dismiss.setAttribute('aria-label', 'Dismiss');
-    dismiss.textContent = '×';
-    dismiss.onclick = () => toast.remove();
-    toast.append(message, dismiss);
-    document.getElementById('toasts')?.prepend(toast);
+    tcPlaybackError('Couldn’t start playback. Check that TuneConsole and its browser extension are connected, then try again.');
     return false;
   };
   return fetch('/play', {

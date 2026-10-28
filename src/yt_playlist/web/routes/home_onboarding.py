@@ -135,7 +135,7 @@ def build(ctx):
                 'album': onboarding.starter_album(store)})
         if preference == 'radio':
             bootstrap = ctx.radio.bootstrap()
-            if bootstrap['seeds'] or bootstrap['state'].get('active'):
+            if (bootstrap['seeds'] and bootstrap.get('seedMenu')) or bootstrap['state'].get('active'):
                 return templates.TemplateResponse(request, '_partials/onboarding_radio.html', {
                     'radio_bootstrap': bootstrap,
                     'radio_tracks': ctx.radio.history_tracks(bootstrap['state'])})

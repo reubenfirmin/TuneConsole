@@ -193,6 +193,49 @@ def test_eligibility_chooses_usable_cache_before_recording(
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == caches['baseline']
 
 
+@pytest.mark.parametrize('selection', ['include', 'avoid'])
+@pytest.mark.parametrize('exhausted', [False, True])
+def test_partial_genre_menu_keeps_usable_offers_before_falling_back(
+        store, prepared, selection, exhausted):
+    request = ({'include_genres': ['jazz']} if selection == 'include' else
+               {'avoid_genres': ['ambient', 'classical', 'rock-indie', 'techno', 'trance']})
+    with mix_tuning.adjusting(store, 1001):
+        store.rec_proposals.put_proposals('home_genre_request', {
+            'epoch': mix_tuning.card_epoch(store), **request}, 1001)
+    tailored = home_prepared.prepare(store, 1001)
+    assert tailored and all(0 < len(menu['protos']) < 4 for menu in tailored['menus'])
+    keys = {t['key'] for menu in tailored['menus'] for p in menu['protos'] for t in p['tracks']}
+    if exhausted:
+        for key in keys:
+            store.rec_model.record_dislike(key, until=None, now=1002)
+
+    scheduled = []
+    for now in (1003, 1004):
+        payload = home_prepared.load(store, now)
+        assert payload == tailored
+        shown = home_prepared.cards(store, payload, now, service(store), lambda: scheduled.append(True))
+        assert shown.protos and shown.preparing
+        held = store.rec_proposals.get_proposals('home_choice')
+        if exhausted:
+            assert shown.preference_notice
+            assert held['prepared_tuning'] == prepared['tuning']
+            assert not keys & {t['key'] for p in shown.protos for t in p['tracks']}
+        else:
+            assert shown.preference_notice is None
+            assert held['prepared_tuning'] == tailored['tuning']
+            contents = lambda protos: [(p['experiment_id'], [t['key'] for t in p['tracks']]) for p in protos]
+            assert any(contents(shown.protos) == contents(menu['protos']) for menu in tailored['menus'])
+            assert all(t['genre'] == 'Jazz' for p in shown.protos for t in p['tracks'])
+            assert all(p['recipe']['genre_request'].get(selection) == request[f'{selection}_genres']
+                       for p in shown.protos)
+            if now == 1003:
+                initial = contents(shown.protos)
+            else:
+                assert contents(shown.protos) == initial
+    assert scheduled
+    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
+
+
 def test_retry_reuses_completed_card_work_without_publishing_partial_set(store, monkeypatch):
     seed(store)
     track = store.conn.execute('SELECT identity_key FROM tracks LIMIT 1').fetchone()[0]

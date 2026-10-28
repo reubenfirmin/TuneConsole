@@ -26,7 +26,6 @@
 .mix-preference-note {
   margin: 0 0 .9rem;
   padding: .8rem 1rem;
-  border-inline-start: 3px solid var(--accent);
   border-radius: 4px;
   background: var(--surface-card);
   color: var(--text);

@@ -1,4 +1,6 @@
-"""Genre labels clip before the badge padding and keep their complete border."""
+"""Genre labels use available space and clip before the badge padding when constrained."""
+import json
+
 import pytest
 from playwright.sync_api import expect
 
@@ -46,7 +48,8 @@ def assert_badge_padding(badge, genre, *, clipped=False):
 def test_genre_badge_fits_its_column(song_app, page, monkeypatch, tmp_path, surface, width, root_size):
     store, source = song_app["store"], song_app["source"]
     genres = {"desert-rock": "Desert Rock", "stoner-rock": "Stoner Rock",
-              "long-genre": "Progressive House with a very long genre label"}
+              "progressive-trance": "Progressive Trance",
+              "long-genre": "Progressive House with a very long genre label " * 4}
     tracks = []
     for video, genre in genres.items():
         track = store.tracks.upsert_track(video, "Song", "Artist", "Album", 270,
@@ -59,7 +62,7 @@ def test_genre_badge_fits_its_column(song_app, page, monkeypatch, tmp_path, surf
         monkeypatch.setattr(song_app["app"].state.ctx.radio, "status", lambda: {
             "local_id": source, "playlist_id": "SOURCE", "history_count": len(tracks), "title": "Radio Session"})
         monkeypatch.setattr(song_app["app"].state.ctx.radio, "history_tracks",
-                            lambda state: store.playlists.get_playlist_tracks(source))
+                            lambda state: store.charts.playlist_tracks_detail(source))
     page.set_viewport_size({"width": width, "height": 850})
     path = "/album?browse=MPRE_badge" if surface == "album" else f"/playlist/{source}"
     page.goto(song_app["base"] + path)
@@ -69,15 +72,33 @@ def test_genre_badge_fits_its_column(song_app, page, monkeypatch, tmp_path, surf
     if surface == "radio":
         page.add_style_tag(url=song_app["base"] + "/static/radio.css")
         page.evaluate("() => htmx.ajax('GET', '/radio/playlist', {target: '.library-table-card', swap: 'outerHTML'})")
+        expect(page.locator(".radio-track-scroll .radio-history")).to_be_visible()
     page.evaluate("() => document.fonts.ready.then(() => true)")
+    geometry = page.locator('tr[data-vid="progressive-trance"]').evaluate("""row => ({
+        cells: Array.from(row.cells, cell => ({text: cell.innerText,
+            width: cell.getBoundingClientRect().width})),
+        label: {natural: row.querySelector('.gtag-label').scrollWidth,
+            actual: row.querySelector('.gtag-label').clientWidth},
+        viewport: innerWidth, table: row.closest('table').getBoundingClientRect().width
+    })""")
+    (tmp_path / "genre-geometry.json").write_text(json.dumps(geometry, indent=2))
+    page.locator("table.track-table").screenshot(
+        path=tmp_path / f"genre-badges-{surface}-{width}-{root_size}.png")
     for video, genre in genres.items():
         badge = page.locator(f'tr[data-vid="{video}"] .gtag')
         assert_badge_padding(badge, genre, clipped=video == "long-genre")
-    page.locator("table.track-table").screenshot(
-        path=tmp_path / f"genre-badges-{surface}-{width}-{root_size}.png")
+        if video == "progressive-trance" and width >= 1280:
+            assert badge.locator(".gtag-label").evaluate("el => el.scrollWidth <= el.clientWidth"), \
+                "Progressive Trance should fit when the desktop row has room"
 
     # A later metadata edit must recreate the same content-box clipping, with literal text.
-    updated = 'Progressive Rock <live> & "extended" with a very long genre label'
+    page.evaluate("""() => applySongMetadata('progressive-trance', {
+        title: 'Song', artist: 'Artist', genre: 'Progressive Trance', year: '1999'
+    })""")
+    if width >= 1280:
+        assert page.locator('tr[data-vid="progressive-trance"] .gtag-label').evaluate(
+            "el => el.scrollWidth <= el.clientWidth")
+    updated = 'Progressive Rock <live> & "extended" with a very long genre label ' * 4
     page.evaluate("""genre => applySongMetadata('long-genre', {
         title: 'Song', artist: 'Artist', genre, year: '2000'
     })""", updated)

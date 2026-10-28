@@ -58,3 +58,30 @@ def test_missing_source_keeps_the_original_usable_score_without_inventing_attrib
     context = character.provenance(item)
     assert context['intensity'] == .7 and context['intensity_vibe'] == 'release'
     assert context['intensity_source'] is None
+
+
+@pytest.mark.parametrize('value', [0., .1, .2, 1.])
+def test_explicit_intensity_correction_wins_over_learned_fit_and_its_provenance(value):
+    item = {'musical': {'dimensions': {'intensity': {'value': value, 'support': 1., 'override': True}},
+                        'vibes': {'fits': {'release': {'score': .885, 'support': 1.,
+                                                     'source': 'audio_measurement'}}}}}
+    assert character.intensity_evidence(item) == (value, 1.)
+    assert character.intensity(item) == value
+    context = character.provenance(item)
+    assert context['intensity'] == value and context['intensity_support'] == 1.
+    assert context['intensity_source'] is None and context['intensity_vibe'] is None
+
+
+@pytest.mark.parametrize('correction', [
+    {'value': None, 'support': 1., 'override': True},
+    {'value': float('nan'), 'support': 1., 'override': True},
+    {'value': .1, 'support': 0., 'override': True},
+    {'value': .1, 'support': 1., 'override': False},
+    {'value': .1, 'support': 1., 'override': 'true'},
+])
+def test_only_a_usable_explicit_correction_takes_precedence(correction):
+    item = {'musical': {'dimensions': {'intensity': correction},
+                        'vibes': {'fits': {'release': {'score': .885, 'support': .8,
+                                                     'source': 'audio_measurement'}}}}}
+    assert character.intensity_evidence(item) == (.885, .8)
+    assert character.provenance(item)['intensity_source'] == 'audio_measurement'

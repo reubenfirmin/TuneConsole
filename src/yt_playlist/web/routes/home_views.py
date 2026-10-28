@@ -144,6 +144,9 @@ class HomeViews:
             return self.cards_fragment(request, now, swap_oob=swap_oob)
         except Exception:  # noqa: BLE001 - don't strand a fragment on a spinner
             self.ctx.logger.exception("home cards render failed")
+            if request.method == 'POST' and request.url.path == '/home/vibe':
+                # Keep the playable board mounted and let the visible vibe status offer a retry.
+                return Response(status_code=503)
             return self.templates.TemplateResponse(request, "_partials/mode_cards.html",
                                                    {"protos": [], "swap_oob": swap_oob, "status_oob": True})
 

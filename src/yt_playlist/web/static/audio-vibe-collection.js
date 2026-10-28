@@ -12,6 +12,7 @@ const TAXONOMY = root.dataset.taxonomyVersion;
 const RESTART_MESSAGE = 'Restart TuneConsole to load the listening session descriptions, then reload this page.';
 let run = read(RUN), view = read(VIEW), receivedAt = Date.now();
 let session = null, sampler = null, leader = false, acquiring = false;
+let connectionStatus = null;
 let closed = false, release = null, flushing = false, retryAt = 0, timer = null;
 let storageAvailable = true;
 let lastActivityWrite = 0;
@@ -63,6 +64,7 @@ function merge(value, publish = false) {
   if (!compatible(value)) {
     console.warn(RESTART_MESSAGE); return;
   }
+  if (value.run_id === run?.id) value.collection_status = run.collection_status || null;
   // Analysis can finish after playback has advanced. Its completed card still
   // belongs in the stack, even though the sampler now owns a different run.
   cards?.accept(value);
@@ -94,6 +96,10 @@ async function loadRun(id) {
 }
 
 function changed(value) {
+  if (leader && JSON.stringify(value.collection_status || null) !== JSON.stringify(connectionStatus)) {
+    value.collection_status = connectionStatus;
+    write(RUN, value);
+  }
   const changedRun = run?.id !== value.id;
   run = value;
   if (changedRun) {
@@ -102,7 +108,8 @@ function changed(value) {
   }
   if (cards) cards.accept({run_id: value.id,
     playback: {video_id: value.video_id, title: value.title, artist: value.artist},
-    samples: [], prediction: null, choices: JSON.parse(ratingRoot.dataset.choices), taxonomy_version: TAXONOMY},
+    samples: [], prediction: null, collection_status: value.collection_status || null,
+    choices: JSON.parse(ratingRoot.dataset.choices), taxonomy_version: TAXONOMY},
     {placeholder: true});
 }
 
@@ -183,6 +190,15 @@ async function becomeLeader() {
         extensionIds: root.dataset.extensionIds.split(',').filter(Boolean),
         changed(value) {
           const capture = sampler?.active;
+          const current = sampler?.run;
+          if (!capture) {
+            const status = ['unavailable', 'connecting'].includes(value.phase) ? value : null;
+            connectionStatus = status;
+            if (current && JSON.stringify(current.collection_status || null) !== JSON.stringify(status)) {
+              current.collection_status = status;
+              sampler.persist();
+            }
+          }
           if (capture && capture.run === sampler.run) {
             const previous = capture.run.activity?.phase;
             if (['waiting', 'capturing', 'analysing'].includes(value.phase)) {

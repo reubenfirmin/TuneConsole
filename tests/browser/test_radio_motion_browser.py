@@ -313,6 +313,9 @@ def test_artwork_evolves_slowly_with_reduced_motion_and_pauses_when_hidden(page,
     phase = page.evaluate('Alpine.$data(document.querySelector(".radio-home")).artworkPhase')
     page.clock.fast_forward(30 * 60_000)
     assert page.evaluate('Alpine.$data(document.querySelector(".radio-home")).artworkPhase') == phase
+    # Isolate the short resumed-frame measurement from browser round trips.
+    # Tab transitions above retain their normal asynchronous browser clock.
+    page.clock.pause_at(page.evaluate('Date.now() / 1000') + .1)
     resumed = page.evaluate('''() => {
       delete document.hidden;
       document.dispatchEvent(new Event('visibilitychange'));

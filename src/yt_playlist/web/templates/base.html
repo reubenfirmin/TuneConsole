@@ -118,6 +118,7 @@
   {% endif %}
   <script src="/static/playback-controls.js?v={{ asset_v }}"></script>
   {% if path == '/' or path.startswith('/album') %}<script src="/static/album-player.js?v={{ asset_v }}"></script>{% endif %}
+  {% if path.startswith('/playlist/') %}<script src="/static/playlist-player.js?v={{ asset_v }}"></script>{% endif %}
   <script src="/static/app.js?v={{ asset_v }}"></script>
   <script src="/static/app-navigation.js?v={{ asset_v }}"></script>
   {% if path == '/' or path.startswith('/album') %}<script src="/static/listening-choices.js?v={{ asset_v }}"></script>{% endif %}

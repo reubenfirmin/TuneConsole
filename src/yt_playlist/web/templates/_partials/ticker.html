@@ -1,7 +1,7 @@
 {# Ranked "ticker" chart: one row per category. Reads as a ranked bar chart (bar length = recent
    listen share, like Top songs). Always overlaid: a faint ◦ for where it sat earlier, and a thin
    range whisker. ONLY when t.compare (genre/year/artist, broad buckets where "share of library"
-   is intuitive): a dashed corpus tick + over/under ratio column. Per-dimension color via .dim-<dim>.
+   is intuitive): an over/under ratio column. Per-dimension color via .dim-<dim>.
    t = {"rows":[...], "compare":bool, "close_days":int, "span_days":int}. #}
 {% import "_partials/_viz_tip.html" as vt %}
 {% from "_macros.html" import library_icon %}
@@ -16,7 +16,7 @@
     <th class="rank">#</th>
     {% if has_art %}<th class="col-thumb" aria-label="Artwork"></th>{% endif %}
     <th>{{ heads[dim] }}</th>
-    <th class="tickhead">share of listening days{% if cmp %} &nbsp;·&nbsp; <span class="chart-warm">┊</span> collection share{% endif %}</th>
+    <th class="tickhead">share of listening days</th>
     <th class="num">{{ cd }}d</th>
     {% if cmp %}<th class="num">vs library</th>{% endif %}
   </tr></thead>
@@ -37,7 +37,6 @@
           {% if r.high > r.low %}<i class="tk-whisker" style="left:{{ g.whisker_lo_pct|round(2) }}%;width:{{ (g.whisker_hi_pct - g.whisker_lo_pct)|round(2) }}%"></i>{% endif %}
           <i class="tk-bar{% if cmp and g.over %} over{% endif %}" style="width:{{ g.bar_pct|round(2) }}%"></i>
           {% if g.open_pct is not none %}<i class="tk-open" style="left:{{ g.open_pct|round(2) }}%"></i>{% endif %}
-          {% if cmp and r.corpus_share > 0 %}<i class="tk-corpus" style="left:{{ g.corpus_pct|round(2) }}%"></i>{% endif %}
         </span>
       </td>
       <td class="num mono">{{ (r.close * 100)|round(1) }}%</td>

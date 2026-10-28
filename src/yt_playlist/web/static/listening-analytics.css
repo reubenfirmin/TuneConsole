@@ -24,7 +24,7 @@
 .lp-filter-grid select { width:100%; max-width:none; }
 .lp-active-filters,.lp-selection,.lp-comparison { font:.75rem/1.7 var(--font-mono); color:var(--dim); }
 .lp-selection { margin-top:-.6rem; margin-bottom:1.5rem; }
-.lp-comparison { padding:1rem; border-left:2px solid var(--accent); background:var(--surface-sunk); }
+.lp-comparison { padding:1rem; background:var(--surface-sunk); }
 .lp-details-heading { margin-top:2rem; }
 .lp-recording-table { width:100%; border-collapse:collapse; font-size:.75rem; }
 .lp-recording-table :is(th,td) { text-align:left; padding:.75rem; border-bottom:1px solid var(--border); }

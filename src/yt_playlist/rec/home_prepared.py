@@ -675,11 +675,18 @@ def _prepared_choice(store, payload, now, epoch, tuning, schedule, *, record):
     return payload, chosen, protos, held
 
 
+def _matches_genre_request(protos, requested):
+    return all(
+        set(p.get('recipe', {}).get('genre_request', {}).get(key, [])) == set(requested.get(f'{key}_genres', []))
+        for p in protos for key in ('include', 'avoid'))
+
+
 def cards(store, payload, now, service, schedule=lambda: None, *, record=True):
     """Choose an experiment from prepared alternatives using current mode evidence."""
     epoch = home_cards._epoch(store, "cards")
     tuning = tuning_key(store, now)
     genres = store.rec_proposals.get_proposals("home_genre_request") or {}
+    requested = genres if mix_tuning.genre_active(store, genres) else {}
     vibe = home_vibe.current(store, now)
     if not payload:
         schedule()
@@ -704,6 +711,11 @@ def cards(store, payload, now, service, schedule=lambda: None, *, record=True):
             if alternative is None or alternative == payload:
                 continue
             candidate = _prepared_choice(store, alternative, now, epoch, tuning, schedule, record=record)
+            # A smaller usable genre selection takes precedence over unrelated
+            # cards. Keep its whole menu and context while missing lanes refill.
+            if (requested and choice[2] and _matches_genre_request(choice[2], requested)
+                    and not _matches_genre_request(candidate[2], requested)):
+                continue
             if len(candidate[2]) > len(choice[2]):
                 choice = candidate
             if len(choice[2]) == 4:
@@ -745,12 +757,7 @@ def cards(store, payload, now, service, schedule=lambda: None, *, record=True):
             slots.append({"proto": None, "pool": pool})
     notice = None
     if refreshing and protos:
-        requested = (genres if mix_tuning.genre_active(store, genres) else {})
-        genre_pending = bool(requested) and any(
-            set(p.get('recipe', {}).get('genre_request', {}).get('include', []))
-                != set(requested.get('include_genres', []))
-            or set(p.get('recipe', {}).get('genre_request', {}).get('avoid', []))
-                != set(requested.get('avoid_genres', [])) for p in protos)
+        genre_pending = bool(requested) and not _matches_genre_request(protos, requested)
         vibe_pending = vibe and any(p.get('recipe', {}).get('vibe') != vibe for p in protos)
         if vibe_pending or genre_pending:
             labels = {option['family']: option['label'] for option in payload['genre_options']}

@@ -376,6 +376,7 @@ def test_tv_length_cap_can_admit_long_video_without_changing_music_limit(store):
 
 def test_tv_tab_waits_for_real_mixes_and_follows_long_play(store):
     from html.parser import HTMLParser
+    from tests.conftest import seed_catalog_track
 
     class Tabs(HTMLParser):
         def __init__(self, markup):
@@ -398,6 +399,9 @@ def test_tv_tab_waits_for_real_mixes_and_follows_long_play(store):
                 self.in_tab = False
 
     iid = store.identities.upsert_identity('main', 'cred', None, True)
+    # An imported empty account has no preparation to await. Model a real
+    # library whose first offers are still being prepared.
+    seed_catalog_track(store, 'waiting|artist', 'Waiting', 'Artist', video_id='waiting')
     store.settings.set_setting('last_sync_at', '1')
     with TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1),
                     base_url='http://127.0.0.1') as web:

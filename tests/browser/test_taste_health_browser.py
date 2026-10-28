@@ -10,7 +10,7 @@ from yt_playlist.rec import autotune_run, eval_recs, scorecard
 
 
 @pytest.mark.parametrize('width', [1440, 390])
-def test_production_comparison_reports_formats_and_pause_without_overflow(live_app, store, page, width, tmp_path):
+def test_historical_production_comparison_reports_formats_and_pause_without_overflow(live_app, store, page, width, tmp_path):
     from tests.rec.test_product_comparison import favorable
     from yt_playlist.rec import product_comparison as product
     current = {'phase': 'observing', 'attempt': 1, 'seed': 'balanced', 'policy': dict(product.POLICY),
@@ -18,17 +18,18 @@ def test_production_comparison_reports_formats_and_pause_without_overflow(live_a
         'challenger': {'method': 'svd', 'dim': 64}, 'generation': 'serving',
         'started_at': 0, 'exposure_until': 28 * product.DAY, 'decision_at': 29 * product.DAY,
         'constraints': product.constraints(store)}
-    current['run_id'] = store.model_selection.start_selection(0, {'kind': 'product', 'ran_at': 0,
-        'status': 'running', 'phase': 'observing', 'previous': current['previous'],
-        'selected': current['previous'], 'challenger': current['challenger'], 'grid': []})
+    run = {'kind': 'product', 'ran_at': 0, 'status': 'running', 'phase': 'observing',
+        'previous': current['previous'], 'selected': current['previous'],
+        'challenger': current['challenger'], 'grid': []}
+    current['run_id'] = store.model_selection.start_selection(0, run)
     store.rec_proposals.put_proposals(product.SURFACE, current, 0)
-    store.rec_proposals.put_proposals('model_live_report', favorable(store, current), current['decision_at'])
+    report = favorable(store, current)
+    run.update(status='retained', reason='Historical menu comparison completed.', product_report=report)
+    store.model_selection.save_selection(current['run_id'], run)
     page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(live_app + '/taste#health')
-    table = page.get_by_role('table', name='Observed choices and listening by format and setup')
-    expect(table).to_be_visible()
-    expect(table.get_by_role('row')).to_have_count(7)
-    expect(page.get_by_text('Observed days:', exact=False)).to_be_visible()
+    # Daily model selection owns current health; old menu experiments remain in history.
+    expect(page.get_by_role('table', name='Observed choices and listening by format and setup')).to_have_count(0)
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.locator('#autotune-status').screenshot(path=str(tmp_path / f'production-comparison-{width}.png'))
     page.get_by_role('button', name='Pause automatic selection', exact=True).click()
@@ -36,6 +37,11 @@ def test_production_comparison_reports_formats_and_pause_without_overflow(live_a
     page.get_by_role('button', name='Resume automatic selection', exact=True).click()
     expect(page.get_by_role('button', name='Pause automatic selection', exact=True)).to_be_visible()
     page.get_by_role('link', name='History and test details', exact=True).click()
+    table = page.get_by_role('table', name='Listening outcomes by format', exact=True)
+    expect(table).to_be_visible()
+    expect(table.get_by_role('row')).to_have_count(7)
+    expect(page.get_by_text('Controlled menus and Radio episodes:', exact=False)).to_contain_text(
+        f"{report['overall']['days']['incumbent']} observed days with the current setup")
     expect(page.get_by_text('Challenger: Playlist patterns (SVD), 64 features.', exact=True)).to_be_visible()
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
 
@@ -173,7 +179,7 @@ def test_model_health_checks_can_retry_without_reloading_the_tab(live_app, store
 
 
 def test_model_health_remembers_running_selection_after_reload(live_app, store, page):
-    run = {"ran_at": 1, "status": "running", "previous": {"method": "svd", "dim": 48},
+    run = {"kind": "daily", "ran_at": 1, "status": "running", "previous": {"method": "svd", "dim": 48},
            "selected": {"method": "svd", "dim": 48}, "grid": [], "progress": "Comparing setup 2 of 4."}
     run_id = store.model_selection.start_selection(1, run)
     paths = []
@@ -191,7 +197,7 @@ def test_model_health_remembers_running_selection_after_reload(live_app, store, 
     expect(page.locator(".model-health-facts > div").first.locator("strong")).to_have_text("1")
     expect(page.locator(".model-health-facts strong").nth(1)).to_have_text("Item2Vec")
     expect(page.locator(".model-health-facts strong").nth(2)).to_have_text("2 dimensions")
-    expect(page.get_by_text("No later measurements yet", exact=True)).to_be_visible()
+    expect(page.get_by_role("heading", name="Latest 30-day comparison", exact=True)).to_be_visible()
     assert "/taste/viz/engine" not in paths
 
 
@@ -223,13 +229,13 @@ def test_automatic_selection_explains_waiting_and_empty_measurements(live_app, s
     section = page.locator(".model-health-tuning")
     if state == "waiting":
         expect(section.get_by_role("heading", name="First comparison hasn’t run yet", exact=True)).to_be_visible()
-        expect(section).to_contain_text("0 / 14 days")
+        expect(section).to_contain_text("0 / 44 days")
         expect(section).to_contain_text("0 / 100 tracks")
     elif state == "insufficient":
         expect(section.get_by_role("heading", name="More listening needed", exact=True)).to_be_visible()
         expect(section.locator("#selection-test-tracks")).to_have_attribute("value", "29")
         expect(section.locator("#selection-test-tracks")).to_have_attribute("max", "50")
-        expect(section).to_contain_text("3 test periods available · 2 required")
+        expect(section).to_contain_text("3 test periods available · 1 required")
         expect(section.locator("progress")).to_have_count(1)
         expect(section.get_by_text("Playlist patterns", exact=True)).to_have_count(1)
         expect(section).not_to_contain_text("78.7%")

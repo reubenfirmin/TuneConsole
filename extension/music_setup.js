@@ -6,7 +6,7 @@
   const DISMISSED = "tuneconsole-setup-dismissed";
   const SHOWN = "tuneconsole-setup-shown";
   let connected = null, revision = 0, host = null, showTimer = null;
-  let dismissed = false, automaticShown = false, mounting = false;
+  let dismissed = false, automaticShown = false, mounting = null;
   try { dismissed = sessionStorage.getItem(DISMISSED) === "1"; } catch (e) {}
 
   function remove() { host?.remove(); host = null; }
@@ -83,12 +83,13 @@
   async function show() {
     showTimer = null;
     if (!canMount() || mounting) return;
-    mounting = true;
+    const attempt = new AbortController();
+    mounting = attempt;
     try {
       // Music tabs share persistent origin storage. Serialize the read/increment so
       // simultaneous tabs cannot each spend the same one of the two automatic prompts.
-      await navigator.locks.request(SHOWN, () => {
-        if (!canMount()) return;
+      await navigator.locks.request(SHOWN, {signal: attempt.signal}, () => {
+        if (attempt.signal.aborted || !canMount()) return;
         let automatic = false;
         if (!dismissed && !automaticShown) {
           try {
@@ -102,12 +103,21 @@
         }
         mount(automatic);
       });
-    } catch (e) { if (canMount()) mount(false); }
-    finally { mounting = false; }
+    } catch (e) { if (!attempt.signal.aborted && canMount()) mount(false); }
+    finally { if (mounting === attempt) mounting = null; }
   }
 
   function setConnected(value) {
-    connected = value === true;
+    const next = value === true;
+    if (connected !== next) {
+      // A queued display belongs to this disconnect only. Cancel it so a later
+      // disconnect gets its own grace even while another Music tab holds the lock.
+      clearTimeout(showTimer);
+      showTimer = null;
+      mounting?.abort();
+      mounting = null;
+    }
+    connected = next;
     if (connected) {
       clearTimeout(showTimer);
       showTimer = null;
@@ -140,6 +150,8 @@
     stop() {
       controller.stopped = true;
       clearTimeout(showTimer);
+      mounting?.abort();
+      mounting = null;
       clearInterval(poll);
       try { chrome.runtime.onMessage.removeListener(receive); } catch (e) {}
       document.removeEventListener("visibilitychange", onVisible);

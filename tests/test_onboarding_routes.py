@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 from yt_playlist.core.store import Store
@@ -34,7 +36,8 @@ def test_saved_album_starter_arrives_without_tracks_or_training(store):
     store.collection.add_saved_album({'browse': 'MPRE_first', 'title': 'First record',
                                       'artist': 'My artist', 'type': 'Album'})
     html = client.get('/home/onboard/start').text
-    assert 'First record' in html and 'From your album collection' in html
+    assert 'First record' in html
+    assert "Here's an album to listen to while we perform initial customization." in html
     assert 'hx-post="/album/play"' in html
     assert 'data-onboarding-album="MPRE_first"' in html
     assert 'Play album' in html and 'Play mix' not in html
@@ -61,7 +64,7 @@ def test_album_starter_can_use_familiar_artists_but_not_incomplete_imports(store
         albums.observe(store.conn, 'MPRE_familiar', title='Familiar record', artist='Familiar artist')
     html = client.get('/home/onboard/start').text
     assert 'Familiar record' in html and 'Unverified album' not in html
-    assert 'An album from an artist in your collection' in html
+    assert "Here's an album to listen to while we perform initial customization." in html
     assert 'Play mix' not in html
     # A saved release takes priority over the familiar-artist fallback.
     store.collection.add_saved_album({'browse': 'MPRE_saved', 'title': 'Saved record', 'artist': 'Other artist'})
@@ -99,6 +102,26 @@ def test_uploaded_starter_preserves_existing_browser_handoff(store):
     assert 'My upload' in html and 'Play album' in html
     assert 'https://music.youtube.com/browse/' + UPLOAD_RELEASE_PREFIX in html
     assert 'Play mix' not in html
+
+
+def test_generated_starter_hides_radio_until_setup_is_complete(store):
+    from yt_playlist.rec.onboarding import SETUP_COMPLETE
+
+    _synced_thin(store)
+    fake, client = _client(store)
+    response = client.post('/home/generate', data={
+        'name': 'Something to listen to - January 1 1970',
+        'tracks': json.dumps([{'video_id': 'v1', 'title': 'T', 'artist': 'A'}]),
+    })
+    assert response.status_code == 200 and 'Saved' in response.text
+    playlist = next(p for p in store.playlists.get_playlists() if p.ytm_playlist_id == fake.created[0][0])
+    html = client.get(f'/playlist/{playlist.id}').text
+    assert 'Play on YouTube Music' in html
+    assert 'Start radio from this playlist' not in html
+
+    store.settings.set_setting(SETUP_COMPLETE, '1')
+    html = client.get(f'/playlist/{playlist.id}').text
+    assert f'href="/?radio_playlist={playlist.id}#radio"' in html
 
 
 def test_home_shows_onboarding_when_thin(store):

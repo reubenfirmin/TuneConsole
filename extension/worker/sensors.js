@@ -102,7 +102,8 @@ function createSensors({version = TC_CONFIG.sensorVersion, revision = TC_CONFIG.
         mainAgeMs: result.reply?.mainAgeMs ?? null,
         capture: result.reply?.capture ?? null});
     }
-    const report = {type: "sensor-health", ytmTabs: tabs.length, respondingTabs: responding,
+    const report = {type: "sensor-health", playbackConfirmation: true,
+      ytmTabs: tabs.length, respondingTabs: responding,
       reinjectedTabs: reinjected, healthy: tabs.length > 0 && responding === tabs.length,
       recovering: reloading > 0, reloadedTabs: reloading,
       versions,

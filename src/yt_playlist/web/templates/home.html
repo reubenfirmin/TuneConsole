@@ -78,9 +78,10 @@
       show_identities_nudge or show_backend_update or recap or spotify_library_job %}
   <div class="home-dashboard"
        :class="{'is-radio': panel === 'radio'}"
-       x-data="{ panel: location.hash.slice(1) || '{{ dash_default }}',
+       x-data="{ panel: location.hash.slice(1) || '{{ dash_default }}', albumTuningReady: false,
                  go(p) { this.panel = p; history.replaceState(null, '', '#' + p); window.dispatchEvent(new Event('hashchange')); fetch('/home/format', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: new URLSearchParams({panel:p})}).catch(() => {}); } }"
        @hashchange.window="panel = location.hash.slice(1) || '{{ dash_default }}'"
+       @album-tuning-ready.window="albumTuningReady = true"
        x-init='$nextTick(() => { if (!$el.querySelector(`[data-dash="${panel}"]`)) go({{ dash_default|tojson }}) })'>
     <div class="dash-navigation">
     <nav class="dash-nav" aria-label="Home areas" role="tablist"
@@ -121,6 +122,7 @@
       {% endif %}
     </nav>
     <button class="album-tune" type="button" x-show="panel === 'album-choices'" x-cloak
+            :disabled="!albumTuningReady"
             @click="$dispatch('album-tuning-open')" aria-label="Adjust album parameters"
             aria-haspopup="dialog" title="Adjust parameters">
       <svg viewBox="0 0 32 24" aria-hidden="true"><path d="M3 5h5m6 0h15M3 12h16m6 0h4M3 19h8m6 0h12"/><circle cx="11" cy="5" r="3"/><circle cx="22" cy="12" r="3"/><circle cx="14" cy="19" r="3"/></svg>
