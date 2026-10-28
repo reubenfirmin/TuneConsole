@@ -16,19 +16,19 @@ function playlistPlayback(playlist) {
       const status = window.playbackStatus?.snapshot;
       this.apply(status);
       this.busy = true;
-      let deadline;
+      const controller = new AbortController();
+      const deadline = setTimeout(() => controller.abort(), 12000);
       let errorMessage = 'Playback was not confirmed. Check YouTube Music before trying again.';
       try {
         if (!this.active) {
-          await window.tcPlay('https://music.youtube.com/playlist?list=' + encodeURIComponent(playlist));
+          await window.tcPlay('https://music.youtube.com/playlist?list=' + encodeURIComponent(playlist),
+            {signal: controller.signal});
           return;
         }
         const song = status.now_playing || status.resumable_player;
         const action = this.playing ? 'pause' : 'play';
         const params = new URLSearchParams({action, videoId: song.video_id, confirm: 'true'});
         if (!status.now_playing) params.set('resume', 'true');
-        const controller = new AbortController();
-        deadline = setTimeout(() => controller.abort(), 12000);
         const response = await fetch('/now-playing/toggle?' + params, {
           method: 'POST', signal: controller.signal,
         });

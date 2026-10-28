@@ -78,7 +78,8 @@ def test_default_vibe_closes_without_dimming_or_marking_an_adjustment(live_app, 
         expect(dialog.locator('[role="tabpanel"]:visible')).to_have_count(1)
         expect(dialog.locator('#fp-vibe-panel')).to_be_visible()
         expect(dialog.locator('#fp-preferences-panel')).not_to_be_visible()
-        expect(dialog.locator('.fp-tab-dot')).to_have_attribute('hidden', '')
+        expect(dialog.locator('.fp-tab-dot')).to_have_js_property('hidden', True)
+        expect(dialog.locator('.fp-tab-dot')).not_to_be_visible()
         for card in dialog.locator('.fp-vibe-content').all():
             expect(card).to_have_css('opacity', '1')
             expect(card).to_have_css('filter', 'none')
@@ -100,7 +101,7 @@ def test_default_vibe_closes_without_dimming_or_marking_an_adjustment(live_app, 
         choose_default()
     expect(dialog).not_to_be_visible()
     expect(page.locator('#home-mode-cards')).to_have_attribute('data-vibe', '')
-    expect(dot).to_have_attribute('hidden', '')
+    expect(dot).to_have_js_property('hidden', True)
     launcher.click()
     assert_neutral_choices()
     dialog.get_by_role('button', name='Close mix controls', exact=True).click()
@@ -206,10 +207,46 @@ def test_slow_vibe_request_closes_dialog_and_keeps_ready_mixes_usable(live_app, 
     expect(card.get_by_role('button', name='Save and play this mix', exact=True)).to_be_enabled()
     expect(card.locator('.gen-track-play').first).to_be_visible()
     expect(feedback).to_have_attribute('data-state', 'saving')
+    expect(feedback).to_be_in_viewport()
+    expect(page.locator('#home-vibe-feedback')).to_have_count(1)
     assert len(pending) == 1
     pending[0].continue_()
     expect(page.locator('#home-mode-cards')).to_have_attribute('data-vibe', 'relax')
     expect(feedback).to_have_attribute('data-state', 'ready')
+
+
+def test_vibe_feedback_replacement_keeps_one_owner_and_drops_the_previous_timer(live_app, store, page):
+    prepare(store)
+    page.route('https://i.ytimg.com/**', lambda route: route.abort())
+    page.clock.install()
+    page.set_viewport_size({'width': 390, 'height': 850})
+    page.goto(live_app)
+    page.get_by_role('button', name='Tune these mixes', exact=True).click()
+    page.get_by_role('radio', name='Relax', exact=True).check()
+    feedback = page.locator('#home-vibe-feedback')
+    expect(feedback).to_have_attribute('data-state', 'ready')
+    # Exercise the real feed endpoint and normal HTMX/Alpine cleanup, in one document.
+    page.evaluate("""async () => {
+      await htmx.ajax('GET', '/home/feed', {target: '#home-feed', swap: 'outerHTML'});
+      await Alpine.nextTick();
+    }""")
+    expect(feedback).to_have_count(1)
+    expect(feedback).not_to_be_visible()
+    pending = []
+    page.route('**/home/vibe', lambda route: pending.append(route))
+    page.get_by_role('button', name='Tune these mixes', exact=True).click()
+    page.get_by_role('radio', name='Energize', exact=True).check()
+    expect(feedback).to_have_attribute('data-state', 'saving')
+    expect(feedback).to_be_in_viewport()
+    page.clock.fast_forward(9000)
+    expect(feedback).to_be_in_viewport()
+    expect(feedback).to_have_attribute('data-state', 'saving')
+    expect(feedback).to_have_count(1)
+    assert len(pending) == 1
+    pending[0].continue_()
+    expect(page.locator('#home-mode-cards')).to_have_attribute('data-vibe', 'energize')
+    page.goto(live_app + '/artists')
+    expect(feedback).to_have_count(0)
 
 
 @pytest.mark.parametrize('notice', ['', "Heads up - we're unable to create relax mix tapes right now."])
@@ -269,16 +306,20 @@ def test_tuning_launcher_stays_at_mix_board_center_with_preference_notices(live_
     page.route('https://i.ytimg.com/**', lambda route: route.abort())
     page.goto(live_app)
     board = page.locator('#home-mode-cards')
-    launcher = page.get_by_role('button', name='Tune these mixes', exact=True)
     expect(board.locator(':scope > .gen-card')).to_have_count(4)
     # Only the notice text/state is controlled; the board and layout use actual rendered markup.
     for message in ['', "Heads up - we're unable to create relax mix tapes right now.",
                     ' '.join(["Heads up - we're unable to create relax + techno mix tapes right now."] * 4), '']:
         page.locator('#home-mix-status').evaluate('(el, text) => { el.textContent = text; el.hidden = !text; }', message)
-        bounds = board.bounding_box()
-        button = launcher.bounding_box()
-        assert abs(button['x'] + button['width'] / 2 - bounds['x'] - bounds['width'] / 2) < 2
-        assert abs(button['y'] + button['height'] / 2 - bounds['y'] - bounds['height'] / 2) < 2
+        # Sample both rectangles in one frame while the page's normal motion continues.
+        centers = board.evaluate("""el => {
+          const board = el.getBoundingClientRect();
+          const button = document.querySelector('.fp-collapse').getBoundingClientRect();
+          return {dx: button.x + button.width / 2 - board.x - board.width / 2,
+                  dy: button.y + button.height / 2 - board.y - board.height / 2};
+        }""")
+        assert abs(centers['dx']) < 2, centers
+        assert abs(centers['dy']) < 2, centers
 
 
 def test_mix_tabs_fit_desktop_mobile_and_short_windows(live_app, store, page, tmp_path):
@@ -403,7 +444,9 @@ def test_vibe_respects_genre_focus_through_clear_and_expiry(live_app, store, pag
     dialog.get_by_role('radio', name='Take it as it comes', exact=True).check()
     expect(row).to_have_attribute('data-vibe', '')
     expect(page.locator('.fp-tuning-dot')).to_be_visible()  # The independent Jazz focus remains active.
-    expect(dialog.locator('.fp-tab-dot')).to_have_attribute('hidden', '')
+    vibe_dot = page.locator('#fp-vibe-tab .fp-tab-dot')
+    expect(vibe_dot).to_have_js_property('hidden', True)
+    expect(vibe_dot).not_to_be_visible()
     assert row.locator('[data-genres]').evaluate_all(
         'els => els.length > 0 && els.every(el => JSON.parse(el.dataset.genres).every(g => g.toLowerCase() === "jazz"))')
     page.get_by_role('button', name='Change vibe', exact=True).click()

@@ -71,6 +71,7 @@
     <div class="fp-intro"><h2>Meet the moment.</h2><p>Same taste in music. A different kind of day.</p></div>
     <form id="home-vibe-form" hx-post="/home/vibe" hx-target="#home-mode-cards" hx-swap="outerHTML"
           hx-trigger="change" hx-sync="#fingerprint:queue last" hx-disabled-elt="find fieldset"
+          @keydown.space="if ($event.target.matches('input[type=radio]:checked')) { $event.preventDefault(); close(); }"
           @click="if ($event.target.matches('input[type=radio]')) close()">
       <fieldset class="fp-vibe-fields">
         <legend class="sr-only">Choose a vibe for your mixes</legend>

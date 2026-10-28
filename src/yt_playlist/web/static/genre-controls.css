@@ -57,6 +57,9 @@
   min-height: 1.5rem; min-width: 2.5rem; }
 /* Tight horizontal chrome so all four year digits fit the narrow year column (4rem on albums). */
 td.mb-year { padding-left: 0.25rem; padding-right: 0.3rem; }
+/* Badges already provide their own horizontal padding. Use the existing genre column
+   for the label instead of reserving another wide gutter on both sides. */
+.track-table td.mb-genre { padding-inline: .1rem; }
 .gtag { display: inline-flex; font-size: var(--type-xs); padding: 0.08rem 0.4rem; border-radius: 999px;
   box-sizing: border-box; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: clip;
   background: var(--surface-2); border: 1px solid var(--border-2); color: var(--dim); white-space: nowrap; }

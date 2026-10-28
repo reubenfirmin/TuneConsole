@@ -214,9 +214,9 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
 .page-home .fingerprint .fp-close:hover { color: var(--text); background: var(--surface-subtle); box-shadow: none; }
 
 /* The launcher stays on the board. A native modal makes the rest of the page inert. */
-.page-home .dash-directions .home-mix-board { display: grid; grid-template-columns: minmax(0, 1fr); }
+.page-home .dash-directions .home-mix-board { display: grid; grid-template-columns: minmax(0, 1fr); margin-bottom: 1.375rem; }
 .page-home .dash-directions .home-mix-board > .mix-preference-note { grid-area: 1 / 1; }
-.page-home .dash-directions .home-mix-board > .gen-lanes { grid-area: 2 / 1; min-width: 0; }
+.page-home .dash-directions .home-mix-board > .gen-lanes { grid-area: 2 / 1; min-width: 0; margin-bottom: 0; }
 .page-home .dash-directions .fingerprint {
   grid-area: 2 / 1;
   place-self: center;
@@ -397,7 +397,7 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
   background: linear-gradient(115deg, color-mix(in srgb, var(--teal) 20%, var(--surface-raised)), var(--surface-raised));
   box-shadow: 0 .75rem 3rem color-mix(in srgb, var(--shadow-ink) 70%, transparent); }
 .home-vibe-feedback[hidden] { display: none; }
-#home-feed:has(.home-vibe-feedback:not([hidden])) { padding-bottom: 10rem; }
+body:has(> .home-vibe-feedback:not([hidden])) #home-feed { padding-bottom: 10rem; }
 .home-vibe-feedback-copy { min-width: 0; flex: 1; }
 .home-vibe-feedback-copy strong { display: block; font-size: var(--type-ui); line-height: 1.4; }
 .home-vibe-feedback-copy p { margin: .25rem 0 0; font-size: var(--type-xs); line-height: 1.5; color: var(--dim); }

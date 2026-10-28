@@ -9,7 +9,10 @@
     </div>
     <p class="section-note mix-preparation-note" role="status">Your next mixes will appear as your library is prepared.</p>
   </section>
-  <aside id="home-vibe-feedback" class="home-vibe-feedback" hidden aria-label="Vibe update">
+  {# Main and the dashboard panels retain entrance transforms. Keep fixed feedback at body level;
+     Alpine removes the teleport when this feed is replaced or the page is left. #}
+  <template x-data x-teleport="body">
+  <aside id="home-vibe-feedback" class="home-vibe-feedback" x-data="homeVibeFeedback()" hidden aria-label="Vibe update">
     <span class="home-vibe-progress" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
     <div class="home-vibe-feedback-copy" role="status" aria-live="polite" aria-atomic="true">
       <strong id="home-vibe-feedback-title"></strong>
@@ -18,6 +21,7 @@
     <button type="button" class="home-vibe-edit" onclick="window.dispatchEvent(new CustomEvent('home-vibe-edit'))">Change vibe</button>
     <button type="button" class="home-vibe-dismiss" aria-label="Dismiss vibe update" onclick="dismissHomeVibeFeedback()">×</button>
   </aside>
+  </template>
   <div id="steer-toast" class="steer-toast" x-data="{show:false}" x-show="show" x-cloak x-transition
        @mixes-reranked.window="show=true; setTimeout(()=>show=false, 3500)"
        x-init="$nextTick(() => { if (sessionStorage.getItem('steered')) { sessionStorage.removeItem('steered'); show=true; setTimeout(()=>show=false, 3500); } })">

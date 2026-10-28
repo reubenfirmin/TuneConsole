@@ -38,6 +38,9 @@ def test_musical_evidence_opens_with_keyboard_and_fits_narrow_screens(song_app, 
 
 @pytest.mark.parametrize('width', [1280, 390])
 def test_track_details_actions_and_navigation(song_app, page, width, tmp_path):
+    # This journey checks a loaded hero; failure and fallback use separate image-event cases.
+    song_app['store'].tracks.upsert_track('owned-song', 'Owned Song', 'Artist & Friends', 'Album', 180,
+                                          thumbnail='/static/nag/identities.png')
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.set_viewport_size({'width': width, 'height': 900})
@@ -45,6 +48,7 @@ def test_track_details_actions_and_navigation(song_app, page, width, tmp_path):
     page.get_by_role('link', name='Owned Song', exact=True).click()
     expect(page.get_by_role('heading', name='Owned Song', exact=True)).to_be_visible()
     expect(page.get_by_role('link', name='Source mix', exact=True)).to_be_visible()
+    page.wait_for_function("document.querySelector('.track-detail-art').naturalWidth > 0")
     art = page.locator('.track-detail-art').bounding_box()
     hero = page.locator('.library-hero.release-hero').bounding_box()
     assert art['width'] >= hero['width'] and art['height'] >= hero['height']

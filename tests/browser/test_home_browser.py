@@ -614,16 +614,37 @@ def test_mix_controls_automatically_reset_an_open_page_after_four_hours(live_app
 
 
 def test_regenerating_one_mix_updates_shuffle_request(live_app, store, page):
+    from dataclasses import asdict
     import json
+    import logging
     from urllib.parse import parse_qs
 
     from playwright.sync_api import expect
     from tests.test_home_other_genres import seed_genres
+    from yt_playlist.rec import home_cards, home_prepared
+    from yt_playlist.web.jobs import SyncJobs
 
     seed_genres(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
     prepare_home(store, 1)
+    # Publish real menus with one distinct theme per epoch band. Randomly drawing
+    # from the usual menu batch can legitimately repeat the wheelhouse genre.
+    payload = store.rec_proposals.get_proposals(home_prepared.SURFACE)
+    service = home_cards.HomeCards(store, SyncJobs(), logging.getLogger(__name__))
+    menus = []
+    for epoch, order in enumerate(((0, 1, 2, 3, 4, 5), (1, 2, 3, 4, 5, 0))):
+        menu = asdict(service.cards(home_cards.CardsRequest(1, epoch=epoch, mode_order=order, record=False)))
+        for proto in menu["protos"]:
+            proto["experiment_id"] = home_cards.experiment_id(proto)
+            proto["recipe"]["experiment_id"] = proto["experiment_id"]
+        by_lane = {proto["lane"]: proto for proto in menu["protos"]}
+        for slot in menu["slots"]:
+            if slot["proto"]:
+                slot["proto"] = by_lane[slot["proto"]["lane"]]
+        menus.append(menu)
+    payload["menus"] = menus
+    store.rec_proposals.put_proposals(home_prepared.SURFACE, payload, 1)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(f"{live_app}/")
     card = page.locator("#gen-wheelhouse")

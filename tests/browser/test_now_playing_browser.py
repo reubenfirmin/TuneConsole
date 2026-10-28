@@ -75,6 +75,14 @@ def test_progress_uses_control_divider_without_time_row_in_home_and_dock(live_ap
     expect(progress).to_be_visible()
     assert progress.evaluate('el => getComputedStyle(el).forcedColorAdjust')=='none'
     # Reduced motion still displays locally estimated progress between heartbeats.
+    # Freeze after the visibility transitions, then restart the status owner so
+    # transport delays and periodic polls cannot change the measured interval.
+    page.clock.pause_at(page.evaluate('Date.now() / 1000') + .1)
+    page.evaluate('''() => {
+        window.playbackStatus.stop();
+        window.playbackStatus.start();
+        return window.playbackStatus.refresh();
+    }''')
     status['now_playing'].update(position=3,paused=False)
     page.evaluate('window.playbackStatus.refresh()')
     page.clock.run_for(500)

@@ -323,6 +323,15 @@ function syncHomeVibeFeedback() {
   renderHomeVibeFeedback();
 }
 
+function homeVibeFeedback() {
+  return {
+    init() { syncHomeVibeFeedback(); },
+    destroy() {
+      if (homeVibeUpdate?.feedback === this.$el) clearHomeVibeFeedback();
+    },
+  };
+}
+
 function syncHomeVibe() {
   syncHomeVibeFeedback();
   const panel = document.getElementById('fingerprint');

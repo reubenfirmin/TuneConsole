@@ -102,7 +102,7 @@ function tcPlaybackError(message) {
 }
 window.tcPlaybackError = tcPlaybackError;
 
-function tcPlay(url) {
+function tcPlay(url, {signal} = {}) {
   const requestId = window.tcPlaybackRequestSequence = (window.tcPlaybackRequestSequence || 0) + 1;
   window.dispatchEvent(new CustomEvent('playback-requested', {detail: {url, requestId}}));
   const failed = () => {
@@ -111,7 +111,7 @@ function tcPlay(url) {
     return false;
   };
   return fetch('/play', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }), signal,
   }).then(r => r.json()).then(d => {
     if (!d || !d.ok) return failed();
     window.dispatchEvent(new CustomEvent('playback-settled', {detail: {requestId, ok: true}}));

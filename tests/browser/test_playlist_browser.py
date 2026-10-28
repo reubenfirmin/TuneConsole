@@ -285,6 +285,43 @@ def test_playlist_header_follows_only_its_confirmed_queue_without_relaunching(li
     assert errors == []
 
 
+def test_initial_playlist_launch_times_out_once_and_allows_deliberate_retry(live_playlist_app, page):
+    base, pid = (live_playlist_app[key] for key in ('base', 'pid'))
+    requests, toggles = [], []
+    page.route('**/bridge/status', lambda route: route.fulfill(json={'connected': False}))
+
+    def launch(route):
+        requests.append(route.request.post_data_json)
+        if len(requests) > 1:
+            route.fulfill(json={'ok': True})
+
+    page.route('**/play', launch)
+    page.on('request', lambda request: toggles.append(request.url)
+            if '/now-playing/toggle' in request.url else None)
+    page.clock.install()
+    page.set_viewport_size({'width': 390, 'height': 850})
+    page.goto(f'{base}/playlist/{pid}')
+    header = page.get_by_role('button', name='Play on YouTube Music', exact=True)
+    header.click()
+    expect(header).to_be_disabled()
+    expect(header).to_have_attribute('aria-busy', 'true')
+    page.clock.fast_forward(13000)
+    expect(header).to_be_enabled()
+    expect(header).not_to_have_attribute('aria-busy', 'true')
+    expect(page.locator('#playback-error')).to_contain_text('Couldn’t start playback')
+    assert requests == [{'url': 'https://music.youtube.com/playlist?list=PL1'}]
+    page.clock.fast_forward(13000)
+    assert len(requests) == 1, 'a timeout must not replay an uncertain launch automatically'
+    with page.expect_response('**/play'):
+        header.click()
+    expect(header).to_be_enabled()
+    expect(page.locator('#playback-error')).to_have_count(0)
+    assert requests == [{'url': 'https://music.youtube.com/playlist?list=PL1'}] * 2
+    assert toggles == []
+    assert len(page.context.pages) == 1
+    expect(page).to_have_url(f'{base}/playlist/{pid}')
+
+
 @pytest.mark.parametrize('failure', ['rejected', 'network', 'invalid_json', 'unconfirmed'])
 def test_playlist_header_retains_observed_state_when_control_is_not_confirmed(live_playlist_app, page, failure):
     base, pid = (live_playlist_app[key] for key in ('base', 'pid'))

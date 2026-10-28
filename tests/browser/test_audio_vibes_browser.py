@@ -825,6 +825,7 @@ def test_failed_sample_is_logged_and_replaced_in_background(vibes_enabled, live_
 
 
 def test_old_prediction_waits_for_current_answers_without_contaminating_feedback(vibes_enabled, live_app, page, store):
+    fake_extension(page)
     values, _ = saved_banner(page, live_app, store)
     old = {'run_id': values[0]['run_id'], 'samples': values, 'taxonomy_version': 'audio-vibe-targets-1',
            'choices': {'focus': {'label': 'Instrumental + calm'}}, 'prediction': {'vibe': 'focus'}}
@@ -856,6 +857,7 @@ def test_old_prediction_waits_for_current_answers_without_contaminating_feedback
     assert feedback['vibes'] == ['relax']
     assert set(feedback['sample_ids']) == {value['id'] for value in values}
     assert feedback['prediction']['taxonomy_version'] == 'audio-session-targets-1'
+    assert not page.evaluate('vibeCaptures')
 
 
 def test_automatic_app_reload_waits_for_card_interaction(vibes_enabled, live_app, page, store, monkeypatch):
