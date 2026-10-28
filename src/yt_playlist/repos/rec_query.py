@@ -249,6 +249,27 @@ class RecQueryRepo(Repo):
         return result
 
     @synchronized
+    def group_candidates(self, keys):
+        """Current owned display and eligibility fields for prepared group pools.
+
+        Resolve the playable entry before reading its catalog projection, once
+        per recording, rather than reloading metadata in separate pool passes.
+        """
+        keys = list(dict.fromkeys(keys))
+        result = {}
+        for offset in range(0, len(keys), 500):
+            batch = keys[offset:offset + 500]
+            qs = ','.join('?' for _ in batch)
+            rows = self.conn.execute(
+                'SELECT t.identity_key,t.title,t.artist,t.album,t.video_id,t.thumbnail,t.genre,t.duration_s '
+                'FROM tracks t WHERE t.id IN ('
+                'SELECT MIN(e.id) FROM recordings r JOIN catalog_entries e ON e.recording_id=r.id '
+                'JOIN library_memberships m ON m.entry_id=e.id JOIN youtube_items y ON y.video_id=e.video_id '
+                f'WHERE r.identity_key IN ({qs}) AND COALESCE(y.available,1)<>0 GROUP BY r.id)', batch)
+            result.update({row['identity_key']: dict(row) for row in rows})
+        return result
+
+    @synchronized
     def library_genre_families(self) -> list[dict]:
         """Genre families present in the library, each with its track count, the option list for the
         Clusters genre-family filter (#29). Untagged tracks contribute nothing. Sorted most-common

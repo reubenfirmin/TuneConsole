@@ -89,6 +89,9 @@ def test_idle_worker_notices_expiry(store, monkeypatch):
     monkeypatch.setattr(worker.projections, 'poll', lambda: None)
     # This check isolates suppression expiry from independent content preparation.
     monkeypatch.setattr(worker.preparation, 'due', lambda now: False)
+    monkeypatch.setattr(worker, '_poll_choices', lambda: None)
+    monkeypatch.setattr(worker, '_poll_evidence_storage', lambda: None)
+    monkeypatch.setattr(worker, '_poll_tv', lambda: None)
     triggers = []
     monkeypatch.setattr(worker, '_schedule', lambda **kwargs: triggers.append(kwargs))
     worker._maintenance_loop()

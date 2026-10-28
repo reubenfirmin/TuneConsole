@@ -45,27 +45,29 @@
     </div>
   </template>
 
-  {% macro pl_row(promote=False) %}
+  {% macro pl_row(promote=False, show_created=False) %}
   <tr :data-playlist-id="r.id" :class="{ selrow: sel[r.id] }">
     <td class="selcell" @click="rowCheck(r, $event)">
       <input type="checkbox" :checked="sel[r.id]" @click.stop="rowCheck(r, $event)"></td>
     <td class="playlist-art-cell">
       <span class="pl-cover art-playlist">
         <img class="pl-thumb" :src="r.thumbnail" x-show="r.thumbnail" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
-        <a class="pl-play" :href="'https://music.youtube.com/playlist?list=' + r.ytm"
-           target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
+        <a class="pl-play" :href="r.is_video ? '/?tv_playlist=' + r.id + '#tv' : 'https://music.youtube.com/playlist?list=' + r.ytm"
+           :target="r.is_video ? '_self' : '_blank'" rel="noopener" :title="r.is_video ? 'Play on TV' : 'Play on YouTube Music'">▶</a>
       </span>
     </td>
     <td>
       {% if promote %}<div class="generated-title-actions">{% endif %}
         <a class="ptitle" :href="'/playlist/' + r.id" x-text="r.title" title="Open in TuneConsole"></a>
+        {% if show_created %}<small class="playlist-created" x-text="'Created ' + fmtLast(r.created)"></small>{% endif %}
+        <small class="playlist-playback" x-text="r.last == null ? 'No recorded playlist listening' : 'Last listened ' + fmtLast(r.last)"></small>
         {% if promote %}<button type="button" class="promote-btn" x-show="r.is_generated" @click.stop="promote(r)"
                 title="Keep this playlist in your library and use it to shape your recommendations">Promote to library</button>
       </div>{% endif %}
     </td>
-    {% if has_groups %}<td><span class="gtag" x-show="r.group" x-text="r.group"></span></td>{% endif %}
+    {% if has_groups %}<td><span class="gtag" x-show="r.group" :title="r.group"><span class="gtag-label" x-text="r.group"></span></span></td>{% endif %}
     <td class="num mono" x-text="r.count"></td>
-    <td class="num lastcol" x-text="fmtLast(r.last)"></td>
+    <td class="num lastcol" x-text="r.last == null ? 'No recorded listen' : fmtLast(r.last)"></td>
     <td class="pl-activity-cell">
       <span class="pl-activity" role="img" :title="activityLabel(r)" :aria-label="activityLabel(r)">
         <i :style="{ '--heat': activity(r) }"></i>
@@ -74,20 +76,33 @@
   </tr>
   {% endmacro %}
 
+  {% macro pl_head(sortable=False) %}
+      <thead><tr>
+        <th class="col-action" aria-label="Select"></th>
+        <th class="col-thumb" aria-label="Cover"></th>
+        {% for label, key, cls in [('Playlist', 'title', ''), ('Group', 'group', 'col-group'), ('Songs', 'count', 'num col-count'), ('Last played', 'last', 'num col-last'), ('Activity', 'listens', 'col-length')] %}
+        {% if key != 'group' or has_groups %}
+        <th class="{{ cls }}{% if sortable %} sorth{% endif %}"{% if sortable %} tabindex="0" role="button" @click="sortBy('{{ key }}')" @keydown.enter.space.prevent="sortBy('{{ key }}')"{% endif %}{% if key == 'last' %} title="Most recent recorded playback from this playlist. Partial listening counts; playing its songs elsewhere does not."{% elif key == 'listens' %} title="Playlist listening sessions, including partial listens. A context change or 30 minutes without playback starts a new session; track changes and repeated reports do not."{% endif %}>{{ label }}{% if sortable %}{{ sort_indicator(key) }}{% endif %}</th>
+        {% endif %}
+        {% endfor %}
+      </tr></thead>
+  {% endmacro %}
+
   {# Recent playlists are shortcuts to the same rows, with shared selection and actions. #}
   <section class="card gen-grp playlist-pinned playlist-new" x-show="newRows().length && !collapsed.New" x-cloak
            aria-label="New playlists">
     <button type="button" class="gen-grp-head" @click="toggleSection('New')"
             :aria-expanded="!collapsed.New" aria-controls="new-playlists"
-            title="Playlists from the past 7 days">
+            title="Playlists created in the past 7 days">
       <span class="gen-grp-caret" aria-hidden="true" :class="{ 'is-closed': collapsed.New }">{{ arrow_icon('disclosure') }}</span>
       <span class="section-label">New playlists</span>
       <span class="gen-grp-count" x-text="newRows().length"></span>
       <span class="gen-grp-toggle" x-text="collapsed.New ? 'Expand' : 'Collapse'"></span>
     </button>
     <table id="new-playlists" class="playlist-index" x-show="!collapsed.New">
+      {{ pl_head() }}
       <tbody>
-        <template x-for="r in newRows()" :key="r.id">{{ pl_row() }}</template>
+        <template x-for="r in newRows()" :key="r.id">{{ pl_row(show_created=True) }}</template>
       </tbody>
     </table>
   </section>
@@ -103,6 +118,7 @@
       <span class="gen-grp-toggle" x-text="collapsed.Generated ? 'Expand' : 'Collapse'"></span>
     </button>
     <table id="generated-playlists" class="playlist-index" x-show="!collapsed.Generated" x-cloak>
+      {{ pl_head() }}
       <tbody>
         <template x-for="r in genRows()" :key="r.id">{{ pl_row(promote=True) }}</template>
       </tbody>
@@ -117,17 +133,7 @@
 
   <div class="card playlist-table-card">
     <table class="playlist-index">
-      <thead><tr>
-        <th class="col-action"></th>
-        <th class="col-thumb"></th>
-        <th class="sorth" tabindex="0" role="button" @click="sortBy('title')" @keydown.enter.space.prevent="sortBy('title')">Playlist{{ sort_indicator('title') }}</th>
-        {% if has_groups %}<th class="sorth col-group" tabindex="0" role="button" @click="sortBy('group')" @keydown.enter.space.prevent="sortBy('group')">Group{{ sort_indicator('group') }}</th>{% endif %}
-        <th class="sorth num col-count" tabindex="0" role="button" @click="sortBy('count')" @keydown.enter.space.prevent="sortBy('count')">Songs{{ sort_indicator('count') }}</th>
-        <th class="sorth num col-last" tabindex="0" role="button" @click="sortBy('last')" @keydown.enter.space.prevent="sortBy('last')"
-            title="Most recent time a song from this playlist showed up in your play history">Last{{ sort_indicator('last') }}</th>
-        <th class="sorth col-length" tabindex="0" role="button" @click="sortBy('listens')" @keydown.enter.space.prevent="sortBy('listens')"
-            title="Relative activity based on track plays within each playlist. Hover a meter for the exact total.">Activity{{ sort_indicator('listens') }}</th>
-      </tr></thead>
+      {{ pl_head(sortable=True) }}
       <template x-for="sec in sections()" :key="sec.name">
         <tbody>
           <tr x-show="split && sec.name" class="group-row"><td colspan="{{ 7 if has_groups else 6 }}" x-text="sec.name"></td></tr>

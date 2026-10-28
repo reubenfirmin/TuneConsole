@@ -44,6 +44,27 @@ def select(conn, entry_id, field, value, source, *, now=None):
                  (subject,field,source,time.time() if now is None else now))
 
 
+def reuse_recording_selections(conn, previous, target):
+    """Fill genuinely missing facts for a verified equivalent recording.
+
+    Copy only selected values and their attribution. Historical findings remain on
+    their original subjects. An existing selection, including a blank or null,
+    belongs to the target and is never replaced by a merge.
+    """
+    before = conn.execute('SELECT * FROM recordings WHERE id=?', (previous,)).fetchone()
+    after = conn.execute('SELECT * FROM recordings WHERE id=?', (target,)).fetchone()
+    for field in RECORDING_FIELDS:
+        if before[field] in (None, '') or after[field] not in (None, ''):
+            continue
+        if conn.execute('SELECT 1 FROM recording_field_sources WHERE recording_id=? AND field=?',
+                        (target, field)).fetchone():
+            continue
+        conn.execute(f'UPDATE recordings SET {field}=? WHERE id=?', (before[field], target))
+        conn.execute('INSERT INTO recording_field_sources(recording_id,field,source,selected_at) '
+                     'SELECT ?,field,source,selected_at FROM recording_field_sources '
+                     'WHERE recording_id=? AND field=?', (target, previous, field))
+
+
 def apply_provider(conn, entry_id, provider, fields, providers):
     """The first provider wins disagreements; documented genre refinements can be more precise.
 

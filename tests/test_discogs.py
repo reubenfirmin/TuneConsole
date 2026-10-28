@@ -63,7 +63,7 @@ def test_deco_unrelated_results_are_not_metadata_options(monkeypatch):
         {"id": 3, "title": "David Crowder*Band - Sunsets & Sushi", "year": "2005",
          "genre": ["Rock"], "style": ["Alternative Rock"]},
     ])
-    def unexpected_lookup(*args):
+    def unexpected_lookup(*args, **kwargs):
         raise AssertionError("Unrelated artists do not need release lookups")
     monkeypatch.setattr(discogs, "_get", unexpected_lookup)
     assert discogs.enrich("You & Me", "Deco (BE)") == (None, None)
@@ -76,7 +76,7 @@ def test_album_hit_must_contain_the_requested_artists_track(monkeypatch, compila
         {"id": 2, "title": ("Various" if compilation else "Björk") + " - Post",
          "year": "1995", "genre": ["Electronic"]},
     ])
-    def fake_get(path, params, tok):
+    def fake_get(path, params, tok, **kwargs):
         if path == "releases/1":
             return {"artists": [{"name": "Björk"}], "tracklist": [{"title": "Another Song"}]}
         assert path == "releases/2"
@@ -89,7 +89,7 @@ def test_album_hit_must_contain_the_requested_artists_track(monkeypatch, compila
 def test_release_lookup_failure_does_not_validate_album(monkeypatch):
     monkeypatch.setattr(discogs, "_search", lambda query, tok: [
         {"id": 1, "title": "Björk - Post", "year": "1995", "genre": ["Electronic"]}])
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise OSError("timeout")
     monkeypatch.setattr(discogs, "_get", fail)
     assert discogs.enrich("Hyperballad", "Björk") == (None, None)

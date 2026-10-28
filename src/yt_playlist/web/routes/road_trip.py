@@ -272,9 +272,11 @@ def build(ctx) -> APIRouter:
     async def save_draft(request: Request, recipe_id: int):
         """Materialize exactly what's on screen as a YouTube playlist (Generated group: quarantined
         from the taste model and GC'd on the normal schedule), using the shared save/play feedback."""
-        return await activity_for(ctx).to_thread(_save_draft, request, recipe_id)
+        bridge = getattr(ctx, "bridge", None)
+        intent = bridge.begin_playback_intent() if bridge is not None else None
+        return await activity_for(ctx).to_thread(_save_draft, request, recipe_id, intent)
 
-    def _save_draft(request, recipe_id):
+    def _save_draft(request, recipe_id, intent):
         # Reads, normalization, remote mutation, bookkeeping and rendering all
         # belong to the admitted worker, including after request cancellation.
         recipe, state = drafts.for_save(recipe_id)
@@ -309,7 +311,7 @@ def build(ctx) -> APIRouter:
             if bridge is not None and getattr(bridge, "connected", False):
                 watch_url = f"https://music.youtube.com/watch?list={saved['new_ytm']}"
                 activity_for(ctx).start_thread(playlist_navigation.navigate_when_ready,
-                                 args=(client, bridge, saved["new_ytm"], watch_url))
+                                 args=(client, bridge, saved["new_ytm"], watch_url), kwargs={"intent": intent})
         except PlaylistAddUncertain as exc:
             result["partial_ytm"] = exc.playlist_id
             return response(str(exc))

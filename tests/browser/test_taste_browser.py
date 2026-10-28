@@ -8,6 +8,7 @@ from playwright.sync_api import expect
 
 from yt_playlist.rec import rec_params
 from yt_playlist.util.matching import identity_key
+from yt_playlist.web.track_links import track_url
 
 
 @pytest.mark.parametrize("width", [1440, 1024, 390, 320])
@@ -62,7 +63,7 @@ def test_preview_and_compare_show_artwork_play_tracks_and_keep_baseline(live_app
     with page.expect_response(lambda response: urlsplit(response.url).path == "/play"):
         play.press("Enter")
     assert play_requests == [{"url": "https://music.youtube.com/watch?v=preview-song"}]
-    expect(sample_table.get_by_role("link", name=title, exact=True)).to_have_attribute("data-yt-info", "")
+    expect(sample_table.get_by_role("link", name=title, exact=True)).to_have_attribute("href", track_url(sample[0]))
 
     page.locator("#comparison-body").scroll_into_view_if_needed()
     expect(page.locator("#comparison-body")).not_to_contain_text("Loading")
@@ -218,14 +219,14 @@ def test_playlist_influence_shows_the_whole_blend_and_links_selected_rows(live_a
     rows = influence.locator(".playlist-influence-row")
     expect(rows).to_have_count(9)
     expect(influence.locator(".playlist-blend-segment")).to_have_count(9)
-    expect(influence.get_by_text("10 playlists shape this match", exact=True)).to_be_visible()
+    expect(influence.get_by_text("10 interests shape this match", exact=True)).to_be_visible()
     expect(influence.locator(".playlist-blend-caption")).to_contain_text("70% comes from your top 3")
     expect(rows.first.locator(".playlist-influence-title")).to_have_text(titles[0])
     expect(rows.first.locator(".playlist-influence-plays")).to_contain_text("34")
     expect(rows.first.locator(".playlist-influence-genres")).to_contain_text("techno")
     expect(rows.last.locator(".playlist-influence-title")).to_have_text("Other 2 playlists")
     expect(rows.last.locator(".playlist-influence-share")).to_contain_text("3%")
-    expect(influence.locator(".playlist-influence-footnote")).to_contain_text("1 playlist has no listening weight yet")
+    expect(influence.locator(".playlist-influence-footnote")).to_contain_text("1 context has no allocation weight yet")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     influence.locator("..").screenshot(path=str(tmp_path / f"playlist-blend-{width}.png"))
 

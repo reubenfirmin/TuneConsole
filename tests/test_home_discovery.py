@@ -92,6 +92,72 @@ def test_discovery_can_show_one_song_without_claiming_a_mix_is_ready(store):
     assert "New recommendations will appear" not in response.text
 
 
+def test_discovery_survives_model_cache_invalidation_and_rechecks_eligibility(store, monkeypatch):
+    seed_songs(store)
+    store.discovery.upsert_discovered_album('retained-album', 'Artist', 'Retained album', '2026', None, 1)
+    client = client_for(store, 'discovery')
+    assert 'Retained album' in client.get('/home/discovery').text
+    with store.conn:
+        store.conn.execute("DELETE FROM rec_proposals WHERE surface IN "
+                           "('home_prepared','home_tuned','home_choice','mode_bundles','fresh_pool')")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Refreshing discovery must not prepare or rank candidates')
+
+    monkeypatch.setattr(home_prepared, 'prepare', forbidden)
+    monkeypatch.setattr(discover, 'pick_discovered_albums', forbidden)
+    monkeypatch.setattr(fresh_pool, 'pick', forbidden)
+    response = client.get('/home/discovery')
+    assert 'Retained album' in response.text and 'Songs to discover' in response.text
+    assert 'Finding new music for you' not in response.text
+
+    store.rec_model.record_feedback('for_you', 'song 0|artist 0', 'dismiss', now=3)
+    store.rec_model.record_feedback('for_you', 'artist:Artist 1', 'mute', now=3)
+    store.discovery.delete_discovered_albums(['retained-album'])
+    response = client.get('/home/discovery')
+    assert 'Retained album' not in response.text
+    assert 'data-discovery-id="song 0|artist 0"' not in response.text
+    assert 'data-discovery-id="song 1|artist 1"' not in response.text
+
+
+def test_discovery_publishes_even_when_mix_assembly_is_deferred(store, monkeypatch):
+    from yt_playlist.core.activity import WorkBudgetExceeded
+
+    seed_songs(store)
+    store.discovery.upsert_discovered_album('ready', 'Artist', 'Ready independently', '2026', None, 1)
+    def exhausted(*args):
+        raise WorkBudgetExceeded('Mix assembly is still catching up')
+
+    monkeypatch.setattr(home_prepared, '_prepare', exhausted)
+    assert home_prepared.prepare(store, 3) is None
+    selection = home_prepared.discovery(store, None, 3)
+    assert selection['discovery_albums'][0]['title'] == 'Ready independently'
+    assert len(selection['discovery_tracks']) == 10
+
+
+def test_new_discovery_pool_is_served_while_mix_projection_is_unchanged(store):
+    seed_songs(store)
+    home_prepared.prepare(store, 3)
+    old_mix_projection = home_prepared.load(store, 3)
+    assert old_mix_projection and not old_mix_projection['discovery_albums']
+    store.discovery.upsert_discovered_album('new-album', 'Artist', 'Fresh arrival', '2026', None, 4)
+    home_prepared.prepare_discovery(store, 4)
+    selection = home_prepared.discovery(store, old_mix_projection, 4)
+    assert [a['browse_id'] for a in selection['discovery_albums']] == ['new-album']
+
+
+@pytest.mark.parametrize('bad_row', [None, {'browse_id': []},
+    {'browse_id': 'bad', 'artist': []}, {'browse_id': 'bad', 'artist': 'Artist', 'genre': {}},
+])
+def test_corrupt_independent_discovery_pool_cannot_crash_a_refresh(store, bad_row):
+    client = client_for(store)
+    store.rec_proposals.put_proposals(home_prepared.DISCOVERY_SURFACE, {
+        'discovery_albums': [bad_row], 'discovery_artists': [], 'discovery_tracks': []}, 1)
+    assert home_prepared.load_discovery(store) is None
+    response = client.get('/home/discovery')
+    assert response.status_code == 200
+
+
 def test_missing_artist_art_is_queued_and_repaired_image_appears_without_reranking(store, monkeypatch):
     store.discovery.upsert_discovered_artist('New artist', 1, [], [], None, 1)
     client = client_for(store)

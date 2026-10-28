@@ -4,8 +4,12 @@
 // alters, blocks, or reorders requests, and it fails open: any error means a lost observation,
 // never a broken page. Ratings include the fetch outcome; other events are raw request intent.
 (function () {
-  if (window.__tcFetchHook) return;
-  window.__tcFetchHook = true;
+  var REVISION = 2;
+  var previous = window.__tcFetchHook;
+  if (previous && previous.revision >= REVISION && !previous.stopped) return;
+  if (previous && typeof previous.stop === "function") previous.stop();
+  var hook = window.__tcFetchHook = {revision: REVISION, stopped: false,
+    stop: function () { hook.stopped = true; }};
 
   var PATTERNS = [
     { re: /\/youtubei\/v1\/like\/(like|removelike|dislike)([?/]|$)/, kind: "rate" },
@@ -16,20 +20,31 @@
   ];
   var BODY_CAP = 4096;
 
-  function brand() {
-    try { return (window.ytcfg && window.ytcfg.get) ? (window.ytcfg.get("DELEGATED_SESSION_ID") || "") : ""; } catch (e) { return ""; }
+  function account() {
+    try {
+      var cfg = window.ytcfg;
+      if (cfg && cfg.get) {
+        var delegated = cfg.get("DELEGATED_SESSION_ID");
+        if ((typeof delegated === "string" && delegated) || cfg.get("LOGGED_IN") === true)
+          return {brandKnown: true, brandId: delegated || ""};
+      }
+    } catch (e) {}
+    return {brandKnown: false, brandId: ""};
   }
 
   var orig = window.fetch;
   window.fetch = function (input, init) {
+    if (hook.stopped) return orig.apply(this, arguments);
     var observation = null;
     var bodyReady = Promise.resolve("");
     try {
       var url = typeof input === "string" ? input : ((input && input.url) || "");
       for (var i = 0; i < PATTERNS.length; i++) {
         if (PATTERNS[i].re.test(url)) {
-          observation = {kind: PATTERNS[i].kind, url: url.split("?")[0],
-                         href: location.href, brandId: brand()};
+          // Snapshot identity before fetch/body/result waits: an account switch
+          // cannot retag a request that is already in flight.
+          observation = Object.assign({kind: PATTERNS[i].kind, url: url.split("?")[0],
+                         href: location.href}, account());
           // YTM usually passes the JSON body inside a Request object, not as a string init.body;
           // clone() lets us read it without consuming the stream. Async is fine: the server stamps
           // event time at receipt, and a failed read still reports the observation (empty body).
@@ -44,9 +59,10 @@
       }
     } catch (e) {}
     function report(outcome) {
-      if (!observation) return;
+      if (!observation || hook.stopped) return;
       bodyReady.then(function (body) {
         try {
+          if (hook.stopped) return;
           window.postMessage({__tcCuration: Object.assign({}, observation, outcome,
             {body: (body || "").slice(0, BODY_CAP)})}, "*");
         } catch (e) {}

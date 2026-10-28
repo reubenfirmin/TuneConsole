@@ -75,21 +75,21 @@ def test_populated_conversion_preserves_originals_precision_receipts_and_project
         assert store.conn.execute('SELECT 1 FROM sqlite_master WHERE name=?', (name,)).fetchone() is None
 
 
-def test_file_upgrade_publishes_verified_predecessor_backup_and_reopens(tmp_path):
+def test_file_upgrade_preserves_evidence_and_reopens_without_backups(tmp_path):
     store = _predecessor(tmp_path / 'state.db')
     originals = _originals(store.conn)
     migrate(store.conn, registry=_registry())
     store.conn.close()
-    backups = list((tmp_path / 'backups').glob('*.db'))
-    assert len(backups) == 1
-    with sqlite3.connect(backups[0]) as backup:
-        assert backup.execute('PRAGMA integrity_check').fetchone() == ('ok',)
-        assert _originals(backup) == originals
-        assert backup.execute('SELECT MAX(version) FROM schema_migrations').fetchone() == (32,)
+    assert not (tmp_path / 'backups').exists()
     with sqlite3.connect(tmp_path / 'state.db') as reopened:
         migrate(reopened, registry=_registry())
         capture.validate(reopened)
         assert reopened.execute('SELECT COUNT(*) FROM listening_capture_receipts').fetchone() == (4,)
+        assert reopened.execute('PRAGMA integrity_check').fetchone() == ('ok',)
+        assert list(reopened.execute(
+            'SELECT identity_id,raw_identity_key,identity_key,recording_id,source,last_observed_at,'
+            'capture_id,capture_item_id FROM listening_observations WHERE capture_id IS NOT NULL '
+            'ORDER BY capture_item_id')) == originals
 
 
 def test_conversion_failure_restores_original_tables_rows_and_version(tmp_path):

@@ -102,10 +102,8 @@ def test_populated_upgrade_does_not_invent_user_intent_and_rolls_back(tmp_path):
     before = s.enrichment_reports.metadata_provenance(1)
     s.init_schema()
     assert s.enrichment_reports.metadata_provenance(1) == before
-    for backup in (tmp_path / 'backups').glob('*.db'):
-        with sqlite3.connect(backup) as conn:
-            assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-            assert conn.execute('SELECT genre FROM recordings').fetchone()[0] == 'Rock'
+    assert not (tmp_path / 'backups').exists()
+    assert s.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
 
 
 def test_resolution_and_override_commit_atomically(store):

@@ -272,6 +272,7 @@ def test_account_data_requires_selection_preview_and_confirmation_before_writes(
     assert 'id="onboarding-feed"' in dashboard.text
     assert 'class="dash-nav"' not in dashboard.text
     from tests.onboarding_support import publish_personal_mix
+    web.post('/home/onboard/format', data={'format': 'mixes'})
     publish_personal_mix(store, now=1000)
     dashboard = web.get("/")
     assert "Spotify import complete" in dashboard.text

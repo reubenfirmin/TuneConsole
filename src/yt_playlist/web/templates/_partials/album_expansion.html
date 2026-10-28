@@ -1,0 +1,9 @@
+{% if album %}
+{% include '_partials/album_tracks.html' %}
+<div class="album-inline-tools">
+  {% include '_partials/album_controls.html' %}
+</div>
+{% else %}
+<p class="section-note">The tracklist couldn’t be loaded.</p>
+<button class="btn-ghost" hx-get="/album/inline?browse={{ browse_id|urlencode }}&amp;opportunity={{ opportunity_id or '' }}" hx-target="closest .album-inline" hx-swap="innerHTML">Try again</button>
+{% endif %}

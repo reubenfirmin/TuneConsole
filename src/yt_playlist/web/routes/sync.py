@@ -59,6 +59,14 @@ def build(ctx) -> APIRouter:
         activity_for(ctx).start_thread(run)
         return JSONResponse({"job_id": job.id})
 
+    @router.get("/sync/status/{job_id}")
+    def sync_status(job_id: int):
+        """Retained terminal observation when a progress stream cannot reconnect."""
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Sync job is missing or expired.")
+        return {"done": job.done, "error": job.error, "outcome": job.outcome}
+
     @router.get("/sync/events/{job_id}")
     async def sync_events(request: Request, job_id: int):
         job = jobs.get(job_id)

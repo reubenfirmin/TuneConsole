@@ -126,7 +126,8 @@ class RecEvidenceRepo(Repo):
 
         Admit only unchanged, previously seen playlists. Their memberships can
         prove existence for legacy tracks without created_at. Mutable genre/year
-        enrichment is excluded; listening-session evidence is strictly before cutoff.
+        enrichment and undated album/artist relationships are excluded;
+        listening-session evidence is strictly before cutoff.
         """
         eligibility = self._store.rec_eligibility
         excl = eligibility.excluded_playlist_ids() | eligibility.catchall_playlist_ids()
@@ -140,11 +141,14 @@ class RecEvidenceRepo(Repo):
             proven_by_playlist = {r["k"] for r in self.conn.execute(
                 f"SELECT DISTINCT t.identity_key k FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
                 f"WHERE pt.playlist_id IN ({qs})", list(safe_playlists))}
-        good = {r["k"] for r in self.conn.execute(
-            "SELECT DISTINCT identity_key k FROM tracks WHERE created_at IS NOT NULL AND created_at<=? "
-            "AND (video_type IS NULL OR video_type <> 'MUSIC_VIDEO_TYPE_UGC') "
-            f"AND {eligibility.track_length_clause()}", (cutoff,))}
-        good |= proven_by_playlist
+        eligible = {r["k"] for r in self.conn.execute(
+            "SELECT DISTINCT identity_key k FROM tracks "
+            "WHERE (video_type IS NULL OR video_type <> 'MUSIC_VIDEO_TYPE_UGC') "
+            f"AND {eligibility.track_length_clause()}")}
+        dated = {r["k"] for r in self.conn.execute(
+            "SELECT DISTINCT identity_key k FROM tracks WHERE created_at IS NOT NULL AND created_at<=?",
+            (cutoff,))}
+        good = (dated | proven_by_playlist) & eligible
         good -= eligibility.generated_only_keys()
         out = []
         pbuckets = {}
@@ -157,13 +161,8 @@ class RecEvidenceRepo(Repo):
                 if r["k"] in good:
                     pbuckets.setdefault(r["g"], set()).add(r["k"])
         out += [list(s) for s in pbuckets.values() if len(s) > 1]
-        for sql, cap in (("SELECT at.album_id g,t.identity_key k FROM tracks t JOIN album_tracks at ON at.entry_id=t.id", max_album),
-                         ("SELECT ta.artist_id g,t.identity_key k FROM tracks t JOIN track_artists ta ON ta.entry_id=t.id", _ARTIST_BASKET_CAP)):
-            buckets = {}
-            for r in self.conn.execute(sql):
-                if r["k"] in good:
-                    buckets.setdefault(r["g"], set()).add(r["k"])
-            out += [list(s) for s in buckets.values() if 1 < len(s) <= cap]
+        # These relationships have no observation timestamp. Current enrichment
+        # cannot establish that the same co-membership existed before cutoff.
         sbuckets = {}
         for r in self.conn.execute(
                 "SELECT DISTINCT identity_id||':'||day g,identity_key k FROM listening_activity WHERE at<?", (cutoff,)):
@@ -174,5 +173,6 @@ class RecEvidenceRepo(Repo):
             "SELECT COUNT(*) n FROM playlists WHERE first_seen IS NOT NULL AND first_seen<=?", (cutoff,)).fetchone()["n"]
         coverage = {"eligible_tracks": len(good), "safe_playlists": len(safe_playlists),
                     "known_playlists": int(total_playlists), "session_baskets": len(sbuckets),
-                    "mutable_content_baskets_excluded": True}
+                    "mutable_content_baskets_excluded": True,
+                    "undated_relationship_baskets_excluded": ["album", "artist"]}
         return out, coverage

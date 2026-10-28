@@ -29,6 +29,13 @@ geometry, history/queue measurements, motion listeners and saved drawings. The s
 adapter supplies the documented `RadioArtworkView` (drawing identity, visibility, motion,
 preview slot and direction count). Artwork does not read session payloads or issue requests.
 The adapter composes artwork property descriptors to preserve reactive geometry getters.
+Song selection immediately animates the requested cover and names it in the stream
+header, with preceding songs grayed out as a skip preview. This feedback follows the
+latest click until matching unpaused playback, failure or a session change; accepting
+the selection request alone does not establish playback.
+The preview retains removed rows while playback is pending. A stale selection is
+refreshed and retried only while the same song remains in that stream and session;
+uncertain deliveries are never retried. Genuine failures appear inside the stream.
 `library-controls.css` owns playlist selection, editable titles, mastheads and track
 table geometry with their responsive rules. It precedes the library page styles.
 Library mastheads, selection and view controls use `library.css`. `library-tables.css` owns

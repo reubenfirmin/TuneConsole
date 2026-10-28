@@ -14,6 +14,7 @@ from yt_playlist.library.playlist_metadata import versioned_title
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.web.radio_persistence import PREPARATION_TIMEOUT, restore
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending, readback_durations
+from yt_playlist.web.radio_mutations import RadioMutations
 from yt_playlist.web.radio_projection import saved_view
 from yt_playlist.web.radio_state import Phase, Session
 
@@ -32,6 +33,21 @@ class RadioLaunch:
     def __init__(self, store, playlists, persistence, policy, lock, now_fn):
         self.store, self.playlists, self.persistence, self.policy = store, playlists, persistence, policy
         self.lock, self.now_fn = lock, now_fn
+
+    def retain_provenance(self):
+        """Keep source identity once writes resume, without replaying activity or a checkpoint."""
+        with self.store._lock:
+            if getattr(self.store, 'activity_paused', False):
+                return
+            pending = self.store.transient_radio_playlists.copy()
+            if not pending:
+                return
+            for playlist in pending:
+                self.store.playlists.mark_generated_playlist(playlist)
+            settings = self.store.settings
+            known = json.loads(settings.get_setting('radio_session_playlist_ids') or '[]')
+            settings.set_setting('radio_session_playlist_ids', json.dumps(sorted(set(known) | pending)))
+            self.store.transient_radio_playlists.difference_update(pending)
 
     def checkpoint_view(self, playing):
         """A saved checkpoint alone cannot establish current native playback."""
@@ -83,7 +99,12 @@ class RadioLaunch:
                     versioned_title(self.store, f"Radio Session · {day.isoformat()}"))
         s.started_at, s.selected = self.now_fn(), list(seeds or [seed])
         s.choices[seed["video_id"]] = {"id": uuid4().hex,
+            "option_id": seed["video_id"],
             "menu_id": f"playlist:{playlist_id}" if playlist_id is not None else menu_id or "direct"}
+        if seed_video_id and menu_id:
+            from yt_playlist.rec import choice_evidence
+            choice_evidence.safe_respond(self.store, menu_id, "choice", self.now_fn(),
+                                        option_id=seed["video_id"], details={"episode_id": s.episode_id})
         return s
 
     def create(self, s, *, from_playlist=False):
@@ -101,12 +122,23 @@ class RadioLaunch:
             s.selected.append(pick)
         if s.stop.is_set():
             return False
+        alternates = self.store.tracks.playback_alternates(s.identity, [t['video_id'] for t in seeds])
+        seeds = [{**track, **alternates.get(track['video_id'], {})} for track in seeds]
         result = playlist_generated.create_generated_playlist(
             self.store, s.title, seeds, s.client, self.now_fn(), s.identity)
         with self.lock:
             s.playlist, s.local_id = result["new_ytm"], result["pid"]
-        seeds = [{**track, "key": track["identity_key"]}
-                 for track in self.store.charts.playlist_tracks_detail(s.local_id)]
+            s.initial_handles = result.get("added_handles", {})
+        if s.local_id is None:
+            with self.store._lock:
+                self.store.transient_radio_playlists.add(s.playlist)
+                # Creation can finish just after the repair's resume callback.
+                self.retain_provenance()
+        logger.info("Radio initial write: playlist=%s requested=%s acknowledged=%s",
+                    s.playlist, [t['video_id'] for t in seeds], s.initial_handles)
+        seeds = ([{**track, "key": track["identity_key"]}
+                  for track in self.store.charts.playlist_tracks_detail(s.local_id)]
+                 if s.local_id is not None else result['tracks'])
         if not seeds:
             raise ValueError("No playable songs could be added to radio. Choose another playlist or song.")
         s.candidates.retain(seeds)
@@ -115,7 +147,8 @@ class RadioLaunch:
         s.choices[seeds[0]["video_id"]] = choice
         settings = self.store.settings
         known = json.loads(settings.get_setting("radio_session_playlist_ids") or "[]")
-        settings.set_setting("radio_session_playlist_ids", json.dumps(list(dict.fromkeys(known + [s.playlist]))))
+        if not getattr(self.store, 'activity_paused', False) and s.local_id is not None:
+            settings.set_setting("radio_session_playlist_ids", json.dumps(list(dict.fromkeys(known + [s.playlist]))))
         with self.lock:
             s.initial_tracks = seeds
             s.preparation_deadline = time.monotonic() + PREPARATION_TIMEOUT
@@ -133,15 +166,27 @@ class RadioLaunch:
         except Exception:
             s.preparation_snapshot = None
             raise
-        if received == expected:
+        if received == expected and all(row.get('isAvailable') is not False for row in remote):
             return PreparedStart(readback_durations(seeds, remote))
         report = ("preparing", tuple(received))
         if report != s.observer_report:
             logger.info("Radio playlist preparation pending: playlist=%s expected=%s received=%s",
                         s.playlist, expected, received)
             s.observer_report = report
-        accepted = set(received)
-        if [video for video in expected if video in accepted] != received:
+        # Music's playback ID can differ from the saved upload ID. The write's
+        # occurrence handle proves the correspondence even when credits differ.
+        matched, position = [], -1
+        for row in remote:
+            candidates = [(i, track) for i, track in enumerate(seeds) if
+                track['video_id'] in (row['videoId'], row.get('playlistVideoId')) or
+                (row.get('setVideoId') and s.initial_handles.get(track['video_id']) == row['setVideoId'])]
+            if len(candidates) != 1 or candidates[0][0] <= position:
+                s.preparation_snapshot = None
+                raise PlaylistPending()
+            position, track = candidates[0]
+            matched.append(track)
+        accepted = {track['video_id'] for track in matched}
+        if len(accepted) != len(received):
             s.preparation_snapshot = None
             raise PlaylistPending()
         if s.preparation_snapshot != tuple(received):
@@ -150,7 +195,27 @@ class RadioLaunch:
             raise PlaylistPending()
         if not received:
             raise PlaylistChanged("YouTube Music did not save any playable songs. Choose another song.")
-        return PreparedStart(readback_durations([t for t in seeds if t["video_id"] in accepted], remote),
+        confirmed = []
+        substitutions = RadioMutations(self.playlists, self.persistence, self.store.tracks, self.now_fn,
+                                       paused=lambda: getattr(self.store, 'activity_paused', False))
+        for track, row in zip(matched, remote):
+            if row.get('isAvailable') is False:
+                accepted.discard(track['video_id'])
+            elif track['video_id'] != row['videoId']:
+                substitution = substitutions.substitute(track, row, s.candidates.by_video,
+                                                       identity_id=s.identity, playlist=s.playlist)
+                actual = substitution.accepted
+                s.candidates.retain([actual])
+                choice = s.choices.pop(track['video_id'], None)
+                if choice:
+                    s.choices[actual['video_id']] = choice
+                s.rejected.add(track['video_id'])
+                confirmed.append(actual)
+            else:
+                confirmed.append(track)
+        if not confirmed:
+            raise PlaylistChanged("YouTube Music did not save any playable songs. Choose another song.")
+        return PreparedStart(readback_durations(confirmed, remote),
                              tuple(t for t in seeds if t["video_id"] not in accepted))
 
     def resume(self, playing, clients, candidates_factory):
@@ -162,13 +227,17 @@ class RadioLaunch:
                 or state["playlist"] != playing.get("playlist_ytm_id")
                 or not (state.get("tracks") or state.get("initial_tracks"))):
             return None, False
-        candidates = candidates_factory(self.store, self.now_fn(), state.get("tuning"))
-        return restore(state, clients[identity], identity, candidates), state.get("fingerprint") != candidates.fingerprint
+        candidates = candidates_factory(self.store, self.now_fn(), state.get("tuning"),
+                                        comparison=state.get('comparison'))
+        # A paired session owns its already visible plans across daily cache
+        # publication and restart. Replenish naturally as those plans advance.
+        changed = state.get("fingerprint") != candidates.fingerprint and not state.get('comparison')
+        return restore(state, clients[identity], identity, candidates), changed
 
     def accept(self, s, prepared: PreparedStart):
         """Publish the confirmed initial queue before the coordinator navigates."""
         seeds = list(prepared.tracks)
-        if prepared.omitted:
+        if prepared.omitted or seeds[0]['video_id'] != s.initial_tracks[0]['video_id']:
             choice = s.choices.pop(s.initial_tracks[0]['video_id'], None)
             if choice:
                 s.choices[seeds[0]['video_id']] = choice
@@ -176,10 +245,12 @@ class RadioLaunch:
             for track in prepared.omitted:
                 s.rejected = set(self.policy.reject(s.candidate_view(), track))
                 s.directions.blocked.add(track['video_id'])
+        s.directions.blocked.update(s.rejected)
         if seeds != s.tracks:
             self.playlists.publish(s.local_id, s.title, s.tracks, seeds, self.now_fn())
             s.accept_tracks(seeds, self.now_fn())
         s.initial_tracks = []
+        s.initial_handles = {}
         s.preparation_deadline = 0
         s.preparation_snapshot = None
         if not s.stopped_by_user:
@@ -196,7 +267,7 @@ class RadioLaunch:
         local = next((p for p in self.store.playlists.get_playlists() if p.ytm_playlist_id == playlist), None)
         if local is None or local.identity_id not in clients:
             return None
-        candidates = candidates_factory(self.store, self.now_fn())
+        candidates = candidates_factory(self.store, self.now_fn(), comparison=None)
         candidates.retain([{**t, "key": t["identity_key"]}
                            for t in self.store.charts.playlist_tracks_detail(local.id)])
         ids = [t["videoId"] for t in self.playlists.read(clients[local.identity_id], playlist)]

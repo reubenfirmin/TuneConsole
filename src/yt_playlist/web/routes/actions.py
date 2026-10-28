@@ -3,8 +3,11 @@ import json
 from datetime import datetime
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse, RedirectResponse
+
+from yt_playlist.core.accounts import client_for
+from yt_playlist.core.playlist_snapshot import playlist_read_report
 
 from yt_playlist.util.action_kinds import (
     ADD_TRACKS, APPLY_MERGE, COPY_INTO, COPY_PLAYLIST, DELETE_EMPTY, DELETE_PLAYLIST, GC_GENERATED,
@@ -125,6 +128,23 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(request, "actions.html", {
             "rows": rows, "flash": request.query_params.get("flash"),
             "flasherr": request.query_params.get("flasherr")})
+
+    @router.get("/actions/{action_id}/deletions/{entry_index}/snapshot-report")
+    def deletion_snapshot_report(action_id: int, entry_index: int):
+        """Inspect saved intent even when sync has removed its local playlist row."""
+        action = store.actions.get_action(action_id)
+        entries = json.loads(action.undo_json or "{}").get("deletions", []) if action else []
+        if entry_index < 0 or entry_index >= len(entries):
+            raise HTTPException(404, "Saved deletion not found")
+        entry = entries[entry_index]
+        try:
+            identity_id, client = client_for(store, ctx.client_provider(), identity_id=entry["identity"])
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return JSONResponse({"identity_id": identity_id, "action_id": action_id,
+                             "entry_index": entry_index,
+                             "reads": playlist_read_report(client, entry["ytm"])},
+                            headers={"Cache-Control": "no-store"})
 
     @router.post("/actions/{action_id}/recheck-deletion")
     def recheck_deletion(action_id: int):

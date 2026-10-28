@@ -1,0 +1,7 @@
+TuneConsole #531 welcome illustration
+Generated 2026-10-28 using the built-in imagegen tool, opaque background.
+Final asset: onboarding-welcome.webp, 1536 by 1024, WebP quality 85.
+Original PNG retained in Codex generated_images.
+
+Final prompt:
+Create a brand-new welcoming hero illustration for TuneConsole, a personal music discovery app. Use a wide landscape 3:2 composition, intended to be displayed at 1536 by 1024. A joyful imaginative garden of sound: oversized sculptural teal, cobalt and warm coral ribbons curl and flow through lush stylized flowers and broad leaves toward a radiant golden sunrise at the upper right. Rich hand-cut paper collage with beautiful subtle paper grain, layered shapes, crisp crafted edges, playful confident editorial illustration, generous simple forms. The upper right and central area hold the expressive garden; leave the lower left third visually calm in deep midnight blue for a separate HTML welcome heading and button. Vibrant and inviting, with a clear bright focal point that still reads when cropped to a narrow mobile viewport. This is an introduction to music, visually distinct from hardware-based listening-mode choices. No record players, no vinyl records, no album sleeves, no cassette tapes, no radios, no speakers, no UI, no letters, no words, no logos, no watermarks. Opaque background.

@@ -1,22 +1,21 @@
 """Backend update check: is a newer release than the running version available?
 
-The running version is baked in by hatch-vcs. The latest release comes from the GitHub
-releases API (see check_latest, Task 3). This module holds the pure logic: reading and
-sanitizing the running version, detecting how the backend was installed (to give the right
-update command), comparing versions, and building the nag payload the Home page renders.
+The running version is baked in by hatch-vcs. Release metadata comes through the GitHub
+IAO. This owner schedules checks, reads and sanitizes the running version, detects how the
+backend was installed, compares versions and builds the update payload the Home page renders.
 """
 import importlib.metadata
 import json
 import os
 import sys
-import urllib.request
+
+from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.integrations.github import GitHubReleasesIAO
 
 PACKAGE = "yt-playlist"
 
-_RELEASES_URL = "https://api.github.com/repos/reubenfirmin/TuneConsole/releases/latest"
-_HTTP_TIMEOUT_S = 8
 _CHECK_INTERVAL_S = 4 * 3600       # every four hours
-_USER_AGENT = "yt-playlist-updatecheck"
+_github = GitHubReleasesIAO()
 
 # (button label, optional link) per install kind. Flatpak and macOS have in-app controls;
 # otherwise-unrecognized release installs go to the release page. TuneConsole does not offer or
@@ -67,22 +66,39 @@ def is_dev_install() -> bool:
 
 
 def _fetch_latest_release():
-    """Single network seam (tests monkeypatch this). GET the releases API and return the latest
-    tag as base X.Y.Z, or None. Raises on network/HTTP errors; check_latest swallows them."""
-    req = urllib.request.Request(
-        _RELEASES_URL,
-        headers={"User-Agent": _USER_AGENT, "Accept": "application/vnd.github+json"},
-    )
-    with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
-        data = json.load(resp)
+    """Project the IAO's public release metadata to the existing version format."""
+    data = _github.latest_release()
+    if data is None:
+        return None
     tag = (data.get("tag_name") or "").lstrip("v").strip()
     return tag or None
 
 
+def schedule_first_check(store, now):
+    """Give a fresh install a full interval before its first automatic release request.
+
+    Persist the deadline so restarting during onboarding does not reset the delay.
+    Existing installations with a checked or cached release keep their schedule.
+    """
+    if (store.settings.get_setting("latest_version_checked_at") is None
+            and store.settings.get_setting("latest_version_seen") is None
+            and store.settings.get_setting("latest_version_check_after") is None):
+        store.settings.set_setting("latest_version_check_after", str(now + _CHECK_INTERVAL_S))
+
+
 def check_latest(store, now, *, interval_s=_CHECK_INTERVAL_S):
     """At most once per interval_s, refresh the cached latest release. Always stamps the check time
-    (so a persistent failure retries at most once per interval, never hammering GitHub). Fail-silent."""
+    (so a persistent failure retries at most once per interval). Access errors are silent;
+    explicit work cancellation propagates without stamping a completed check."""
     last = store.settings.get_setting("latest_version_checked_at")
+    if last is None:
+        first_due = store.settings.get_setting("latest_version_check_after")
+        if first_due is not None:
+            try:
+                if now < float(first_due):
+                    return
+            except (TypeError, ValueError):
+                pass
     if last is not None:
         try:
             if now - float(last) < interval_s:
@@ -90,7 +106,10 @@ def check_latest(store, now, *, interval_s=_CHECK_INTERVAL_S):
         except (TypeError, ValueError):
             pass
     try:
-        latest = _fetch_latest_release()
+        with _github.context(getattr(store, 'enrichment_state', None)):
+            latest = _fetch_latest_release()
+    except (WorkClosing, WorkBudgetExceeded):
+        raise
     except Exception:                       # noqa: BLE001 - offline/HTTP/parse must not surface
         latest = None
     store.settings.set_setting("latest_version_checked_at", str(now))

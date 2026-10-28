@@ -1,6 +1,18 @@
 {% import "_partials/taste_viz.html" as tv with context %}
 {% if panel == 'overview' %}
 {{ tv.overview() }}
+{% elif panel == 'groups' %}
+<section class="taste-settings-section" aria-labelledby="taste-grouping-preview-title" x-data="{ query: '' }">
+  <h2 id="taste-grouping-preview-title">Music groups</h2>
+  <p class="section-note">Your library forms broad areas and smaller interests as musical details arrive. Weak connections can separate and stronger ones can bring groups together again. Small interests stay visible even when they cannot fill a mix.</p>
+  <p class="section-note">{% if group_policy == 'adaptive' %}Home’s Mix tapes now draw from these groups. Your mix choices shape which areas return, and recent listening and sound preferences shape the tracks.{% else %}Home uses the existing mixes while these groups are prepared.{% endif %}</p>
+  <label class="taste-group-search" for="music-group-search">Find a group or artist
+    <input id="music-group-search" type="search" x-model="query" placeholder="Search music groups…">
+  </label>
+  <div id="taste-grouping-preview-body" hx-get="/taste/grouping-preview" hx-trigger="intersect once, every 10s [document.visibilityState === 'visible' && document.getElementById('taste-grouping-preview-body').offsetParent !== null]">
+    {% include "_partials/taste_grouping_preview.html" %}
+  </div>
+</section>
 {% elif panel == 'experiment' %}
 {% include "_partials/taste_experiment.html" %}
 {% elif panel == 'profile' %}
@@ -64,6 +76,20 @@
 {% elif panel == 'feedback' %}
 {% from "_macros.html" import sort_indicator %}
 <h2 class="section">Your saved feedback</h2>
+{% if album_feedback %}
+<section class="card" aria-label="Album feedback">
+  <h3>Album feedback</h3>
+  <p class="section-note">More like this adjusts a saved record's shared interest weight. Not for me excludes that release. Already know it records familiarity. Clearing removes this album adjustment.</p>
+  {% for browse, item in album_feedback.items() %}
+  <form hx-post="/album/feedback" hx-swap="none" @htmx:after-request="if ($event.detail.successful) $el.remove()">
+    <a href="/album?browse={{ browse|urlencode }}">{{ browse }}</a>
+    <span>{{ {'more':'More like this', 'known':'Already know it', 'reject':'Not for me'}.get(item.kind, item.kind) }}</span>
+    <input type="hidden" name="browse_id" value="{{ browse }}"><input type="hidden" name="kind" value="clear">
+    <button class="btn-ghost">Clear album feedback</button>
+  </form>
+  {% endfor %}
+</section>
+{% endif %}
 <div class="card taste-feedback-summary-card">
   <p class="section-note">Likes and dislikes come from YouTube Music. Choices on suggestions tell TuneConsole what you want more of, less of, or later. These counts show the feedback currently saved.</p>
   {% if feedback %}
@@ -115,8 +141,7 @@
                target="_blank" rel="noopener" aria-label="Play {{ b.title }} on YouTube Music">▶</a>{% endif %}
           </span>
         </td>
-        <td>{% if b.video_id %}<a class="ptitle" href="https://music.youtube.com/watch?v={{ b.video_id|urlencode }}"
-               target="_blank" rel="noopener" data-yt-info>{{ b.title }}</a>{% else %}{{ b.title }}{% endif %}</td>
+        <td>{% if b.video_id %}<a class="ptitle" href="{{ track_url(b) }}">{{ b.title }}</a>{% else %}{{ b.title }}{% endif %}</td>
         <td><a class="alink" href="/artist?name={{ b.artist|urlencode }}">{{ b.artist }}</a></td>
         <td class="muted">{{ b.album or '—' }}</td>
         <td class="text-dim">{% if b.until_iso %}<time datetime="{{ b.until_iso }}" title="{{ b.until_iso }}">{{ b.until_label }}</time>{% else %}{{ b.until_label }}{% endif %}</td>

@@ -123,7 +123,8 @@ def invalidate_derived(conn):
     catalog_changed(conn)
 
 
-def rekey_state(conn, old_key, new_key, recording_id, *, previous_recording_id=None):
+def rekey_state(conn, old_key, new_key, recording_id, *, previous_recording_id=None,
+                reconcile_calendar=True):
     """Move only established associations; raw observations and unknown aliases stay intact."""
     subject = previous_recording_id or recording_id
     conn.execute('UPDATE album_tracks SET recording_id=? WHERE entry_id IS NULL AND recording_id=?', (recording_id,subject))
@@ -131,9 +132,9 @@ def rekey_state(conn, old_key, new_key, recording_id, *, previous_recording_id=N
         conn.execute(f'UPDATE {table} SET identity_key=?,recording_id=? WHERE recording_id=?', (new_key,recording_id,subject))
     conn.execute('UPDATE listening_observations SET identity_key=?,recording_id=? WHERE recording_id=?',
                  (new_key,recording_id,subject))
-    from .listening_calendar import reconcile_foreign_days
-    for row in conn.execute('SELECT identity_id FROM listening_calendars'):
-        reconcile_foreign_days(conn,row[0])
+    if reconcile_calendar:
+        from .listening_calendar import reconcile_recordings
+        reconcile_recordings(conn, {subject, recording_id})
     for row in conn.execute('SELECT rowid,* FROM rec_feedback WHERE recording_id=?', (subject,)).fetchall():
         payload = json.dumps(dict(row))
         conn.execute("INSERT OR IGNORE INTO identity_state_archive VALUES ('feedback_reassociation',?,?,?)", (f'{subject}:{row["rowid"]}:{old_key}',payload,'verified association or alias disambiguation; learning is not replayed'))
@@ -162,8 +163,12 @@ def rekey_state(conn, old_key, new_key, recording_id, *, previous_recording_id=N
                 pass
 
 
-def associate_item(conn, video_id, recording_id, *, source, evidence, now):
-    """Apply an explicit verified association; ingestion/provider guesses never call this."""
+def associate_item(conn, video_id, recording_id, *, source, evidence, now, same_recording=False):
+    """Correct an association, optionally verifying equivalence of both recordings.
+
+    Correcting a misidentified upload does not establish that facts about its old
+    recording describe the target. Only explicit equivalence permits fact reuse.
+    """
     if not source or not isinstance(evidence,dict) or not evidence:
         raise ValueError('A verified association requires its source and supporting evidence')
     recording_id = resolve_recording(conn,recording_id)
@@ -186,25 +191,22 @@ def associate_item(conn, video_id, recording_id, *, source, evidence, now):
     finish_reassociation(conn,video_id,previous,recording_id,member,remaining,now,association_id=association_id)
     # Release occurrences retain their exact entry; its current recording resolves at read time.
     conn.execute('UPDATE legacy_track_refs SET recording_id=? WHERE video_id=?', (recording_id,video_id))
-    # Verified musical identity permits reuse of recording facts, never item/release fields.
-    for field in RECORDING_FIELDS:
-        conn.execute(f'UPDATE recordings SET {field}=(SELECT {field} FROM recordings WHERE id=?) '
-                     f"WHERE id=? AND ({field} IS NULL OR {field}='')", (previous,recording_id))
+    if same_recording:
+        metadata.reuse_recording_selections(conn, previous, recording_id)
     # Exact-video observations can follow the corrected association without changing raw evidence.
     conn.execute('UPDATE play_events SET recording_id=?,identity_key=? WHERE video_id=?', (recording_id,target[0],video_id))
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='listening_observations'").fetchone():
-        from .listening_calendar import reconcile_foreign_days
-        for row in conn.execute('SELECT DISTINCT identity_id FROM play_events WHERE video_id=?',(video_id,)).fetchall():
-            reconcile_foreign_days(conn,row[0])
     conn.execute('UPDATE recordings SET provisional=0 WHERE id=?', (recording_id,))
     retired = not conn.execute('SELECT 1 FROM catalog_entries WHERE recording_id=?', (previous,)).fetchone()
     if retired:
-        rekey_state(conn,previous_key,target[0],recording_id,previous_recording_id=previous)
+        rekey_state(conn,previous_key,target[0],recording_id,previous_recording_id=previous,
+                    reconcile_calendar=False)
         conn.execute('INSERT OR REPLACE INTO recording_redirects VALUES (?,?,?,?)', (previous,recording_id,source,payload))
         conn.execute('UPDATE recording_redirects SET recording_id=? WHERE recording_id=?', (recording_id,previous))
         for row in conn.execute('SELECT alias,source FROM recording_aliases WHERE recording_id=?', (previous,)).fetchall():
             conn.execute('INSERT OR IGNORE INTO recording_aliases VALUES (?,?,?)', (row['alias'],recording_id,row['source']))
         conn.execute('DELETE FROM recording_aliases WHERE recording_id=?', (previous,))
+    from .listening_calendar import reconcile_recordings
+    reconcile_recordings(conn, {previous, recording_id})
     combined = rating_feedback.aggregate(conn, rating_keys)
     # An exact upload's contribution follows its corrected recording, including partial
     # reassociation. Do not leave feedback on the old recording or replay its learning.

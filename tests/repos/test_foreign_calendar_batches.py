@@ -145,3 +145,79 @@ def test_observation_scope_plan_uses_account_recording_source_date_index(store):
     assert any('SEARCH o USING INDEX ix_listening_observation_source_scope' in detail
                and 'identity_key=?' in detail and 'source_day=?' in detail and 'timezone=?' in detail
                for detail in plan)
+
+
+@pytest.mark.parametrize('unrelated', [10, 60])
+def test_alias_collisions_do_not_reproject_unrelated_foreign_history(store, monkeypatch, unrelated):
+    iid = account(store)
+    at = stamp('2026-10-20T12:00:00')
+    with store.conn:
+        for i in range(unrelated):
+            listening.observe_day(store.conn, iid, f'unrelated-{i}', '2026-10-20',
+                                  'ytm_history', 'America/New_York', at)
+    first = store.tracks.upsert_track('first', 'Wise One', 'Artist', '', 180)
+    key = store.tracks.catalog_subject(first)['identity_key']
+    store.history.record_play_event(iid, key, 'first', at)
+    with store.conn:
+        for source in ['ytm_history', 'independent']:
+            listening.observe_day(store.conn, iid, key, '2026-10-20', source,
+                                  'America/New_York', at)
+    visited, original = [], listening_calendar._foreign_rows
+
+    def rows(*args):
+        for row in original(*args):
+            visited.append(row['identity_key'])
+            yield row
+
+    monkeypatch.setattr(listening_calendar, '_foreign_rows', rows)
+    store.tracks.upsert_track('second', 'Wise One', 'Artist', '', 180)
+    new = store.tracks.catalog_subject(first)['identity_key']
+    assert visited == [new, new]
+    assert new != key and store.history.listening_day_counts(iid) == {new: 1}
+    assert store.conn.execute("SELECT COUNT(*) FROM listening_observations WHERE day IS NULL").fetchone()[0] == unrelated
+
+
+@pytest.mark.parametrize('partial', [False, True])
+def test_recording_association_scopes_accounts_sources_dst_and_ambiguity(store, monkeypatch, partial):
+    iids = [store.identities.upsert_identity(name, name, None, True) for name in ('a', 'b')]
+    for iid in iids:
+        with store.conn:
+            listening.calendar(store.conn, iid, 'UTC')
+    old = store.tracks.upsert_track('old', 'Old', 'Artist', '', 180)
+    target = store.tracks.upsert_track('target', 'Target', 'Artist', '', 180)
+    recording = store.tracks.catalog_subject(target)['recording_id']
+    if partial:
+        store.tracks.upsert_track('sibling', 'Sibling', 'Artist', '', 180)
+        store.tracks.associate_youtube_item('sibling', store.tracks.catalog_subject(old)['recording_id'],
+            source='review', evidence={'same': True}, now=1, same_recording=True)
+    keys = {video: store.tracks.identity_key_for_video(video) for video in ('old', 'target')}
+    # The DST source date spans two UTC dates; merging exact evidence makes it ambiguous.
+    times = [stamp('2026-11-01T01:30:00', 'America/New_York'),
+             stamp('2026-11-01T23:30:00', 'America/New_York')]
+    for iid in iids:
+        for video, at in zip(('old', 'target'), times):
+            store.history.record_play_event(iid, keys[video], video, at)
+            with store.conn:
+                for source in ('ytm_history', 'independent'):
+                    listening.observe_day(store.conn, iid, keys[video], '2026-11-01', source,
+                                          'America/New_York', at)
+                listening.observe_day(store.conn, iid, 'unrelated', '2026-11-01',
+                                      'ytm_history', 'America/New_York', at)
+    raw = list(map(tuple, store.conn.execute('SELECT id,raw_identity_key,source_day,source,timezone '
+                                             'FROM listening_observations ORDER BY id')))
+    visited, original = [], listening_calendar._foreign_rows
+
+    def rows(*args):
+        for row in original(*args):
+            visited.append(row['identity_key'])
+            yield row
+
+    monkeypatch.setattr(listening_calendar, '_foreign_rows', rows)
+    store.tracks.associate_youtube_item('old', recording, source='review', evidence={'same': True},
+                                      now=max(times) + 1, same_recording=not partial)
+    assert 'unrelated' not in visited and len(visited) == 8
+    assert list(map(tuple, store.conn.execute('SELECT id,raw_identity_key,source_day,source,timezone '
+                                             'FROM listening_observations ORDER BY id'))) == raw
+    for iid in iids:
+        assert store.history.listening_day_counts(iid) == {keys['target']: 2}
+    assert all(row[0] is None for row in store.conn.execute('SELECT day FROM listening_observations'))

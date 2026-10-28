@@ -36,7 +36,8 @@ const ctx = vm.createContext({WebSocket: Socket, URL, TextEncoder, Date,
       if (['missing_receiver', 'injection'].includes(scenario) && sends === 1)
         throw Error('missing receiver');
       if (scenario === 'lost_reply') fail();
-      return {status: 200, body: '{}', timeZone: 'America/Costa_Rica'};
+      return {status: 200, body: '{}', timeZone: 'America/Costa_Rica',
+        headers: {'retry-after': '120', 'set-cookie': secret, authorization: secret}};
     }},
   },
   isMissingReceiver: e => e.message === 'missing receiver',
@@ -83,6 +84,7 @@ const request = {id: 42, method: 'POST', url: 'https://music.youtube.com/youtube
   if (['success', 'replacement', 'missing_receiver'].includes(scenario)) {
     assert.equal(reply.status, 200);
     assert.equal(reply.timeZone, 'America/Costa_Rica');
+    assert.deepEqual(reply.headers, {'retry-after': '120'});
   } else {
     assert.equal(reply.status, 0);
     assert.equal(body.outcome, ['lost_reply', 'dispatch'].includes(scenario) ? 'uncertain' : 'not-dispatched');

@@ -33,6 +33,35 @@ def candidates(store, **tuning):
     return result
 
 
+def test_prepared_pool_reuses_the_accounts_verified_playable_upload(store, seed):
+    owner = store.identities.upsert_identity('Main', 'credential', None, True)
+    actual = {**seed, 'video_id': 'playable', 'duration': 200}
+    store.tracks.upsert_track('playable', seed['title'], seed['artist'], '', 200)
+    store.tracks.remember_playback_alternate(owner, {**seed, 'duration': 200}, actual,
+        evidence={'playlist': 'PL', 'set_video_id': 'owned'}, now=1)
+    c = candidates(store)
+    assert [t['video_id'] for t in c._load('1')] == ['playable']
+    assert c.seed_offer(1)[0]['video_id'] == 'playable'
+
+
+def test_album_links_survive_prepared_and_catalog_hydration_and_metadata_refresh(store, seed):
+    with store.conn:
+        store.conn.execute("UPDATE tracks SET album='Seed album',album_browse_id='MPREseed' WHERE video_id='seed'")
+    c = candidates(store)
+    prepared = c._load('1')[0]
+    assert (prepared['album'], prepared['album_browse_id']) == ('Seed album', 'MPREseed')
+    fresh, _ = catalog_track(store, 'catalog-album')
+    with store.conn:
+        store.conn.execute("UPDATE tracks SET album='Catalog album',album_browse_id='MPREcatalog' WHERE video_id='catalog-album'")
+    picked = c.next_track([seed])
+    assert picked['video_id'] == fresh['video_id']
+    assert (picked['album'], picked['album_browse_id']) == ('Catalog album', 'MPREcatalog')
+    with store.conn:
+        store.conn.execute("UPDATE tracks SET album='Enriched album',album_browse_id='MPREenriched' WHERE video_id='catalog-album'")
+    assert c.refresh_metadata([picked])
+    assert (picked['album'], picked['album_browse_id']) == ('Enriched album', 'MPREenriched')
+
+
 def test_themed_fills_all_four_streams_with_unprepared_catalog_tracks(store, seed, monkeypatch):
     for i in range(30):
         catalog_track(store, f"catalog-{i}")

@@ -20,7 +20,7 @@ def test_autotune_done_status_refreshes_model_status(store):
 def test_taste_page_empty_autotune_state(store):
     html = _client(store).get("/taste/panels/health").text
     assert "First comparison hasn’t run yet" in html
-    assert 'value="0" max="14"' in html
+    assert 'value="0" max="44"' in html  # Fourteen training days before the 30-day holdout.
     assert "Compare model setups</button>" not in html
 
 
@@ -85,7 +85,9 @@ def test_autotune_report_distinguishes_failed_scores_and_unscored_baseline(store
     assert html.count("Not scored") == 2
     assert "Test unavailable" in html
     assert "0.0%" in html  # A genuine zero remains a score; an unavailable test does not.
-    assert "percentage points" not in html
+    comparison = html.split('<dl class="autotune-comparison">', 1)[1].split('</dl>', 1)[0]
+    assert '<dt>Change</dt>' not in comparison
+    assert "percentage points" not in comparison
     assert 'datetime="1970-01-01T00:16:40+00:00"' in html
 
 
@@ -111,7 +113,7 @@ def test_taste_preview_explains_scope_sources_and_two_different_samples(store):
     preview = html.split('id="taste-preview"', 1)[1]
     for text in ("Preview &amp; compare", "Home’s familiar-music mix", "Taste matches",
                  "Deep cuts", "Playlist neighbors", "recent-listening influence and memory",
-                 "Source weights in Generated playlists", "Up to 8 songs", "top 24 picks"):
+                 "Source weights in Listening choices", "Up to 8 songs", "top 24 picks"):
         assert text in preview
     for destination in ("#recommendations/main", "#recommendations/genres", "#recommendations/features",
                         "#learning", "#generated"):

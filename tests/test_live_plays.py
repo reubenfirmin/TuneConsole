@@ -47,6 +47,40 @@ def test_unverified_metadata_does_not_write_track_history_or_rating():
     assert live_plays.handle_play_event(_ctx(s), _msg(metadataVerified=True), 1001) is True
 
 
+def test_native_upload_proof_records_known_song_without_importing_unverified_credits_or_rating():
+    s = _store()
+    video = 'FDuJmIOtT7I'
+    title = "Most Precious Love (DF's Future 3000 Extended Mix) (feat. Barbara Tucker)"
+    s.tracks.upsert_track(video, title, 'Blaze', 'Most Precious Love', 480)
+    before = s.tracks.track_detail(video)
+    msg = _msg(videoId=video, title='An uploader title', artist='Uploader channel',
+               metadataVerified=False, videoVerified=True, likeStatus='DISLIKE')
+    assert live_plays.handle_play_event(_ctx(s), msg, 1000)
+    assert s.tracks.track_detail(video) == before
+    evidence, more = s.tracks.track_play_ledger(before['recording_id'])
+    assert not more and len(evidence) == 1 and evidence[0]['kind'] == 'play'
+    assert s.history.play_events_since(0)[0]['identity_key'] == before['identity_key']
+    assert not s.rec_model.disliked_identity_keys()
+    assert s.tracks.item_rating(1, video) is None
+    # Hydrated credits can follow without manufacturing a second play.
+    assert not live_plays.handle_play_event(_ctx(s), _msg(videoId=video, title=title, artist='Blaze',
+                                                        metadataVerified=True), 1001)
+    assert len(s.history.play_events_since(0)) == 1
+
+
+@pytest.mark.parametrize('overrides', [
+    {'videoVerified': False}, {'videoId': 'unknown'}, {'brandKnown': False},
+    {'brandId': 'unknown'}, {'muted': True}, {'tabMuted': True}, {'paused': True}, {'volume': 0},
+])
+def test_unverified_native_play_requires_known_upload_account_and_audible_playback(overrides):
+    s = _store()
+    s.tracks.upsert_track('v1', 'Canonical title', 'Canonical artist', '', 180)
+    msg = _msg(**{'metadataVerified': False, 'videoVerified': True, **overrides})
+    assert not live_plays.handle_play_event(_ctx(s), msg, 1000)
+    assert not s.history.play_events_since(0)
+    assert s.tracks.identity_key_for_video('unknown') is None
+
+
 @pytest.mark.parametrize("silent", [{"muted": True}, {"tabMuted": True}, {"volume": 0}, {"paused": True}])
 def test_silent_play_does_not_write_but_unmute_records_once(silent):
     s = _store()
@@ -125,3 +159,33 @@ def test_live_play_and_history_backfill_share_browser_date():
     want = datetime.datetime(2026, 10, 20, 12, tzinfo=datetime.timezone.utc).timestamp()
     assert s.conn.execute("SELECT day_ts FROM listening_days").fetchone()[0] == want
     assert s.history.play_events_since(0)[0]["played_at"] == now
+
+
+def test_selected_album_playback_is_context_evidence_not_organic_track_learning():
+    import json
+    from yt_playlist.rec import choice_evidence, layers
+
+    s = _store(with_brand=True)
+    oid = choice_evidence.issue(s, 'albums', [{'id': 'album', 'keys': ['song|artist']}],
+                                990, context={})
+    choice_evidence.respond(s, oid, 'choice', 991, option_id='album', action_id='chosen')
+    s.settings.set_setting('listening_album_pending', json.dumps({'opportunity_id': oid,
+        'browse': 'album', 'playlist': 'OLAK-album', 'videos': ['v1', 'v2'],
+        'at': 991, 'action_id': 'chosen'}))
+    assert live_plays.handle_play_event(_ctx(s), _msg(playlist='OLAK-album'), 1000)
+    assert s.conn.execute('SELECT is_generated FROM play_events').fetchone()[0] == 1
+    assert layers._plays(s, 0) == []
+    assert choice_evidence.compile_report(s, 1001)['formats']['albums']['starts'] == 1
+    # The first verified account owns the pending queue; another account is not attributed.
+    pending = json.loads(s.settings.get_setting('listening_album_pending'))
+    assert pending['identity_id'] == 1
+    assert choice_evidence.album_playback_context(s, _msg(playlist='OLAK-album'), 1001,
+                                                 identity_id=2) is None
+    assert choice_evidence.album_playback_context(s, _msg(playlist='OLAK-album', videoId='outside'),
+                                                 1001, identity_id=1) is None
+    # Album continuation stays quarantined even though it contains multiple tracks.
+    assert live_plays.handle_play_event(_ctx(s), _msg(playlist='OLAK-album', title='Next', videoId='v2'), 1200)
+    assert layers._plays(s, 0) == []
+    # A later independent direct choice has its own organic evidence.
+    assert live_plays.handle_play_event(_ctx(s), _msg(), 5000)
+    assert [row['identity_key'] for row in layers._plays(s, 0)] == ['song|artist']

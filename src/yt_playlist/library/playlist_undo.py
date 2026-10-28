@@ -5,7 +5,6 @@ from pathlib import Path
 from uuid import uuid4
 
 from yt_playlist.library.action_claim import claim_action
-from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.library.sync import refresh_playlist
 from yt_playlist.library.playlist_mutation import mutation_status, restore_playlist_sequence
 from yt_playlist.library.playlist_positions import cancel_insertions
@@ -30,15 +29,13 @@ def _client(clients, identity):
 
 
 def _refresh(store, client, identity, playlist_id, title, now, *, created_at=None):
+    expected_revision = store.playlists.playlist_revision(identity, playlist_id)
     detail = _existing(client, playlist_id)
     if detail is None:
         raise ValueError(f"Recovered playlist {playlist_id} is missing. Review it before retrying Undo.")
     title = detail.get("title") or title or "Restored"
-    if created_at is not None:
-        store.playlists.upsert_playlist(identity, playlist_id, title, len(detail["tracks"]),
-                              content_hash([t["videoId"] for t in detail["tracks"]]), now,
-                              created_at=created_at)
-    refresh_playlist(store, identity, client, playlist_id, title, now, snapshot=detail)
+    refresh_playlist(store, identity, client, playlist_id, title, now, snapshot=detail,
+                     expected_revision=expected_revision, created_at=created_at)
 
 
 def _steps(undo, action_id):

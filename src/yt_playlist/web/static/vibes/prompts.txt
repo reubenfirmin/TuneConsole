@@ -1,0 +1,27 @@
+TuneConsole vibe artwork, generated with the built-in imagegen tool on 2026-10-28.
+Each scene was generated separately with the common prompt followed by its scene.
+The selected square PNGs were downscaled to 480px WebP, quality 85.
+
+Common prompt:
+Create one premium miniature editorial illustration for a music app's mood picker. Tactile handmade cut-paper collage with luminous screenprinted grain, sculptural layered shapes, playful sophisticated music-poster art. Vivid saturated colors, strong silhouette, bold lighting, no text, no lettering, no labels, no borders, no UI. Not an emoji, not a flat outline icon, not a glossy app icon. A compact cohesive landscape vignette fills a square canvas edge to edge. Designed to be beautiful and legible at 150px wide.
+
+natural.webp:
+A bright red-orange portable record player with a black vinyl disc, surrounded by wild oversized coral and lemon flowers and flowing teal ribbons against a vivid cobalt-blue background. Spontaneous musical discovery, carefree and welcoming.
+
+relax.webp:
+A sculptural mint-green hammock slung between two deep green tropical palms over a still turquoise pool, peach sunset orb, lilac shadows. Warm lush unhurried retreat. Jade, mint, peach, turquoise.
+
+concentrate.webp:
+An illuminated cobalt and periwinkle glass prism with perfectly aligned concentric paper rings, a tiny warm amber light at the center and dark blue structured architectural shadows. Quiet absorbed concentration, orderly but imaginative. Electric blue, periwinkle, amber.
+
+cruise.webp:
+A lilac vintage convertible seen from behind, driving along a sweeping coastal road beside a vivid turquoise sea, deep indigo hills, coral sky and a low pale yellow sun. Easygoing everyday journey. Playful paper landscape.
+
+energize.webp:
+A chunky orange roller skate with vivid coral wheels, yellow laces and flowing hot-pink and cobalt paper speed ribbons, dynamically angled across a rich tangerine background. Propulsive upbeat motion, bold kinetic shapes.
+
+uplift.webp:
+An exuberant sunflower with golden paper petals, coral center and chunky emerald leaves rising among pink and tangerine clouds under a vivid sky-blue sky. Buoyant sunny optimism, lush and joyful rather than cute.
+
+release.webp:
+A monumental jagged magenta rock formation bursting with molten coral and deep violet paper lightning, a small black speaker stack at its base, energetic tactile layers and strong dramatic shadows. Cathartic powerful music poster, no danger or destruction, saturated hot pink, red and violet.

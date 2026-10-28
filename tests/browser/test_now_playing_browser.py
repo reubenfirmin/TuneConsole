@@ -17,7 +17,7 @@ def test_space_controls_playback_without_intercepting_search_or_focused_buttons(
         commands.append(route.request.url)
         status['now_playing']['paused'] = not status['now_playing']['paused']
         route.fulfill(json={'ok':True})
-    page.route('**/now-playing/toggle',toggle)
+    page.route('**/now-playing/toggle*',toggle)
     page.goto(live_app+'/artists')
     player = page.locator('.global-now-playing')
     expect(player).to_be_visible()
@@ -75,6 +75,14 @@ def test_progress_uses_control_divider_without_time_row_in_home_and_dock(live_ap
     expect(progress).to_be_visible()
     assert progress.evaluate('el => getComputedStyle(el).forcedColorAdjust')=='none'
     # Reduced motion still displays locally estimated progress between heartbeats.
+    # Freeze after the visibility transitions, then restart the status owner so
+    # transport delays and periodic polls cannot change the measured interval.
+    page.clock.pause_at(page.evaluate('Date.now() / 1000') + .1)
+    page.evaluate('''() => {
+        window.playbackStatus.stop();
+        window.playbackStatus.start();
+        return window.playbackStatus.refresh();
+    }''')
     status['now_playing'].update(position=3,paused=False)
     page.evaluate('window.playbackStatus.refresh()')
     page.clock.run_for(500)
@@ -509,7 +517,7 @@ def test_failed_playback_does_not_open_an_uncontrolled_music_tab(live_app, store
     page.route("**/play", play)
     playlist = store.playlists.get_playlists()[0]
     page.goto(f"{live_app}/playlist/{playlist.id}")
-    control = page.get_by_role("link", name="Play on YouTube Music")
+    control = page.get_by_role("button", name="Play on YouTube Music", exact=True)
     control.click()
     error = page.locator("#playback-error")
     expect(error).to_contain_text("Couldn’t start playback")

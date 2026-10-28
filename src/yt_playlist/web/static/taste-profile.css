@@ -52,7 +52,7 @@
 
 /* Playlist shares pair a whole-blend view with the listening evidence behind each source. */
 .playlist-influence-intro { max-width: 70ch; line-height: 1.75; }
-.playlist-influence-notice { padding: .8rem 1rem; border-inline-start: 2px solid var(--amber);
+.playlist-influence-notice { padding: .8rem 1rem;
   background: color-mix(in srgb, var(--amber) 5%, transparent); color: var(--dim);
   font-size: var(--type-ui); line-height: 1.65; margin: 1.25rem 0; }
 .playlist-influence-layout { display: grid; grid-template-columns: minmax(14rem, .8fr) minmax(0, 2fr);

@@ -8,11 +8,12 @@ LookupUnavailable so callers can retain stale content and retry shortly.
 import re
 import unicodedata
 import urllib.parse
-import urllib.request
 import urllib.error
+from html import unescape
 
-from yt_playlist.providers.base import LookupUnavailable, RateLimiter
-from yt_playlist.providers import transport
+from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.integrations.wikipedia import WikipediaIAO, SEARCH, SUMMARY
+from yt_playlist.providers.base import LookupUnavailable
 from yt_playlist.util import genre_catalog, net
 
 name = "wikipedia"
@@ -22,13 +23,8 @@ name = "wikipedia"
 _STOPWORDS = {"band", "musician", "music", "genre", "the", "and", "of", "a"}
 _MAX_CANDIDATES = 5
 
-_SEARCH = "https://en.wikipedia.org/w/api.php"
-_SUMMARY = "https://en.wikipedia.org/api/rest_v1/page/summary/"
-_USER_AGENT = "yt-playlist/0.1 ( https://4rc.io ; rf@4rc.io )"
-_MIN_INTERVAL = 0.2                       # Wikipedia is generous; stay polite
-_HTTP_TIMEOUT_S = 8                       # bounded provider I/O, off the page request path
-_pacer = RateLimiter(_MIN_INTERVAL)
-_breaker = net.CircuitBreaker()
+_SEARCH, _SUMMARY = SEARCH, SUMMARY
+_iao = WikipediaIAO()
 
 _CONTEXT = {"artist": "band musician", "genre": "music genre"}
 # Search disambiguation, not an equivalence in the genre catalog. The library's
@@ -37,10 +33,27 @@ _GENRE_SEARCH_NAMES = {"minimal": "minimal techno"}
 
 
 def _get_json(url):
-    """One HTTP GET returning parsed JSON. The single network seam (tests monkeypatch this)."""
-    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT,
-                                               "Accept": "application/json"})
-    return transport.request_json(req, timeout=_HTTP_TIMEOUT_S, pace=_pacer.wait, breaker=_breaker)
+    return _iao.get_url(url)
+
+
+def access(store=None):
+    return _iao.context(store)
+
+
+def _project(fetch, *args):
+    errors = []
+    try:
+        with net.probe_errors() as errors:
+            try:
+                return fetch(*args)
+            except LookupUnavailable as exc:
+                exc.retry_at = max([net.retry_after(exc.__cause__, _iao.now()),
+                    *(net.retry_after(error, _iao.now()) for error in errors)])
+                raise
+    finally:
+        # Replay after leaving the inner capture, including usable stale results.
+        for error in errors:
+            net.record_probe_failure(error)
 
 
 def _tokens(text):
@@ -91,7 +104,7 @@ def _search_titles(kind, display):
 
 
 def _summary(title):
-    url = _SUMMARY + urllib.parse.quote(title.replace(" ", "_")) + "?redirect=true"
+    url = _SUMMARY + urllib.parse.quote(title.replace(" ", "_"), safe='') + "?redirect=true"
     try:
         return _get_json(url)
     except urllib.error.HTTPError as exc:
@@ -101,6 +114,11 @@ def _summary(title):
 
 
 def fetch_summary(kind, display):
+    """Resolve a matching article; stale evidence also reports pending access."""
+    return _project(_fetch_summary, kind, display)
+
+
+def _fetch_summary(kind, display):
     """Return a summary or confirmed miss; raise LookupUnavailable on retryable failures.
 
     Walks the top search candidates and accepts the first that is a real article (type 'standard',
@@ -108,6 +126,8 @@ def fetch_summary(kind, display):
     first name or a mention of the artist inside another article is insufficient."""
     try:
         titles = _search_titles(kind, display)
+    except (WorkClosing, WorkBudgetExceeded):
+        raise
     except Exception as exc:
         raise LookupUnavailable("Wikipedia search unavailable") from exc
     failed = False
@@ -123,6 +143,8 @@ def fetch_summary(kind, display):
                 raise ValueError("Invalid Wikipedia title")
             thumbnail = (s.get("thumbnail") or {}).get("source")
             page_url = ((s.get("content_urls") or {}).get("desktop") or {}).get("page")
+        except (WorkClosing, WorkBudgetExceeded):
+            raise
         except Exception:
             failed = True
             continue
@@ -139,4 +161,59 @@ def fetch_summary(kind, display):
         }
     if failed:
         raise LookupUnavailable("Wikipedia summaries unavailable")
+    return None
+
+
+def fetch_artwork(display):
+    """Resolve attributed musician photography, retaining subject and license checks."""
+    return _project(_fetch_artwork, display)
+
+
+def _fetch_artwork(display):
+    """Resolve a musician's lead image and its file attribution, without biography copy.
+
+    Require a matching musician article and original file identity; unrelated
+    people, disambiguation pages and unattributed files cannot become scenery.
+    """
+    try:
+        for title in _search_titles('artist', display):
+            if not matches_subject('artist', display, title):
+                continue
+            summary = _summary(title)
+            if (summary.get('type') != 'standard'
+                    or not matches_subject('artist', display, summary.get('title') or title)):
+                continue
+            context = summary.get('description') or summary.get('extract') or ''
+            if not re.search(r'\b(musician|musical|band|singer|songwriter|dj|composer|rapper|'
+                             r'guitarist|bassist|drummer|pianist|vocalist|orchestra|'
+                             r'music producer|record producer)\b', context, re.I):
+                continue
+            original = summary.get('originalimage') or {}
+            url = original.get('source') or ''
+            parsed = urllib.parse.urlsplit(url)
+            if parsed.scheme != 'https' or parsed.netloc != 'upload.wikimedia.org':
+                continue
+            filename = urllib.parse.unquote(parsed.path.rsplit('/', 1)[-1])
+            params = {'action': 'query', 'format': 'json', 'prop': 'imageinfo',
+                      'titles': 'File:' + filename, 'iiprop': 'url|extmetadata', 'iiurlwidth': '1200'}
+            data = _get_json(_SEARCH + '?' + urllib.parse.urlencode(params))
+            for page in data['query']['pages'].values():
+                for info in page.get('imageinfo') or []:
+                    meta = info.get('extmetadata') or {}
+                    def plain(key):
+                        return ' '.join(unescape(re.sub('<[^>]+>', '',
+                            (meta.get(key) or {}).get('value') or '')).split())
+                    author, license_name = plain('Artist'), plain('LicenseShortName')
+                    source = info.get('descriptionurl') or ''
+                    image = info.get('thumburl') or info.get('url') or ''
+                    nonfree = (meta.get('NonFree') or {}).get('value')
+                    if (author and license_name and str(nonfree).casefold() not in ('true', '1')
+                            and 'fair use' not in license_name.casefold() and source.startswith('https://')
+                            and image.startswith('https://upload.wikimedia.org/')):
+                        return {'url': image, 'source_url': source, 'kind': 'artist',
+                                'credit': f'{display} · {author} · {license_name}'}
+    except (WorkClosing, WorkBudgetExceeded):
+        raise
+    except Exception as exc:
+        raise LookupUnavailable('Wikipedia artwork unavailable') from exc
     return None

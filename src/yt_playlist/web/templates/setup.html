@@ -4,7 +4,7 @@
 {% block body %}
 <div class="page-head">
   <h1>Set up TuneConsole</h1>
-  <p>Connect YouTube Music, choose metadata providers, and import your playlists and listening history.</p>
+  <p>Connect YouTube Music, choose where Home starts, and import your playlists and listening history.</p>
 </div>
 
 {% if error %}{% call banner('err') %}<strong>{{ error }}</strong>{% endcall %}{% endif %}
@@ -19,12 +19,33 @@
   <div class="tabs" role="tablist">
     <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'browser' }"
             @click="tab = 'browser'" :aria-selected="tab === 'browser'">Pairing</button>
+    <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'home' }"
+            @click="tab = 'home'" :aria-selected="tab === 'home'">Home</button>
     <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'enrichment' }"
             @click="tab = 'enrichment'" :aria-selected="tab === 'enrichment'">Enrichment</button>
     <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'import' }"
             @click="tab = 'import'" :aria-selected="tab === 'import'">Import</button>
     <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'identities' }"
             @click="tab = 'identities'" :aria-selected="tab === 'identities'">Identities</button>
+  </div>
+
+  <div class="tab-panel" role="tabpanel" x-show="tab === 'home'" x-cloak>
+    <section class="card" aria-labelledby="setup-home-title">
+      <h2 class="section section-flush" id="setup-home-title">Your landing page</h2>
+      <p class="section-note">You can switch between listening modes at any time. Choose which one opens when you return to Home.</p>
+      <form hx-post="/home/format" hx-trigger="change" hx-swap="none" x-data="{ saved: false, failed: false }"
+            @htmx:after-request="saved = $event.detail.successful; failed = !saved">
+        <label for="setup-home-format">Start Home with</label>
+        <select id="setup-home-format" name="format" @change="saved = false; failed = false">
+          {% for value, label in [('auto','Follow my listening'), ('mixes','Mix tapes'), ('albums','Long play'), ('radio','On air'), ('both','My last listening tab')] %}
+          <option value="{{ value }}" {{ 'selected' if home_format == value }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <p class="section-note">Follow my listening starts with your onboarding choice and adapts after you choose and play a format on three separate days. Choose a specific mode to keep it fixed.</p>
+        <p class="section-note" role="status" x-show="saved" x-cloak>Saved.</p>
+        <p class="section-note" role="alert" x-show="failed" x-cloak>Could not save your choice. Try again.</p>
+      </form>
+    </section>
   </div>
 
   {# ── Tab 1: Pairing (the browser-extension bridge) ────────────────────────────────── #}
@@ -340,7 +361,7 @@
 
 <script>
 function setupForm(rows, masterIdx, configured, savedIdentities, initialMessage, hasError = false) {
-  // Tabs are pure client state. ?tab=enrichment|import|identities deep-links a tab
+  // Tabs are pure client state. ?tab=home|enrichment|import|identities deep-links a tab
   // (the home nudge cards use it); anything else lands on Pairing. The pairing indicator polls
   // GET /bridge/status every couple seconds so it flips to connected the moment the extension
   // pairs, no reload needed. Alpine calls init() automatically since it's a method on the
@@ -351,7 +372,7 @@ function setupForm(rows, masterIdx, configured, savedIdentities, initialMessage,
     masterIdx: masterIdx,
     configured: configured,
     savedIdentities: savedIdentities,
-    tab: hasError ? 'identities' : (['identities', 'enrichment', 'import'].includes(wanted) ? wanted : 'browser'),
+    tab: hasError ? 'identities' : (['home', 'identities', 'enrichment', 'import'].includes(wanted) ? wanted : 'browser'),
     connected: false,
     saving: false, saveQueued: false, saveTask: null, identitySaveError: '',
     removingIdentity: false, identityRemoveError: '', identityMessage: initialMessage || '',
@@ -378,7 +399,7 @@ function setupForm(rows, masterIdx, configured, savedIdentities, initialMessage,
         })
         .catch(() => {});
       poll();
-      setInterval(poll, 2000);
+      this._statusTimer = setInterval(poll, 2000);
       this.$watch('tab', tab => {
         if (tab !== 'identities') this.$refs.identityGuide.hidePopover();
         if (tab === 'identities') {
@@ -388,6 +409,7 @@ function setupForm(rows, masterIdx, configured, savedIdentities, initialMessage,
       });
       if (this.tab === 'identities') this.$nextTick(() => this.checkIdentities());
     },
+    destroy() { clearInterval(this._statusTimer); },
     toggleIdentityGuide() {
       if (this.$refs.identityGuide.matches(':popover-open')) this.$refs.identityGuide.hidePopover();
       else this.showIdentityGuide();

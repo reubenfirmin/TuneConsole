@@ -38,6 +38,7 @@ def test_retained_measured_timings_balance_four_whole_file_groups(suite):
     assert max(loads) - min(loads) < 2
     assert baseline["run"].endswith("/40050066995")
     assert baseline["failed_cases"]  # Diagnostic timing input must not claim a passing source run.
+    assert baseline['refresh_run'].endswith('/40193589708')
 
 
 def reports(total=2, nodeids=None):
@@ -157,9 +158,33 @@ def test_all_shards_pin_one_trusted_unexpired_baseline_artifact():
             return {"workflow_runs": [
                 {"head_branch": "main", "status": "completed", "conclusion": "success", "event": "pull_request"},
                 {"head_branch": "main", "status": "completed", "conclusion": "success", "event": "push",
-                 "id": 123, "run_attempt": 2},
+                 "id": 123, "run_attempt": 2, 'run_started_at': '2026-10-26T12:00:00Z'},
             ]}
     assert timing_source(Source()) == {"timing_run": "123", "timing_artifact": "55"}
+
+
+@pytest.mark.parametrize('started,expected', [
+    ('2026-10-24T12:00:00Z', False),
+    ('2026-10-25T12:33:40Z', False),
+    (None, False),
+    ('2026-10-25T12:33:41Z', True),
+])
+def test_newer_committed_weight_refresh_is_not_overridden_by_stale_main(started, expected):
+    class Source:
+        repository = 'owner/repo'
+
+        def api(self, path):
+            if '/artifacts?' in path:
+                return {'artifacts': [{'name': 'source-test-timings-1', 'id': 99,
+                                       'expired': False, 'size_in_bytes': 100}]}
+            return {'workflow_runs': [
+                {'head_branch': 'main', 'status': 'completed', 'conclusion': 'success',
+                 'event': 'push', 'id': 123, 'run_attempt': 1, 'run_started_at': started},
+            ]}
+
+    assert timing_source(Source(), {'refreshed_at': '2026-10-25T12:33:40Z'}) == (
+        {'timing_run': '123', 'timing_artifact': '99'} if expected
+        else {'timing_run': '', 'timing_artifact': ''})
 
 
 def hosted_jobs(shards=2, prefix=""):

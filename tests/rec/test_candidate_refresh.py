@@ -29,6 +29,33 @@ def no_fit(*args, **kwargs):
     raise AssertionError('Preference or clock changes must reuse the completed model')
 
 
+@pytest.mark.parametrize('projection', ['vibe', 'profile'])
+def test_projection_upgrade_refreshes_legacy_pools_on_worker_without_refitting(store, monkeypatch, projection):
+    from yt_playlist.rec import home_vibe, musical_character
+
+    library(store)
+    vectors = store.rec_model.get_rec_vectors()
+    bundles = store.rec_proposals.get_proposals('mode_bundles')
+    # An older installation can have a valid ordinary pool and a current
+    # preference stamp, without the projection required by the new controls.
+    bundles.pop('_vibes')
+    store.rec_proposals.put_proposals('mode_bundles', bundles, 2000)
+    assert not candidate_refresh.due(store, 2000)
+    module = home_vibe if projection == 'vibe' else musical_character
+    monkeypatch.setattr(module, 'VERSION', module.VERSION + '-upgrade')
+    monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
+    assert candidate_refresh.due(store, 2000)
+
+    assert mode_surfaces.prepare_bundles(store, 2000) is not None
+    refreshed = store.rec_proposals.get_proposals('mode_bundles')['_vibes']
+    assert refreshed['version'] == home_vibe.VERSION
+    assert refreshed['profile_version'] == musical_character.VERSION
+    assert set(refreshed['pools']) == set(home_vibe.PRESETS)
+    assert refreshed['pools']['relax']['explore']
+    assert not candidate_refresh.due(store, 2001)
+    assert store.rec_model.get_rec_vectors() == vectors
+
+
 def test_genre_edits_reset_and_restore_update_scores_and_served_provenance(store, monkeypatch):
     key = library(store)
     original = candidate(store, key)
@@ -46,8 +73,7 @@ def test_genre_edits_reset_and_restore_update_scores_and_served_provenance(store
             assert row is None
         else:
             assert (row['score'] < original['score']) == (weight < 1)
-            policy = json.loads(store.conn.execute('SELECT configuration FROM rec_serving_policies '
-                'WHERE model_version=?', (row['pool_policy'],)).fetchone()[0])
+            policy = store.rec_ledger.policy_configuration(row['pool_policy'])
             assert policy['weights'][axis] == weight
         assert store.rec_model.get_rec_vectors() == vectors
     store.rec_model.reset_weights()
@@ -93,3 +119,70 @@ def test_stale_ranking_publication_does_not_mark_preferences_current(store, monk
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', superseded)
     assert mode_surfaces.prepare_bundles(store, 2000) is None
     assert candidate_refresh.due(store, 2000)
+
+
+def test_taste_controls_rerank_saved_pools_after_edits_resets_and_checkpoint_restore(store, monkeypatch):
+    from tests.taste_support import _client
+
+    seed(store)
+    iid = store.identities.get_identities()[0].id
+    store.history.import_play_events(iid, [
+        (store.tracks.identity_key_for_video(f'v{i}'), f'v{i}', 1000 - day * 86400)
+        for i in range(8) for day in range(1, 6)])
+    refresh(store)
+    client = _client(store, now=2000)
+    worker = client.app.state.ctx.rec_worker
+    requests = []
+
+    def rerank(**kwargs):
+        requests.append(kwargs)
+        assert kwargs == {'full': False, 'bundles': True}
+        assert candidate_refresh.due(store, 2000)
+        assert mode_surfaces.prepare_bundles(store, 2000) is not None
+
+    monkeypatch.setattr(worker, '_schedule', rerank)
+    monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
+    vectors = store.rec_model.get_rec_vectors()
+
+    def pool(surface):
+        return store.rec_proposals.get_proposals('mode_bundles')['all'][surface]
+
+    original = pool('wheelhouse')
+    assert pool('comfort')
+    tuning = home_prepared.tuning_key(store, 2000)
+    assert client.post('/taste/checkpoint').status_code == 200
+    assert client.post('/taste/param', data={'name': 'comfort_min_plays', 'value': 12}).status_code == 200
+    assert pool('comfort') == []
+    assert home_prepared.tuning_key(store, 2000) != tuning
+    assert client.post('/taste/reset-param', data={'name': 'comfort_min_plays'}).status_code == 200
+    assert pool('comfort')
+    assert client.post('/taste/weight', data={'axis': 'lane:deep_cut', 'weight': 3}).status_code == 200
+    changed = pool('wheelhouse')
+    assert [r['key'] for r in changed] != [r['key'] for r in original]
+    policy = store.rec_ledger.policy_configuration(changed[0]['pool_policy'])
+    assert policy['weights']['lane:deep_cut'] == 3
+    assert policy['params']['comfort_min_plays'] == 4
+    assert client.post('/taste/reset-weights').status_code == 200
+    assert pool('wheelhouse') == original
+    client.post('/taste/param', data={'name': 'comfort_min_plays', 'value': 12})
+    client.post('/taste/weight', data={'axis': 'lane:deep_cut', 'weight': 3})
+    assert client.post('/taste/checkpoint/restore').status_code == 200
+    assert pool('wheelhouse') == original
+    assert pool('comfort')
+    client.post('/taste/param', data={'name': 'comfort_min_plays', 'value': 12})
+    assert client.post('/taste/reset-all').status_code == 200
+    assert pool('comfort')
+    assert len(requests) == 9
+    assert store.rec_model.get_rec_vectors() == vectors
+    assert not candidate_refresh.due(store, 2000)
+
+
+def test_lane_decay_invalidates_prepared_rankings(store, monkeypatch):
+    library(store)
+    store.rec_model.set_weight('lane:deep_cut', 3, now=2000)
+    refresh(store)
+    monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
+    now = 2000 + candidate_refresh.DECAY_TICK_S
+    assert candidate_refresh.due(store, now)
+    refresh(store, now)
+    assert not candidate_refresh.due(store, now)

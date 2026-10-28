@@ -1,5 +1,6 @@
 """Artist seed rings, accessible seed editing, and readable multi-seed canvas cards."""
 import math
+import json
 
 import numpy as np
 import pytest
@@ -451,6 +452,65 @@ def test_shared_state_load_cannot_overwrite_a_replacement_canvas(page, curated_c
     assert page.evaluate("viewResets") == 0
     saved = page.evaluate(f"JSON.parse(localStorage.getItem({DATA}._canvasKey({DATA}.activeId)))")
     assert saved["playlistName"] == state["playlistName"]
+
+
+def _saved_playlist_link(page, store):
+    state = page.evaluate(f"{DATA}._stateBlob()")
+    state['playlistName'] = 'Saved playlist B'
+    state['nodes'][0]['seeds'] = [{'kind': 'artist', 'label': 'Saved B', 'keys': ['saved-b']}]
+    iid = store.identities.get_identities()[0].id
+    pid = store.playlists.upsert_playlist(iid, 'SAVED', 'Saved playlist B', 0, 'h', 1)
+    store.playlists.mark_generated_playlist('SAVED')
+    store.playlist_recipes.set_recipe('SAVED', {'model': 'cluster'})
+    store.playlist_recipes.set_cluster_canvas('SAVED', json.dumps(state))
+    return pid
+
+
+def test_reopening_saved_playlist_keeps_both_local_canvases_after_edit_and_reload(
+        page, curated_canvas, cluster_library, store):
+    pid = _saved_playlist_link(page, store)
+    original_id = page.evaluate(f"{DATA}.activeId")
+    page.goto(f'{cluster_library}/playlist/{pid}')
+    page.get_by_role('link', name='Open cluster editor', exact=True).click()
+    name = page.locator('.cluster-savebar input[name="name"]')
+    expect(name).to_have_value('Saved playlist B')
+    reopened_id = page.evaluate(f"{DATA}.activeId")
+    assert reopened_id != original_id
+    assert page.evaluate(f"{DATA}.canvases.length") == 2
+    assert page.evaluate('(id) => JSON.parse(localStorage.getItem("tc:canvas:" + id)).playlistName',
+                         original_id) == 'Curated canvas'
+    name.fill('Edited saved playlist B')
+    page.evaluate(f"{DATA}.persist(); {DATA}._flushState()")
+    page.reload()
+    expect(name).to_have_value('Edited saved playlist B')
+    assert page.evaluate(f"{DATA}.activeId") == reopened_id
+    page.evaluate(f"id => {DATA}.switchCanvas(id)", original_id)
+    expect(name).to_have_value('Curated canvas')
+    assert page.evaluate(f"{DATA}.centralSeeds().map(s => s.label)") == ['A', 'B']
+    page.evaluate(f"id => {DATA}.switchCanvas(id)", reopened_id)
+    expect(name).to_have_value('Edited saved playlist B')
+    assert page.evaluate(f"{DATA}.centralSeeds().map(s => s.label)") == ['Saved B']
+
+
+@pytest.mark.parametrize('failure', ['http', 'invalid', 'malformed'])
+def test_failed_saved_playlist_link_preserves_active_local_canvas(
+        page, curated_canvas, cluster_library, store, failure):
+    pid = _saved_playlist_link(page, store)
+    original_id = page.evaluate(f"{DATA}.activeId")
+    bad = {'v': 2, 'nodes': []} if failure == 'invalid' else {'v': 1, 'nodes': [None]}
+    page.route('**/clusters/state/SAVED', lambda route: route.fulfill(
+        status=503 if failure == 'http' else 200, json=bad))
+    page.goto(f'{cluster_library}/playlist/{pid}')
+    page.get_by_role('link', name='Open cluster editor', exact=True).click()
+    expect(page.locator('.cluster-error')).to_contain_text('Could not open the saved cluster.')
+    name = page.locator('.cluster-savebar input[name="name"]')
+    expect(name).to_have_value('Curated canvas')
+    page.evaluate(f"{DATA}.persist(); {DATA}._flushState()")
+    assert page.evaluate(f"{DATA}.activeId") == original_id
+    assert page.evaluate(f"{DATA}.canvases.length") == 1
+    page.reload()
+    expect(name).to_have_value('Curated canvas')
+    assert page.evaluate(f"{DATA}.centralSeeds().map(s => s.label)") == ['A', 'B']
 
 
 def test_linked_artist_and_genre_seed_together_without_competing_requests(page, cluster_library):

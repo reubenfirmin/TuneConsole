@@ -1,0 +1,28 @@
+{# Shared by the playlist popup and On Air. Both use generating.js for motion and status. #}
+<div class="gen-loader"{% if loader_radio|default(false) %}
+     x-data="launchLoaderView(8)"
+     x-effect="update({active: visible && launching, thumbs: launchTracks.map(song => song.thumbnail).filter(Boolean),
+       statuses: restoring ? ['Returning to your radio', 'Connecting to YouTube Music'] : [busyAction === 'start' ? 'Finding your frequency' : 'Connecting to YouTube Music', 'Tuning your radio'],
+       detail: !restoring && launchSong?.title ? 'Starting with ' + launchSong.title + (launchSong.artist ? ' · ' + launchSong.artist : '') : ''})"{% elif loader_tv|default(false) %}
+     x-data="launchLoaderView()"
+     x-effect="update({active: visible && generating, thumbs: [], statuses: ['Generating TV session']})"{% endif %}>
+  <div class="cluster-stars" aria-hidden="true"></div>
+  <div class="gen-visual" aria-hidden="true">
+    <canvas class="gen-fx"></canvas>
+    <div class="gen-orbit">
+      <div class="gen-hub">
+        <span class="gen-hub-ring"></span>
+        <svg class="brand-eq" viewBox="0 0 28 24">
+          {% for x, y in [(0,9),(6,3),(12,12),(18,6),(24,14)] %}
+          <rect class="eqbar gen-eq-{{ loop.index }}" x="{{ x }}" y="{{ y }}" width="4" height="{{ 24-y }}" rx="2"/>
+          {% endfor %}
+        </svg>
+      </div>
+    </div>
+  </div>
+  <div class="gen-scrim" aria-hidden="true"></div>
+  <div class="gen-copy">
+    <h2 class="gen-status"><span class="gen-dot" aria-hidden="true"></span><span data-loader-status>{{ loader_status|default('Tuning your radio') }}</span><span class="gen-cursor" aria-hidden="true"></span></h2>
+    <p class="gen-sub" data-loader-detail>{{ loader_detail|default('') }}</p>
+  </div>
+</div>

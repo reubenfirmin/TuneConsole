@@ -157,6 +157,9 @@ def test_radio_preparation_starts_inside_lifespan_after_work_opens(store, monkey
         def __init__(self, ctx):
             self.ctx = ctx
 
+        def retain_provenance(self):
+            pass
+
         def prepare(self):
             def warm():
                 started.set()
@@ -180,6 +183,42 @@ def test_radio_preparation_starts_inside_lifespan_after_work_opens(store, monkey
     finally:
         finish.set()
     assert ctx.work.wait(5) and not ctx.work.accepting
+
+
+def test_shutdown_cannot_restart_workers_after_deferred_startup(store, monkeypatch):
+    from yt_playlist.web import app as web_app
+
+    app = create_app(store, lambda: {}, background_work=True)
+    ctx = app.state.ctx
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    def start():
+        entered.set()
+        assert release.wait(5)
+        calls.append('start')
+    worker = SimpleNamespace(start_ticker=start, trigger_mode_refresh=lambda: None,
+                             shutdown=lambda: calls.append('stop'), join=lambda timeout: None)
+    ctx.rec_worker = ctx.enrich_worker = worker
+    monkeypatch.setattr(ctx.radio, 'prepare', lambda: None)
+    monkeypatch.setattr(web_app, '_background_sync_loop', lambda *a, **kw: None)
+    observed = []
+    def finish_when_closing():
+        while ctx.work.accepting:
+            release.wait(.005)
+        observed.append(list(calls))
+        release.set()
+    finisher = None
+    try:
+        with TestClient(app):
+            assert entered.wait(5)
+            finisher = threading.Thread(target=finish_when_closing)
+            finisher.start()
+    finally:
+        release.set()
+        if finisher:
+            finisher.join(5)
+    assert observed == [[]]
+    assert calls == ['start', 'start', 'stop', 'stop']
 
 
 def test_restart_waits_for_a_generated_playlist_save(store, monkeypatch):

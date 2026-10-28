@@ -6,6 +6,71 @@ import pytest
 from tests.radio_session_support import poc, play
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending
 from yt_playlist.web.radio_session import PlaylistRadio
+from yt_playlist.library import playlist_generated
+
+
+@pytest.fixture
+def owned_playback(poc, monkeypatch):
+    from yt_playlist.core.bridge import Bridge
+
+    controller, remote, frames, *_ = poc
+    bridge = Bridge()
+    bridge._send = frames.append
+    monkeypatch.setattr('yt_playlist.core.bridge.asyncio.run_coroutine_threadsafe', lambda frame, loop: None)
+    controller.ctx.bridge = controller.playback.bridge = bridge
+    return controller, remote, frames, bridge
+
+
+def test_newer_direct_play_survives_older_radio_creation(owned_playback, monkeypatch):
+    controller, remote, frames, bridge = owned_playback
+    create = playlist_generated.create_generated_playlist
+    direct = {'type': 'navigate', 'url': 'https://music.youtube.com/watch?v=newer'}
+
+    def create_after_direct(*args, **kwargs):
+        result = create(*args, **kwargs)
+        assert bridge.send_control(direct, intent=bridge.begin_playback_intent())
+        return result
+
+    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', create_after_direct)
+    assert controller.start()['ok']
+    assert remote.ids
+    assert controller.ctx.store.playlists.get_playlist(controller.session.local_id)
+    assert controller.persistence.load()['playlist'] == 'PLSESSION'
+    assert frames == [direct]
+
+
+def test_newer_direct_play_survives_radio_readiness_retry(owned_playback, monkeypatch):
+    controller, remote, frames, bridge = owned_playback
+    read = remote.get_playlist
+    monkeypatch.setattr(remote, 'get_playlist', lambda *args, **kwargs: {'tracks': [{'videoId': 'v1'}], 'trackCount': 1})
+    assert controller.start()['starting']
+    assert not frames
+    direct = {'type': 'navigate', 'url': 'https://music.youtube.com/watch?v=newer'}
+    bridge.send_control(direct, intent=bridge.begin_playback_intent())
+    monkeypatch.setattr(remote, 'get_playlist', read)
+    controller._complete_start(controller.session)
+    assert controller.session.tracks and not controller.session.initial_tracks
+    assert frames == [direct]
+
+
+def test_radio_route_reserves_playback_before_its_worker_starts(owned_playback, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from yt_playlist.web.routes import radio_session
+
+    controller, remote, frames, bridge = owned_playback
+    direct = {'type': 'navigate', 'url': 'https://music.youtube.com/watch?v=newer'}
+
+    async def delayed(target, *args, **kwargs):
+        bridge.send_control(direct, intent=bridge.begin_playback_intent())
+        return target(*args, **kwargs)
+
+    monkeypatch.setattr(controller.work, 'to_thread', delayed)
+    app = FastAPI()
+    app.include_router(radio_session.build(controller.ctx))
+    with TestClient(app) as client:
+        assert client.post('/radio/start', json={}).json()['ok']
+    assert remote.ids and frames == [direct]
 
 
 @pytest.mark.parametrize("presence", ["missing", "stale", "disconnected", "paused", "other_playlist"])
@@ -128,3 +193,61 @@ def test_settling_never_accepts_incomplete_or_unowned_initial_contents(poc, monk
     assert frames == []
     assert c.session.initial_tracks
     assert not c.session.tracks
+
+
+@pytest.mark.parametrize('proof', ['receipt', 'saved_identity'])
+@pytest.mark.parametrize('replace_seed', [False, True])
+def test_launch_adopts_proven_playback_upload_and_skips_an_omitted_song(poc, monkeypatch, proof, replace_seed):
+    c, remote, frames, _, pool = poc
+    requested = pool[0 if replace_seed else 2]
+    requested.update(title='Ride (Vince Clarke Remix)', artist='Dubfire & Miss Kittin', duration=326)
+    c.ctx.store.tracks.upsert_track(requested['video_id'], requested['title'], requested['artist'], '', 326)
+    c.ctx.store.tracks.update_metadata(requested['video_id'],
+        {'title': requested['title'], 'artist': requested['artist']}, observation={})
+    create = playlist_generated.create_generated_playlist
+
+    def create_with_receipts(*args):
+        result = create(*args)
+        return {**result, 'added_handles': {requested['video_id']: 'owned-occurrence'}}
+
+    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', create_with_receipts)
+    substitute = {'videoId': 'v31', 'setVideoId': 'owned-occurrence',
+                  'title': requested['title'], 'artists': [{'name': 'Dubfire'}], 'duration_seconds': 326}
+    if proof == 'saved_identity':
+        substitute['playlistVideoId'] = requested['video_id']
+        monkeypatch.setattr(playlist_generated, 'create_generated_playlist', create)
+    rows = [substitute, {'videoId': 'v3'}] if replace_seed else [{'videoId': 'v1'}, substitute]
+    monkeypatch.setattr(remote, 'get_playlist', lambda *args, **kwargs: {'tracks': rows, 'trackCount': 2})
+    assert c.start()['starting'] and not frames
+    s = c.session
+    s.preparation_seen_at = time.monotonic() - 10
+    c._complete_start(s)
+    ids = [row['videoId'] for row in rows]
+    assert [t['video_id'] for t in s.tracks] == ids
+    assert s.directions.seed['video_id'] == ids[0]
+    assert set(s.choices) == {ids[0]}
+    assert s.rejected == {requested['video_id'], 'v2'}
+    assert len(frames) == 1 and f'watch?v={ids[0]}&list=' in frames[0]['url']
+    assert not remote.adds and not remote.removes
+    assert not s.initial_handles
+    alternate = c.ctx.store.tracks.playback_alternate(s.identity, requested['video_id'])
+    assert alternate['video_id'] == 'v31'
+    assert alternate['key'] != requested['key']
+    assert [t['video_id'] for t in c.ctx.store.charts.playlist_tracks_detail(s.local_id)] == ids
+    assert [t['video_id'] for t in c.persistence.load()['tracks']] == ids
+    # A later launch reuses the proven upload instead of requesting the bad ID again.
+    c.stop()
+    assert c.start(requested['video_id'])['ok']
+    assert 'v31' in remote.ids and requested['video_id'] not in remote.ids
+
+
+def test_launch_skips_unplayable_saved_rows_instead_of_navigating_to_them(poc, monkeypatch):
+    c, remote, frames, *_ = poc
+    rows = [{'videoId': 'v1', 'isAvailable': False}, {'videoId': 'v2'}, {'videoId': 'v3'}]
+    monkeypatch.setattr(remote, 'get_playlist', lambda *args, **kwargs: {'tracks': rows, 'trackCount': 3})
+    assert c.start()['starting'] and not frames
+    c.session.preparation_seen_at = time.monotonic() - 10
+    c._complete_start(c.session)
+    assert [t['video_id'] for t in c.session.tracks] == ['v2', 'v3']
+    assert 'watch?v=v2&list=' in frames[0]['url']
+    assert c.session.rejected == {'v1'}

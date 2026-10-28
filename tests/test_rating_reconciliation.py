@@ -166,6 +166,7 @@ def test_api_native_and_player_paths_share_account_and_exact_upload_reconciliati
     # A native unlike belongs to A, and exposes the retained like of B.
     ctx = SimpleNamespace(store=store)
     event = {'kind': 'rate', 'url': 'https://music.youtube.com/youtubei/v1/like/removelike',
+             'brandKnown': True,
              'body': json.dumps({'target': {'videoId': 'a'}}), 'brandId': '',
              'phase': 'settled', 'success': True, 'httpStatus': 200}
     assert player_events.handle_player_event(ctx, event, 30)

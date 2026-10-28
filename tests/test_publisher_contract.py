@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1] / "packaging"))
 from promote_release import Backend
 import promote_release
-from rehearse_publisher import rehearse
+from rehearse_publisher import cleanup, rehearse
 import release_services
 
 
@@ -28,6 +28,7 @@ class GitHub:
         self.unreachable = False
         self.hidden_reads = 0
         self.hide_created_reads = 0
+        self.listing_lag = 0
         monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
         monkeypatch.setattr("urllib.request.urlopen", self.urlopen)
         self.backend = Backend("owner/repo")
@@ -58,6 +59,8 @@ class GitHub:
             result = self.release
         elif "/releases/assets/" in path:
             return io.BytesIO(self.contents[int(path.rsplit("/", 1)[1])])
+        elif path == "/repos/owner/repo/releases/12":
+            result = self.release
         else:
             assert query["per_page"] == ["100"]
             # Ensure drafts on later pages can be found, not just recent releases.
@@ -68,6 +71,9 @@ class GitHub:
                 result = []
             else:
                 result = [self.release] if self.release else []
+                if self.release and self.listing_lag:
+                    self.listing_lag -= 1
+                    result = []
         return io.BytesIO(json.dumps(result).encode())
 
     def run(self, *args):
@@ -101,8 +107,9 @@ def lookup_clock(monkeypatch):
         clock.sleeps.append(seconds)
         clock.now += seconds
 
-    monkeypatch.setattr(promote_release, "time", SimpleNamespace(
-        monotonic=lambda: clock.now, sleep=sleep))
+    fake_time = SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep)
+    monkeypatch.setattr(promote_release, "time", fake_time)
+    monkeypatch.setattr("rehearse_publisher.time", fake_time)
     return clock
 
 
@@ -154,6 +161,64 @@ def test_rehearsal_cleans_up_after_interrupted_upload(monkeypatch):
         rehearse(github.backend, "publisher-contract-failure", "b" * 40)
     assert github.release is None
     assert github.requests[-1][0] == "DELETE"
+
+
+def test_created_draft_discovery_recovers_only_after_confirming_the_exact_resource(monkeypatch, capsys, lookup_clock):
+    github = GitHub(monkeypatch)
+    github.listing_lag = 2
+    rehearse(github.backend, "publisher-contract-lag", "a" * 40)
+    assert lookup_clock.sleeps == [1, 1]
+    direct = [(method, path) for method, path, _ in github.requests
+              if path == "/repos/owner/repo/releases/12"]
+    assert direct == [("GET", "/repos/owner/repo/releases/12")] * 2 + [
+        ("DELETE", "/repos/owner/repo/releases/12")]
+    assert len(github.commands) == 3
+    output = capsys.readouterr().out
+    assert '"attempt": 3' in output and '"created_id": 12' in output
+    assert "visible by ID" in output and "fixture-token" not in output
+
+
+def test_persistent_discovery_failure_is_bounded_and_cleans_up_by_created_id(monkeypatch, lookup_clock):
+    github = GitHub(monkeypatch)
+    github.listing_lag = 100
+    with pytest.raises(RuntimeError, match="lookup failed after 10 seconds"):
+        rehearse(github.backend, "publisher-contract-invisible", "a" * 40)
+    assert lookup_clock.sleeps == [1] * 10
+    assert github.release is None and github.commands == []
+    assert github.requests[-2:] == [
+        ("GET", "/repos/owner/repo/releases/12", {}),
+        ("DELETE", "/repos/owner/repo/releases/12", {})]
+
+
+@pytest.mark.parametrize("hidden_reads", [0, 3])
+def test_lost_create_response_still_cleans_up_the_authenticated_draft(monkeypatch, lookup_clock, hidden_reads):
+    github = GitHub(monkeypatch)
+    github.hide_created_reads = hidden_reads
+    send = github.urlopen
+
+    def lose_reply(request, timeout):
+        result = send(request, timeout)
+        if request.method == "POST":
+            raise urllib.error.URLError("reply lost after creation")
+        return result
+
+    monkeypatch.setattr("urllib.request.urlopen", lose_reply)
+    with pytest.raises(urllib.error.URLError, match="reply lost"):
+        rehearse(github.backend, "publisher-contract-lost-reply", "a" * 40)
+    assert github.release is None and github.commands == []
+    assert github.requests[-1][0] == "DELETE"
+    assert lookup_clock.sleeps == [1] * hidden_reads
+
+
+@pytest.mark.parametrize("change", [{"draft": False}, {"tag_name": "v1.2.3"}, {"id": 99}])
+def test_cleanup_never_deletes_a_changed_or_public_created_release(monkeypatch, change):
+    github = GitHub(monkeypatch)
+    created = {"id": 12, "tag_name": "publisher-contract-test", "draft": True, "assets": []}
+    github.release = {**created, **change}
+    with pytest.raises(RuntimeError, match="identity or draft state differs"):
+        cleanup(github.backend, "publisher-contract-test", created=created)
+    assert github.release is not None
+    assert not any(method == "DELETE" for method, _, _ in github.requests)
 
 
 def test_interrupted_real_staging_resumes_and_published_assets_are_immutable(monkeypatch, tmp_path):
@@ -240,123 +305,128 @@ def test_preflight_reports_exact_failing_service_without_exposing_response(monke
     assert checked == ["pages", "recovery", "baseline"]
 
 
-@pytest.mark.parametrize("location", [
-    "/v2/owner/repo/blobs/uploads/probe",
-    "https://ghcr.io/v2/owner/repo/blobs/uploads/probe?_state=fixture-secret",
-])
-@pytest.mark.parametrize("completion_status", [201, 202])
-def test_registry_preflight_transfers_blob_and_completes_updated_upload_session(
-        monkeypatch, location, completion_status):
-    monkeypatch.setenv("GITHUB_ACTOR", "owner")
-    monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
-    requests = []
-    next_location = "/v2/owner/repo/blobs/uploads/probe-next?_state=updated%2Bstate%2Fvalue"
+def test_pages_write_check_requires_an_actual_grant(monkeypatch):
+    backend = Backend("owner/repo")
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "account")
+    monkeypatch.setattr(backend, "api", lambda *args, **kwargs: {})
+    with pytest.raises(ValueError, match="upload token"):
+        release_services.pages_permissions(backend)
 
-    def respond(request, timeout):
+
+class RegistryResponse(io.BytesIO):
+    def __init__(self, status, payload=b"", headers=None):
+        super().__init__(payload)
+        self.status = status
+        self.headers = headers or {}
+
+
+class Registry:
+    location = "/v2/owner/repo/blobs/uploads/disposable?opaque=do-not-print-upload"
+    next_location = "/v2/owner/repo/blobs/uploads/next?_state=updated%2Bstate%2Fvalue"
+
+    def __init__(self, monkeypatch):
+        self.requests = []
+        self.failure = None
+        self.failure_status = 403
+        self.statuses = [200, 202, 202, 201]
+        monkeypatch.setenv("GITHUB_ACTOR", "fixture-actor")
+        monkeypatch.setenv("GITHUB_TOKEN", "do-not-print-credential")
+        monkeypatch.setattr(release_services.urllib.request, "urlopen", self.urlopen)
+
+    def urlopen(self, request, timeout):
         assert timeout == 30
-        requests.append(request)
-        response = io.BytesIO(b'{"token":"registry-token"}' if len(requests) == 1 else b"")
-        response.status = {1: 200, 2: 202, 3: 202, 4: completion_status}[len(requests)]
-        response.headers = {"Location": next_location if len(requests) == 3 else location}
-        return response
+        stage = len(self.requests)
+        self.requests.append(request)
+        if self.failure == stage:
+            raise urllib.error.HTTPError(request.full_url, self.failure_status,
+                "do-not-print-reason", {"Secret": "do-not-print-header"},
+                io.BytesIO(b"do-not-print-body"))
+        return RegistryResponse(self.statuses[stage],
+            b'{"token":"do-not-print-bearer"}' if stage == 0 else b"",
+            {"Location": self.location if stage == 1 else self.next_location} if stage in (1, 2) else {})
 
-    monkeypatch.setattr(release_services.urllib.request, "urlopen", respond)
-    if completion_status == 201:
-        release_services.registry_permissions("ghcr.io/owner/repo")
-    else:
-        with pytest.raises(ValueError, match="did not complete"):
-            release_services.registry_permissions("ghcr.io/owner/repo")
-    assert [request.get_method() for request in requests] == ["GET", "POST", "PATCH", "PUT"]
-    assert requests[0].get_header("Authorization").startswith("Basic ")
-    assert urllib.parse.parse_qs(urllib.parse.urlsplit(requests[0].full_url).query)["scope"] == [
-        "repository:owner/repo:pull,push"]
-    assert requests[2].full_url == urllib.parse.urljoin("https://ghcr.io/", location)
-    assert requests[2].data == b"{}"
-    assert requests[2].get_header("Content-range") == "0-1"
-    assert requests[-1].full_url.startswith("https://ghcr.io" + next_location + "&digest=")
-    upload = urllib.parse.urlsplit(requests[-1].full_url)
-    assert (upload.scheme, upload.netloc, upload.path) == (
-        "https", "ghcr.io", "/v2/owner/repo/blobs/uploads/probe-next")
-    assert urllib.parse.parse_qs(upload.query) == {
+
+@pytest.mark.parametrize("location", [
+    "/v2/owner/repo/blobs/uploads/disposable?opaque=do-not-print-upload",
+    "https://ghcr.io/v2/owner/repo/blobs/uploads/disposable?opaque=do-not-print-upload"])
+def test_registry_transfers_blob_and_completes_the_updated_session(monkeypatch, capsys, location):
+    registry = Registry(monkeypatch)
+    registry.location = location
+    release_services.registry_permissions("ghcr.io/owner/repo")
+    token, upload, transfer, complete = registry.requests
+    assert urllib.parse.parse_qs(urllib.parse.urlsplit(token.full_url).query) == {
+        "service": ["ghcr.io"], "scope": ["repository:owner/repo:pull,push"]}
+    assert token.get_header("Authorization").startswith("Basic ")
+    assert upload.method == "POST" and upload.data == b""
+    assert upload.full_url == "https://ghcr.io/v2/owner/repo/blobs/uploads/"
+    assert transfer.method == "PATCH" and transfer.data == b"{}"
+    assert transfer.get_header("Content-range") == "0-1"
+    assert transfer.full_url == urllib.parse.urljoin("https://ghcr.io/", registry.location)
+    assert complete.method == "PUT" and complete.data == b""
+    assert complete.full_url.startswith("https://ghcr.io" + registry.next_location + "&digest=")
+    assert urllib.parse.parse_qs(urllib.parse.urlsplit(complete.full_url).query) == {
         "_state": ["updated+state/value"],
-        "digest": ["sha256:" + hashlib.sha256(b"{}").hexdigest()],
-    }
-    for request in requests[1:]:
-        assert request.get_header("Authorization") == "Bearer registry-token"
+        "digest": ["sha256:" + hashlib.sha256(b"{}").hexdigest()]}
+    for request in (upload, transfer, complete):
+        assert request.get_header("Authorization") == "Bearer do-not-print-bearer"
         assert request.get_header("Content-type") == "application/octet-stream"
-    assert requests[1].data == requests[-1].data == b""
-
-
-@pytest.mark.parametrize("failed_request,operation", [
-    (1, "token request"), (2, "upload initiation"), (3, "blob transfer"), (4, "upload completion"),
-])
-@pytest.mark.parametrize("status", [401, 403, 404, 405, 503])
-def test_registry_preflight_names_http_failure_without_upload_url_or_credentials(
-        monkeypatch, capsys, failed_request, operation, status):
-    monkeypatch.setenv("GITHUB_ACTOR", "owner")
-    monkeypatch.setenv("GITHUB_TOKEN", "credential-do-not-print")
-    requests = []
-
-    def respond(request, timeout):
-        requests.append(request)
-        if len(requests) == failed_request:
-            raise urllib.error.HTTPError(request.full_url, status, "secret-response", {}, None)
-        response = io.BytesIO(b'{"token":"registry-token-do-not-print"}')
-        response.status = 200 if len(requests) == 1 else 202
-        response.headers = {"Location": "/v2/owner/repo/blobs/uploads/probe?_state=secret-state"}
-        return response
-
-    monkeypatch.setattr(release_services.urllib.request, "urlopen", respond)
-    with pytest.raises(urllib.error.HTTPError) as failure:
-        release_services.registry_permissions("ghcr.io/owner/repo")
-    assert failure.value.code == status
-    assert len(requests) == failed_request
     output = capsys.readouterr().out
+    assert "token request: HTTP 200" in output
+    assert "upload initiation: HTTP 202" in output
+    assert "blob transfer: HTTP 202" in output
+    assert "upload completion: HTTP 201" in output
+    assert "do-not-print" not in output
+
+
+@pytest.mark.parametrize("stage,operation", [
+    (0, "token request"), (1, "upload initiation"),
+    (2, "blob transfer"), (3, "upload completion")])
+@pytest.mark.parametrize("status", [401, 403, 404, 405, 503])
+def test_registry_failure_identifies_the_operation_and_status_without_remote_details(monkeypatch, capsys, stage, operation, status):
+    import traceback
+
+    registry = Registry(monkeypatch)
+    registry.failure = stage
+    registry.failure_status = status
+    backend = Backend("owner/repo")
+    monkeypatch.setattr(release_services.shutil, "which", lambda tool: "/bin/" + tool)
+    monkeypatch.setattr(backend, "run", lambda *args: None)
+    monkeypatch.setattr(release_services, "rehearse", lambda *args: None)
+    pages = []
+    monkeypatch.setattr(release_services, "pages_permissions", lambda *args: pages.append(True))
+    with pytest.raises(RuntimeError, match="GHCR package push") as failure:
+        release_services.preflight(backend, "v1.2.3", "a" * 40, "probe", stable=False)
+    output = capsys.readouterr().out + "".join(traceback.format_exception(failure.value))
     assert f"GHCR {operation} (HTTP {status})" in output
-    assert not any(secret in output for secret in (
-        "credential-do-not-print", "registry-token-do-not-print", "secret-state", "secret-response"))
+    assert "do-not-print" not in output and "blobs/uploads" not in output
+    assert len(registry.requests) == stage + 1 and pages == [True]
 
 
-@pytest.mark.parametrize("location_request", [2, 3])
-@pytest.mark.parametrize("location", ["http://ghcr.io/upload", "https://other.example/upload"])
-def test_registry_preflight_never_sends_upload_credentials_to_an_unexpected_origin(
-        monkeypatch, location_request, location):
-    monkeypatch.setenv("GITHUB_ACTOR", "owner")
-    monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
-    requests = []
-
-    def respond(request, timeout):
-        requests.append(request)
-        response = io.BytesIO(b'{"token":"registry-token"}')
-        response.status = 200 if len(requests) == 1 else 202
-        response.headers = {"Location": location if len(requests) == location_request
-                            else "/v2/owner/repo/blobs/uploads/probe"}
-        return response
-
-    monkeypatch.setattr(release_services.urllib.request, "urlopen", respond)
-    with pytest.raises(ValueError, match="unexpected upload origin"):
+@pytest.mark.parametrize("stage,status", [(0, 202), (1, 200), (2, 200), (3, 200), (3, 202)])
+def test_registry_requires_acceptance_and_confirmed_completion(monkeypatch, stage, status):
+    registry = Registry(monkeypatch)
+    registry.statuses[stage] = status
+    with pytest.raises(release_services.RegistryPreflightError) as failure:
         release_services.registry_permissions("ghcr.io/owner/repo")
-    assert len(requests) == location_request
-    assert all(urllib.parse.urlsplit(request.full_url).netloc == "ghcr.io" for request in requests)
+    assert failure.value.status == status
+    assert len(registry.requests) == stage + 1
 
 
-@pytest.mark.parametrize("failed_request,message", [(2, "disposable upload"), (3, "blob transfer")])
-def test_registry_preflight_rejects_incomplete_upload_stages(monkeypatch, failed_request, message):
-    monkeypatch.setenv("GITHUB_ACTOR", "owner")
-    monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
-    requests = []
-
-    def respond(request, timeout):
-        requests.append(request)
-        response = io.BytesIO(b'{"token":"registry-token"}')
-        response.status = 200 if len(requests) in (1, failed_request) else 202
-        response.headers = {"Location": "/v2/owner/repo/blobs/uploads/probe"}
-        return response
-
-    monkeypatch.setattr(release_services.urllib.request, "urlopen", respond)
-    with pytest.raises(ValueError, match=message):
+@pytest.mark.parametrize("location", [
+    "http://ghcr.io/v2/owner/repo/blobs/uploads/disposable",
+    "https://elsewhere.invalid/v2/owner/repo/blobs/uploads/disposable",
+    "/v2/owner/repo/manifests/latest", "/v2/other/repo/blobs/uploads/disposable",
+    "/v2/owner/repo/blobs/uploads/", "/v2/owner/repo/blobs/uploads/disposable#fragment"])
+@pytest.mark.parametrize("stage", [1, 2])
+def test_registry_only_targets_the_returned_https_upload(monkeypatch, location, stage):
+    registry = Registry(monkeypatch)
+    if stage == 1:
+        registry.location = location
+    else:
+        registry.next_location = location
+    with pytest.raises(release_services.RegistryPreflightError, match="location validation"):
         release_services.registry_permissions("ghcr.io/owner/repo")
-    assert len(requests) == failed_request
+    assert len(registry.requests) == stage + 1
 
 
 def test_preflight_reports_all_service_failures_and_checks_stable_baseline(monkeypatch, capsys):
@@ -381,13 +451,74 @@ def test_preflight_reports_all_service_failures_and_checks_stable_baseline(monke
                     "recoverable stable-channel baseline"):
         assert service in str(failure.value)
     output = capsys.readouterr().out
-    assert "HTTP 403" in output
-    assert "secret" not in output
+    assert "HTTP 403" in output and "secret" not in output
 
 
-def test_pages_write_check_requires_an_actual_grant(monkeypatch):
-    backend = Backend("owner/repo")
-    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "account")
-    monkeypatch.setattr(backend, "api", lambda *args, **kwargs: {})
-    with pytest.raises(ValueError, match="upload token"):
-        release_services.pages_permissions(backend)
+@pytest.mark.parametrize("streamed", [False, True])
+def test_public_downloads_use_an_anonymous_identified_request(monkeypatch, streamed):
+    payload = b"signed repository metadata" * 50000
+    monkeypatch.setenv("GITHUB_TOKEN", "do-not-send")
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "do-not-send")
+    requests = []
+
+    def urlopen(request, timeout):
+        requests.append(request)
+        assert timeout == 30
+        assert request.get_method() == "GET"
+        assert request.data is None
+        assert dict(request.header_items()) == {"User-agent": release_services.PUBLIC_USER_AGENT}
+        # Model the public CDN denying urllib's default Python user agent.
+        assert not request.get_header("User-agent").startswith("Python-urllib/")
+        return io.BytesIO(payload)
+
+    monkeypatch.setattr(release_services.urllib.request, "urlopen", urlopen)
+    url = "https://repo.tuneconsole.com/summary"
+    if streamed:
+        release_services.public_download(url, hashlib.sha256(payload).hexdigest())
+        with pytest.raises(ValueError, match="checksum differs"):
+            release_services.public_download(url, "0" * 64)
+    else:
+        assert release_services.public_bytes(url) == payload
+    assert requests
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("status", [403, 404, 503, None])
+def test_public_failure_reports_operation_and_status_without_remote_secrets(monkeypatch, streamed, status):
+    import traceback
+
+    url = "https://do-not-print-user:do-not-print-password@repo.tuneconsole.com/summary?token=do-not-print-query#secret"
+
+    def denied(request, timeout):
+        if status is None:
+            raise urllib.error.URLError("do-not-print-reason")
+        raise urllib.error.HTTPError(request.full_url, status, "do-not-print-reason",
+                                     {"Secret": "do-not-print-header"}, io.BytesIO(b"do-not-print-body"))
+
+    monkeypatch.setattr(release_services.urllib.request, "urlopen", denied)
+    with pytest.raises(release_services.PublicVerificationError) as failure:
+        if streamed:
+            release_services.public_download(url, "0" * 64)
+        else:
+            release_services.public_bytes(url)
+    output = "".join(traceback.format_exception(failure.value))
+    assert "Public download GET https://repo.tuneconsole.com/summary" in output
+    if status is not None:
+        assert f"HTTP {status}" in output
+    else:
+        assert "failed" in output
+    assert "do-not-print" not in output
+
+
+@pytest.mark.parametrize("changed", ["summary", "summary.sig"])
+def test_public_flatpak_rejects_candidate_hash_mismatch_before_trusting_remote(monkeypatch, tmp_path, changed):
+    checksums = {name: hashlib.sha256(name.encode()).hexdigest() for name in ("summary", "summary.sig")}
+    monkeypatch.setattr(release_services, "public_bytes",
+                        lambda url: b"altered" if url.endswith(changed) else url.rsplit("/", 1)[-1].encode())
+
+    def no_remote(*args, **kwargs):
+        pytest.fail("Do not configure a remote before candidate hashes match")
+
+    monkeypatch.setattr(release_services.subprocess, "run", no_remote)
+    with pytest.raises(ValueError, match=f"Public Flatpak {changed} differs from signed candidate"):
+        release_services.verify_flatpak(tmp_path, "1.2.3", checksums, {})

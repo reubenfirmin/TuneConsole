@@ -1,5 +1,4 @@
 import json
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -95,19 +94,16 @@ def test_account_scope_repair_failure_keeps_installed_v29_unchanged(installed_v2
         raise RuntimeError('interrupt preservation repair')
     monkeypatch.setattr(registry,'MIGRATIONS',(*current[:29],Migration(30,current[29].name,fail)))
     with pytest.raises(MigrationError,match='interrupt preservation repair'):
-        migrate(store.conn,backup_dir=tmp_path / 'repair-backups')
+        migrate(store.conn)
     assert list(store.conn.iterdump())==before
-    backups = list((tmp_path / 'repair-backups').glob('*.db'))
-    assert len(backups)==1
-    with sqlite3.connect(backups[0]) as backup:
-        assert backup.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
-        assert backup.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]==29
+    assert not (tmp_path / 'backups').exists()
+    assert store.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
     monkeypatch.setattr(registry,'MIGRATIONS',current)
     store.init_schema()
     assert store.playlists.get_playlist_groups()['@account:2:LM']=='Old likes'
 
 
-def test_scope_upgrade_failure_rolls_back_with_verified_backup(installed_v23,tmp_path,monkeypatch):
+def test_scope_upgrade_failure_rolls_back_without_backups(installed_v23,tmp_path,monkeypatch):
     store = installed_v23
     before = list(store.conn.iterdump())
     current = registry.MIGRATIONS
@@ -116,14 +112,12 @@ def test_scope_upgrade_failure_rolls_back_with_verified_backup(installed_v23,tmp
         raise RuntimeError('interrupt account migration')
     monkeypatch.setattr(registry,'MIGRATIONS',(*current[:23],Migration(24,current[23].name,fail)))
     with pytest.raises(MigrationError,match='interrupt account migration'):
-        migrate(store.conn,backup_dir=tmp_path / 'backups')
+        migrate(store.conn)
     assert list(store.conn.iterdump())==before
     monkeypatch.setattr(registry,'MIGRATIONS',current)
     store.init_schema()
-    for path in (tmp_path / 'backups').glob('*.db'):
-        with sqlite3.connect(path) as backup:
-            assert backup.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
-            assert backup.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]==23
+    assert not (tmp_path / 'backups').exists()
+    assert store.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
 
 
 def test_system_curation_is_per_account_and_survives_membership_removal(store):
@@ -202,7 +196,8 @@ def test_generated_system_context_does_not_quarantine_another_accounts_likes(sto
         store.playlists.upsert_playlist(iid,'LM','Likes',0,'h',1)
     store.playlists.set_playlist_provenance('LM',identity_id=a,origin='tuneconsole',adopted=False)
     for iid in (a,b):
-        store.history.record_play_event(iid,'song|artist',None,10,playlist_ytm_id='LM')
+        store.history.record_play_event(iid,'song|artist',None,10,playlist_ytm_id='LM',source_timezone='UTC')
     assert [r[0] for r in store.conn.execute('SELECT is_generated FROM play_events ORDER BY id')]==[1,0]
     assert store.trends.ledger_track_plays(0,20)=={'song|artist':1}
-    assert [r['identity_id'] for r in RecapRepo(store).snapshot(0,20)['plays']]==[b]
+    # Recap ranges use calendar day boundaries, including the day's early events.
+    assert [r['identity_id'] for r in RecapRepo(store).snapshot(0,86400)['plays']]==[b]

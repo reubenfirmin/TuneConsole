@@ -58,7 +58,7 @@ def prepare(store, now):
     return mode_surfaces.prepare_bundles(store, now)
 
 
-def pick(store, now, include_genres=(), avoid_genres=(), size=12, *, minimum=4):
+def pick(store, now, include_genres=(), avoid_genres=(), size=12, *, minimum=4, bundles=None):
     """A balanced Fresh preview from already ranked candidates.
 
     Do not roll another single-genre theme over the user's selection. Each requested family must
@@ -66,7 +66,13 @@ def pick(store, now, include_genres=(), avoid_genres=(), size=12, *, minimum=4):
     Reading a page or choosing genres must never fit a projection or score the discovery pool.
     Individual discovery tiles can use a smaller minimum than a saveable mix.
     """
-    bundles = store.rec_proposals.get_proposals("mode_bundles") or {}
+    if preset := home_vibe.current(store, now):
+        from yt_playlist.rec import vibe_pools
+        tracks = vibe_pools.pick(store, now, preset, 'fresh', size=size,
+                                 include_genres=include_genres, avoid_genres=avoid_genres)
+        return tracks if len(tracks) >= minimum else []
+    if bundles is None:
+        bundles = store.rec_proposals.get_proposals("mode_bundles") or {}
     candidates = list(store.rec_proposals.get_proposals("fresh_pool") or [])
     candidates.extend(bundles.get("all", {}).get("fresh", []))
     for mid, bucket in bundles.items():

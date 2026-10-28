@@ -1,0 +1,58 @@
+.tv-home { max-width: 90rem; margin-inline: auto; }
+.tv-slot { max-width: 90rem; margin-inline: auto; }
+/* The player stays outside page replacements; only its screen position follows Home. */
+.tv-session { position: absolute; z-index: 1; }
+.topbar .omni[hidden] { display: none; }
+body.app-standalone > :is(.topbar, .authbar) { display: none; }
+body.app-standalone > main { margin: 0; padding: 0; max-width: none; min-height: 100dvh; animation: none; }
+body.app-standalone > .global-now-playing-slot {
+  display: block; position: fixed; inset: auto 0 0; z-index: 201;
+  padding: .75rem max(1rem, env(safe-area-inset-right)) max(.75rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+  pointer-events: none;
+}
+body.app-standalone .global-now-playing { max-width: 56rem; margin-inline: auto; pointer-events: auto; }
+/* Leave room for the measured controls so neither the recap nor its close and
+   navigation controls, nor generation status, are obscured by the player. */
+body.app-standalone #app-page > :is(.gen-stage, .reel) { bottom: var(--playback-dock-height, 0px); }
+@media (min-width: 45rem) {
+  body.app-standalone .hs-now { grid-template-columns: 3rem minmax(0, 1fr) 10rem; }
+  body.app-standalone .hs-rate-group { grid-column: 3; grid-row: 1; padding: 0; border: 0; }
+  body.app-standalone .hs-progress { inset: auto 0 -.25rem; }
+  body.app-standalone .hs-source { grid-column: 2 / -1; grid-row: 2; }
+}
+body.tv-is-playing { isolation: isolate; }
+.tv-backdrop { --art-index: 0; position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; opacity: .24; }
+.tv-backdrop img { position: absolute; inset: -5%; width: 110%; height: 110%; object-fit: cover; filter: saturate(.7); animation: tv-art-drift 45s ease-in-out infinite alternate; }
+@keyframes tv-art-drift { to { translate: 2% -3%; scale: 1.06; } }
+.tv-theater { position: relative; isolation: isolate; width: 100%; aspect-ratio: 16 / 9; min-height: 220px; background: var(--space-3); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.tv-player, .tv-player iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.tv-idle { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .7rem; text-align: center; padding: 1rem; background: radial-gradient(ellipse at center, var(--surface-2), var(--space-3)); }
+.tv-idle h2 { font-family: var(--font-sans); font-size: clamp(1.2rem, 3vw, 2rem); margin: 0; }
+.tv-idle p { color: var(--dim); margin: 0; max-width: 45ch; }
+.tv-mark svg { width: 3rem; height: 3rem; stroke: var(--accent); fill: none; stroke-width: 2.5; }
+.tv-message { color: var(--dim); font-size: .85rem; }
+.tv-loading.gen-stage { position: absolute; z-index: 2; }
+.tv-loading .gen-visual { inset: 1rem 0 calc(var(--loader-copy-height, 3rem) + 1rem); }
+.tv-loading .gen-copy { left: 1.25rem; right: 1.25rem; bottom: 1rem; }
+.tv-loading .gen-status { margin: 0; text-transform: none; font-size: clamp(.8rem, 2vw, 1.2rem); }
+.tv-loading .gen-hub { width: 54px; height: 54px; }
+.tv-loading .gen-hub .brand-eq { width: 28px; height: 24px; }
+.tv-loading .gen-node { width: 30px; height: 30px; border-radius: 7px; }
+.tv-filmstrip { display: flex; gap: .5rem; max-width: 100%; overflow-x: auto; padding: .65rem .15rem; scrollbar-width: thin; scroll-padding-inline: .15rem; }
+.tv-film { flex: 0 0 4.5rem; aspect-ratio: 16 / 9; min-width: 0; padding: 0; border: 1px solid transparent; border-radius: 3px; background: var(--space-3); cursor: pointer; overflow: hidden; }
+.tv-film.is-current { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.tv-film:hover, .tv-film:focus-visible { border-color: var(--accent); }
+.tv-film:disabled { cursor: default; }
+.tv-film img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.tv-length { margin-top: 1.5rem; }
+.tv-length-label, .tv-length-ends { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+.tv-length-label output { flex-shrink: 0; font-family: var(--font-mono); color: var(--accent); }
+.tv-length-ends { color: var(--dim); font-size: .75rem; }
+.tv-params { padding: 1.5rem; }
+.tv-reset { margin-top: 1rem; }
+.tv-dialog-actions { display: flex; justify-content: flex-end; gap: .75rem; margin-top: 1.5rem; }
+@media (max-width: 600px) {
+  .tv-idle { gap: .4rem; }
+  .tv-idle p { font-size: .8rem; }
+  .tv-mark svg { width: 2rem; height: 2rem; }
+}

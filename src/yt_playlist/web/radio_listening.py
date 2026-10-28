@@ -9,7 +9,8 @@ import logging
 import time
 from uuid import uuid4
 
-from yt_playlist.rec import measurement
+from yt_playlist.rec import choice_evidence, choice_outcomes, measurement, musical_character
+from yt_playlist.rec.radio_candidates import POLICY_VERSION
 from yt_playlist.web.radio_playback import PlaybackObservation, PlaybackRequest, PlaybackUnavailable
 from yt_playlist.web.radio_playlist_io import PlaylistPending
 from yt_playlist.web.radio_state import selected_slot
@@ -64,6 +65,8 @@ class RadioListening:
             if refresh_at is not None and result.get("refresh") in {"clicked", "requested"}:
                 s.edits.windows.append([refresh_at, self.now_fn() + 3])
             self.report(s, result)
+        if observation.player(s.playlist) is None:
+            return
         position = next((i for i, track in enumerate(s.tracks)
                          if player.get("playlist_ytm_id") == s.playlist
                          and track["video_id"] == player.get("video_id")), None)
@@ -106,10 +109,13 @@ class RadioListening:
                     *report)
 
     @staticmethod
-    def player(s):
+    def player(s, *, allow_paused=False):
         if s.browser_seen_at is None:
             return None
-        return PlaybackObservation(s.browser or {}, s.browser_seen_at).player(s.playlist, allow_paused=s.skip_requested)
+        explicit_play = (s.requested_direction and s.requested_direction.get('play')
+                         or s.replacement and s.replacement.play)
+        return PlaybackObservation(s.browser or {}, s.browser_seen_at).player(
+            s.playlist, allow_paused=bool(allow_paused or s.skip_requested or explicit_play))
 
     def record(self, s, position, *, track=None):
         track = track if track is not None else s.tracks[position]
@@ -129,6 +135,14 @@ class RadioListening:
         if choice:
             measurement.record_action(self.store, "start", now, keys=[track["key"]],
                 event_id=f"radio:{s.episode_id}:{choice['menu_id']}:{choice['id']}")
+            for kind in ("start", "experience"):
+                choice_evidence.safe_respond(self.store, choice["menu_id"], kind, now,
+                    option_id=choice.get("option_id", choice["id"]), action_id=f"radio:{s.episode_id}:{choice['menu_id']}:{choice['id']}:{kind}",
+                    details={"video_id": video, "episode_id": s.episode_id})
+            choice_outcomes.bind(self.store, s.identity, s.playlist, video, choice['menu_id'],
+                                choice.get('option_id', choice['id']), now)
+        else:
+            choice_outcomes.continue_playback(self.store, s.identity, s.playlist, video, now)
 
     def update(self, s, *, force=False):
         with self.lock:
@@ -147,12 +161,36 @@ class RadioListening:
 
     def seed_offer(self, candidates):
         tracks, menu_id = candidates.seed_offer(), uuid4().hex
+        tracks = [{**track, 'serving_context': {**track.get('serving_context', {}),
+                   'ordering_ranker': POLICY_VERSION, **musical_character.provenance(track)}} for track in tracks]
         measurement.record_recommendations(self.store, 'radio_seed', tracks,
             self.now_fn(), request_id=menu_id, ranker='radio-seed',
             provenance={'menu_id': menu_id, 'fingerprint': candidates.fingerprint,
                         'choice_unit': 'radio_session'})
-        self.store.settings.set_setting('radio_seed_offer', json.dumps({'tracks': tracks, 'menu_id': menu_id}))
+        if not getattr(self.store, 'activity_paused', False):
+            self.store.settings.set_setting('radio_seed_offer', json.dumps({'tracks': tracks, 'menu_id': menu_id,
+                'comparison': getattr(candidates, 'comparison', None)}))
+        context = getattr(candidates, 'choice_context', None) or (self.store.rec_proposals.get_proposals("home_prepared") or {}).get("choice_context", {})
+        choice_evidence.safe_issue(self.store, "radio", [{"id": t["video_id"], "position": i + 1,
+            "tracks": [t], "mode_id": t.get("_radio_mode"), "intent": "seed",
+            "score": getattr(candidates, "prior", {}).get(t.get("_radio_mode"), {}).get(t["key"])}
+            for i, t in enumerate(tracks)], self.now_fn(), opportunity_id=menu_id,
+            context={**context, "radio": {"fingerprint": candidates.fingerprint, "tuning": candidates.tuning,
+                                        'ordering_ranker': POLICY_VERSION, 'musical_policy': musical_character.VERSION}})
         return tracks, menu_id
+
+    def capture_menu(self, s):
+        menu_id = s.directions.menu_id
+        branches = s.directions.public([])
+        context = getattr(s.candidates, 'choice_context', None) or (self.store.rec_proposals.get_proposals("home_prepared") or {}).get("choice_context", {})
+        choice_evidence.safe_issue(self.store, "radio", [{"id": branch["id"],
+            "position": branch["slot"] + 1, "active": branch["active"], "tracks": branch["tracks"],
+            "mode_id": (branch["tracks"] or [{}])[0].get("_radio_mode"), "intent": "direction"}
+            for branch in branches], self.now_fn(), opportunity_id=menu_id, episode_id=s.episode_id, reuse=True,
+            context={**context, "radio": {"fingerprint": s.candidates.fingerprint, "tuning": s.candidates.tuning,
+                'ordering_ranker': POLICY_VERSION, 'musical_policy': musical_character.VERSION,
+                "now": s.candidates.now_posterior, "now_sampled_at": s.candidates.now_sampled_at,
+                "history": [t["key"] for t in s.heard]}})
 
     def tune(self, s, candidates):
         """Rebuild the offered future without changing durable taste or observed listening."""
@@ -173,20 +211,33 @@ class RadioListening:
             s.edits.queue({'slot': selected, 'tracks': list(branch['tracks']),
                            'choice': choice if branch['tracks'] else None})
 
-    def select(self, s, proposal_id, menu_id):
+    def select(self, s, proposal_id, menu_id, video_id=None, *, intent=None):
         """Queue a validated visible choice; the observer settles saved writes later."""
         if not self.current(s) or not s.directions:
             return {'ok': False, 'reason': 'Start a Radio Session first.'}, False
         slot, branch = s.directions.find(proposal_id)
         if menu_id != s.directions.menu_id or branch is None:
             return {'ok': False, 'stale': True, 'reason': 'The next songs changed. Choose a direction again.'}, False
-        if slot == selected_slot(s):
+        if video_id is None and slot == selected_slot(s):
             return {'ok': True}, False
         if not branch['tracks']:
             return {'ok': False, 'reason': 'No more library songs are available in that direction.'}, False
-        s.edits.queue({'slot': slot, 'tracks': list(branch['tracks']),
-                       'choice': {'id': branch['id'], 'menu_id': menu_id}})
+        index = next((i for i, track in enumerate(branch['tracks']) if track['video_id'] == video_id), None)
+        if video_id is not None and index is None:
+            return {'ok': False, 'stale': True, 'reason': 'That song left the stream. Choose a current song.'}, False
+        index = index or 0
+        self.capture_menu(s)
+        choice_evidence.safe_respond(self.store, menu_id, "choice", self.now_fn(), option_id=branch["id"],
+            details={"episode_id": s.episode_id, "slot": slot,
+                     **({'video_id': video_id, 'sequence_position': index + 1} if video_id else {})})
+        request = {'slot': slot, 'tracks': list(branch['tracks'][index:]),
+                   'choice': {'id': branch['id'], 'menu_id': menu_id}}
+        if video_id is not None:
+            request['play'] = {'video_id': video_id, 'intent': intent}
+            request['excluded'] = [t['video_id'] for t in branch['tracks'][:index]]
+        s.edits.queue(request)
         s.error = None
+        s.selection_error = None
         return {'ok': True}, True
 
     def seen(self, s, menu_id):
@@ -196,7 +247,11 @@ class RadioListening:
         if menu_id in s.seen_menus:
             return {"ok": True}, ()
         branches = s.directions.public([])
-        items = [{**track, "lane": branch["id"], "serving_context": {
+        self.capture_menu(s)
+        choice_evidence.safe_respond(self.store, menu_id, "visible", self.now_fn(),
+                                    visible=[branch["id"] for branch in branches])
+        items = [{**track, "lane": branch["id"], "serving_context": {**track.get('serving_context', {}),
+            'ordering_ranker': POLICY_VERSION, **musical_character.provenance(track),
             "proposal_id": branch["id"], "slot": branch["slot"],
             "sequence_position": index + 1, "active": branch["active"]}}
             for branch in branches for index, track in enumerate(branch["tracks"])]

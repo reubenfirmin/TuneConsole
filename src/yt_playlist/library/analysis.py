@@ -358,7 +358,9 @@ def analyze_cleanup(store) -> CleanupResult:
     overlap_prefs = {'suppressed': {frozenset((a, b)) for a, b, _ in prefs.suppressed},
                      'ignored_ytm': prefs.ignored_ytm, 'kept': prefs.kept}
     near_pairs = near_duplicate_pairs(state, near_groups, **overlap_prefs)
-    dupe_ids = {p.id for d in find_dupes(state) for p in (d.playlist_a, d.playlist_b)}
+    # Only visible duplicate suggestions take precedence over ordinary overlaps.
+    # Dismissing one merge must not suppress other relationships involving its members.
+    dupe_ids = exact_ids | {p.id for pair in near_pairs for p in (pair.playlist_a, pair.playlist_b)}
     overlaps = find_overlaps(state, exclude_playlist_ids=dupe_ids, **overlap_prefs)
     return CleanupResult(state, groups, near_pairs, overlaps,
                          find_empty_playlists(state, ignored=ci.get('empty')),

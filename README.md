@@ -1,15 +1,34 @@
 # TuneConsole
 
-A privacy-first tool that allows you to manage your YouTube playlists & albums, and find new songs to listen to. Includes a layered recommendation engine that you can fine tune. Also includes the ability to import from Spotify.
+**A better algorithm.**
 
-I built this because:
+Works with your existing YouTube Music account. TuneConsole learns from your library
+and listening history to bring you new discoveries, neglected records, and old
+favorites. Shape your next mix, follow connections between songs, or switch between
+four radio streams as you listen.
 
-a) I find YouTube's recommendations OK but not great
+Free app and extension. Recommendations run on your computer, and your YouTube Music
+sign-in stays in your browser. Bring your Spotify playlists and saved albums along
+with the included import.
 
-b) And I find YouTube's discovery and playlist management to be pretty bad
+[**Get TuneConsole**](https://tuneconsole.com/#install) ·
+[Explore tuneconsole.com](https://tuneconsole.com) ·
+[Privacy policy](https://tuneconsole.com/privacy)
 
-**Website: [tuneconsole.com](https://tuneconsole.com)** — overview, install guide, and
-[privacy policy](https://tuneconsole.com/privacy).
+[![Personalized mix tapes: music close to your taste, overlooked records, new discoveries, and old favorites.](https://tuneconsole.com/shots/home.webp)](https://tuneconsole.com)
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="https://tuneconsole.com/shots/radio.webp"><img src="https://tuneconsole.com/shots/radio.webp" alt="TuneConsole Radio with a playing song and four streams to choose from." width="100%"></a>
+      <strong>Radio that follows your taste.</strong> Four streams to explore and switch between.
+    </td>
+    <td width="50%" valign="top">
+      <a href="https://tuneconsole.com/shots/clusters.webp"><img src="https://tuneconsole.com/shots/clusters.webp" alt="An interactive map connecting songs from M83, Shpongle, Pink Floyd, and other artists." width="100%"></a>
+      <strong>Find a new path through your music.</strong> Explore connections and turn your discoveries into playlists.
+    </td>
+  </tr>
+</table>
 
 ## Features
 
@@ -30,6 +49,11 @@ b) And I find YouTube's discovery and playlist management to be pretty bad
   names and aliases. Expand or search the genre families there; equivalent names share an entry,
   while distinct subgenres retain their identity. Vocabulary upgrades preserve custom additions
   and disabled genres. Changes apply to future matching; existing song tags stay as saved.
+- **Album descriptions**: Long play can optionally use your DeepSeek Flash API key in
+  Settings / Enrichment. Descriptions are saved locally and reused; generation defaults to
+  at most 20 requests per UTC day, with a configurable limit and pause switch. Only artist,
+  album title and year are sent. `DEEPSEEK_API_KEY` or `deepseek_api_key` in config.toml
+  also work; the environment takes precedence over a saved key.
 
 ## Quickstart
 
@@ -45,8 +69,37 @@ b) And I find YouTube's discovery and playlist management to be pretty bad
 
 HTTP access logs are disabled by default. To include request logs in `app.log` and terminal
 output, start with `YT_PLAYLIST_ACCESS_LOG=1 uv run yt-playlist` (also works with `--reload`).
-Packaged apps and containers use the same environment variable. Application messages and
-server error tracebacks remain enabled regardless of this setting.
+Application messages and server error tracebacks remain enabled regardless of this setting.
+
+The new Charts Home journal and Listening analytics views are enabled for feedback.
+Start with `YT_PLAYLIST_LISTENING_CHARTS=0 uv run yt-playlist` to hide both views and
+stop their background preparation. Set the variable to `1` to enable them explicitly.
+The existing Charts rankings remain available in either mode.
+Packaged apps and containers use the same environment variable.
+
+Audio collection runs independently of developer vibe ratings. With a compatible
+extension model installed, ordinary app pages collect three ten-second excerpts
+during natural playback, near 30 seconds, halfway and two-thirds through a song.
+Keep a TuneConsole page open. Playback never seeks, and one app tab owns capture.
+Audio and inference stay in YouTube Music; only bounded measurements and frozen
+embeddings reach the app. Compatible measurements use the bundled Emotify vibe
+checkpoint and seed bounded artist/genre predictions for unmeasured recordings.
+Missing measurements retain the provider-metadata fallback. The existing six
+vibes and human annotations retain their meanings.
+
+Public extension archives currently exclude the optional research model assets.
+Those builds remain idle for automatic collection. Local model preparation is
+documented in `experiments/audio_lab/README.md`; reload the extension afterward.
+This checkpoint does not establish public model redistribution or population
+accuracy. See `experiments/audio_lab/MODEL_CHECKPOINT.md` for results and limits.
+
+The developer rating banner defaults off. To enable it, put
+`YT_PLAYLIST_AUDIO_VIBES=1` in the checkout's ignored `.env.local`, or set that
+environment variable explicitly. An explicit environment value takes precedence;
+`0` hides ratings without disabling collection. The banner accepts multiple
+existing vibe choices and preserves the prediction and sample evidence at each
+explicit edit. Regular users are never asked to label vibes. The dedicated Audio
+analysis preview retains its immediate manual/automatic single-excerpt behavior.
 
 ### Docker / Podman
 
@@ -86,17 +139,77 @@ and keep released versions unchanged. A migration uses explicit SQL on the suppl
 connection. The runner owns its transaction, version stamp and rollback; migration
 code must never commit, use `executescript`, or call repository write methods.
 
-Before upgrading an existing database, TuneConsole creates and integrity-checks a
-SQLite snapshot in `backups/` beside that database. Snapshot filenames identify
-the source and target schema versions. Fresh installations and reopening a current
-database do not create migration backups. Startup reports failed versions without
-starting the application against a partly upgraded schema.
+Each migration's schema changes, data changes and version stamp commit atomically.
+SQLite's transaction journal handles rollback and crash recovery; the framework does
+not create full-database snapshots or maintain a backup collection. If a migration
+fails, its changes roll back while previously completed versions remain committed,
+and the upgrade can resume on the next launch. Startup reports failed versions
+without starting the application against a partly upgraded schema.
 
-To recover, stop TuneConsole, preserve the failed database together with any `-wal`,
-`-shm` or journal files, and copy the verified backup to the database location.
-Remove the stopped database's old sidecar files from that location before reopening.
-Use an application release compatible with the backup's schema. Recovery is manual;
-TuneConsole never automatically downgrades or restores over your database.
+Prepared recommendation policies share a content-addressed configuration body across
+ranker, vibe, lane and genre variants. Existing full JSON policies remain readable.
+Background preparation collects unused policies after a one-hour grace period,
+preserving impression references and policy IDs in prepared/session data. Unused
+shared policy storage has admission limits of 64 MiB and 131,072 variants; an individual
+batch is capped at 8 MiB and 16,384 variants. These admission limits apply to new
+shared records; legacy full JSON policies are collected in bounded batches.
+If unused shared records, including newly expired served
+evidence, exceed the limits, preparation defers while maintenance catches up.
+A rejected batch retains the published pools.
+Online collection targets 8 MiB each for policy rows and orphan bodies per pass,
+including the last row that crosses the target, with at most 4,096 of each.
+Prepared policy writes reserve at least 256 MiB of filesystem headroom. Served
+attribution is protected independently of those disposable-data limits.
+
+On upgrade, a one-time repair starts automatically on a separate background
+connection. The UI opens immediately; browsing, starting and tuning radio, and
+existing playback remain available. A banner shows "Compacting storage - won't
+record activity until done" while repair is active. Activity is not recorded and
+radio session checkpoint writes are skipped; personal edits return a retry message.
+Radio uses an in-memory session during repair. After repair, minimal generated
+playlist provenance is saved so subsequent plays stay excluded from taste learning;
+discarded activity and session checkpoints are never replayed. Recommendation,
+enrichment and sync workers wait until repair finishes or safely defers. Normal
+recording then resumes and the banner clears, including when final compaction is
+deferred. The deferral reason remains in the logs and maintenance status.
+
+Repair collects obsolete legacy policies, shares retained configurations, and
+reclaims empty pages with native SQLite VACUUM in WAL mode. UI reads continue
+during compaction. SQLite serializes other application instances' writers; no
+stale snapshot replaces current data. Each conversion verifies the resolved
+configuration before committing, and integrity/foreign-key checks run around
+cleanup and compaction. Durable batch progress survives interruption; Ctrl+C
+cancels outstanding SQLite work and later launches resume committed progress.
+Logs report progress and completion.
+
+Cleanup reserves 32 MiB plus bounded batch work. Compaction needs temporary space
+for SQLite's compact working database and approximately twice the occupied-page
+size plus 256 MiB and overhead on the live database filesystem. If these are the
+same filesystem, their requirements add together. This is a working-space
+estimate: SQLite disk-full errors roll back safely. Busy readers get bounded,
+interruptible retries before further batches can grow the WAL. Insufficient
+space or prolonged contention defers repair, preserves completed batches, and
+retries on the next startup. No full oversized migration backup is created for
+this derived-policy cleanup. SQLite transaction protection remains on.
+
+For a separate recovery rehearsal on another filesystem:
+
+```bash
+uv run python -m yt_playlist.core.policy_recovery \
+  --source "$HOME/.local/share/yt-playlist/state.db" \
+  --output-dir /path/with/space/tuneconsole-recovery
+```
+
+The destination must be new and have approximately three times the source database's
+size available. The command opens the source read-only, keeps an untouched verified
+SQLite backup, collects unused policies on a working copy, shares retained policy
+bodies, and creates `compact.db`. `report.json` records integrity/foreign-key checks,
+non-policy table counts, exact retained configuration fingerprints and before/after
+sizes. It never replaces the source. Before using the candidate, stop all application
+writers and create a fresh candidate from that final state; a candidate created while
+the application was running excludes subsequent user changes. Preserve the stopped
+original database and its sidecars together before installing the candidate. Use the
+application version that supports the candidate's schema.
 
 The shared catalog separates a musical recording (`recordings.id`) from its playable
 uploads (`youtube_items.video_id`). New uploads get separate provisional recordings;

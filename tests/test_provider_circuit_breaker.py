@@ -3,7 +3,7 @@ import urllib.error
 
 import pytest
 
-from yt_playlist.providers import acousticbrainz, deezer, discogs, lastfm, musicbrainz
+from yt_playlist.providers import deezer, lastfm, musicbrainz
 from yt_playlist.providers.waterfall import run_waterfall
 from yt_playlist.util import net
 
@@ -44,7 +44,7 @@ def test_parse_error_counts_as_reachable():
     assert not b.tripped()
 
 
-@pytest.mark.parametrize("provider", [musicbrainz, discogs, lastfm, deezer, acousticbrainz])
+@pytest.mark.parametrize("provider", [musicbrainz, deezer])
 @pytest.mark.parametrize("offline", [False, True])
 def test_waterfall_probe_distinguishes_outages_from_confirmed_misses(
         provider, offline, store, monkeypatch):
@@ -54,28 +54,27 @@ def test_waterfall_probe_distinguishes_outages_from_confirmed_misses(
     store.playlists.set_playlist_tracks(pid, ids)
     calls = []
 
-    def response(*args, **kwargs):
-        calls.append(args)
-        if offline:
-            exc = urllib.error.URLError("offline")
-            provider._breaker.record(exc)
-            raise exc
-        provider._breaker.record()
-        return {}
+    import io
+    from types import SimpleNamespace
+    from yt_playlist.integrations.musicbrainz import MusicBrainzIAO
+    from yt_playlist.integrations.deezer import DeezerIAO
 
-    seam = "_get" if provider in (musicbrainz, discogs, lastfm) else "_get_json"
-    monkeypatch.setattr(provider, seam, response)
+    def open_request(request, **kwargs):
+        calls.append(request.full_url)
+        if offline:
+            raise urllib.error.URLError('offline')
+        return io.StringIO('{"data":[]}' if provider is deezer else '{"recordings":[]}')
+
+    boundary = DeezerIAO if provider is deezer else MusicBrainzIAO
+    monkeypatch.setattr(provider, '_iao', boundary(open_fn=open_request,
+        now_fn=lambda: 1000, pacer=SimpleNamespace(wait=lambda: None)))
     monkeypatch.setattr(lastfm, "api_key", lambda *args: "key")
-    # AcousticBrainz probes a known recording; isolate MusicBrainz requests from this provider test.
-    monkeypatch.setattr(musicbrainz, "recording_mbid", lambda *args: "mbid")
     events = []
     completed = run_waterfall(store, store.tracks.tracks_for_waterfall(pid),
                               [{"name": provider.name, "enabled": True}], events.append,
                               registry={provider.name: provider}, now_fn=lambda: 1000)
     attempt = store.enrichment_state.enrichment_attempts("t0|art")[provider.name]
-    # A known MusicBrainz recording ID is itself retained evidence for AcousticBrainz.
-    expected = "found" if provider is acousticbrainz else "no_match"
-    assert attempt["status"] == ("retry" if offline else expected)
+    assert attempt["status"] == ("retry" if offline else "no_match")
     if offline:
         assert completed == []
         assert len(calls) < 8

@@ -3,9 +3,9 @@ library views that power the collection pages.
 """
 import json
 import time
-from yt_playlist.core import artists as artist_catalog, albums as album_catalog
+from yt_playlist.core import artists as artist_catalog, albums as album_catalog, album_aliases
 
-from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
 
 
 _COMPLETE_ALBUM_TRACKLISTS = (
@@ -19,6 +19,59 @@ _COMPLETE_ALBUM_TRACKLISTS = (
 
 
 class CollectionRepo(Repo):
+    @snapshot_read
+    def taste_album_contexts(self, *, include_browse=()):
+        """Stable releases with distinct listening days for each recording.
+
+        Only a complete fetched tracklist supplies a coverage denominator. Repeated
+        occurrences/uploads and overlapping accounts cannot multiply a track's days.
+        Listening days already exclude known generated playback.
+        """
+        included = set(include_browse)
+        contexts = self._store.memoized_read(('album-taste-contexts', 1), self._taste_album_contexts)
+        return [album for album in contexts
+                if album['saved'] or album['return_days'] >= 2 or album['browse'] in included]
+
+    def _taste_album_contexts(self):
+        rows = self.conn.execute(
+            "SELECT a.id,a.title,a.artist,p.provider_id browse,a.year,a.genre,a.thumbnail,"
+            "at.id occurrence,at.is_full,f.complete,f.expected_track_count,"
+            "COALESCE(r.identity_key,er.identity_key,at.legacy_track_key) key,"
+            "EXISTS(SELECT 1 FROM album_library_memberships m WHERE m.album_id=a.id) saved "
+            "FROM albums a JOIN album_tracks at ON at.album_id=a.id "
+            "LEFT JOIN catalog_entries e ON e.id=at.entry_id "
+            "LEFT JOIN recordings er ON er.id=e.recording_id "
+            "LEFT JOIN recordings r ON r.id=at.recording_id "
+            "LEFT JOIN album_fetch_state f ON f.album_id=a.id "
+            "JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube'").fetchall()
+        days = {row['identity_key']: row['days'] for row in self.conn.execute(
+            "SELECT d.identity_key,COUNT(DISTINCT d.day) days FROM listening_days d "
+            "WHERE d.identity_key IN ("
+            "SELECT COALESCE(r.identity_key,er.identity_key,at.legacy_track_key) "
+            "FROM album_tracks at LEFT JOIN catalog_entries e ON e.id=at.entry_id "
+            "LEFT JOIN recordings er ON er.id=e.recording_id "
+            "LEFT JOIN recordings r ON r.id=at.recording_id) GROUP BY d.identity_key")}
+        albums = {}
+        for row in rows:
+            album = albums.setdefault(row["id"], {k: row[k] for k in
+                ("id", "title", "artist", "browse", "year", "genre", "thumbnail", "saved",
+                 "complete", "expected_track_count")})
+            album.setdefault("tracks", {})[row["occurrence"]] = (row["key"], row["is_full"])
+        result = []
+        for album in albums.values():
+            tracks = album.pop("tracks").values()
+            full = [key for key, is_full in tracks if is_full]
+            fetched, expected = album.pop("complete"), album.pop("expected_track_count")
+            album["tracklist_complete"] = bool(fetched and full and all(full) and expected == len(full))
+            album["keys"] = sorted(set(full if album["tracklist_complete"] else
+                                       (key for key, _ in tracks if key)))
+            album["track_days"] = {key: days.get(key, 0) for key in album["keys"]}
+            album["return_days"] = max(album["track_days"].values(), default=0)
+            album["return_coverage"] = (sum(count >= 2 for count in album["track_days"].values())
+                / len(album["keys"]) if album["tracklist_complete"] else None)
+            result.append(album)
+        return sorted(result, key=lambda a: a["id"])
+
     @synchronized
     def cache_album_tracklist(self, browse_id, title, artist, thumbnail, keys, *, video_ids=None, entries=None, credits=None, year=None, album_type=None):
         """Only full album fetches may write this denominator; playlist sync cannot."""
@@ -35,6 +88,11 @@ class CollectionRepo(Repo):
             return None
         row = self.conn.execute("SELECT title,video_ids_json FROM album_share_snapshots WHERE browse_id=?",
                                 (browse_id,)).fetchone()
+        if row is None:
+            row = self.conn.execute('SELECT s.title,s.video_ids_json FROM album_share_snapshots s '
+                "JOIN album_provider_ids p ON p.provider='youtube' AND p.provider_id=s.browse_id "
+                'WHERE p.album_id=? ORDER BY p.is_primary DESC,p.provider_id LIMIT 1',
+                (album_catalog.lookup(self.conn, browse_id),)).fetchone()
         return {"title": row["title"], "video_ids": json.loads(row["video_ids_json"])} if row else None
 
     @synchronized
@@ -69,7 +127,7 @@ class CollectionRepo(Repo):
         if not album_browse_id:
             rows = self.conn.execute(
                 "SELECT DISTINCT p.provider_id FROM album_tracks a JOIN catalog_entries e ON e.id=a.entry_id "
-                "JOIN album_provider_ids p ON p.album_id=a.album_id AND p.provider='youtube' WHERE e.video_id=?",
+                "JOIN album_primary_provider_ids p ON p.album_id=a.album_id AND p.provider='youtube' WHERE e.video_id=?",
                 (video_id,)).fetchall()
             album_browse_id = rows[0][0] if len(rows)==1 else None
         if album_browse_id:
@@ -154,7 +212,8 @@ class CollectionRepo(Repo):
     @synchronized
     def saved_album_ids(self, *, browse_ids=None) -> set:
         if browse_ids is None:
-            return {r["browse_id"] for r in self.conn.execute("SELECT browse_id FROM saved_albums")}
+            return {r[0] for r in self.conn.execute("SELECT p.provider_id FROM album_provider_ids p "
+                "WHERE p.provider='youtube' AND EXISTS(SELECT 1 FROM album_library_memberships m WHERE m.album_id=p.album_id)")}
         result = set()
         for bid in set(browse_ids):
             if self.conn.execute('SELECT 1 FROM album_provider_ids p JOIN album_library_memberships m '
@@ -165,6 +224,64 @@ class CollectionRepo(Repo):
     @synchronized
     def album_id(self, browse_id):
         return album_catalog.lookup(self.conn,browse_id)
+
+    @synchronized
+    def canonical_album_ids(self, browse_ids):
+        return {bid: album_catalog.lookup(self.conn, bid) for bid in set(browse_ids) if bid}
+
+    @lookup_read
+    def preferred_album_ids(self, browse_ids):
+        """Resolve only proven aliases; unknown IDs and distinct editions stay independent."""
+        ids = list(set(browse_ids))
+        result = {bid: bid for bid in ids}
+        for start in range(0, len(ids), 400):
+            batch = ids[start:start + 400]
+            placeholders = ','.join('?' for _ in batch)
+            result.update(self.conn.execute(
+                'SELECT p.provider_id,preferred.provider_id FROM album_provider_ids p '
+                'JOIN album_primary_provider_ids preferred ON preferred.album_id=p.album_id '
+                "AND preferred.provider=p.provider WHERE p.provider='youtube' "
+                f'AND p.provider_id IN ({placeholders})', batch))
+        return result
+
+    @snapshot_read
+    def album_alias_revision(self):
+        """Append-only reconciliations invalidate derived release attribution."""
+        return self.conn.execute('SELECT count(*) FROM album_alias_reconciliations').fetchone()[0]
+
+    @snapshot_read
+    def album_alias_candidates(self, titles):
+        """Cheap title candidates; only complete source comparisons may reconcile them."""
+        titles = {' '.join(str(title or '').split()).casefold() for title in titles}
+        if not titles:
+            return []
+        return [dict(row) for row in self.conn.execute(
+            "SELECT p.provider_id browse_id,a.title,a.artist FROM albums a "
+            "JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube'")
+            if ' '.join(str(row['title'] or '').split()).casefold() in titles]
+
+    @synchronized
+    def observe_album_representation(self, browse_id, album, *, now=None):
+        with self.conn:
+            if not self.conn.in_transaction:
+                self.conn.execute('BEGIN IMMEDIATE')
+            return album_aliases.observe(self.conn, browse_id, album, now=now)
+
+    @synchronized
+    def claim_album_alias_check(self, first, second, now):
+        first, second = sorted((first, second))
+        if first == second:
+            return False
+        with self.conn:
+            if not self.conn.in_transaction:
+                self.conn.execute('BEGIN IMMEDIATE')
+            left, right = album_catalog.lookup(self.conn, first), album_catalog.lookup(self.conn, second)
+            if left is not None and left == right:
+                return False
+            self.conn.execute('DELETE FROM album_alias_checks WHERE checked_at<?', (now - 30 * 86400,))
+            return bool(self.conn.execute('INSERT INTO album_alias_checks VALUES (?,?,?) '
+                'ON CONFLICT(first_id,second_id) DO UPDATE SET checked_at=excluded.checked_at '
+                'WHERE checked_at<=?', (first, second, now, now - 900)).rowcount)
 
     @synchronized
     def add_saved_album(self, a, *, identity_id=None) -> None:
@@ -208,26 +325,71 @@ class CollectionRepo(Repo):
                 'identity_id': row['identity_id'], 'label': row['label'], 'active': bool(row['active'])})
         return owners
 
-    @synchronized
-    def saved_albums_recency(self) -> dict:
+    @snapshot_read
+    def saved_albums_recency(self, *, include_generated=False) -> dict:
         """{browse_id: newest play ts across the album's tracks | None}. Plays come from history (a
         track's identity_key in a snapshot). LEFT JOINs throughout, so an album whose tracks aren't in
         the library (or were never played) comes back None, i.e. as cold as possible."""
+        activity = ('SELECT identity_key,played_at at FROM play_events UNION ALL '
+                    'SELECT identity_key,day_ts+86400 FROM listening_days'
+                    if include_generated else 'SELECT identity_key,at FROM listening_activity')
         rows = self.conn.execute(
             "SELECT sa.browse_id AS browse,MAX(hi.at) AS last "
             "FROM saved_albums sa "
             "LEFT JOIN album_track_links a ON a.browse_id=sa.browse_id "
             "LEFT JOIN tracks t ON t.id=a.entry_id "
-            "LEFT JOIN listening_activity hi ON hi.identity_key=t.identity_key "
+            f"LEFT JOIN ({activity}) hi ON hi.identity_key=t.identity_key "
             "GROUP BY sa.browse_id").fetchall()
         return {r["browse"]: r["last"] for r in rows}
 
     # --- aggregate library views ---
+    def album_listening_counts(self, browse_ids):
+        """Recorded track plays, counting each recording once per requested release.
+
+        Include recommendation playback here, even though it is quarantined from
+        organic taste learning. Dated history supplies one play per track/day only
+        when no exact event already represents that account's day.
+        """
+        return {browse: summary['plays'] for browse, summary in self.album_listening_summary(browse_ids).items()}
+
+    @snapshot_read
+    def album_listening_summary(self, browse_ids):
+        """Track-play totals and release coverage for a familiarity indicator."""
+        browse_ids = list(dict.fromkeys(browse_ids))
+        if not browse_ids:
+            return {}
+        placeholders = ','.join('?' for _ in browse_ids)
+        rows = self.conn.execute(
+            "WITH membership AS MATERIALIZED ("
+            "SELECT DISTINCT p.provider_id browse,"
+            "COALESCE(r.identity_key,er.identity_key,at.legacy_track_key) key,COALESCE(f.complete,0) complete "
+            "FROM album_provider_ids p JOIN album_tracks at ON at.album_id=p.album_id "
+            "LEFT JOIN album_fetch_state f ON f.album_id=p.album_id "
+            "LEFT JOIN recordings r ON r.id=at.recording_id "
+            "LEFT JOIN catalog_entries e ON e.id=at.entry_id "
+            "LEFT JOIN recordings er ON er.id=e.recording_id "
+            f"WHERE p.provider='youtube' AND p.provider_id IN ({placeholders})"
+            "), requested AS MATERIALIZED (SELECT DISTINCT key FROM membership WHERE key IS NOT NULL),"
+            "exact AS (SELECT pe.identity_key,COUNT(*) n FROM play_events pe "
+            "WHERE pe.identity_key IN (SELECT key FROM requested) GROUP BY pe.identity_key),"
+            "fallback AS (SELECT d.identity_key,COUNT(*) n FROM listening_days d "
+            "WHERE d.identity_key IN (SELECT key FROM requested) "
+            "AND NOT EXISTS(SELECT 1 FROM play_events pe JOIN play_event_calendar c ON c.event_id=pe.id "
+            "WHERE pe.identity_key=d.identity_key AND pe.identity_id=d.identity_id AND c.day=d.day) "
+            "GROUP BY d.identity_key) "
+            "SELECT m.browse,COUNT(m.key) tracks,MAX(m.complete) complete,"
+            "SUM(COALESCE(e.n,0)+COALESCE(d.n,0)) plays FROM membership m "
+            "LEFT JOIN exact e ON e.identity_key=m.key LEFT JOIN fallback d ON d.identity_key=m.key "
+            "GROUP BY m.browse", browse_ids).fetchall()
+        return {**{browse: {'plays': 0, 'tracks': 0, 'complete': False} for browse in browse_ids},
+                **{row['browse']: {'plays': row['plays'], 'tracks': row['tracks'],
+                                  'complete': bool(row['complete'])} for row in rows}}
+
     def _play_counts(self):
         return {r["identity_key"]: r["c"]
                 for r in self.conn.execute("SELECT identity_key, COUNT(*) c FROM listening_days GROUP BY identity_key")}
 
-    @synchronized
+    @snapshot_read
     def collection_albums(self) -> list[dict]:
         """Every album across your playlists: artist, song count, #playlists, total plays."""
         plays = self._play_counts()
@@ -235,7 +397,7 @@ class CollectionRepo(Repo):
             "SELECT a.id album_id,a.title album,t.identity_key key,a.artist artist,p.provider_id browse, "
             "       MIN(t.thumbnail) thumb, GROUP_CONCAT(DISTINCT pt.playlist_id) pls "
             "FROM albums a JOIN album_tracks at ON at.album_id=a.id JOIN tracks t ON t.id=at.entry_id "
-            "JOIN playlist_tracks pt ON pt.track_id=t.id JOIN album_provider_ids p "
+            "JOIN playlist_tracks pt ON pt.track_id=t.id JOIN album_primary_provider_ids p "
             "ON p.album_id=a.id AND p.provider='youtube' WHERE NULLIF(a.title,'') IS NOT NULL "
             "GROUP BY a.id,t.identity_key").fetchall()
         albums = {}
@@ -254,7 +416,7 @@ class CollectionRepo(Repo):
         out.sort(key=lambda a: (-a["plays"], a["album"].lower()))
         return out
 
-    @synchronized
+    @snapshot_read
     def collection_artists(self) -> list[dict]:
         """Artists across playlists and saved albums, including albums not yet materialized."""
         plays = self._play_counts()
@@ -266,7 +428,7 @@ class CollectionRepo(Repo):
             "FROM tracks t JOIN track_artists ta ON ta.entry_id=t.id LEFT JOIN artist_provider_ids ap "
             "ON ap.artist_id=ta.artist_id AND ap.provider='youtube' "
             "LEFT JOIN album_tracks at ON at.entry_id=t.id LEFT JOIN albums a ON a.id=at.album_id "
-            "LEFT JOIN album_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
+            "LEFT JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
             "LEFT JOIN playlist_tracks pt ON pt.track_id=t.id "
             "WHERE t.artist<>'' AND (pt.track_id IS NOT NULL OR "
             "EXISTS(SELECT 1 FROM album_library_memberships m WHERE m.album_id=a.id)) "
@@ -310,20 +472,20 @@ class CollectionRepo(Repo):
         out.sort(key=lambda a: (-a["plays"], a["artist"].lower()))
         return out
 
-    @synchronized
+    @snapshot_read
     def artist_albums(self, artist, browse_id=None):
+        aid = artist_catalog.lookup(self.conn,artist)
         if browse_id:
             row = self.conn.execute("SELECT artist_id FROM artist_provider_ids WHERE provider='youtube' AND provider_id=?", (browse_id,)).fetchone()
-            aid = row[0] if row else None
-        else:
-            aid = artist_catalog.lookup(self.conn,artist)
+            if row:
+                aid = row[0]
         if aid is None:
             return []
         plays, collection = self._play_counts(), {}
         for row in self.conn.execute(
                 "SELECT a.id,a.title album,a.year,a.thumbnail thumb,p.provider_id browse, "
                 "EXISTS(SELECT 1 FROM album_library_memberships m WHERE m.album_id=a.id) saved "
-                "FROM albums a JOIN album_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
+                "FROM albums a JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
                 "WHERE EXISTS(SELECT 1 FROM album_tracks at JOIN tracks t ON t.id=at.entry_id "
                 "JOIN track_artists ta ON ta.entry_id=t.id WHERE at.album_id=a.id AND ta.artist_id=?) "
                 "OR (EXISTS(SELECT 1 FROM album_library_memberships m WHERE m.album_id=a.id) "

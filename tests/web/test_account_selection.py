@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from tests.conftest import FakeClient
+from yt_playlist.core.bridge import Bridge
 from yt_playlist.web.app import create_app
 from yt_playlist.rec import road_trip
 
@@ -94,8 +95,13 @@ def test_radio_creation_uses_the_main_account(store,monkeypatch,order):
     clients = dict(reversed(list(remotes.items()))) if order=='main-first' else dict(remotes)
     if order=='main-missing':
         clients.pop(main)
+    class ConnectedBridge(Bridge):
+        @property
+        def connected(self):
+            return True
+
     ctx = SimpleNamespace(store=store,client_provider=lambda:clients,now_fn=lambda:1,
-                          bridge=SimpleNamespace(connected=True))
+                          bridge=ConnectedBridge())
     radio = radio_session.PlaylistRadio(ctx)
     monkeypatch.setattr(radio,'join',lambda:None)
     song = dict(video_id='song',title='Song',artist='Artist')

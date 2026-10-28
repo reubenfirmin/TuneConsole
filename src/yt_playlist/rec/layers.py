@@ -26,27 +26,51 @@ each wall-clock decayed by `session_halflife_h` (hours scale). Same conceptual s
 but tuned for within-session carry-over. Mirrors centroid_tilt's style: accumulates weighted vectors,
 returns a mean of decayed unit vectors or None when quiet/below gate.
 """
+from dataclasses import dataclass
+
 import numpy as np
 
 from yt_playlist.rec import embedding_vectors as vectors, rec_params, taste_modes, transient
 
-# #93v2: every layer in this module reads recent plays as MOOD EVIDENCE and feeds that reading back
-# into the scores that steer radio, so every play_events_since read here excludes the radio
-# playlists' own machine-queued plays. The single shared helper (and the full rationale for the
-# loop it closes) lives in transient.radio_list_ids, next to the slower transient/graduation funnel
-# that needs the same exclusion.
+# All four layers preserve the same generated-playback boundary. Deliberate choices are
+# incorporated separately; automatic track continuation cannot reinforce its own taste context.
 _radio_list_ids = transient.radio_list_ids
 
 
 def _plays(store, since):
-    return store.history.play_events_since(since, exclude_list_ids=_radio_list_ids(store))
+    quarantined = store.rec_eligibility.generated_only_keys()
+    return [row for row in store.history.play_events_since(
+        since, exclude_list_ids=_radio_list_ids(store), taste_only=True)
+        if row["identity_key"] not in quarantined]
 
 
-def _snapshot(store):
-    return store.rec_model.content_generation(keys=[r['identity_key'] for r in _plays(store, 0)])
+@dataclass
+class RecentEvidence:
+    latest: dict
+    modes: list
+    vectors: object
+    index: dict
+
+    def since(self, timestamp):
+        return {key: ts for key, ts in self.latest.items() if ts >= timestamp}
 
 
-def now_mode_mix(store, now):
+def recent_evidence(store, now, *, window_h=24):
+    """Read recent evidence first, then decode only its distinct content keys.
+
+    A combined NOW/Session view shares this one generation and decoded matrix.
+    Empty windows still read the encoding identity for mode validity, with no
+    vector rows requested. Lifetime listening never expands this work.
+    """
+    latest = {r['identity_key']: r['played_at']
+              for r in _plays(store, now - window_h * 3600)}
+    snapshot = store.rec_model.content_generation(keys=list(latest))
+    modes = taste_modes.live_modes(store, snapshot=snapshot)
+    _keys, CV, cidx = vectors.load_content_vectors(store, snapshot=snapshot)
+    return RecentEvidence(latest, modes, CV, cidx if CV is not None else {})
+
+
+def now_mode_mix(store, now, *, evidence=None):
     """Shared internals for `now_mode_posterior` and the taste_viz NOW ribbon: the {mode_id: share}
     posterior, `n` (the count of distinct played keys that fed it), and the active mode list used to
     build it (so a caller wanting mode labels doesn't have to re-fetch them).
@@ -54,24 +78,18 @@ def now_mode_mix(store, now):
     gate isn't cleared. Public (not `_`-prefixed): taste_viz needs the full mix, not just the reduced
     readings the other two callers take from it.
     """
-    snapshot = _snapshot(store)
-    modes = taste_modes.live_modes(store, snapshot=snapshot)
+    window_h = rec_params.get_param(store, "now_window_h")
+    evidence = evidence if evidence is not None else recent_evidence(store, now, window_h=window_h)
+    modes = evidence.modes
     if not modes:
         return None, 0, modes
-    _ckeys, CV, cidx = vectors.load_content_vectors(store, snapshot=snapshot)
+    CV, cidx = evidence.vectors, evidence.index
     if CV is None:
         return None, 0, modes
 
-    window_h = rec_params.get_param(store, "now_window_h")
     min_events = int(rec_params.get_param(store, "now_min_events"))
     since = now - window_h * 3600.0
-    rows = _plays(store, since)
-
-    # Dedup per key, keeping the latest timestamp in the window (rows arrive oldest-first, so a plain
-    # overwrite lands on the latest occurrence of each key).
-    latest: dict = {}
-    for r in rows:
-        latest[r["identity_key"]] = r["played_at"]
+    latest = evidence.since(since)
 
     played_keys = [k for k in latest if k in cidx]
     if len(played_keys) < min_events:
@@ -116,25 +134,25 @@ def now_mode_posterior(store, now) -> dict | None:
     return posterior
 
 
-def evidence_coverage(store, now) -> dict:
+def evidence_coverage(store, now, *, evidence=None) -> dict:
     """Coverage/confidence facts for the UI, computed from the exact NOW/Session play source.
 
     `total` is distinct eligible real-time plays after radio provenance exclusion; `mapped` is the
     subset with a content vector and therefore able to vote in the mode posterior.
     """
-    _keys, CV, cidx = vectors.load_content_vectors(store, snapshot=_snapshot(store))
-    cidx = cidx if CV is not None else {}
+    window_h = rec_params.get_param(store, "now_window_h")
+    evidence = evidence if evidence is not None else recent_evidence(store, now, window_h=max(24, window_h))
+    cidx = evidence.index
 
     def one(window_h):
-        rows = _plays(store, now - window_h * 3600.0)
-        latest = {r["identity_key"]: r["played_at"] for r in rows}
+        latest = evidence.since(now - window_h * 3600.0)
         mapped = sum(k in cidx for k in latest)
         total = len(latest)
         return {"total": total, "mapped": mapped,
                 "coverage": mapped / total if total else None,
                 "window_h": window_h}
 
-    return {"now": one(rec_params.get_param(store, "now_window_h")),
+    return {"now": one(window_h),
             "session": one(24)}
 
 
@@ -185,7 +203,7 @@ def session_tilt(store, now, V, idx) -> np.ndarray | None:
     return tilt / contributing
 
 
-def session_mode_mix(store, now):
+def session_mode_mix(store, now, *, evidence=None):
     """The SESSION layer's legible companion to `session_tilt`. `session_tilt` blends recent plays
     into a single bounded tilt in the collaborative embedding space - real signal, but not something
     that can be honestly labeled (a blend of two unrelated corners of taste is a "free vector" that
@@ -204,24 +222,18 @@ def session_mode_mix(store, now):
     contributed (unweighted, matching `now_mode_mix`'s `n`); `modes` is the active mode list. Below the
     gate this returns None, never a weak guess, mirroring every other layer in this module.
     """
-    snapshot = _snapshot(store)
-    modes = taste_modes.live_modes(store, snapshot=snapshot)
+    evidence = evidence if evidence is not None else recent_evidence(store, now)
+    modes = evidence.modes
     if not modes:
         return None, 0, modes
-    _ckeys, CV, cidx = vectors.load_content_vectors(store, snapshot=snapshot)
+    CV, cidx = evidence.vectors, evidence.index
     if CV is None:
         return None, 0, modes
 
     min_events = int(rec_params.get_param(store, "now_min_events"))
     session_hl_h = rec_params.get_param(store, "session_halflife_h")
     since = now - 24 * 3600.0
-    rows = _plays(store, since)
-
-    # Dedup per key, keeping the latest timestamp in the window (rows arrive oldest-first, so a plain
-    # overwrite lands on the latest occurrence of each key).
-    latest: dict = {}
-    for r in rows:
-        latest[r["identity_key"]] = r["played_at"]
+    latest = evidence.since(since)
 
     played_keys = [k for k in latest if k in cidx]
     if len(played_keys) < min_events:

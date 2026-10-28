@@ -1,5 +1,5 @@
 {# Swapped in for a proto-playlist card after "Save & play": success or a friendly failure. #}
-<section class="gen-card card gen-done">
+<section class="gen-card card gen-done"{% if not error and ytm %} data-generated-playlist="{{ ytm }}"{% endif %}>
   {% if error %}
   <header class="gen-head"><span class="status-label status-label--error">{% if partial_ytm %}Partially saved{% else %}Couldn't save{% endif %}</span>
     <h2 class="gen-name">{{ name }}</h2></header>

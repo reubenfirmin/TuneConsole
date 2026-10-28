@@ -1,0 +1,23 @@
+<section class="listening-format" aria-labelledby="listening-format-title">
+  <h1 id="listening-format-title">How do you like to listen?</h1>
+  <p>Customize your landing page. You can easily switch between listening modes, but your choice here will set the default.</p>
+  <div class="listening-format-options">
+    {% for value, label, description in [
+      ('albums', 'Long play', 'Whole albums, from the first track to the last.'),
+      ('mixes', 'Mix tapes', 'Personal playlists that bring your favorites and discoveries together.'),
+      ('radio', 'On air', 'A continuous flow of music that finds its own way.')
+    ] %}
+    <form method="post" action="/home/onboard/format" hx-post="/home/onboard/format"
+          hx-target="#home" hx-select="#home" hx-swap="outerHTML">
+      <input type="hidden" name="format" value="{{ value }}">
+      <button class="listening-format-option" type="submit" aria-label="Start with {{ label }}">
+        <img src="/static/onboarding-{{ value }}.png" alt="" width="1536" height="1024">
+        <span class="listening-format-copy">
+          <strong>{{ label }} {{ arrow_icon('right') }}</strong>
+          <span>{{ description }}</span>
+        </span>
+      </button>
+    </form>
+    {% endfor %}
+  </div>
+</section>

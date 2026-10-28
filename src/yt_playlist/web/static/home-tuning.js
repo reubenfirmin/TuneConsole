@@ -107,11 +107,14 @@ document.addEventListener('htmx:afterRequest', event => {
   const raw = event.detail.xhr?.getResponseHeader('X-Mix-Tuning-Remaining');
   if (raw === null || raw === undefined) return;
   const remaining = Number(raw);
-  if (remaining === 0 && mixTuningDeadline && event.detail.target?.id !== 'fingerprint') {
+  if (remaining === 0 && mixTuningDeadline && event.detail.target?.id !== 'fingerprint'
+      && event.detail.elt?.id !== 'home-vibe-form') {
     // A fragment can notice expiration before the timer; refresh its controls too.
     mixTuningDeadline = Date.now();
     refreshExpiredMixTuning();
   } else {
+    // Clearing a vibe already updates its controls below. A zero deadline here
+    // means there are no remaining adjustments, rather than an unseen expiry.
     scheduleMixTuningExpiry(remaining);
   }
 });
@@ -234,35 +237,133 @@ document.addEventListener('htmx:afterRequest', event => {
   }
 });
 
+let homeVibeUpdate = null;
+let homeVibeFeedbackTimer;
+
+function homeVibeLabel(value) {
+  return [...document.querySelectorAll('#home-vibe-form input')]
+    .find(input => input.value === value)?.closest('label').querySelector('strong')?.textContent.trim() || 'your vibe';
+}
+
+function dismissHomeVibeFeedback() {
+  if (homeVibeUpdate) homeVibeUpdate.dismissed = true;
+  document.getElementById('home-vibe-feedback')?.setAttribute('hidden', '');
+}
+
+function clearHomeVibeFeedback() {
+  clearTimeout(homeVibeFeedbackTimer);
+  homeVibeUpdate = null;
+  document.getElementById('home-vibe-feedback')?.setAttribute('hidden', '');
+}
+
+function renderHomeVibeFeedback() {
+  const update = homeVibeUpdate;
+  const feedback = document.getElementById('home-vibe-feedback');
+  if (!feedback || !update) return;
+  feedback.hidden = !!update.dismissed;
+  feedback.dataset.state = update.phase;
+  const readyMixes = !!document.querySelector('#home-mode-cards .gen-card-body');
+  let title = update.value ? 'Adjusting your mixes for ' + update.label + '…' : 'Adjusting your mixes…';
+  let detail = readyMixes ? '' : 'Your mix tapes will appear here when they’re ready.';
+  if (update.phase === 'ready') {
+    title = update.value ? 'Your ' + update.label + ' mix tapes are ready.' : 'Your mix tapes are ready.';
+    detail = '';
+  } else if (update.phase === 'error') {
+    title = 'Couldn’t update your mix tapes.';
+    detail = 'Choose a vibe to try again.';
+  } else if (update.phase === 'notice') {
+    title = update.notice;
+    detail = 'We’ll keep trying to prepare your mix tapes.';
+  }
+  // Repeated preparation polls must not repeat an unchanged live announcement.
+  const heading = document.getElementById('home-vibe-feedback-title');
+  const description = document.getElementById('home-vibe-feedback-detail');
+  if (heading.textContent !== title) heading.textContent = title;
+  if (description.textContent !== detail) description.textContent = detail;
+}
+
+function syncHomeVibeFeedback() {
+  const feedback = document.getElementById('home-vibe-feedback');
+  const row = document.getElementById('home-mode-cards');
+  if (!feedback || !row) return;
+  // Navigation replaces the feed; a previous page's request must not own its status.
+  if (homeVibeUpdate?.feedback !== feedback) {
+    clearTimeout(homeVibeFeedbackTimer);
+    homeVibeUpdate = null;
+  }
+  const value = row.dataset.vibe || '';
+  if (homeVibeUpdate?.phase === 'saving') return;
+  if (homeVibeUpdate?.phase === 'error') {
+    if (value === homeVibeUpdate.previousValue) return;
+    clearHomeVibeFeedback();
+  }
+  if (homeVibeUpdate && homeVibeUpdate.value !== value) {
+    clearTimeout(homeVibeFeedbackTimer);
+    homeVibeUpdate = null;
+    feedback.hidden = true;
+  }
+  // Restore ongoing preparation after a reload, without announcing old completed changes.
+  if (!homeVibeUpdate && value && row.dataset.preparing === 'true') {
+    homeVibeUpdate = {feedback, value, label: homeVibeLabel(value), phase: 'waiting'};
+  }
+  if (!homeVibeUpdate) return;
+  const phase = row.dataset.preferenceNotice ? 'notice'
+    : row.dataset.preparing === 'true' || !row.querySelector('.gen-card-body') ? 'waiting' : 'ready';
+  if (phase !== homeVibeUpdate.phase) {
+    clearTimeout(homeVibeFeedbackTimer);
+    homeVibeUpdate.phase = phase;
+    if (phase === 'ready') {
+      const completed = homeVibeUpdate;
+      homeVibeFeedbackTimer = setTimeout(() => {
+        if (homeVibeUpdate === completed) dismissHomeVibeFeedback();
+      }, 8000);
+    }
+  }
+  homeVibeUpdate.notice = row.dataset.preferenceNotice;
+  renderHomeVibeFeedback();
+}
+
+function homeVibeFeedback() {
+  return {
+    init() { syncHomeVibeFeedback(); },
+    destroy() {
+      if (homeVibeUpdate?.feedback === this.$el) clearHomeVibeFeedback();
+    },
+  };
+}
+
 function syncHomeVibe() {
+  syncHomeVibeFeedback();
   const panel = document.getElementById('fingerprint');
   if (!panel) return;
   const row = document.getElementById('home-mode-cards');
   const vibe = row?.dataset.vibe ?? panel.dataset.vibe ?? '';
   panel.querySelectorAll('#home-vibe-form input').forEach(input => { input.checked = input.value === vibe; });
   window.dispatchEvent(new CustomEvent('home-vibe-sync', {detail: vibe}));
-  const status = document.getElementById('home-vibe-status');
-  if (status && !status.dataset.failed && !panel.querySelector('#home-vibe-form.htmx-request')) {
-    const label = panel.querySelector('#home-vibe-form input:checked')?.closest('label').querySelector('strong')?.textContent;
-    status.textContent = label ? 'In the mix: ' + label + '.' : 'Pick a vibe. Your mixes update right away.';
-  }
 }
 
 document.addEventListener('htmx:beforeRequest', event => {
+  if (event.detail.elt?.matches('[hx-post="/home/fingerprint/reset"]')) clearHomeVibeFeedback();
   if (event.detail.elt?.id !== 'home-vibe-form') return;
-  const status = document.getElementById('home-vibe-status');
-  delete status.dataset.failed;
-  status.textContent = 'Finding your kind of ' + (event.detail.elt.querySelector('input:checked')?.value ? 'vibe…' : 'music…');
+  const selected = event.detail.elt.querySelector('input:checked');
+  clearTimeout(homeVibeFeedbackTimer);
+  homeVibeUpdate = {
+    feedback: document.getElementById('home-vibe-feedback'),
+    request: event.detail.xhr,
+    previousValue: document.getElementById('home-mode-cards')?.dataset.vibe || '',
+    value: selected?.value || '', label: homeVibeLabel(selected?.value || ''), phase: 'saving',
+  };
+  window.dispatchEvent(new CustomEvent('home-vibe-saving'));
+  renderHomeVibeFeedback();
 });
 document.addEventListener('htmx:afterRequest', event => {
   if (event.detail.elt?.id === 'home-vibe-form') {
-    const status = document.getElementById('home-vibe-status');
-    if (!event.detail.successful) {
-      status.dataset.failed = 'true';
-      status.textContent = 'Couldn’t change the vibe. Try again.';
+    if (homeVibeUpdate?.request !== event.detail.xhr) return;
+    if (homeVibeUpdate?.request === event.detail.xhr) {
+      homeVibeUpdate.phase = event.detail.successful ? 'waiting' : 'error';
+      renderHomeVibeFeedback();
     }
     syncHomeVibe();
-    if (event.detail.successful) window.dispatchEvent(new CustomEvent('mixes-reranked'));
   }
   if (event.detail.elt?.matches('.fp-slider, .fp-breadth-slider')) {
     const status = document.getElementById('home-preference-status');

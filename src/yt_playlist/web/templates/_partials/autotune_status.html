@@ -7,7 +7,7 @@
 {% set measured = r and r.status in ['applied', 'retained', 'restored'] %}
 {% set comparison = r.comparison if measured else none %}
 {% set f = r.followup if measured else {} %}
-{% set unchanged = measured and r.previous == r.selected %}
+{% set unchanged = measured and r.previous == r.selected and not r.diagnostic_challenger %}
 {% set has_chart = measured and f.points|default([])|length > 1 %}
 {% set evidence = latest.baseline if latest and latest.status == 'insufficient' else none %}
 {% macro gate(id, label, value, total, unit) %}
@@ -36,7 +36,7 @@
       {% elif r and r.status == 'restored' %}
       <p class="selection-note">Previous model restored. Measurements below stopped at restoration.</p>
       {% elif latest and latest.status != 'running' %}
-      <p class="selection-note">Kept the current model.{% if latest.status == 'retained' %} No alternative showed a reliable improvement.{% endif %}</p>
+      <p class="selection-note">{{ latest.reason }}</p>
       {% else %}<p class="selection-note">Regular training continues when your library syncs.</p>{% endif %}
     </section>
 
@@ -47,7 +47,7 @@
       {% if evidence.windows < s.min_windows %}
       {{ gate('selection-test-periods', 'Test periods', evidence.windows, s.min_windows, 'periods') }}
       {% else %}<p class="selection-passed"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 4 4 8-8"/></svg>{{ evidence.windows }} test periods available · {{ s.min_windows }} required</p>{% endif %}
-      <p class="selection-note">We need library data from before those first plays to check the predictions fairly.{% if evidence.trials < s.min_trials %} Your last test was {{ s.min_trials - evidence.trials }} tracks short.{% endif %}</p>
+      <p class="selection-note">{% if latest.kind|default('') == 'daily' %}The latest 30 days need {{ s.min_trials }} comparable first-play tracks across {{ s.min_active_days }} active days. Training uses all reconstructable history before that period.{% else %}We need library data from before those first plays to check the predictions fairly.{% endif %}{% if evidence.trials < s.min_trials %} Your last test was {{ s.min_trials - evidence.trials }} tracks short.{% endif %}</p>
     </section>
     {% elif not measured %}
     <section class="selection-evidence" aria-labelledby="selection-evidence-title">
@@ -55,13 +55,13 @@
       {% if busy %}<p class="selection-summary">{{ s.reason }}</p>
       {% else %}
         {% for c in s.checks[:2] if c.value < c.total %}{{ gate('selection-ready-' ~ loop.index, c.label, c.value, c.total, c.unit) }}{% endfor %}
-        {% if s.state == 'ready' %}<p class="selection-summary">The next model update will compare setups automatically.</p>{% endif %}
+        {% if s.state == 'ready' %}<p class="selection-summary">The background worker will compare setups automatically.</p>{% endif %}
         {% if latest and latest.status == 'failed' %}<p class="selection-summary">{{ latest.reason }}</p>{% endif %}
       {% endif %}
     </section>
     {% endif %}
 
-    {% if measured %}
+    {% if measured and r.kind|default('') not in ['product', 'daily'] %}
     <section class="selection-results" aria-labelledby="selection-results-title">
       <h4 id="selection-results-title">Later plays predicted</h4>
       {% if latest and latest.id != r.id %}<p class="selection-note">Tracking the change made {{ r.date }}.</p>{% endif %}
@@ -100,17 +100,81 @@
     {% endif %}
   </div>
 
+  {% if latest and latest.kind|default('') == 'daily' %}
+  <section class="selection-results" aria-labelledby="selection-daily-title">
+    <h4 id="selection-daily-title">Latest 30-day comparison</h4>
+    <p>Training uses all reconstructable history before the latest 30 days. Those 30 days are withheld as one comparison period. After choosing a setup, training uses all current data.</p>
+    {% if latest.baseline %}<p class="selection-note">{{ latest.baseline.trials }} comparable first-play tracks across {{ latest.baseline.active_days }} active days.</p>{% endif %}
+    {% if latest.grid %}
+    <div class="table-scroll"><table class="selection-comparison" aria-label="Daily model prediction comparison">
+      <thead><tr><th>Alternative</th><th>Prediction matches</th><th>Result</th></tr></thead>
+      <tbody>{% for candidate in latest.grid %}<tr><th>{{ candidate.label }} / {{ candidate.dim }} features</th>
+        <td>{{ score(candidate.score) if candidate.eligible else 'Unavailable' }}</td><td>{{ candidate.reason }}</td></tr>{% endfor %}</tbody>
+    </table></div>
+    {% endif %}
+    <p class="selection-note">{{ latest.reason or latest.progress }} Prediction scores measure later first plays; they do not establish better album or playlist enjoyment.</p>
+  </section>
+  {% endif %}
+
+  {% if s.product %}
+  <section class="selection-results" aria-labelledby="selection-product-title">
+    <h4 id="selection-product-title">Choices and listening</h4>
+    <p>{{ s.product.reason|default('Both setups serve complete menus and continuing Radio episodes.') }}
+       {% if s.product.phase == 'observing' %}Decision after {{ s.product.decision_date }}.{% endif %}</p>
+    <p class="selection-note">Current: {{ methods.get(s.product.previous.method, s.product.previous.method) }}, {{ s.product.previous.dim }} features.
+       Challenger: {{ methods.get(s.product.challenger.method, s.product.challenger.method) }}, {{ s.product.challenger.dim }} features.</p>
+    {% set report = s.product.report %}
+    {% if report %}
+    <div class="table-scroll selection-outcomes"><table class="selection-comparison" aria-label="Observed choices and listening by format and setup">
+      <thead><tr><th>Format / setup</th><th>Visible</th><th>Chosen / started</th><th>Observed / unknown</th></tr></thead>
+      <tbody>{% for format, row in report.formats.items() %}{% for arm, counts in row.arms.items() %}
+        <tr><th>{{ {'mixes': 'Mix tapes', 'albums': 'Albums', 'radio': 'On air'}[format] }} / {{ 'current' if arm == 'incumbent' else arm }}</th>
+          <td>{{ counts.visible|default(0) }}</td><td>{{ counts.choices|default(0) }} / {{ counts.starts|default(0) }}</td>
+          <td>{{ counts.observed|default(0) }} / {{ counts.unknown|default(0) }}</td></tr>
+      {% endfor %}{% endfor %}</tbody>
+    </table></div>
+    {% for format, row in report.formats.items() if row.interval %}
+    <p class="selection-note">{{ {'mixes': 'Mix tapes', 'albums': 'Albums', 'radio': 'On air'}[format] }}:
+      {{ row.arms.incumbent.qualified|default(0) }} / {{ row.arms.incumbent.observed|default(0) }} qualified with the current setup,
+      {{ row.arms.challenger.qualified|default(0) }} / {{ row.arms.challenger.observed|default(0) }} with the challenger.
+      Difference {{ '%+.1f'|format(row.difference * 100) }} points;
+      uncertainty {{ '%+.1f'|format(row.interval[0] * 100) }} to {{ '%+.1f'|format(row.interval[1] * 100) }} points.</p>
+    {% endfor %}
+    <p class="selection-note">Observed days: {{ report.overall.days.incumbent }} current, {{ report.overall.days.challenger }} challenger.
+      {% if report.overall.interval %}Difference: {{ '%+.1f'|format(report.overall.difference * 100) }} points;
+      uncertainty {{ '%+.1f'|format(report.overall.interval[0] * 100) }} to {{ '%+.1f'|format(report.overall.interval[1] * 100) }} points.
+      {% else %}More observed days are needed to estimate uncertainty.{% endif %}
+      Missing endings stay unknown. Tracks within an episode do not create independent votes.
+      {% if report.overall.missing_outcome_bounds.interval %}Allowing every unknown outcome to favor the current setup,
+      the difference is bounded by {{ '%+.1f'|format(report.overall.missing_outcome_bounds.interval[0] * 100) }} to
+      {{ '%+.1f'|format(report.overall.missing_outcome_bounds.interval[1] * 100) }} points.{% endif %}</p>
+    {% else %}<p class="selection-empty">Waiting for attributable listening outcomes.</p>{% endif %}
+  </section>
+  {% endif %}
+
+  {% if r and r.monitoring %}
+  <p class="selection-note" role="status">{% if r.monitoring.status == 'review' %}<strong>Review the recent decline.</strong>
+    Recent observed listening fell in two successive weeks. You can restore the previous model below.
+    {% elif r.monitoring.status == 'insufficient' %}Later listening has too little observed coverage to assess a decline.
+    {% else %}Checking later listening each week.{% endif %} This follow-up is observational.</p>
+  {% endif %}
+
   <div class="selection-schedule">
+    {% if f.frozen_at|default(none) is not none %}<p class="selection-note">This historical forecast summary is retained as last measured. Its 180-day source window has closed, so later listening does not revise it.</p>{% endif %}
+    {% if r and r.diagnostic_challenger %}<p class="selection-note">Shadow forecasts compare the current setup with {{ methods.get(r.diagnostic_challenger.method, r.diagnostic_challenger.method) }}, {{ r.diagnostic_challenger.dim }} features. This setup has not been applied.</p>{% endif %}
     <p>{% if not busy and s.state != 'paused' %}<strong>Next check.</strong> {% endif %}{{ s.reason }}{% if s.next_date %} Retries from {{ s.next_date }}.{% endif %}</p>
-    {% for c in s.checks[2:] if c.value < c.total %}{{ gate('selection-fresh-tracks', 'New tracks since last comparison', c.value, c.total, c.unit) }}{% endfor %}
-    {% if measured %}<p class="selection-note">Scores show the share of your later first plays that appeared in those 20 predictions. For example, 40% means 4 of 10 eligible tracks you played were predicted.</p>{% endif %}
+    {% for c in s.checks[2:] if c.value < c.total %}{{ gate('selection-fresh-tracks', 'Distinct tracks played since last comparison', c.value, c.total, c.unit) }}{% endfor %}
+    {% if measured and r.kind|default('') != 'product' %}<p class="selection-note">Scores show the share of eligible first plays that appeared in the model’s 20 predictions. For example, 40% means 4 of 10 eligible tracks you played were predicted.</p>{% endif %}
   </div>
   <footer class="selection-footer">
-    <div><a href="/taste/model-selection/history">History and test details</a><p>Your preferences are kept. Regular training continues.</p></div>
+    <div><a href="/taste/model-selection/history">History and test details</a><p>Checks run daily when enough fresh listening is available. Uncertain comparisons keep the current setup.</p></div>
     {% if s.state == 'paused' %}
     <button type="button" hx-post="/taste/model-selection/resume" hx-target="#autotune-status" hx-swap="outerHTML">Resume automatic selection</button>
-    {% elif s.restore_id and not busy %}
+    {% else %}
+    {% if s.state != 'restoring' %}<button type="button" class="btn-secondary" hx-post="/taste/model-selection/pause" hx-target="#autotune-status" hx-swap="outerHTML">Pause automatic selection</button>{% endif %}
+    {% if s.restore_id and s.state != 'restoring' %}
     <button type="button" class="btn-secondary" hx-post="/taste/model-selection/restore" hx-target="#autotune-status" hx-swap="outerHTML" hx-confirm="Restore the model saved before this selection? Automatic selection will pause until you resume it. Your preferences and regular training are kept.">Restore previous model</button>
+    {% endif %}
     {% endif %}
   </footer>
 </div>

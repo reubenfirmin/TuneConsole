@@ -1,7 +1,8 @@
 """Generated proto-playlists: the two dated, saveable lanes on Home.
 
-Covers the load-bearing constraint: a playlist this app generates (auto-grouped "Generated") must
-NOT feed the recommendation engine until it's played or re-grouped, plus the create endpoint.
+Covers generated-playlist creation and learning provenance. Generated sources
+do not supply track-level taste evidence until explicit adoption; membership
+must never suppress a track that remains eligible for recommendations.
 """
 import json
 import threading
@@ -117,7 +118,7 @@ def test_fresh_creation_starts_enrichment_and_page_rejoins(store, monkeypatch, r
     only_provider(store, "musicbrainz")
     started, release = threading.Event(), threading.Event()
 
-    def enrich(title, artist):
+    def enrich(title, artist, *, observations=None):
         started.set()
         assert release.wait(timeout=10)
         return "Rock", "1998", None, [], []
@@ -175,7 +176,7 @@ def test_save_button_opens_generating_screen(store):
     assert "window.open('/home/generating'" in app_js.text       # opens during the user gesture
 
 
-def test_saved_proto_tracks_not_re_offered(store):
+def test_generated_membership_is_retained_without_suppressing_candidates(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "Art", None, None, 1) for i in range(2)]
     gen = store.playlists.upsert_playlist(iid, "PLG", "From your catalog - June 21 2026", 2, "h", 1.0)
@@ -184,7 +185,9 @@ def test_saved_proto_tracks_not_re_offered(store):
     store.playlists.mark_generated_playlist('PLG')
 
     keys = store.rec_eligibility.generated_track_keys()
-    assert keys == {identity_key("S0", "Art"), identity_key("S1", "Art")}   # spoken for; don't re-offer
+    assert keys == {identity_key("S0", "Art"), identity_key("S1", "Art")}
+    assert not store.rec_eligibility.suppressed_candidate_keys(keys, 1)
+    assert not any(keys & set(basket) for basket in store.rec_evidence.rec_baskets())
 
 
 def test_generate_endpoint_rejects_empty(store):
@@ -334,6 +337,18 @@ def test_gc_keeps_generated_when_at_least_half_played(store, monkeypatch, tmp_pa
     assert store.playlists.get_playlist(pid) is not None
 
 
+def test_gc_counts_live_generated_playback_without_feeding_organic_history(store):
+    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    day, now = 86400.0, 100 * 86400.0
+    pid, ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day, n=4)
+    for i in (0, 1):
+        store.history.record_play_event(iid, identity_key(f'PLGT{i}', 'GenArt'), f'PLG{i}',
+                                        now - day, playlist_ytm_id=ytm)
+    assert all(at is None for at in store.charts.get_playlist_track_recency()[pid])
+    assert playlist_generated.gc_generated_playlists(store, {iid: FakeClient()}, now) == []
+    assert store.playlists.get_playlist(pid) is not None
+
+
 def test_gc_deletes_generated_when_under_half_played(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     from yt_playlist.library import executor, playlist_undo
@@ -393,8 +408,8 @@ def test_carded_orders_by_recipe_journey(store, monkeypatch):
     """_carded must order the proto by the recipe's journey. Force 'warm_up' and assert the preview
     rises in energy thirds (and still spaces artists / carries genre)."""
     from yt_playlist.rec import home_cards as home
-    from yt_playlist.util import genre_map
-    from yt_playlist.rec import recipes, journeys
+    from tests.musical_support import prepare_profiles
+    from yt_playlist.rec import musical_character, recipes
     from yt_playlist.rec.surfaces import ForYouItem
     store.identities.upsert_identity("main", "cred", None, True)
     # mellow vs intense families, interleaved so source order is NOT already sorted.
@@ -405,8 +420,10 @@ def test_carded_orders_by_recipe_journey(store, monkeypatch):
     for i, (genre, artist) in enumerate(spec):
         tid = store.tracks.upsert_track(f"v{i}", f"S{i}", artist, "", None, 1)
         store.tracks.set_track_genre(tid, genre)
+        store.tracks.set_track_audio(tid, energy=0 if artist == "Calm" else 1)
         items.append(ForYouItem(f"S{i}", artist, "", f"v{i}", None, 1, "r",
                                 identity_key(f"S{i}", artist), "comfort"))
+    prepare_profiles(store)
     monkeypatch.setattr(recipes, "roll_recipe",
                         lambda *a, **k: {"facets": {}, "journey": "warm_up", "dj": {"seed": 1}})
 
@@ -414,7 +431,8 @@ def test_carded_orders_by_recipe_journey(store, monkeypatch):
 
     out = card["tracks"]
     assert card["recipe"]["journey"] == "warm_up"
-    e = [genre_map.energy(t.genre) for t in out]
+    profiles = musical_character.load(store, [t.key for t in out])
+    e = [musical_character.intensity({'musical': profiles[t.key]}) for t in out]
     thirds = [sum(e[:4]) / 4, sum(e[4:8]) / 4, sum(e[8:]) / 4]
     assert thirds[0] < thirds[1] < thirds[2]               # warm_up rises across ALL thirds (shuffle ~17%)
     assert all(getattr(t, "genre", "") for t in out)        # genres still attached

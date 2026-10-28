@@ -10,6 +10,8 @@ from tests.conftest import FakeClient
 
 def _client(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
+    from yt_playlist.rec import model_health
+    assert model_health.prepare(store, 1000) is not None
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     return TestClient(app, base_url="http://127.0.0.1")
 

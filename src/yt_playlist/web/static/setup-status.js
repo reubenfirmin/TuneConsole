@@ -30,7 +30,7 @@
 function initialSetup() {
   return {
     complete: false, connected: false, running: false, training: false, imported: false,
-    songs: 0, analyzed: 0, total: 0, modes: 0, mixes_ready: false,
+    songs: 0, analyzed: 0, total: 0, modes: 0, mixes_ready: false, listening_format: 'mixes',
     activity: '', current: null, target: null, step: '', outcome: null, events: [], _logRequest: false,
     get summary() {
       if (!this.imported) {
@@ -40,6 +40,8 @@ function initialSetup() {
         if (this.songs || this.running) return 'Bringing in your music';
         return this.connected ? 'Keep YouTube Music open' : 'Connect the extension to get started';
       }
+      if (this.listening_format === 'albums') return 'Finding albums for you';
+      if (this.listening_format === 'radio') return 'Getting your radio ready';
       return 'Preparing your personal mixes';
     },
     apply(data) {

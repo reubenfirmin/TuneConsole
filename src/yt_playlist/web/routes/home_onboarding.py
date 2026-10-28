@@ -2,10 +2,11 @@
 import time
 
 from fastapi import APIRouter, Request, Response
+from fastapi.responses import RedirectResponse
 
 from yt_playlist.core.accounts import main_client
 from yt_playlist.providers import lastfm
-from yt_playlist.rec import home_cards, onboarding
+from yt_playlist.rec import home_cards, home_preferences, onboarding
 from yt_playlist.rec.home_cards import _proto
 
 LASTFM_NUDGE_SNOOZE_S = 30 * 86400
@@ -55,6 +56,21 @@ def build(ctx):
     router = APIRouter()
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
 
+    @router.post('/home/onboard/welcome')
+    def welcome():
+        store.settings.set_setting('onboard_welcomed', '1')
+        return RedirectResponse('/', status_code=303)
+
+    @router.post('/home/onboard/format')
+    async def choose_listening_format(request: Request):
+        preference = (await request.form()).get('format')
+        if preference not in home_preferences.PANELS:
+            return Response('Choose albums, mixes or radio.', status_code=422)
+        store.settings.set_setting('onboard_listening_format', preference)
+        store.settings.set_setting('onboard_welcomed', '1')
+        store.settings.set_setting('onboard_format_pending', '0')
+        return RedirectResponse('/', status_code=303)
+
     @router.post("/onboard/lastfm/dismiss")
     def dismiss_lastfm_nudge():
         store.settings.set_setting("lastfm_nudge_dismissed_at", str(now_fn()))
@@ -99,6 +115,7 @@ def build(ctx):
     @router.get("/home/onboard/status")
     def home_onboard_status():
         status = onboarding.arrival_status(store, now_fn())
+        status['setup']['listening_format'] = home_preferences.default_format(store)
         job = ctx.jobs.find_active_library()
         events = job.events.since(0)[1] if job else []
         status["setup"]["running"] = bool(job)
@@ -112,9 +129,20 @@ def build(ctx):
 
     @router.get("/home/onboard/start")
     def home_onboard_start(request: Request):
+        preference = home_preferences.default_format(store)
+        if preference == 'albums':
+            return templates.TemplateResponse(request, '_partials/onboarding_album.html', {
+                'album': onboarding.starter_album(store)})
+        if preference == 'radio':
+            bootstrap = ctx.radio.bootstrap()
+            if (bootstrap['seeds'] and bootstrap.get('seedMenu')) or bootstrap['state'].get('active'):
+                return templates.TemplateResponse(request, '_partials/onboarding_radio.html', {
+                    'radio_bootstrap': bootstrap,
+                    'radio_tracks': ctx.radio.history_tracks(bootstrap['state'])})
         tracks = onboarding.library_sample(store, n=home_cards.PROTO_SIZE)
         proto = _proto(store, "onboard_library", "Something to listen to", tracks, now_fn()) if tracks else None
-        return templates.TemplateResponse(request, "_partials/onboarding_start.html", {"proto": proto})
+        return templates.TemplateResponse(request, "_partials/onboarding_start.html", {
+            "proto": proto, 'radio_fallback': preference == 'radio'})
 
     @router.post("/onboard/done")
     def onboard_done():

@@ -83,3 +83,26 @@ def reconcile_foreign_days(conn, identity_id, *, observations=None, events=None)
         day = projected[scope]
         if day != row['day']:
             conn.execute('UPDATE listening_observations SET day=? WHERE id=?', (day, row['id']))
+
+
+def reconcile_recordings(conn, recording_ids):
+    """Reproject only foreign dates whose recording identity changed.
+
+    Read the post-change subjects, including both sides of a partial correction.
+    Exact events on either side can change an existing date's unique anchor.
+    Coalesce sources and dates per account before asking for exact evidence.
+    """
+    recording_ids = sorted(set(recording_ids))
+    if not recording_ids:
+        return
+    scopes = defaultdict(set)
+    marks = ','.join('?' for _ in recording_ids)
+    for row in conn.execute('SELECT o.identity_id,o.identity_key,o.source_day,o.timezone '
+                            'FROM listening_observations o JOIN listening_calendars c '
+                            'ON c.identity_id=o.identity_id '
+                            f'WHERE o.recording_id IN ({marks}) '
+                            "AND o.precision='calendar_day' AND o.timezone<>c.timezone",
+                            recording_ids):
+        scopes[row['identity_id']].add((row['identity_key'], row['source_day'], row['timezone']))
+    for identity_id, observations in scopes.items():
+        reconcile_foreign_days(conn, identity_id, observations=observations)

@@ -46,7 +46,7 @@ def test_populated_upgrade_reconciles_order_and_retains_unknown_evidence(install
     assert list(store.conn.iterdump())==before
 
 
-def test_failed_upgrade_rolls_back_and_backups_are_version_24(installed_v24,tmp_path,monkeypatch):
+def test_failed_upgrade_rolls_back_without_backups(installed_v24,tmp_path,monkeypatch):
     store = installed_v24
     before = list(store.conn.iterdump())
     current = registry.MIGRATIONS
@@ -55,14 +55,10 @@ def test_failed_upgrade_rolls_back_and_backups_are_version_24(installed_v24,tmp_
         raise RuntimeError('interrupt relationship upgrade')
     monkeypatch.setattr(registry,'MIGRATIONS',(*current[:24],Migration(25,current[24].name,fail)))
     with pytest.raises(MigrationError,match='interrupt relationship upgrade'):
-        migrate(store.conn,backup_dir=tmp_path / 'backups')
+        migrate(store.conn)
     assert list(store.conn.iterdump())==before
-    backups = list((tmp_path / 'backups').glob('*.db'))
-    assert backups
-    for path in backups:
-        with sqlite3.connect(path) as backup:
-            assert backup.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
-            assert backup.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]==24
+    assert not (tmp_path / 'backups').exists()
+    assert store.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
 
 
 def test_non_numeric_legacy_positions_are_preserved_and_reconciled(installed_v24):

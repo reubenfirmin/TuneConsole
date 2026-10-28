@@ -26,6 +26,11 @@ if importlib.util.find_spec("pytest_playwright") is not None:
 def isolated_app_home(tmp_path, monkeypatch):
     """Backups, action locks and settings must never touch the user's app data."""
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path / "app-home"))
+    # A developer's opt-in .env.local must not enable automatic audio in other tests.
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+    # A developer's paid provider key must never turn an ordinary test into a billable call.
+    monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
 
 
 @pytest.fixture(autouse=True)

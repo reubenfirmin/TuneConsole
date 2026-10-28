@@ -14,10 +14,25 @@ logger = logging.getLogger("yt_playlist.work")
 _lock = threading.Lock()
 _spans = {}
 _phase = ContextVar("tuneconsole_work_phase", default="unscoped")
+_maintenance_phase = ContextVar("tuneconsole_maintenance_phase", default=None)
 
 
 def current_phase():
     return _phase.get()
+
+
+@contextmanager
+def maintenance_job(phase):
+    """Attribute publications to their job; a publication is progress, not completion.
+
+    The job owner reports completed only after all requested work succeeds.
+    Timing spans keep their existing names and scheduling behavior.
+    """
+    token = _maintenance_phase.set(phase)
+    try:
+        yield
+    finally:
+        _maintenance_phase.reset(token)
 
 
 @contextmanager
@@ -61,16 +76,29 @@ class MaintenanceDiagnostics:
         self.waiting = {}
 
     def record(self, outcome, *, reasons=(), phase=None):
-        phase = phase or current_phase()
+        if phase is None:
+            owner = _maintenance_phase.get()
+            phase = owner or current_phase()
+            if owner and outcome == 'published':
+                outcome = 'progress'
         now = self.clock()
         with self.lock:
-            self.phases[phase, outcome] += 1
-            self.reasons.update((phase, reason) for reason in set(reasons))
-            if outcome == 'deferred':
-                self.waiting.setdefault(phase, now)
-            elif outcome == 'published':
-                self.waiting.pop(phase, None)
-            self._flush(now, force=False)
+            self._record(outcome, reasons, phase, now)
+
+    def resolve_wait(self, phase, reason):
+        """Retire disabled/obsolete work once, without producing idle poll events."""
+        with self.lock:
+            if phase in self.waiting:
+                self._record('obsolete', (reason,), phase, self.clock())
+
+    def _record(self, outcome, reasons, phase, now):
+        self.phases[phase, outcome] += 1
+        self.reasons.update((phase, reason) for reason in set(reasons))
+        if outcome == 'deferred':
+            self.waiting.setdefault(phase, now)
+        elif outcome in {'published', 'completed', 'obsolete'}:
+            self.waiting.pop(phase, None)
+        self._flush(now, force=False)
 
     def flush(self, *, force=False):
         with self.lock:
@@ -89,7 +117,7 @@ class MaintenanceDiagnostics:
         for (phase, reason), count in sorted(self.reasons.items()):
             reasons.setdefault(phase, {})[reason] = count
         logger.info('Maintenance summary: interval=%.1fs published=%d deferred=%d failed=%d '
-                    'phases=%s reasons=%s waiting_s=%s', elapsed, totals['published'],
+                    'phases=%s reasons=%s waiting_s=%s', elapsed, totals['published'] + totals['progress'],
                     totals['deferred'], totals['failed'], phases, reasons,
                     {phase: round(now - start, 1) for phase, start in sorted(self.waiting.items())})
         self.started = now

@@ -63,6 +63,9 @@ function roadTripBalance(rows) {
 function roadTripScreen() {
   return {
     requests: [],
+    editors: [],
+    revision: 0,
+    progressRequests: new WeakMap(),
     lookups: 0,
     error: '',
     get loading() { return this.lookups > 0 || this.requests.length > 0; },
@@ -71,7 +74,12 @@ function roadTripScreen() {
     },
     requestStarted(event) {
       const detail = event.detail;
-      if (detail.target?.id !== 'road-trip-body' || detail.requestConfig?.verb === 'get') return;
+      if (detail.target?.id !== 'road-trip-body') return;
+      if (detail.requestConfig?.verb === 'get') {
+        this.progressRequests.set(detail.xhr, this.revision);
+        return;
+      }
+      this.revision++;
       const path = detail.requestConfig?.path || '';
       const message = path.endsWith('/save') ? 'Saving your playlist to YouTube…'
         : path.endsWith('/build') ? 'Preparing your playlist…' : 'Updating your route…';
@@ -92,10 +100,19 @@ function roadTripScreen() {
       }
     },
     beforeSwap(event) {
-      // Background progress must not replace an editor with unsaved artist/genre selections,
-      // or remove a request's indicator while its replacement is still being prepared.
-      if (this.loading && event.detail.target?.id === 'road-trip-body'
-          && event.detail.requestConfig?.verb === 'get') event.detail.shouldSwap = false;
+      const detail = event.detail;
+      if (detail.target?.id !== 'road-trip-body' || detail.requestConfig?.verb !== 'get') return;
+      // Edits belong to the persistent screen before their debounce starts a request.
+      // A poll started before a save must also stay obsolete after that save finishes.
+      const dirty = this.editors.some(editor => editor.owner.isConnected && editor.pending());
+      if (this.loading || dirty || this.progressRequests.get(detail.xhr) !== this.revision) {
+        detail.shouldSwap = false;
+      }
+    },
+    editorChanged(event) {
+      const {owner, pending} = event.detail;
+      this.editors = this.editors.filter(editor => editor.owner !== owner && editor.owner.isConnected);
+      if (pending) this.editors.push({owner, pending});
     },
     lookupChanged(event) {
       this.lookups = Math.max(0, this.lookups + (event.detail.pending ? 1 : -1));
@@ -130,15 +147,39 @@ function roadTripForm(initial, context) {
     genreOpts: [], genreQuery: '', blacklistQuery: '', ownGenreQuery: '',
     formElement: null,
     disposed: false,
+    editorScreen: null,
+    editorOwner: null,
+    savedValues: '',
+    valuesSignature() {
+      return JSON.stringify([this.name, this.ownPct, this.familiarity, this.hours, this.minutes,
+        this.artists, this.genres, this.blacklist]);
+    },
+    pendingEdits() {
+      const focused = document.activeElement;
+      return !!this.steerTimer || this.valuesSignature() !== this.savedValues || this.renaming
+        || !!(this.artistQuery || this.genreQuery || this.blacklistQuery || this.ownGenreQuery)
+        || (this.formElement?.contains(focused) && focused.matches('input:not([type="hidden"])'));
+    },
+    reportEditor(pending) {
+      this.editorScreen?.dispatchEvent(new CustomEvent('road-trip-editor', {
+        detail: {owner: this.editorOwner, pending},
+      }));
+    },
     destroy() {
       this.disposed = true;
       clearTimeout(this.artistTimer); clearTimeout(this.steerTimer);
+      this.reportEditor(null);
+      this.editorScreen = null;
       this.formElement = null;
     },
     init() {
       // Suggestion buttons disappear after selection. Keep the form from the component root,
       // since their delayed saves cannot resolve $refs through a detached suggestion element.
       this.formElement = this.$el.querySelector('form');
+      this.editorOwner = this.$el;
+      this.savedValues = this.valuesSignature();
+      this.editorScreen = this.$el.closest('[data-road-trip-screen]');
+      this.reportEditor(() => this.pendingEdits());
       this.artists.filter(name => !this.artistGenres[name]).forEach(name => this.loadArtistGenre(name));
     },
     loadArtistGenre(name) {
@@ -233,6 +274,7 @@ function roadTripForm(initial, context) {
     },
     submit() {
       clearTimeout(this.steerTimer);
+      this.steerTimer = null;
       const form = this.formElement;
       if (!form || !form.isConnected) return;
       form.querySelector('[name=artists]').value = JSON.stringify(this.artists);

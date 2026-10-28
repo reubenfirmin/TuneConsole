@@ -60,7 +60,7 @@ function playlistsTab(rows) {
     },
     activityLabel(r) {
       const n = r.listens || 0;
-      return n.toLocaleString() + ' track play' + (n === 1 ? '' : 's');
+      return n.toLocaleString() + ' playlist listening session' + (n === 1 ? '' : 's') + ' (partial listens count)';
     },
     cmp(a, b) {
       const k = this.sortKey, numeric = (k === 'count' || k === 'listens' || k === 'last');
@@ -88,7 +88,7 @@ function playlistsTab(rows) {
     promote(r) {
       // graduate a Generated playlist into the library (out of the quarantine group), then reload
       fetch('/playlist/' + r.id + '/promote', { method: 'POST', headers: { 'HX-Request': 'true' } })
-        .then(() => location.reload());
+        .then(() => location.replace(location.href));
     },
     sections() {
       // the main table holds everything EXCEPT Generated; split partitions by group (Ungrouped last)
@@ -203,12 +203,13 @@ function moveTab(fromId, toId, rows) {
   };
 }
 function titleEditor(pid) {
-  // click the playlist <h1> to rename it (YouTube + store). The title stays server-rendered in the
-  // <h1> (Jinja escapes it safely); we read/write its text rather than threading it through x-data.
+  // Generated headings present a shorter name. Keep the exact escaped source
+  // title on the editor root so editing never drops its type/date/version.
   return {
     pid: pid, editing: false, draft: '',
+    originalTitle() { return this.$root.dataset.title ?? this.$refs.h1.textContent.trim(); },
     start() {
-      this.draft = this.$refs.h1.textContent.trim();
+      this.draft = this.originalTitle();
       this.editing = true;
       this.$nextTick(() => { this.$refs.inp.focus(); this.$refs.inp.select(); });
     },

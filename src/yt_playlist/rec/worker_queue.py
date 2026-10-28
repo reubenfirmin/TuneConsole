@@ -12,11 +12,17 @@ class Job(StrEnum):
     BUNDLES = "bundles"
     TRENDS = "trends"
     CLEANUP = "cleanup"
+    ANALYTICS = "analytics"
     CONTENT = "content"
     HOME = "home"
+    TV = "tv"
     ARTWORK = "artwork"
     STORIES = "stories"
     MEASUREMENT = "measurement"
+    EVIDENCE_STORAGE = "evidence_storage"
+    CHOICES = "choices"
+    GROUPS = "groups"
+    MODEL_HEALTH = "model_health"
 
 
 @dataclass
@@ -56,21 +62,23 @@ class Retry:
 class PendingJobs:
     def __init__(self):
         self.pending = {}
+        self._inflight_measurements = {}
         self.retry = {job: Retry() for job in Job}
         # A successful publication is not permission to refit immediately on the
         # next enrichment write. Admit at most one start per minute for each
         # expensive phase. Ratings and serving projections keep their own clocks.
-        for job in (Job.FULL, Job.BUNDLES):
+        for job in (Job.FULL, Job.BUNDLES, Job.GROUPS):
             self.retry[job].minimum_interval = 60
         self.retry[Job.PREPARE].minimum_interval = 5
+        self.retry[Job.TV].minimum_interval = 60
 
     def __bool__(self):
         return bool(self.pending)
 
     @property
     def visible(self):
-        """Analytics alone does not show the model-refreshing indicator."""
-        return any(job != Job.MEASUREMENT for job in self.pending)
+        """Measurements, summaries and shadow groups do not show a model refresh."""
+        return any(job not in {Job.MEASUREMENT, Job.EVIDENCE_STORAGE, Job.CHOICES, Job.ANALYTICS, Job.GROUPS, Job.TV, Job.MODEL_HEALTH} for job in self.pending)
 
     @property
     def measurements(self):
@@ -82,7 +90,7 @@ class PendingJobs:
     def merge(self, job: Job, payload=True):
         """Flags coalesce, content unions, artwork caps at 40, analytics caps at 64 offers."""
         if job == Job.MEASUREMENT:
-            offers = self.pending.get(job, ())
+            offers = (*self.pending.get(job, ()), *self._inflight_measurements.values())
             if sum(getattr(offer, "work_units", 1) for offer in offers) + getattr(payload, "work_units", 1) > 64:
                 return False
             self.pending.setdefault(job, deque()).append(payload)
@@ -97,8 +105,29 @@ class PendingJobs:
             self.pending[job] = True
         return True
 
-    def take_measurements(self):
-        return self.pending.pop(Job.MEASUREMENT, deque())
+    def take_measurements(self, *, limit=None):
+        """Detach a small FIFO batch; cancellation can still take every pinned reader."""
+        if limit is None:
+            return self.pending.pop(Job.MEASUREMENT, deque())
+        offers = self.pending.get(Job.MEASUREMENT, deque())
+        batch, units = [], 0
+        while offers:
+            size = getattr(offers[0], 'work_units', 1)
+            if batch and units + size > limit:
+                break
+            batch.append(offers.popleft())
+            units += size
+        if not offers:
+            self.pending.pop(Job.MEASUREMENT, None)
+        self._inflight_measurements.update((id(offer), offer) for offer in batch)
+        return batch
+
+    def finish_measurements(self, batch, *, retry=()):
+        """Release admission slots, or return admitted captures to the FIFO head."""
+        for offer in batch:
+            self._inflight_measurements.pop(id(offer), None)
+        if retry:
+            self.pending.setdefault(Job.MEASUREMENT, deque()).extendleft(reversed(retry))
 
     def drain(self):
         """Detach one ordered pass. Arrivals during execution belong to the next pass.

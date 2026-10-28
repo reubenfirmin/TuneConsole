@@ -3,63 +3,58 @@
 Deezer's public API needs no API key for catalog reads. We search several candidates, verify their
 recording identity, then use a track lookup whose object carries the
 `bpm` field (search/listing responses omit it). Deezer reports bpm=0 for tracks it hasn't analysed,
-which we treat as unknown. Deezer also signals quota/errors via an {"error": ...} body on an HTTP
-200, so we check for that explicitly. Failures degrade to None so one bad track never stops a run.
+which we treat as unknown. Vendor access, including HTTP-200 API errors, is owned by DeezerIAO.
+Transient failures retain partial facts and a retry outcome; recording matching stays here.
 """
 import logging
 import math
 import re
 import urllib.parse
-import urllib.request
 
-from yt_playlist.util import net
+from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.integrations.deezer import DeezerIAO, API, TIMEOUT_S
 from yt_playlist.util.matching import normalize, recording_title
-from yt_playlist.providers.base import EnrichmentResult, RateLimiter
-from yt_playlist.providers import transport
+from yt_playlist.providers.base import EnrichmentResult
 
 logger = logging.getLogger(__name__)
 
 name = "deezer"
+manages_availability = True
+_iao = DeezerIAO()
+
+
+def access(store=None):
+    return _iao.context(store.enrichment_state if store is not None else None)
 
 
 def available(store=None) -> bool:
-    return True
+    return _iao.configured
 
 
 def tripped() -> bool:
-    return _breaker.tripped()
+    return not _iao.availability().ready(_iao.now())
 
 
 def reset() -> None:
-    _breaker.reset()
+    """A new batch must respect availability established by other callers."""
 
 
 def probe(track, store=None) -> EnrichmentResult:
     """Expose supported catalogue facts from the shared lookup."""
-    feat = lookup(track["title"], track["artist"], duration=track.get("duration_s"),
-                  isrc=track.get("isrc"))
+    with access(store):
+        feat = lookup(track["title"], track["artist"], duration=track.get("duration_s"),
+                      isrc=track.get("isrc"))
     fields = {k: feat[k] for k in (*_FIELDS, "genre", "year") if feat.get(k) is not None}
     if "year" in fields:
         fields["year"] = str(fields["year"])  # same discrete value type as the other providers
     return EnrichmentResult("deezer", fields)
 
-_API = "https://api.deezer.com"
-_USER_AGENT = "yt-playlist/0.1 +https://4rc.io"
-_MIN_INTERVAL = 0.15                       # ~50 req / 5s soft limit -> stay well under
-_HTTP_TIMEOUT_S = 20                        # cap each request so a stalled socket can't wedge a run
-_pacer = RateLimiter(_MIN_INTERVAL)
-_breaker = net.CircuitBreaker()
+_API = API
+_HTTP_TIMEOUT_S = TIMEOUT_S
 
 
-def _get_json(url):
-    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT,
-                                               "Accept": "application/json"})
-    data = transport.request_json(req, timeout=_HTTP_TIMEOUT_S, pace=_pacer.wait, breaker=_breaker)
-    if isinstance(data, dict) and data.get("error"):
-        # Deezer reports quota/API errors as HTTP 200. Code 800 means no catalogue entry.
-        if data["error"].get("code") != 800:
-            net.record_probe_failure("Deezer API error")
-    return data
+def _get_json(url, *, timeout=_HTTP_TIMEOUT_S):
+    return _iao.get(url, timeout=timeout)
 
 
 _FIELDS = ("bpm", "popularity", "gain", "label", "art")
@@ -122,6 +117,8 @@ def _select_track(data, title, artist, duration, isrc):
         seen.add(track_id)
         try:
             track = _get_json(_API + f"/track/{track_id}")
+        except (WorkClosing, WorkBudgetExceeded):
+            raise
         except Exception as exc:
             logger.warning("Deezer track lookup failed for %s: %s", track_id, exc)
             return None  # an unread candidate cannot establish an unambiguous selection
@@ -159,6 +156,8 @@ def lookup(title, artist, *, duration=None, isrc=None):
     search_url = _API + "/search/track?" + urllib.parse.urlencode({"q": q, "limit": "10"})
     try:
         res = _get_json(search_url)
+    except (WorkClosing, WorkBudgetExceeded):
+        raise
     except Exception as e:  # noqa: BLE001
         logger.warning("Deezer search failed for %r / %r: %s", title, artist, e)
         return feat
@@ -204,6 +203,8 @@ def lookup(title, artist, *, duration=None, isrc=None):
                 genres = ((album.get("genres") or {}).get("data")) or []
                 feat["genre"] = (genres[0].get("name") or None) if genres else None
                 feat["year"] = feat["year"] or _year(album.get("release_date"))
+        except (WorkClosing, WorkBudgetExceeded):
+            raise
         except Exception as e:  # noqa: BLE001
             logger.info("Deezer album lookup failed for %s: %s", album_id, e)
     return feat

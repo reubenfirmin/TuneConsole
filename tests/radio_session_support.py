@@ -51,8 +51,20 @@ class Playlist:
 def poc(monkeypatch, store):
     remote, frames, workers = Playlist(), [], []
     identity = store.identities.upsert_identity("main", "ref", None, True)
+    from yt_playlist.core.bridge import Bridge
+    ownership = Bridge()
+
+    def send_control(frame, *, intent=None):
+        if intent is not None and not ownership.playback_intent_current(intent):
+            return False
+        if intent is None and frame.get('type') == 'navigate':
+            ownership.begin_playback_intent()
+        frames.append(frame)
+        return True
+
     bridge = SimpleNamespace(connected=True, now_playing=None, now_playing_seen_at=None,
-                             send_control=frames.append, requests=[], native_ids=[], auto_adopt=True)
+                             begin_playback_intent=ownership.begin_playback_intent,
+                             send_control=send_control, requests=[], native_ids=[], auto_adopt=True)
 
     async def request_control(frame):
         bridge.requests.append(frame)
@@ -82,7 +94,8 @@ def poc(monkeypatch, store):
         track["key"] = store.tracks.catalog_subject(tid)["identity_key"]
 
     class Candidates:
-        def __init__(self, store, now, tuning=None, *, now_source=None):
+        def __init__(self, store, now, tuning=None, *, now_source=None, comparison=None):
+            self.comparison = getattr(now_source, 'comparison', comparison)
             self.tuning = radio_session.radio_tuning.controls(tuning or radio_session.radio_tuning.DEFAULTS)
             self.now_sampled_at = now
             self.encoding_model = store.settings.get_setting("rec_content_model")
@@ -91,6 +104,13 @@ def poc(monkeypatch, store):
             self.by_key = {t["key"]: t for t in pool}
             self.fingerprint = "fixed-test-candidates"
             self.modes = {}
+            self.refresh_exclusions(now)
+
+        def refresh_exclusions(self, now=None):
+            cutoff = self.now_sampled_at if now is None else now
+            self.blocked = (store.rec_model.disliked_identity_keys()
+                            | store.rec_model.suppressed_keys('for_you', cutoff))
+            self.muted = {artist.casefold() for artist in store.rec_model.muted_artists()}
 
         def refresh_now(self, now):
             self.now_sampled_at = now
@@ -117,7 +137,7 @@ def poc(monkeypatch, store):
         def next_track(self, history, *, target=None, feedback=None, excluded=(), current=None):
             used = {t["video_id"] for t in history} | set(excluded)
             ordered = list(reversed(pool)) if self.tuning["comfort"] < .5 else pool
-            return next((t for t in ordered if t["video_id"] not in used), None)
+            return next((t for t in ordered if t["video_id"] not in used and t['key'] not in self.blocked), None)
 
         def direction_anchor(self, history, anchors, *, excluded=(), feedback=None):
             return self.next_track(history + anchors, excluded=excluded)

@@ -9,6 +9,7 @@ import math
 
 import numpy as np
 
+from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.rec import artist_model, embedding_training as training, embedding_vectors as vector_reads
 from yt_playlist.util import genre_map
 
@@ -38,6 +39,7 @@ def recall_at_k(store, k=20, min_size=5, seed=0) -> dict:
     hits = trials = 0
     n = len(keys)
     for p in store.playlists.get_playlists():
+        check_cancellable_work()
         members = [m for m in store.playlists.get_playlist_track_keys(p.id) if m in idx]
         if len(members) < min_size:
             continue
@@ -137,19 +139,24 @@ def temporal_recall(store, holdout_days=30, k=20) -> dict:
             "baseline": baseline, "lift": (recall / baseline) if recall and baseline else None}
 
 
-def _causal_window(store, cutoff, end, k, dim, method) -> dict:
+def _causal_window(store, cutoff, end, k, dim, method, memory_bytes=None) -> dict:
     """Fit at ``cutoff`` and score organic, previously-unplayed outcomes in [cutoff, end).
 
     Unlike temporal_recall, this never loads the live vectors. The explicit as-of baskets are fitted
     in memory, so neither persisted model state nor a later basket can leak into the representation.
     """
     baskets, coverage = store.rec_evidence.rec_baskets_as_of(cutoff)
+    check_cancellable_work()
+    if memory_bytes is not None:
+        from yt_playlist.rec.model_refresh import _check_fit_memory
+        _check_fit_memory(baskets, dim, memory_bytes)
     weights = None
     if store.settings.get_setting("rec_cooc_weighting") == "1":
         weights = {key: 1.0 + math.log1p(count)
                    for key, count in store.history.play_counts_before(cutoff).items() if count}
     keys, V = training.build_vectors_from_baskets(
         baskets, dim=dim, method=method, weights=weights)
+    check_cancellable_work()
     base = {"cutoff": cutoff, "end": end, "k": k, "coverage": coverage,
             "baskets": len(baskets), "vectors": len(keys)}
     if not keys:
@@ -181,7 +188,8 @@ def _causal_window(store, cutoff, end, k, dim, method) -> dict:
             "lift": (recall / baseline) if recall and baseline else None}
 
 
-def rolling_temporal_recall(store, holdout_days=None, k=20, windows=3, dim=None, method=None) -> dict:
+def rolling_temporal_recall(store, holdout_days=None, k=20, windows=3, dim=None, method=None,
+                            memory_bytes=None) -> dict:
     """Leakage-free rolling forward-prediction evaluation.
 
     Each window independently fits an in-memory model from conservatively reconstructable state at
@@ -204,7 +212,7 @@ def rolling_temporal_recall(store, holdout_days=None, k=20, windows=3, dim=None,
     for i in range(max(1, int(windows))):
         end = hi - i * span + 1e-6       # include a snapshot exactly at the newest known timestamp
         cutoff = end - span
-        rows.append(_causal_window(store, cutoff, end, k, int(dim), method))
+        rows.append(_causal_window(store, cutoff, end, k, int(dim), method, memory_bytes=memory_bytes))
     viable = [row for row in rows if row["recall"] is not None]
     trials = sum(row["trials"] for row in viable)
     hits = sum(row.get("hits", 0) for row in viable)
@@ -236,7 +244,7 @@ def _coverage_band(y, has_audio=False, has_genre=True):
     return "+".join(parts)
 
 
-def projection_recall(store, k=20) -> dict:
+def projection_recall(store, k=20, *, inputs=None, max_targets=None) -> dict:
     """Five-fold projection recall, grouped by track identity, against a fixed reference embedding.
 
     Every evaluated target is excluded from its fold's ridge targets, content vocabulary and audio
@@ -245,7 +253,13 @@ def projection_recall(store, k=20) -> dict:
     unseen-artist performance. Unscorable targets and insufficient training folds remain explicit.
     """
     from yt_playlist.rec.discover import ContentProjection
-    keys, V, idx = vector_reads.load_vectors(store)
+    if inputs is None:
+        with store.read_snapshot() as snapshot:
+            reader = snapshot.store
+            inputs = (vector_reads.load_vectors(reader), reader.rec_query.track_content(),
+                      reader.rec_query.track_audio_features())
+    reference, content, audio = inputs
+    keys, V, idx = reference
     empty_bd = {"by_family": {}, "by_era": {}, "by_coverage": {}}
     result = {"recall": None, "trials": 0, "eligible": 0, "unscored": 0,
               "insufficient": 0, "k": k, "folds": 5, "split": "track_identity_5fold",
@@ -253,11 +267,12 @@ def projection_recall(store, k=20) -> dict:
     if V is None:
         result["reason"] = "No reference embedding"
         return result
-    dao = store.rec_query
-    content, audio = dao.track_content(), dao.track_audio_features()
     eligible = sorted((set(content) | set(audio)) & set(idx))
     result["eligible"] = len(eligible)
     shuffled = np.random.default_rng(0).permutation(eligible).tolist()
+    if max_targets is not None:
+        shuffled = shuffled[:max_targets]
+        result.update(sampled=len(shuffled) < len(eligible), sample_size=len(shuffled))
     Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + 1e-9)
     hits = trials = 0
     by_family, by_era, by_coverage = {}, {}, {}
@@ -270,12 +285,14 @@ def projection_recall(store, k=20) -> dict:
             b["trials"] += 1
 
     for fold in range(5):
+        check_cancellable_work()
         held_out = shuffled[fold::5]
         if not held_out:
             continue
         training = set(idx) - set(held_out)
-        proj = ContentProjection.fit(store, training_keys=training, include_artist=False)
+        proj = ContentProjection.fit_from_inputs(reference, content, audio, training_keys=training)
         for key in held_out:
+            check_cancellable_work()
             g, y = content.get(key, (None, None))
             a = audio.get(key)
             hit = None

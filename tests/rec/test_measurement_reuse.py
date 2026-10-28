@@ -136,6 +136,10 @@ def test_batched_queue_preserves_offer_bound_and_offer_time_attribution(tmp_path
         rec_params.set_param(store, "axis_weight_cap", 2)
         store.rec_model.replace_rec_vectors([("song|artist", np.asarray([1., 0.], dtype=np.float32).tobytes())])
         worker._flush_measurements()
+        assert store.conn.execute("SELECT COUNT(*) FROM rec_served_impressions").fetchone()[0] == 8
+        assert sum(offer.work_units for offer in worker.jobs.measurements) == 56
+        while worker.jobs.measurements:
+            worker._flush_measurements()
         assert store.conn.execute("SELECT COUNT(*) FROM rec_served_impressions").fetchone()[0] == 64
         for row in store.conn.execute("SELECT id FROM rec_served_impressions"):
             config = scorecard.served_recommendation(store, row[0])["configuration"]

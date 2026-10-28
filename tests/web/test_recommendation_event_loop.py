@@ -41,7 +41,7 @@ from yt_playlist.web.app import create_app
 ])
 def test_forms_wait_for_database_outside_event_loop(store, monkeypatch, path, data):
     app = create_app(store, lambda: {}, background_work=False)
-    monkeypatch.setattr(app.state.ctx.bridge, 'send_control', lambda frame: None)
+    monkeypatch.setattr(app.state.ctx.bridge, 'send_control', lambda frame, *, intent: True)
 
     @app.get('/_test/event-loop')
     async def probe():
@@ -74,6 +74,8 @@ def test_forms_wait_for_database_outside_event_loop(store, monkeypatch, path, da
                 release.set()
                 result = await asyncio.wait_for(request, 5)
             assert result.status_code in (200, 400)
+            if path == '/play':
+                assert result.json()['ok'] is True
 
     try:
         asyncio.run(exercise())

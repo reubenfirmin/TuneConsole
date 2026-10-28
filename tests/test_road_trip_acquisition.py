@@ -284,24 +284,26 @@ def test_an_explicit_passenger_genre_keeps_its_origin_when_widened(store, monkey
     assert not [a for a in state["axes"]["theirs"] if a["kind"] == "genre"]
 
 
-def test_genre_artists_prefers_lastfm_and_uses_musicbrainz_for_a_decade(monkeypatch):
+def test_genre_artists_prefers_lastfm_and_uses_musicbrainz_for_a_decade(monkeypatch, store):
     monkeypatch.setattr(candidates.lastfm, "api_key", lambda store=None: "k")
     monkeypatch.setattr(candidates.lastfm, "tag_top_artists",
                         lambda tag, key, limit=25: ["Weezer", "Pixies"])
     mb_calls = []
 
-    def mb(tag, decade=None, limit=25):
+    def mb(tag, decade=None, limit=25, *, store=None):
+        assert store is expected_store
         mb_calls.append((tag, decade))
         return ["Pixies", "Interpol", "Various Artists"] if decade else ["Filler"]
 
     monkeypatch.setattr(candidates.musicbrainz, "tag_artists", mb)
+    expected_store = store
     candidates._GENRE_ARTIST_CACHE.clear()
 
-    assert _real_genre_artists(None, "Alternative Rock") == ["Weezer", "Pixies"]
+    assert _real_genre_artists(store, "Alternative Rock") == ["Weezer", "Pixies"]
     assert mb_calls == []                          # Last.fm answered; no need to ask further
 
     candidates._GENRE_ARTIST_CACHE.clear()
-    got = _real_genre_artists(None, "Alternative Rock", decade="2000")
+    got = _real_genre_artists(store, "Alternative Rock", decade="2000")
 
     assert mb_calls == [("Alternative Rock", "2000")]   # only MB can filter on a decade
     assert got[0] == "Pixies"          # both sources agree on Pixies, so it leads

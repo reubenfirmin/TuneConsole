@@ -39,6 +39,7 @@ def test_rate_on_known_track_feeds_model():
     s.tracks.upsert_track("vidX", "Song", "Artist", "", None)
     body = json.dumps({"target": {"videoId": "vidX"}})
     msg = {"kind": "rate", "url": "https://music.youtube.com/youtubei/v1/like/dislike",
+           "brandKnown": True,
            "phase": "settled", "success": True, "httpStatus": 200,
            "body": body, "href": "https://music.youtube.com/watch?v=vidX", "brandId": ""}
     assert player_events.handle_player_event(_ctx(s), msg, 1000.0) is True
@@ -50,7 +51,7 @@ def test_rate_on_known_track_feeds_model():
 def test_rate_removelike_maps_to_indifferent_and_unknown_track_is_raw_only():
     s = _store()
     body = json.dumps({"target": {"videoId": "ghost"}})
-    msg = {"kind": "rate", "url": ".../youtubei/v1/like/removelike", "body": body, "brandId": ""}
+    msg = {"kind": "rate", "url": ".../youtubei/v1/like/removelike", "body": body, "brandId": "", "brandKnown": True}
     assert player_events.handle_player_event(_ctx(s), msg, 1000.0) is True   # persisted raw
     assert s.rec_model.disliked_identity_keys() == set()                               # but no model write
 
@@ -58,7 +59,7 @@ def test_rate_removelike_maps_to_indifferent_and_unknown_track_is_raw_only():
 def test_playlist_edit_extracts_playlist_and_video():
     s = _store()
     body = json.dumps({"playlistId": "PLmine", "actions": [{"addedVideoId": "v9", "action": "ACTION_ADD_VIDEO"}]})
-    msg = {"kind": "playlist_edit", "url": ".../youtubei/v1/browse/edit_playlist", "body": body, "brandId": ""}
+    msg = {"kind": "playlist_edit", "url": ".../youtubei/v1/browse/edit_playlist", "body": body, "brandId": "", "brandKnown": True}
     player_events.handle_player_event(_ctx(s), msg, 1000.0)
     e = s.player_events.player_events_since(0)[0]
     assert e["playlist_ytm_id"] == "PLmine" and e["video_id"] == "v9"
@@ -66,7 +67,7 @@ def test_playlist_edit_extracts_playlist_and_video():
 
 def test_curation_body_is_truncated_and_bad_json_tolerated():
     s = _store()
-    msg = {"kind": "feedback", "url": ".../youtubei/v1/feedback", "body": "{" + "x" * 9000, "brandId": ""}
+    msg = {"kind": "feedback", "url": ".../youtubei/v1/feedback", "body": "{" + "x" * 9000, "brandId": "", "brandKnown": True}
     assert player_events.handle_player_event(_ctx(s), msg, 1000.0) is True
     payload = json.loads(s.player_events.player_events_since(0)[0]["payload"])
     assert len(payload["body"]) <= 4096
@@ -77,6 +78,7 @@ def test_rate_url_with_querystring_still_parses_action():
     s.tracks.upsert_track("vidQ", "Song", "Artist", "", None)
     body = json.dumps({"target": {"videoId": "vidQ"}})
     msg = {"kind": "rate", "url": "https://music.youtube.com/youtubei/v1/like/dislike?key=abc&prettyPrint=false",
+           "brandKnown": True,
            "phase": "settled", "success": True, "httpStatus": 200,
            "body": body, "brandId": ""}
     assert player_events.handle_player_event(_ctx(s), msg, 1000.0) is True
@@ -98,6 +100,7 @@ def test_rating_requires_confirmation_but_retains_raw_outcomes(action, outcome, 
     s = _store()
     s.tracks.upsert_track("v", "Song", "Artist", "", None)
     msg = {"kind": "rate", "url": f"https://music.youtube.com/youtubei/v1/like/{action}",
+           "brandKnown": True,
            "body": json.dumps({"target": {"videoId": "v"}}), **outcome}
     assert player_events.handle_player_event(_ctx(s), msg, 1000.0)
     rating = s.tracks.item_rating(1, "v")
@@ -111,3 +114,19 @@ def test_rating_requires_confirmation_but_retains_raw_outcomes(action, outcome, 
     assert len(rows) == 1
     payload = json.loads(rows[0]["payload"])
     assert all(payload[k] == v for k, v in outcome.items())
+
+
+@pytest.mark.parametrize('kind', sorted(player_events.CURATION_KINDS))
+@pytest.mark.parametrize('known', [None, False, 0, 1, 'true'])
+def test_unknown_or_legacy_curation_never_creates_account_evidence(kind, known):
+    s = _store()
+    s.tracks.upsert_track('v', 'Song', 'Artist', '', None)
+    msg = {'kind': kind, 'url': 'https://music.youtube.com/youtubei/v1/like/dislike',
+           'body': json.dumps({'target': {'videoId': 'v'}}),
+           'phase': 'settled', 'success': True, 'httpStatus': 200, 'brandId': ''}
+    if known is not None:
+        msg['brandKnown'] = known
+    assert not player_events.handle_player_event(_ctx(s), msg, 1000)
+    assert s.player_events.player_events_since(0) == []
+    assert s.tracks.item_rating(1, 'v') is None
+    assert s.rec_model.disliked_identity_keys() == set()

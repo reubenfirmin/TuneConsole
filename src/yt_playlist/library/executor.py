@@ -12,8 +12,8 @@ from yt_playlist.library.playlist_mutation import (
     apply_playlist_permutation, confirm_playlist_write, same_playlist_items)
 from yt_playlist.library.playlist_snapshot import playlist_if_present, validate_playlist
 from yt_playlist.library.playlist_deletion import (
-    delete_backed_up, deletion_status, resume_pending_deletion)
-from yt_playlist.library.action_claim import claim_action
+    delete_backed_up, deletion_status, pending_deletion, resume_pending_deletion)
+from yt_playlist.library.action_claim import claim_action, claim_playlist_deletion
 from yt_playlist.library.undo_capture import capture_copy, capture_post as _capture_post
 from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.library.playlist_writes import (
@@ -119,6 +119,20 @@ def _remote_video_ids(client, ytm_playlist_id):
 def _verify_and_delete(store, source_playlist_id, source_client, target_client, target_ytm, now,
                        *, retained_video_ids=(), excluded_video_ids=(), backups=None,
                        action_id, locked=False) -> str:
+    source = store.playlists.get_playlist(source_playlist_id)
+    if source is None:
+        raise ValueError("source playlist no longer exists")
+    with claim_playlist_deletion(store, source):
+        if pending_deletion(store, source) is not None:
+            raise ValueError("This playlist already has a saved deletion. Recheck it in the Action Log.")
+        return _verify_claimed_and_delete(
+            store, source_playlist_id, source_client, target_client, target_ytm, now,
+            retained_video_ids=retained_video_ids, excluded_video_ids=excluded_video_ids,
+            backups=backups, action_id=action_id, locked=locked)
+
+
+def _verify_claimed_and_delete(store, source_playlist_id, source_client, target_client, target_ytm, now,
+                               *, retained_video_ids, excluded_video_ids, backups, action_id, locked):
     """Shared copy-before-delete gate for merges, moves and duplicate removal.
 
     Compare exact uploads from fresh reads. Only an explicit merge selection may exclude known
@@ -398,6 +412,15 @@ def forget_empty_playlist(store, playlist_id, now, *, reason="user_requested") -
 
 
 def delete_empty_playlist(store, playlist_id, client, now) -> str | None:
+    """Claim the target, then confirm emptiness before backing up and deleting it."""
+    pl = store.playlists.get_playlist(playlist_id)
+    if pl is None:
+        raise ValueError("playlist no longer exists")
+    with claim_playlist_deletion(store, pl):
+        return _delete_empty_playlist(store, playlist_id, client, now)
+
+
+def _delete_empty_playlist(store, playlist_id, client, now):
     """Delete only after a fresh remote read confirms emptiness; back up and prune the row.
 
     Some empty playlists fail to parse, but that failure cannot prove emptiness: the same failure
@@ -428,6 +451,15 @@ def delete_empty_playlist(store, playlist_id, client, now) -> str | None:
     return backup_path
 
 def delete_playlist(store, playlist_id, client, now) -> str:
+    """Claim and back up one playlist before deleting it with durable recovery."""
+    pl = store.playlists.get_playlist(playlist_id)
+    if pl is None:
+        raise ValueError("playlist no longer exists")
+    with claim_playlist_deletion(store, pl):
+        return _delete_playlist(store, playlist_id, client, now)
+
+
+def _delete_playlist(store, playlist_id, client, now):
     """Delete a playlist outright (any size). Backs up first, prunes the row, records an undoable action.
 
     Unlike delete_empty_playlist, this does not require the playlist to be empty. It's the

@@ -1,8 +1,9 @@
 """The enrichment waterfall: run the configured providers, in order, over a set of tracks.
 
 This is the reusable orchestrator the background worker will call. For each track it walks the
-enabled providers in the user's configured order; each provider's read-only ``probe`` returns what it
-found, which the harness (a) writes to the parseable ``enrichment_log``, (b) applies to the canonical
+enabled providers in the user's configured order; each provider's ``probe`` returns what it
+found without applying catalog metadata. Its IAO owns operational access state. The harness
+(a) writes to the parseable ``enrichment_log``, (b) applies to the canonical
 track fill-only (so a later provider sees an MBID an earlier one resolved) and (c) compares across
 providers to record disagreements as ``enrichment_conflict`` rows.
 
@@ -14,6 +15,8 @@ import uuid
 import time
 from collections.abc import Mapping
 
+from yt_playlist.core.metadata_observations import SubjectChanged
+from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
 from yt_playlist.providers import musicbrainz, lastfm, discogs, deezer, acousticbrainz
 from yt_playlist.providers import base, coverart
 from yt_playlist.providers.enrich_queue import PriorityGate
@@ -46,11 +49,18 @@ class TrackSink:
         self.store.enrichment.apply_provider_fields(self.track['id'],provider,fields,
                                                    providers=self.providers)
 
+    def record_observations(self, run_id, provider, observations, now):
+        self.store.enrichment_state.record_metadata_observations(
+            self.track['id'], provider, observations, run_id=run_id, now=now,
+            expected_recording_id=self.track['recording_id'])
+
     def set_art(self, url, *, source):
-        self.store.tracks.set_track_art(self.track["id"], url, source=source)
+        with self.store.enrichment_state.subject_guard(self.track['id'], self.track['recording_id']):
+            self.store.tracks.set_track_art(self.track["id"], url, source=source)
 
     def record_artwork(self, release_ids, outcome, now):
-        self.store.enrichment_state.record_artwork_result(self.track["id"], release_ids, outcome, now)
+        with self.store.enrichment_state.subject_guard(self.track['id'], self.track['recording_id']):
+            self.store.enrichment_state.record_artwork_result(self.track["id"], release_ids, outcome, now)
 
     def log(self, run_id, provider, field, value):
         self.store.enrichment_state.log_enrichment(self.track["id"], run_id, provider, field, value)
@@ -106,10 +116,36 @@ def _resolve_art(sink, track, results, now_fn=time.time):
     outcome = coverart.CoverResult("found", art) if art else coverart.CoverResult("absent")
     if not art:
         if release_ids:
-            outcome = coverart.lookup(release_ids)
+            with coverart.access(getattr(sink, 'store', None)):
+                outcome = coverart.lookup(release_ids)
     sink.set_art(outcome.url, source='deezer' if art else 'coverart')
     sink.record_artwork(release_ids, outcome, now_fn())
     return outcome
+
+
+def _changed_subject(store, track, on_progress, i, total):
+    store.enrichment_queue.requeue_enrichment([track['id']])
+    on_progress({'type': 'info', 'warning': True,
+                 'text': 'Recording changed during lookup; retrying the current recording.'})
+    on_progress({'type': 'track', 'i': i, 'n': total, 'track_id': track['id'],
+                 'job_id': track.get('job_id', track['id']), 'identity_key': track.get('identity_key'),
+                 'genre': None, 'year': None,
+                 'video_id': track.get('video_id'), 'fully_attempted': False,
+                 'text': 'Recording changed; lookup remains queued.'})
+
+
+def _finish(sink, results, successful, complete):
+    conflicts = base.detect_conflicts(results)
+    for field, candidates in conflicts.items():
+        refreshed = {r.provider for r in results if r.provider in successful
+                     and field in r.fields and not base._empty(r.fields[field])}
+        sink.upsert_conflict(field, candidates, refreshed_providers=refreshed)
+    if complete:
+        agreeing = {field: {r.provider: r.fields[field] for r in results
+                           if field in r.fields and not base._empty(r.fields[field])}
+                    for field in base.FIELD_SPECS if field not in conflicts}
+        sink.retire_agreed_conflicts(agreeing)
+    return len(conflicts), sink.effective_enrichment()
 
 
 def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=None,
@@ -168,13 +204,18 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
             _gate.wait_turn(seq, on_wait=lambda: on_progress(
                 {"type": "info", "waiting": True,
                  "text": "Waiting: a newer run is enriching first…"}))
-            t = {**t, **(store.tracks.catalog_subject(t["id"]) or {})}
+            subject = store.tracks.catalog_subject(t['id']) or {}
+            if t.get('recording_id') is not None and t['recording_id'] != subject.get('recording_id'):
+                _changed_subject(store, t, on_progress, i, total)
+                continue
+            t = {**t, **subject}
             sink = sink_for(t)
             if isinstance(sink, TrackSink):
                 sink.providers = [m.name for m in chosen]
             results = []
             successful = set()
             attempted = 0
+            stale = False
             key = t.get("identity_key") or identity_key(t["title"], t.get("artist", ""))
             coverage = t.get("provider_jobs")
             saved = store.enrichment_state.enrichment_provider_state(t["recording_id"], include_previous=coverage is not None)
@@ -184,6 +225,12 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                 saved = {**{name: attempt for name, attempt in store.enrichment_state.enrichment_attempts(key).items()
                             if name not in coverage}, **saved}
             for m in chosen:
+                try:
+                    with store.enrichment_state.subject_guard(t['id'], t['recording_id']):
+                        pass
+                except SubjectChanged:
+                    stale = True
+                    break
                 prior = saved.get(m.name, {})
                 if coverage is not None and m.name not in coverage:
                     if prior.get("status") in ("found", "no_match"):
@@ -193,7 +240,12 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                     continue
                 if reuse_completed and prior.get("status") in ("found", "no_match"):
                     res = base.EnrichmentResult(m.name, prior["fields"])
-                    _apply(sink, t, res)
+                    try:
+                        with store.enrichment_state.subject_guard(t['id'], t['recording_id']):
+                            _apply(sink, t, res)
+                    except SubjectChanged:
+                        stale = True
+                        break
                     results.append(res)
                     successful.add(m.name)
                     attempted += 1
@@ -214,41 +266,62 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                 with net.probe_errors() as errors:
                     try:
                         res = m.probe(t, store)
-                        fields = dict(res.fields)
-                        for fld, val in fields.items():
-                            if fld not in _INTERNAL:
-                                sink.log(run_id, m.name, fld, val)
-                        _apply(sink, t, res)
-                        results.append(res)
+                        with store.enrichment_state.subject_guard(t['id'], t['recording_id']):
+                            fields = dict(res.fields)
+                            if res.observations:
+                                sink.record_observations(run_id, m.name, res.observations, now_fn())
+                            for fld, val in fields.items():
+                                if fld not in _INTERNAL:
+                                    sink.log(run_id, m.name, fld, val)
+                            _apply(sink, t, res)
+                            results.append(res)
+                    except SubjectChanged:
+                        stale = True
+                        break
+                    except (WorkClosing, WorkBudgetExceeded):
+                        raise
                     except Exception as exc:
                         # One malformed answer must not abort healthy providers or later tracks.
-                        net.record_probe_failure(exc)
+                        fields = {}
+                        if not any(error is exc for error in errors):
+                            net.record_probe_failure(exc)
                 retry = bool(errors) or m.tripped()
-                outage = m.tripped() or any(net.provider_outage(e) for e in errors)
+                outage = m.tripped() or any(net.provider_outage(e) and
+                    getattr(e, 'provider', m.name) == m.name for e in errors)
                 now = now_fn()
                 error = "; ".join(str(e) or type(e).__name__ for e in errors)
                 if m.tripped() and not error:
                     error = "Provider looks unreachable"
-                store.enrichment_state.record_enrichment_attempt(
-                    key, m.name, fields, retry=retry, video_id=t.get("video_id"), now=now,
-                    error=error, cooldown=outage,
-                    retry_after=max((net.retry_after(e, now) for e in errors), default=0),
-                    providers=[mod.name for mod in chosen])
+                try:
+                    with store.enrichment_state.subject_guard(t['id'], t['recording_id']):
+                        store.enrichment_state.record_enrichment_attempt(
+                            key, m.name, fields, retry=retry, video_id=t.get("video_id"), now=now,
+                            error=error, cooldown=outage,
+                            retry_after=max((net.retry_after(e, now) for e in errors), default=0),
+                            providers=[mod.name for mod in chosen],
+                            manage_cooldown=not getattr(m, 'manages_availability', False))
+                except SubjectChanged:
+                    stale = True
+                    break
                 if not retry:
                     attempted += 1
                     successful.add(m.name)
                 else:
                     cooldowns = store.enrichment_state.enrichment_cooldowns()
-                    state = store.enrichment_state.enrichment_provider_state(t["recording_id"])[m.name]
+                    state = store.enrichment_state.enrichment_provider_state(t["recording_id"]).get(m.name, {})
+                    retry_at = state.get('retry_at', now + 30)
                     on_progress({"type": "info", "warning": True,
-                                 "retry_at": state["retry_at"],
+                                 "retry_at": retry_at,
                                  "text": f"{labels[m.name]} lookup failed for {t['title']}: {error}. "
-                                         f"Retry in {max(1, int(state['retry_at'] - now))} seconds."})
+                                         f"Retry in {max(1, int(retry_at - now))} seconds."})
                 if m.tripped():                   # host unreachable. Drop it for the rest of the run
                     dead.add(m.name)
                     on_progress({"type": "info", "warning": True,
                                  "text": f"{m.name} looks unreachable. "
                                  "Skipping it for the rest of this run."})
+            if stale:
+                _changed_subject(store, t, on_progress, i, total)
+                continue
             if needs_art(t):
                 on_progress({"type": "activity", "title": t["title"],
                              "artist": t.get("artist", ""), "i": i, "n": total,
@@ -258,21 +331,19 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                 if art_result and art_result.status == "retry":
                     on_progress({"type":"info", "warning":True,
                         "text": f"Artwork for {t['title']} will retry separately: {art_result.error}"})
+            except SubjectChanged:
+                _changed_subject(store, t, on_progress, i, total)
+                continue
             except Exception as exc:
                 on_progress({"type": "info", "warning": True,
                              "text": f"Cover art lookup failed for {t['title']}: {exc}"})
-            conflicts = base.detect_conflicts(results)
-            for fld, candidates in conflicts.items():
-                refreshed = {r.provider for r in results if r.provider in successful
-                             and fld in r.fields and not base._empty(r.fields[fld])}
-                sink.upsert_conflict(fld, candidates, refreshed_providers=refreshed)
-                conflicts_found += 1
-            if attempted == len(chosen):
-                agreeing = {field: {r.provider: r.fields[field] for r in results
-                                   if field in r.fields and not base._empty(r.fields[field])}
-                            for field in base.FIELD_SPECS if field not in conflicts}
-                sink.retire_agreed_conflicts(agreeing)
-            eff_genre, eff_year = sink.effective_enrichment()
+            try:
+                with store.enrichment_state.subject_guard(t['id'], t['recording_id']):
+                    count, (eff_genre, eff_year) = _finish(sink, results, successful, attempted == len(chosen))
+                    conflicts_found += count
+            except SubjectChanged:
+                _changed_subject(store, t, on_progress, i, total)
+                continue
             if attempted == len(chosen):
                 fully_attempted.append(t.get("job_id", t["id"]))
             on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],

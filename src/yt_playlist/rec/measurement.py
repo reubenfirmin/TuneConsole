@@ -9,8 +9,10 @@ import logging
 import uuid
 from copy import deepcopy
 
-from yt_playlist.rec import embedding_vectors as vectors, rec_params, scoring, transient
+from yt_playlist.rec import choice_bandit, embedding_vectors as vectors, home_vibe, musical_character, rec_params, scoring, transient
 from yt_playlist.core.activity import WorkClosing
+from yt_playlist.core import policy_config
+from yt_playlist.repos import policy_storage
 from yt_playlist.repos.base import synchronized
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import normalize
@@ -35,6 +37,7 @@ class PoolPolicies:
         self.now = now
         self._configuration = None
         self.rows = {}
+        self.bases = {}
 
     def stamp(self, items, ranker):
         if not items:
@@ -42,10 +45,12 @@ class PoolPolicies:
         try:
             if self._configuration is None:
                 _, self._configuration = serving_policy(self.store, self.now)
-            configuration = {**self._configuration, "ranker": ranker}
-            raw = json.dumps(configuration, sort_keys=True, separators=(",", ":"))
-            version = hashlib.sha256(raw.encode()).hexdigest()[:16]
-            self.rows[version] = (version, raw, self.now)
+                base = policy_config.base_record(self._configuration, self.now)
+                self.bases[base[0]] = base
+            base_version = next(iter(self.bases))
+            row = policy_config.variant_record(base_version, {'ranker': ranker}, self.now)
+            version = row[0]
+            self.rows[version] = row
             return [{**item, "pool_policy": version} for item in items]
         except WorkClosing:
             raise
@@ -70,7 +75,7 @@ def _serving_policy(store, now, ranker):
     """
     params = {spec.name: rec_params.get_param(store, spec.name) for spec in rec_params.PARAMS}
     configuration = {
-        "schema": 2, "algorithm": "served-ranking-v2", "ranker": ranker,
+        "schema": 4, "algorithm": "served-ranking-v2", "ranker": ranker,
         "params": params,
         "weights": store.rec_model.get_weights(now=now, revert_halflife_d=params["weight_revert_halflife_d"]),
         "weight_records": store.rec_model.weight_records(), "leans": store.rec_model.get_leans(),
@@ -84,11 +89,14 @@ def _serving_policy(store, now, ranker):
         "recent_skips": store.player_events.recent_skips_with_ts(now - 4 * params["skip_halflife_d"] * 86400),
         "radio_lists": transient.radio_list_ids(store),
         "home": {"vibe": store.settings.get_setting("home_mix_vibe"),
+                 "vibe_at": store.settings.get_setting('home_mix_vibe_updated_at'),
                  "tuning_at": store.settings.get_setting("home_mix_tuning_updated_at"),
                  "genre_request": store.rec_proposals.get_proposals("home_genre_request")},
         "modes": {"definitions": [{k: v for k, v in m.items() if k != "centroid"}
                                    for m in store.modes.list_modes()],
-                  "offered": store.modes.impression_counts(), "picks": store.modes.pick_rows()},
+                  "offered": store.modes.impression_counts(), "picks": store.modes.pick_counts(),
+                  "response_evidence": choice_bandit.stats(store, now)},
+        "musical": {'profile_version': musical_character.VERSION, 'vibe_policy': home_vibe.VERSION},
         "models": store.memoized_read("serving-model-identities", lambda: _model_identities(store)),
     }
     raw = json.dumps(configuration, sort_keys=True, separators=(",", ":"))
@@ -125,6 +133,8 @@ def record_recommendations(store, surface, items, now, *, lane="", mode_id=None,
 
 def record_offers(store, surface, offers, now):
     """Capture one response's live cards and counterfactuals with one bounded queued reader."""
+    if getattr(store, 'activity_paused', False):
+        return
     # Instrumentation must never turn a successful recommendation response into an error.
     try:
         offers = [{**row, "items": [dict(it) if isinstance(it, dict) else vars(it).copy()
@@ -186,6 +196,8 @@ class CapturedOffer:
             context.__exit__(None, None, None)
 
     def run(self):
+        if getattr(self.store, 'activity_paused', False):
+            return
         try:
             _, configuration = serving_policy(self.snapshot.store, self.now)
         except WorkClosing:
@@ -197,9 +209,12 @@ class CapturedOffer:
             try:
                 version, config, rows = _prepare_impressions(
                     self.snapshot.store, items, self.now, configuration=configuration, **options)
-                self.store.rec_ledger.record_serving_policy(version, config, self.now)
+                pools, bases = policy_storage.captured(self.snapshot.store.conn,
+                    (row['provenance'].get('pool_policy') for row in rows))
+                policy, base = policy_config.pack(config, self.now, version=version)
                 self.store.rec_ledger.record_served_impressions(request_id, self.surface, rows,
-                    self.now, prune_before=self.now - RETAIN_DAYS * 86400)
+                    self.now, prune_before=self.now - RETAIN_DAYS * 86400,
+                    policies=[*pools, policy], bases=[*bases, base])
             except WorkClosing:
                 raise
             except Exception:
@@ -216,7 +231,13 @@ def _prepare_impressions(store, items, now, *, lane="", mode_id=None, ranker="la
         raw = json.dumps(config, sort_keys=True, separators=(",", ":"))
         version = hashlib.sha256(raw.encode()).hexdigest()[:16]
     if experiment:
-        config = {**config, "experiment": experiment, "schema": 3}
+        # Assignment and opportunity identities belong to the impression. The reusable policy
+        # retains the experiment definition, including its cohort and actual ranker inputs.
+        definition = {k: v for k, v in experiment.items() if k not in {"comparison_id", "cluster", "assignment"}}
+        if experiment.get("assignment"):
+            definition["assignment"] = {key: experiment["assignment"][key]
+                                        for key in ("policy", "unit") if key in experiment["assignment"]}
+        config = {**config, "experiment": definition}
         version = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:16]
     keys = [it.get("key") or it.get("identity_key") for it in items]
     offered = [key for key in keys if key]
@@ -259,10 +280,11 @@ def stamp_pool(store, items, now, ranker="candidate-pool"):
     if not items:
         return items
     try:
+        maintain_storage(store, now)
         with store.read_snapshot() as snapshot:
             policies = PoolPolicies(snapshot.store, now)
             stamped = policies.stamp(items, ranker)
-        store.rec_ledger.record_prepared_policies(list(policies.rows.values()))
+        store.rec_ledger.record_prepared_policies(list(policies.rows.values()), list(policies.bases.values()))
         return stamped
     except WorkClosing:
         raise
@@ -271,10 +293,28 @@ def stamp_pool(store, items, now, ranker="candidate-pool"):
         return items
 
 
+def maintain_storage(store, now):
+    """Collect unused prepared policies even when no recommendations are served.
+
+    Read the large prepared/session JSON off the serving connection. Publication
+    checks those roots for changes, and rechecks impression references at delete.
+    """
+    with store.read_snapshot() as snapshot:
+        versions, cursor = policy_storage.retention_candidates(snapshot.store.conn, now)
+        stats = {}
+        published = snapshot.publish(lambda: stats.update(policy_storage.prune(store.conn, versions, cursor)))
+    if published and (stats['policies_deleted'] or stats['bodies_deleted']):
+        log.info('Recommendation policy retention: policies_deleted=%d bodies_deleted=%d more=%s',
+                 stats['policies_deleted'], stats['bodies_deleted'], cursor is not None)
+    return published
+
+
 @synchronized
 def record_action(store, kind, now, *, keys=(), video_id=None, playlist_id=None,
                   event_id=None, generated=False):
     """Log a successful explicit action separately from observed plays and organic taste evidence."""
+    if getattr(store, 'activity_paused', False):
+        return
     try:
         keys = set(keys)
         if video_id:
@@ -283,8 +323,7 @@ def record_action(store, kind, now, *, keys=(), video_id=None, playlist_id=None,
             if row:
                 keys.add(row["identity_key"])
             else:
-                keys.update(r["identity_key"] for r in store.discovery.get_discovered_tracks()
-                            if r["video_id"] == video_id)
+                keys.update(store.discovery.identity_keys_for_video(video_id))
         if playlist_id is not None:
             keys.update(store.playlists.get_playlist_track_keys(playlist_id))
         store.rec_ledger.record_recommendation_outcomes(event_id or uuid.uuid4().hex, kind, keys, now,

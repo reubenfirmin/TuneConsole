@@ -1,7 +1,37 @@
 import numpy as np
+import pytest
 
 from yt_playlist.rec import embed, embedding_vectors as vectors
 from tests import model_support
+
+
+@pytest.mark.parametrize('method', ['svd', 'item2vec'])
+def test_fit_is_invariant_to_basket_and_member_order(method):
+    from yt_playlist.rec import embedding_training as training
+    baskets = [[f'key-{(start + offset) % 20}' for offset in range(7)] for start in range(20)]
+    baskets += [baskets[0]]  # Repeated baskets still carry repeated evidence.
+    reordered = [list(reversed(basket)) + [basket[0]] for basket in reversed(baskets)]
+    first = training.build_vectors_from_baskets(baskets, dim=4, method=method)
+    second = training.build_vectors_from_baskets(reordered, dim=4, method=method)
+    assert first.keys == second.keys
+    np.testing.assert_array_equal(first.matrix, second.matrix)
+
+
+def test_item2vec_is_invariant_to_python_hash_seed():
+    import os
+    import subprocess
+    import sys
+
+    code = '''
+import hashlib
+from yt_playlist.rec.embedding_training import build_vectors_from_baskets
+baskets = [list({f'key-{(start + offset) % 20}' for offset in range(7)}) for start in range(20)]
+fit = build_vectors_from_baskets(baskets, dim=4, method='item2vec')
+print(hashlib.sha256(fit.matrix.tobytes()).hexdigest())
+'''
+    hashes = [subprocess.check_output([sys.executable, '-c', code],
+              env={**os.environ, 'PYTHONHASHSEED': seed}, text=True).strip() for seed in ('1', '42')]
+    assert hashes[0] == hashes[1]
 
 
 def test_item2vec_builds_unit_vectors(store):

@@ -26,21 +26,6 @@ def test_wide_net_is_the_honest_counterpart():
     assert rs._beat_wide_net(spread, {"distinct_artists": 5}) is None   # not actually wide
 
 
-def test_new_obsession_needs_real_repetition():
-    assert rs._beat_new_obsession({"top_new_artist": {"artist": "X", "plays": 2}}) is None
-    b = rs._beat_new_obsession({"top_new_artist": {"artist": "X", "plays": 9}})
-    assert b and b["artist"] == "X" and b["plays"] == 9
-
-
-def test_diversity_direction_and_deadband():
-    months = [{"month": "1970-01", "diversity": 0.60}, {"month": "1970-02", "diversity": 0.68}]
-    b = rs._beat_diversity(months, "1970-02")
-    assert b and b["direction"] == "branched out" and b["delta"] == 0.08
-    flat = [{"month": "1970-01", "diversity": 0.60}, {"month": "1970-02", "diversity": 0.61}]
-    assert rs._beat_diversity(flat, "1970-02") is None            # <0.03 change -> omitted
-    assert rs._beat_diversity(months, "1970-01") is None          # no prior month
-
-
 # ── personality axes ───────────────────────────────────────────────────────────────────────────
 def test_energy_axis_falls_back_to_genre_when_no_acoustic():
     # No acoustic rows at all: energy comes purely from the genre prior (techno is high-energy).
@@ -85,9 +70,9 @@ def test_archetype_matrix_is_total():
 
 # ── assembly ────────────────────────────────────────────────────────────────────────────────────
 class _FakeTrends:
-    def ledger_track_plays(self, since, until): return {"k1": 10, "k2": 4}
+    def ledger_track_plays(self, since, until, *, calendar=False): return {"k1": 10, "k2": 4}
     def track_audio(self): return {"k1": {"energy": 0.5, "bpm": 120, "dance": 0.7}}
-    def play_hours(self, since, until): h = [0] * 24; h[22] = 8; h[14] = 6; return h
+    def play_hours(self, since, until, *, calendar=False): h = [0] * 24; h[22] = 8; h[14] = 6; return h
     def track_meta(self): return {"k1": ("A1", "house"), "k2": ("A2", "ambient")}
 
 
@@ -102,7 +87,7 @@ def test_build_story_assembles_cover_personality_and_closing():
     months = [{"month": "2026-05", "diversity": 0.67, "distinct_artists": 200},
               {"month": "2026-06", "diversity": 0.60, "distinct_artists": 300, "plays": 535,
                "new_artist_plays": 40}]
-    story = rs.build_story(_FakeStore(), months, review, insights=[], month_name="June")
+    story = rs.build_story(_FakeStore(), months, review, month_name="June")
     kinds = [b["kind"] for b in story["beats"]]
     assert kinds[0] == "cover" and kinds[-1] == "closing" and "personality" in kinds
     assert "wide_net" in kinds and "all_in" not in kinds          # 14/535 -> wide net, not all in
@@ -121,7 +106,7 @@ def test_build_story_assembles_cover_personality_and_closing():
 def test_cover_reports_activity_even_when_one_artist_dominates(plays, days, artist_plays, expected):
     review = {"month": "2026-09", "plays": plays, "listen_days": days, "longest_streak": 1,
               "top_artists": [{"artist": "A", "plays": artist_plays}]}
-    story = rs.build_story(_FakeStore(), [], review, insights=[], month_name="September")
+    story = rs.build_story(_FakeStore(), [], review, month_name="September")
     assert story["beats"][0]["thesis"] == expected
     # The artist's share is still useful, but says nothing about how often the app was used.
     artist = next(b for b in story["beats"] if b["kind"] == "all_in")
@@ -130,4 +115,4 @@ def test_cover_reports_activity_even_when_one_artist_dominates(plays, days, arti
 
 
 def test_build_story_none_without_review():
-    assert rs.build_story(_FakeStore(), [], None, [], None) is None
+    assert rs.build_story(_FakeStore(), [], None, None) is None

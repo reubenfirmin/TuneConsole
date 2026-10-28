@@ -52,7 +52,8 @@ def operation_values(operation: PlaylistOperation | None) -> dict:
             'waiting': list(tail.waiting) if tail.waiting is not None else None,
             'waiting_at': tail.write.started_at if tail.write else None,
             'receipt': tail.receipt, 'adding': tail.adding, 'proposed': tail.proposed,
-            'slot': tail.slot, 'choice_id': tail.choice_id} if tail else None,
+            'play_prefix': list(tail.play_prefix) if tail.play_prefix is not None else None,
+            'slot': tail.slot, 'choice_id': tail.choice_id, 'excluded': tail.excluded} if tail else None,
     }
 
 
@@ -63,8 +64,12 @@ def encode(s: Session) -> str:
         "started_at": s.started_at, "tracks": s.tracks, "position": s.position, "furthest": s.furthest,
         "fingerprint": s.candidates.fingerprint, "heard": s.heard, "transition": s.transition,
         **operation_values(s.edits.active), "initial_tracks": s.initial_tracks,
+        "initial_handles": s.initial_handles,
         "tuning": s.candidates.tuning, "recent_states": s.edits.recent_states,
-        "requested_direction": s.requested_direction, "choices": s.choices, "rejected": sorted(s.rejected),
+        'comparison': getattr(s.candidates, 'comparison', None),
+        "requested_direction": ({k: v for k, v in s.requested_direction.items() if k != 'play'}
+                                if s.requested_direction else None),
+        "choices": s.choices, "rejected": sorted(s.rejected),
         "stopped": s.stopped_by_user, "halted": s.halted, "error": s.error,
         "directions": {"active": directions.active, "slots": directions.slots,
             "revision": directions.revision, "menu_id": directions.menu_id,
@@ -88,6 +93,7 @@ def restore(state: dict, client, identity, candidates) -> Session:
     s.selected = list(s.tracks) + ([s.pending] if s.pending else [])
     s.furthest = state.get("furthest", s.position)
     s.initial_tracks = state.get("initial_tracks", [])
+    s.initial_handles = state.get("initial_handles", {})
     s.edits.recent_states = state.get("recent_states", [])
     s.edits.requested = state.get("requested_direction")
     s.rejected = set(state.get("rejected", []))
@@ -110,7 +116,8 @@ def restore(state: dict, client, identity, candidates) -> Session:
     pending = state.get("replacement")
     if pending:
         tail = RadioPlaylistTail(s.tracks, pending["proposed"], pending["slot"],
-                                 choice_id=pending.get("choice_id"))
+                                 choice_id=pending.get("choice_id"), excluded=pending.get('excluded', ()),
+                                 play_prefix=pending.get('play_prefix'))
         s.edits.begin(tail)
         tail.allowed = {tuple(ids) for ids in pending["allowed"]}
         tail.confirmed = tuple(pending.get("confirmed", [t["video_id"] for t in s.tracks]))
@@ -127,13 +134,15 @@ def restore(state: dict, client, identity, candidates) -> Session:
 
 
 class RadioPersistence:
-    def __init__(self, settings):
+    def __init__(self, settings, *, paused=lambda: False):
         self.settings = settings
+        self.paused = paused
+        self.transient = None
         self.last_saved = None
         self.lock = threading.RLock()
 
     def load(self) -> dict | None:
-        raw = self.settings.get_setting(SESSION_KEY)
+        raw = self.transient if self.transient is not None else self.settings.get_setting(SESSION_KEY)
         return migrate(json.loads(raw)) if raw else None
 
     def save(self, session: Session):
@@ -150,6 +159,13 @@ class RadioPersistence:
             self._write(json.dumps(state, sort_keys=True))
 
     def _write(self, encoded):
+        # Keep the live transaction journal in RAM during repair. A session
+        # created without a local playlist remains transient for its lifetime.
+        state = json.loads(encoded)
+        if self.paused() or ('local_id' in state and state['local_id'] is None):
+            self.transient = encoded
+            return
         if encoded != self.last_saved:
             self.settings.set_setting(SESSION_KEY, encoded)
             self.last_saved = encoded
+        self.transient = None

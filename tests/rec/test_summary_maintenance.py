@@ -175,7 +175,9 @@ def test_full_rebuild_failure_does_not_swallow_summary_jobs(store, monkeypatch):
     assert not worker.projections.active
 
 
-def test_poll_shares_one_scoped_capture_despite_unrelated_key_churn(store, monkeypatch):
+@pytest.mark.parametrize('analytics_enabled', [False, True])
+def test_poll_shares_one_scoped_capture_despite_unrelated_key_churn(store, monkeypatch, analytics_enabled):
+    monkeypatch.setenv('YT_PLAYLIST_LISTENING_CHARTS', '1' if analytics_enabled else '0')
     seed(store)
     worker = worker_for(store, monkeypatch, [timestamp('2026-10')])
     captures = []
@@ -191,7 +193,7 @@ def test_poll_shares_one_scoped_capture_despite_unrelated_key_churn(store, monke
     assert len(captures) == 1
     baseline = captures.pop()
     assert baseline
-    assert all(not key or (table, key) == ('settings', 'key:takeout_imported_at')
+    assert all(not key or (table, key) in set().union(*maintenance.DEPENDENCIES.values())
                for table, key in baseline)
     with store.conn:
         store.conn.executemany('INSERT INTO settings VALUES (?,?)',
@@ -200,7 +202,8 @@ def test_poll_shares_one_scoped_capture_despite_unrelated_key_churn(store, monke
     assert len(original()) > 4000
     worker.projections.poll()  # Coalesced jobs are still active on this idle tick.
     assert captures == [baseline]
-    assert worker.projections.active == {'trends', 'cleanup'}
+    expected = {'trends', 'cleanup'} | ({'analytics'} if analytics_enabled else set())
+    assert worker.projections.active == expected
 
 
 def test_local_import_setting_invalidates_only_trends_inputs(store):

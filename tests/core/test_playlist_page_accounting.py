@@ -53,6 +53,21 @@ def test_verified_empty_playlist_avoids_upstream_empty_token_index_error():
     assert response == before
 
 
+def test_playback_substitution_preserves_the_original_playlist_upload():
+    from ytmusicapi.navigation import PLAY_BUTTON
+
+    row = item('original')['musicResponsiveListItemRenderer']
+    target = row
+    for field in PLAY_BUTTON:
+        target = target.setdefault(field, {})
+    target['playNavigationEndpoint'] = {'watchEndpoint': {'videoId': 'playable'}}
+    client, _ = _production_client([first([{'musicResponsiveListItemRenderer': row}], count=1)])
+    result = client.get_playlist('PL', limit=None)
+    assert result['tracks'][0]['videoId'] == 'playable'
+    assert result['tracks'][0]['playlistVideoId'] == 'original'
+    assert is_complete_playlist(result)
+
+
 def test_explicit_zero_count_allows_music_empty_shelf_message():
     client, _ = _production_client([first([{'messageRenderer': {'text': {'runs': [
         {'text': 'No saved episodes'}]}}}], count=0)])

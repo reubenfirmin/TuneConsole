@@ -142,11 +142,11 @@ main:not(.page-clusters) h2.section::after {
   box-shadow: 0 7px 12px -11px var(--shadow-ink);
   backdrop-filter: blur(10px);
 }
-.page-playlists .playlist-table-card thead th:first-child {
-  background: transparent;
-  box-shadow: none;
-  backdrop-filter: none;
-}
+.playlist-created { display:block; margin-top:.25rem; color:var(--text); font-size:var(--type-sm); }
+.playlist-playback { display:none; margin-top:.25rem; color:var(--dim); font-size:var(--type-sm); }
+.playlist-created, .playlist-playback { white-space:normal; overflow-wrap:anywhere; }
+.page-playlists .lastcol { white-space:normal; overflow-wrap:anywhere; }
+@media (max-width: 720px) { .playlist-playback { display:block; } }
 .page-playlists .playlist-table-card tbody td {
   padding-block: .52rem;
   border-block-end: 0;

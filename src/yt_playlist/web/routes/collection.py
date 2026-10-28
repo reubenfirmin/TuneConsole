@@ -5,7 +5,8 @@ from yt_playlist.core.accounts import client_for
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
-from yt_playlist.util.thumbnails import best_thumb
+from yt_playlist.library import album_writes
+from yt_playlist.rec import choice_evidence
 
 
 def build(ctx) -> APIRouter:
@@ -27,8 +28,9 @@ def build(ctx) -> APIRouter:
         view = "playlists" if request.query_params.get("view") == "playlists" else "saved"
         data = {"view": view}
         if view == "saved":
-            data["saved"] = store.collection.get_saved_albums()   # populated by sync (get_library_albums)
-            data["saved_owners"] = store.collection.saved_album_owners()
+            with store.read_view() as reader:
+                data["saved"] = reader.collection.get_saved_albums()   # populated by sync (get_library_albums)
+                data["saved_owners"] = reader.collection.saved_album_owners()
         else:
             data["albums"] = store.collection.collection_albums()
         return templates.TemplateResponse(request, "albums.html", data)
@@ -46,12 +48,7 @@ def build(ctx) -> APIRouter:
 
     def _save_album(browse_id):
         identity_id,client,album = _album_and_client(browse_id)
-        client.rate_playlist(album["audioPlaylistId"], "LIKE")
-        store.collection.add_saved_album({
-            "browse": browse_id, "title": album.get("title"), "type": album.get("type"),
-            "artist": ", ".join(x.get("name", "") for x in (album.get("artists") or [])),
-            "year": album.get("year"), "thumbnail": best_thumb(album.get("thumbnails")),
-            "credits":album.get('artists')},identity_id=identity_id)
+        album_writes.set_saved(store, client, identity_id, browse_id, album, saved=True)
 
     def _unsave_album(browse_id, identity_id):
         owners = store.collection.saved_album_owners(browse_id).get(browse_id, [])
@@ -62,12 +59,12 @@ def build(ctx) -> APIRouter:
         if identity_id not in {owner['identity_id'] for owner in owners}:
             raise ValueError("This album is not saved in the selected account.")
         identity_id,client,album = _album_and_client(browse_id,identity_id=identity_id)
-        client.rate_playlist(album["audioPlaylistId"], "INDIFFERENT")
-        store.collection.remove_saved_album(browse_id,identity_id=identity_id)
+        album_writes.set_saved(store, client, identity_id, browse_id, album, saved=False)
 
     @router.post("/collection/save-album")
     async def save_album(request: Request):
-        browse_id = ((await request.form()).get("browse_id") or "").strip()
+        form = await request.form()
+        browse_id = (form.get("browse_id") or "").strip()
         if not browse_id:
             return _toast(request, "no album id")
         try:
@@ -78,6 +75,10 @@ def build(ctx) -> APIRouter:
         except Exception:  # noqa: BLE001
             ctx.logger.exception("save-album %s failed", browse_id)
             return _toast(request, "YouTube refused the save")
+        if form.get("opportunity_id"):
+            choice_evidence.safe_respond(store, form["opportunity_id"], "save", ctx.now_fn(), option_id=browse_id)
+        if worker := getattr(ctx, 'rec_worker', None):
+            worker.trigger_home_refresh()
         return _refresh()
 
     @router.post("/collection/unsave-album")

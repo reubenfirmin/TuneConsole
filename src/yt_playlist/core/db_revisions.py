@@ -9,16 +9,26 @@ import sqlite3
 
 
 _KEY_COLUMNS = {"settings": "key", "rec_proposals": "surface", "player_events": "kind",
+                "rec_proposal_cache_heads": "surface", "rec_proposal_cache_builds": "cache_id",
+                "rec_proposal_cache_chunks": "cache_id",
                 "recordings": "identity_key", "youtube_items": "video_id",
                 "catalog_entries": "recording_id", "unresolved_items": "entry_id",
                 "entry_field_choices": "entry_id", "library_memberships": "entry_id",
                 "discovery_memberships": "recording_id", "discovery_sources": "recording_id",
-                "rec_content_pending": "identity_key", "rec_prepared_content": "identity_key"}
+                "rec_content_pending": "identity_key", "rec_prepared_content": "identity_key",
+                "rec_musical_sources": "source_key", "rec_musical_links": ("source_key", "recording_id"),
+                "rec_musical_pending": "source_key", "rec_musical_source_profiles": "source_key",
+                "rec_musical_profiles": "identity_key", "track_artists": "entry_id",
+                "recording_vibes": "recording_id", "sample_attributes": "recording_id",
+                "measurements": "recording_id"}
 # A declared catalog read consumes every recording field except enrichment's
 # scheduling timestamps. Default/unannotated reads still guard the entire row.
 # Excluding only these fields also guards newly added catalog columns.
 _COLUMN_GROUP_EXCLUSIONS = {
     "recordings": {"catalog": {"first_enriched_at", "last_enriched_at"}},
+}
+_COLUMN_GROUP_INCLUSIONS = {
+    "recordings": {"identity": {"id", "identity_key"}},
 }
 
 
@@ -46,51 +56,67 @@ class Revisions:
             columns = [r[1] for r in conn.execute(f"PRAGMA main.table_xinfo({_identifier(name)})")]
             changed = " OR ".join(f"OLD.{_identifier(c)} IS NOT NEW.{_identifier(c)}"
                                   for c in columns)
+            groups = {group: [c for c in columns if c not in excluded]
+                      for group, excluded in _COLUMN_GROUP_EXCLUSIONS.get(name, {}).items()}
+            groups.update({group: [c for c in columns if c in included]
+                           for group, included in _COLUMN_GROUP_INCLUSIONS.get(name, {}).items()})
             for operation in ("INSERT", "UPDATE", "DELETE"):
                 keys = ["''"]
                 if name in _KEY_COLUMNS:
-                    keys.extend(f"'key:' || {side}.{_identifier(_KEY_COLUMNS[name])}" for side in
+                    columns_for_keys = _KEY_COLUMNS[name]
+                    if isinstance(columns_for_keys, str):
+                        columns_for_keys = (columns_for_keys,)
+                    keys.extend(f"'key:' || {side}.{_identifier(column)}" for column in columns_for_keys for side in
                                 (("OLD", "NEW") if operation == "UPDATE" else
                                  ("OLD",) if operation == "DELETE" else ("NEW",)))
                 writes = "".join(
                     "INSERT INTO snapshot_revisions(table_name,record_key,revision) VALUES ("
-                    f"{_literal(name)},{key},1) ON CONFLICT(table_name,record_key) "
-                    "DO UPDATE SET revision=revision+1;" for key in keys)
+                    f"{_literal(name)},{key},total_changes()+1) ON CONFLICT(table_name,record_key) "
+                    "DO UPDATE SET revision=excluded.revision;" for key in keys)
                 condition = f" WHEN {changed}" if operation == "UPDATE" else ""
                 trigger = _identifier(f"snapshot_revision_{name}_{operation.lower()}")
                 conn.execute(f"CREATE TEMP TRIGGER IF NOT EXISTS {trigger} AFTER {operation} "
                              f"ON main.{_identifier(name)}{condition} BEGIN {writes} END")
-                for group, excluded in _COLUMN_GROUP_EXCLUSIONS.get(name, {}).items():
+                for group, group_columns in groups.items():
                     group_changed = " OR ".join(
                         f"OLD.{_identifier(c)} IS NOT NEW.{_identifier(c)}"
-                        for c in columns if c not in excluded)
+                        for c in group_columns)
                     condition = f" WHEN {group_changed}" if operation == "UPDATE" else ""
                     trigger = _identifier(f"snapshot_revision_{name}_{group}_{operation.lower()}")
                     conn.execute(f"CREATE TEMP TRIGGER IF NOT EXISTS {trigger} AFTER {operation} "
                                  f"ON main.{_identifier(name)}{condition} BEGIN "
                                  "INSERT INTO snapshot_revisions(table_name,record_key,revision) "
-                                 f"VALUES ({_literal(name)},{_literal('group:' + group)},1) "
+                                 f"VALUES ({_literal(name)},{_literal('group:' + group)},total_changes()+1) "
                                  "ON CONFLICT(table_name,record_key) "
-                                 "DO UPDATE SET revision=revision+1; END")
+                                 "DO UPDATE SET revision=excluded.revision; END")
         conn.commit()
 
     def capture(self, dependencies=None):
-        """Read all counters for snapshot validation, or seek only requested dependencies."""
+        """Read last-write serials, seeking only requested dependencies when supplied.
+
+        Each trigger stamps its dependency with total_changes()+1. The trigger's
+        own row write advances that connection counter, so the committed stamp
+        is above every earlier snapshot's serial and at most the final counter.
+        Rollback restores the dependency stamps; counter gaps are harmless.
+        """
         if dependencies is None:
             rows = self.conn.execute(
                 "SELECT table_name,record_key,revision FROM temp.snapshot_revisions")
+            return {(r[0], r[1]): r[2] for r in rows}
         else:
             dependencies = sorted(set(dependencies))
-            if not dependencies:
-                return {}
-            values = ','.join('(?,?)' for _ in dependencies)
-            rows = self.conn.execute(
-                f"WITH requested(table_name,record_key) AS (VALUES {values}) "
-                "SELECT r.table_name,r.record_key,r.revision FROM requested q "
-                "JOIN temp.snapshot_revisions r "
-                "ON r.table_name=q.table_name AND r.record_key=q.record_key",
-                tuple(value for dependency in dependencies for value in dependency))
-        return {(r[0], r[1]): r[2] for r in rows}
+            result = {}
+            for start in range(0, len(dependencies), 400):
+                batch = dependencies[start:start + 400]
+                values = ','.join('(?,?)' for _ in batch)
+                rows = self.conn.execute(
+                    f"WITH requested(table_name,record_key) AS (VALUES {values}) "
+                    "SELECT r.table_name,r.record_key,r.revision FROM requested q "
+                    "JOIN temp.snapshot_revisions r "
+                    "ON r.table_name=q.table_name AND r.record_key=q.record_key",
+                    tuple(value for dependency in batch for value in dependency))
+                result.update(((r[0], r[1]), r[2]) for r in rows)
+            return result
 
 
 class Reads:
@@ -163,9 +189,10 @@ def column_group_reads(store, table, group):
 
     SQLite authorizes every base column in a view even for SELECT identity_key,
     so column authorizer events cannot distinguish catalog inputs from timestamps.
-    Only callers which do not consume the excluded fields may use this scope.
+    Only callers which consume the declared fields may use this scope.
     """
-    if group not in _COLUMN_GROUP_EXCLUSIONS.get(table, {}):
+    if (group not in _COLUMN_GROUP_EXCLUSIONS.get(table, {})
+            and group not in _COLUMN_GROUP_INCLUSIONS.get(table, {})):
         raise ValueError(f"Unknown snapshot column group: {table}.{group}")
     reads = getattr(store, "_snapshot_reads", None)
     if reads is None:

@@ -80,3 +80,21 @@ def test_pending_deletion_excludes_completed_payloads_and_only_materializes_matc
     query, = [sql for sql in queries if sql.startswith("SELECT a.* FROM actions")]
     plan = store.conn.execute("EXPLAIN QUERY PLAN " + query).fetchall()
     assert any("ix_actions_delete_pending" in row[3] for row in plan)
+
+
+def test_failed_deletion_lookup_matches_one_entry_and_preserves_manual_pending_lookup(store):
+    def record(entries, status="delete_failed"):
+        return store.actions.record_action("gc_generated", "{}", "{}", status,
+                                           json.dumps({"deletions": entries}), 1)
+
+    wanted = {"identity": 7, "ytm": "SOURCE", "phase": "failed"}
+    older = record([wanted])
+    newest = record([wanted])
+    record([{"identity": 8, "ytm": "SOURCE"}, {"identity": 7, "ytm": "OTHER"}])
+    for status in ("executed", "undone", "undo_failed"):
+        record([wanted], status)
+    assert store.actions.get_failed_deletion(7, "SOURCE").id == newest
+    assert store.actions.get_pending_deletion(7, "SOURCE") is None
+    assert store.actions.get_failed_deletion(9, "SOURCE") is None
+    store.actions.update_action(newest, "undone", 2)
+    assert store.actions.get_failed_deletion(7, "SOURCE").id == older

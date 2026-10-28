@@ -1,0 +1,51 @@
+{% from '_partials/provider_key.html' import key_entry with context %}
+<section class="provider-card provider-card--fixed album-description-settings{% if not deepseek.enabled %} off{% endif %}"
+         id="album-description-settings" aria-labelledby="album-description-heading"
+         x-data='{ savedKey: {{ deepseek.saved_key|tojson }} }' @provider-key-saved="savedKey = true">
+  <form class="provider-settings-form" method="post" action="/settings/deepseek" hx-post="/settings/deepseek"
+        hx-trigger="change, submit"
+        hx-target="#album-description-settings" hx-swap="outerHTML">
+    <span class="provider-icon provider-icon--deepseek">
+      <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+        <path d="M6 4h15l5 5v19H6Z" fill="currentColor" fill-opacity=".12"/>
+        <path d="M20 4v6h6M11 15h10M11 20h10M11 25h6"/>
+      </svg>
+    </span>
+    <div class="provider-meta">
+      <div class="provider-heading">
+        <strong id="album-description-heading">DeepSeek</strong>
+      </div>
+      <p class="provider-description">Album descriptions for Long play, written with DeepSeek Flash.</p>
+    </div>
+    <label class="provider-toggle" title="Enable DeepSeek">
+      <input type="checkbox" name="enabled" role="switch" aria-label="Enable DeepSeek"
+             {% if deepseek.enabled %}checked{% endif %}>
+      <span class="provider-switch" aria-hidden="true"></span>
+    </label>
+    {% call key_entry('deepseek', 'DeepSeek', deepseek.configured, '/settings/deepseek-key', 'https://platform.deepseek.com/api_keys') %}
+      Your key is stored locally. Descriptions use your DeepSeek API balance.
+      {% if deepseek.key_source == 'environment' %}DEEPSEEK_API_KEY is configured and takes precedence over a saved key.
+      {% elif deepseek.key_source == 'config' %}Using the key from config.toml.{% endif %}
+    {% endcall %}
+    <div class="provider-options">
+      <div class="provider-limit">
+        <label for="deepseek-daily-limit">Maximum requests per day</label>
+        <input id="deepseek-daily-limit" type="number" name="daily_limit" min="0" max="100" step="1"
+               value="{{ deepseek.daily_limit }}" required aria-describedby="deepseek-limit-help">
+        <span id="deepseek-limit-help">{{ deepseek.requests_today }} used today · 0 pauses generation</span>
+      </div>
+      <p class="provider-key-help">Only artist, album title and year are sent. Descriptions are saved and reused.
+        Requests, including failures, count toward the daily limit, which resets at midnight UTC.
+        Generated descriptions are labelled and may contain errors.</p>
+      <button type="submit" name="action" value="disconnect" class="btn-ghost btn-sm" formnovalidate
+              x-show="savedKey" x-cloak>Remove key</button>
+    </div>
+    {% if description_error %}<p class="notice err provider-notice" role="alert">{{ description_error }}</p>{% endif %}
+    {% if description_message %}<p class="provider-key-help provider-notice" role="status">{{ description_message }}</p>{% endif %}
+    {% if deepseek.status == 'auth' %}<p class="notice err provider-notice" role="status">DeepSeek rejected the key. Update it to resume generation.</p>
+    {% elif deepseek.status == 'balance' %}<p class="notice err provider-notice" role="status">DeepSeek reports insufficient balance. Generation will retry later.</p>
+    {% elif deepseek.status == 'rate_limit' %}<p class="provider-key-help provider-notice" role="status">DeepSeek is rate limiting requests. Generation is waiting before retrying.</p>
+    {% elif deepseek.status in ('unavailable', 'invalid_response') %}<p class="provider-key-help provider-notice" role="status">The last description could not be obtained. Existing descriptions are kept.</p>{% endif %}
+  </form>
+</section>

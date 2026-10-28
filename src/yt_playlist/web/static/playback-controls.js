@@ -4,9 +4,12 @@
   let nextPending = false;
 
   function command(action) {
+    if (window.tvPlaybackControls?.active()) return window.tvPlaybackControls.command(action);
     const status = window.playbackStatus?.snapshot;
-    const playing = status?.connected && status.now_playing;
+    const playing = status?.connected && (status.now_playing || status.resumable_player);
     if (!playing?.video_id) return false;
+    const resume = !status.now_playing;
+    if (resume && action === 'next') return false;
     if ((action === 'play' && playing.paused === false) ||
         (action === 'pause' && playing.paused === true)) return true;
     const next = action === 'next';
@@ -17,7 +20,12 @@
       options.headers = {'Content-Type': 'application/json'};
       options.body = JSON.stringify({videoId: playing.video_id});
     }
-    fetch(next ? '/now-playing/next' : '/now-playing/toggle', options)
+    let url = next ? '/now-playing/next' : '/now-playing/toggle';
+    if (!next && (resume || action !== 'toggle')) {
+      url += '?action=' + encodeURIComponent(action);
+      if (resume) url += '&resume=true&videoId=' + encodeURIComponent(playing.video_id);
+    }
+    fetch(url, options)
       .catch(() => {})
       .finally(() => {
         if (next) nextPending = false;
@@ -32,8 +40,9 @@
     const media = {MediaPlayPause: 'toggle', MediaPlay: 'play', MediaPause: 'pause', MediaTrackNext: 'next'};
     let action = media[event.key];
     if (!action && (event.code === 'Space' || event.key === ' ')) {
-      // Native activation of controls and editing always take precedence over the page shortcut.
-      if (event.target?.closest?.('input, textarea, select, button, a, summary, audio, video, '
+      // Native Space activation and editing take precedence. Anchors activate
+      // with Enter, so a focused playback link must not swallow this shortcut.
+      if (event.target?.closest?.('input, textarea, select, button, summary, audio, video, '
           + '[contenteditable]:not([contenteditable="false"]), '
           + '[role="button"], [role="textbox"], [role="combobox"], [role="slider"], '
           + '[role="checkbox"], [role="switch"], [role="tab"], [role="menuitem"]')) return;
@@ -45,8 +54,14 @@
   const session = window.navigator?.mediaSession;
   function updateMedia() {
     if (!session) return;
+    if (window.tvPlaybackControls?.active()) {
+      const video = window.tvPlaybackControls.snapshot();
+      session.playbackState = video.paused ? 'paused' : 'playing';
+      if (window.MediaMetadata) session.metadata = new window.MediaMetadata({title: video.title || '', artist: video.artist || ''});
+      return;
+    }
     const status = window.playbackStatus?.snapshot;
-    const playing = status?.connected && status.now_playing;
+    const playing = status?.connected && (status.now_playing || status.resumable_player);
     const active = !!playing?.video_id;
     session.playbackState = active && typeof playing.paused === 'boolean' ?
       (playing.paused ? 'paused' : 'playing') : 'none';
@@ -59,6 +74,7 @@
       catch (_) { /* Browsers can support only a subset of media actions. */ }
     }
     window.addEventListener('bridge-status', updateMedia);
+    window.addEventListener('tv-playback-state', updateMedia);
     updateMedia();
   }
   window.playbackControls = {command};
@@ -66,34 +82,41 @@
 // Route every YouTube Music play/open link through the extension so it plays in the EXISTING YouTube
 // Music tab (in the background, you stay on TuneConsole). A bridge failure must not create another
 // player that cannot stop the existing music. Ctrl/meta/middle-click still open a new tab.
-function tcPlay(url) {
+function tcPlaybackError(message) {
+  document.getElementById('playback-error')?.remove();
+  const toast = document.createElement('div');
+  toast.id = 'playback-error';
+  toast.className = 'toast toast-err';
+  toast.setAttribute('role', 'alert');
+  const text = document.createElement('span');
+  text.className = 'toast-body';
+  text.textContent = message;
+  const dismiss = document.createElement('button');
+  dismiss.type = 'button';
+  dismiss.className = 'toast-x';
+  dismiss.setAttribute('aria-label', 'Dismiss');
+  dismiss.textContent = '×';
+  dismiss.onclick = () => toast.remove();
+  toast.append(text, dismiss);
+  document.getElementById('toasts')?.prepend(toast);
+}
+window.tcPlaybackError = tcPlaybackError;
+
+function tcPlay(url, {signal} = {}) {
   const requestId = window.tcPlaybackRequestSequence = (window.tcPlaybackRequestSequence || 0) + 1;
   window.dispatchEvent(new CustomEvent('playback-requested', {detail: {url, requestId}}));
   const failed = () => {
     window.dispatchEvent(new CustomEvent('playback-settled', {detail: {requestId, ok: false}}));
-    document.getElementById('playback-error')?.remove();
-    const toast = document.createElement('div');
-    toast.id = 'playback-error';
-    toast.className = 'toast toast-err';
-    const message = document.createElement('span');
-    message.className = 'toast-body';
-    message.textContent = 'Couldn’t start playback. Check that TuneConsole and its browser extension are connected, then try again.';
-    const dismiss = document.createElement('button');
-    dismiss.type = 'button';
-    dismiss.className = 'toast-x';
-    dismiss.setAttribute('aria-label', 'Dismiss');
-    dismiss.textContent = '×';
-    dismiss.onclick = () => toast.remove();
-    toast.append(message, dismiss);
-    document.getElementById('toasts')?.prepend(toast);
+    tcPlaybackError('Couldn’t start playback. Check that TuneConsole and its browser extension are connected, then try again.');
     return false;
   };
   return fetch('/play', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }), signal,
   }).then(r => r.json()).then(d => {
     if (!d || !d.ok) return failed();
     window.dispatchEvent(new CustomEvent('playback-settled', {detail: {requestId, ok: true}}));
     document.getElementById('playback-error')?.remove();
+    if (d.tv_url) window.location.assign(d.tv_url);
     return true;
   }).catch(failed);
 }
@@ -111,7 +134,8 @@ document.addEventListener('click', function (e) {
   // YouTube Music tab keeps playing. Play controls carry no marker and still route to that tab.
   if (a.hasAttribute('data-yt-info')) return;
   var u;
-  try { u = new URL(a.href || a.getAttribute('href'), location.href); } catch (err) { return; }
+  // SVG anchors expose .href as an SVGAnimatedString; the attribute works for both namespaces.
+  try { u = new URL(a.getAttribute('href'), location.href); } catch (err) { return; }
   if (u.hostname !== 'music.youtube.com') return;
   // Any content path (watch / playlist / browse / channel / ...) routes to the existing tab. Only the
   // bare origin (the "sign in" link) is left to open normally so you can actually see the sign-in page.

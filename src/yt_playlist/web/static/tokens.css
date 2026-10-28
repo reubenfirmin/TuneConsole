@@ -112,6 +112,7 @@
   --p-green-150:   #c2f6df;
   --p-green-300:   #6bffab;
   --p-green-350:   #2dffa3;
+  --p-green-400:   #62d89a;
   --p-green-500:   #15e98c;
   --p-green-550:   #199e70;
   --p-green-600:   #3fb950;
@@ -320,6 +321,7 @@
   /* ---- status ---- */
   --ok:          var(--p-green-600);
   --ok-2:        var(--p-sage-300);
+  --audio-contribution-complete: var(--p-green-400);
   --warn:        var(--p-amber-500);
   --warn-2:      var(--p-amber-400);
   --warn-3:      var(--p-amber-450);   /* lighter amber used by badge fills */
@@ -329,6 +331,7 @@
   --danger-deep: var(--p-red-600);
   --danger-soft: color-mix(in srgb, var(--danger) 15%, transparent);
   --on-air:      var(--p-red-500);
+  --tv-playing:  var(--p-blue-500);
   --up:          var(--p-sage-400);     /* ticker "heating up" */
   --down:        var(--p-pink-400);     /* ticker "cooling" (shares --danger hue) */
 

@@ -4,7 +4,6 @@ import sqlite3
 import pytest
 
 from yt_playlist.core import catalog
-from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.migrations import v028_discovery_representatives as upgrade
@@ -19,10 +18,9 @@ REGISTRY = (*MIGRATIONS[:27],Migration(28,'discovery_representatives',upgrade.ap
 @pytest.fixture
 def store():
     s = Store(':memory:')
-    migrate(s.conn,registry=REGISTRY)
-    s._bind_repositories()
-    # This fixture intentionally stops at v028 instead of using init_schema().
-    s._snapshot_revisions = Revisions(s.conn)
+    # Workflow cases call current repositories. The explicit migration cases
+    # below retain their independent v027/v028 databases and registry.
+    s.init_schema()
     yield s
     upgrade.validate(s.conn)
     s.conn.close()
@@ -177,7 +175,7 @@ def test_playback_consumers_take_metadata_from_one_available_upload(store):
     for query,kind in [('Z title','songs'),('Artist','tracks_by')]:
         section = next(r for r in s.search.omni_search(query)['sections'] if r['kind']==kind)
         assert [(r['label'],r['href'],r['thumbnail']) for r in section['rows']]==[
-            ('Z title','https://music.youtube.com/watch?v=b','z-cover')]
+            ('Z title','/track/b','z-cover')]
     assert library_sample(s)==[{'video_id':'b','title':'Z title','artist':'Artist','album':'Z release',
                                'thumbnail':'z-cover','key':key}]
     assert s.charts.top_tracks()==[{'title':'Z title','artist':'Artist','video_id':'b','thumbnail':'z-cover','plays':1}]
@@ -197,7 +195,7 @@ def test_scoped_representative_filters_artist_release_and_account_before_selecti
         sections = s.search.omni_search(query)['sections']
         rows = next(section['rows'] for section in sections if section['kind']==kind)
         assert [(r['label'],r['href'],r['thumbnail']) for r in rows]==[
-            ('Second tune','https://music.youtube.com/watch?v=b',None)]
+            ('Second tune','/track/b',None)]
     for field,value in [('artist','Second artist'),('album_browse_id','second')]:
         sql = playable_tracks_sql(f'SELECT * FROM tracks WHERE {field}=?')
         assert [r['video_id'] for r in s.conn.execute(sql,(value,))]==['b']
@@ -254,11 +252,7 @@ def test_populated_upgrade_repairs_partial_and_complete_moves_and_reopens(tmp_pa
     assert list(s.conn.iterdump())==state
     assert s.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
     s.conn.close()
-    backups = list((tmp_path/'backups').glob('*.db'))
-    assert backups
-    with sqlite3.connect(backups[-1]) as conn:
-        assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]==27
-        assert conn.execute('SELECT entry_id FROM discovery_memberships WHERE recording_id=1').fetchone()[0]==1
+    assert not (tmp_path/'backups').exists()
 
 
 def test_failed_upgrade_restores_installed_schema_and_rows(tmp_path):

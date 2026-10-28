@@ -1,171 +1,44 @@
 <!doctype html>
 <html lang="en" class="gen-page">
-{# Standalone interstitial shown in the popup we open on the "Save & play on YouTube" click. The save
-   round-trip (create the playlist, add tracks, one by one on a batch-add failure) can take many
-   seconds; until the home tab redirects this window to YouTube, a raw about:blank reads as a broken
-   white screen. This gives that wait a branded face in the app's console / deep-space idiom: the
-   playlist's own thumbnails orbit a glowing hub, edges carrying green "data" pulses inward, while the
-   real playlist is wired up on YouTube. No nav/htmx/alpine: it's a momentary page the opener leaves. #}
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Wiring up your playlist…</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}">
-  <!-- Token layer first, then shared components and feature modules in cascade order. -->
   <link rel="stylesheet" href="/static/tokens.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/components.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/clusters.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/generating.css?v={{ asset_v }}">
-  <!-- CSS token -> canvas bridge; must load before any script that paints. -->
   <script src="/static/theme.js?v={{ asset_v }}"></script>
+  <script src="/static/generating.js?v={{ asset_v }}"></script>
 </head>
 <body>
-  <div class="gen-stage" id="gen-stage">
-    <div class="cluster-stars" aria-hidden="true"></div>
-    <canvas class="gen-fx" id="gen-fx" aria-hidden="true"></canvas>
-    <div class="gen-orbit" id="gen-orbit" aria-hidden="true">
-      <div class="gen-hub">
-        <span class="gen-hub-ring"></span>
-        <svg class="brand-eq" viewBox="0 0 28 24" aria-hidden="true">
-          <rect class="eqbar gen-eq-1" x="0"  y="9"  width="4" height="15" rx="2"/>
-          <rect class="eqbar gen-eq-2" x="6"  y="3"  width="4" height="21" rx="2"/>
-          <rect class="eqbar gen-eq-3" x="12" y="12" width="4" height="12" rx="2"/>
-          <rect class="eqbar gen-eq-4" x="18" y="6"  width="4" height="18" rx="2"/>
-          <rect class="eqbar gen-eq-5" x="24" y="14" width="4" height="10" rx="2"/>
-        </svg>
-      </div>
-    </div>
-    <div class="gen-scrim" aria-hidden="true"></div>
-
+  <div class="gen-stage" role="status" aria-live="polite" aria-label="Preparing playlist">
+    {% with loader_status='Wiring up your playlist', loader_detail='Keep this tab open. Your playlist opens here when it is ready.' %}
+    {% include "_partials/launch_loader.html" %}
+    {% endwith %}
     <span class="gen-brand brand" aria-label="TuneConsole">
       <img class="brand-mark" src="/static/favicon.svg?v={{ asset_v }}" width="28" height="28" alt="">
       <span class="brand-name" aria-hidden="true">tuneconsole</span>
     </span>
-
-    <div class="gen-copy">
-      <span class="gen-status"><span class="gen-dot"></span>building on youtube<span class="gen-cursor"></span></span>
-      <h1 class="gen-title">Wiring up your playlist</h1>
-      <p class="gen-sub">Pulling your picks together on YouTube Music. This tab opens the playlist the
-        moment it's ready. Keep it open.</p>
-    </div>
   </div>
-
   <script>
-    // Colours come from tokens.css via theme.js — this canvas holds no palette of its own.
-    var C = window.themePalette({ accent: '--accent', trunk: '--trunk',
-                                  edgeHub: '--gen-edge-hub', edgeRim: '--gen-edge-rim',
-                                  pulseGlow: '--gen-pulse-glow' });
-    // re-open a resolved rgb()/rgba() string to apply a per-frame alpha
-    function alpha(c, a) { var m = c.match(/[\d.]+/g);
-      return m && m.length >= 3 ? 'rgba(' + m[0] + ',' + m[1] + ',' + m[2] + ',' + a + ')' : c; }
-
-  (function () {
-    var stage = document.getElementById('gen-stage');
-    var orbit = document.getElementById('gen-orbit');
-    var canvas = document.getElementById('gen-fx');
-    var ctx = canvas.getContext('2d');
-
-    // The clicked card's surviving thumbnails, stashed by genOpenYT() before this window opened.
-    var thumbs = [];
-    try { thumbs = JSON.parse(localStorage.getItem('tc_gen_thumbs') || '[]'); } catch (e) {}
-    if (!Array.isArray(thumbs)) thumbs = [];
-
-    // Build the orbiting nodes: real thumbnails when we have them, else gradient "♪" tiles so the
-    // graph still feels populated. Two interleaved rings give the swirl some depth.
-    var COUNT = thumbs.length ? Math.min(thumbs.length, 14) : 9;
-    var nodes = [];
-    for (var i = 0; i < COUNT; i++) {
-      var ring = i % 2;
-      var el = document.createElement('div');
-      el.className = 'gen-node';
-      var url = thumbs.length ? thumbs[i % thumbs.length] : '';
-      if (url) {
-        var img = document.createElement('img');
-        img.alt = ''; img.loading = 'lazy'; img.referrerPolicy = 'no-referrer';
-        img.onerror = function () { var p = this.parentNode; if (p) p.classList.add('no-art'); this.remove(); };
-        img.src = url;
-        el.appendChild(img);
-      } else { el.classList.add('no-art'); }
-      orbit.appendChild(el);
-      nodes.push({ el: el, ring: ring,
-        a0: (i / COUNT) * Math.PI * 2 + (ring ? 0.45 : 0),
-        spin: (ring ? 0.055 : 0.085) * (i % 4 < 2 ? 1 : -1),   // alternate direction for a livelier swirl
-        bob: Math.random() * Math.PI * 2,
-        pulse: Math.random() });
-    }
-
-    var W = 0, H = 0, cx = 0, cy = 0, rIn = 0, rOut = 0, DPR = 1;
-    var SQ = 0.6;   // vertical squash → orbit reads as a tilted ring, not a flat circle
-
-    function resize() {
-      DPR = Math.min(window.devicePixelRatio || 1, 2);
-      W = stage.clientWidth; H = stage.clientHeight;
-      canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
-      canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
-      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-      cx = W / 2; cy = H / 2;
-      var base = Math.min(W, H);
-      rIn = base * 0.22; rOut = base * 0.35;
-    }
-    window.addEventListener('resize', resize);
-    resize();
-
-    function drawGrid() {
-      // Faint dot-grid that fades out from the hub, a quiet nod to the Clusters spacetime grid.
-      var step = 36, maxD = Math.max(W, H) * 0.62;
-      for (var gx = cx % step; gx < W; gx += step) {
-        for (var gy = cy % step; gy < H; gy += step) {
-          var dx = gx - cx, dy = gy - cy, d = Math.sqrt(dx * dx + dy * dy);
-          var a = 0.16 * (1 - d / maxD);
-          if (a <= 0.012) continue;
-          ctx.globalAlpha = a;
-          ctx.fillStyle = C.accent;
-          ctx.fillRect(gx, gy, 1.4, 1.4);
-        }
-      }
-      ctx.globalAlpha = 1;
-    }
-
-    function frame(ts) {
-      var t = ts / 1000;
-      ctx.clearRect(0, 0, W, H);
-      drawGrid();
-
-      // Position each node on its (breathing) ring, then draw its edge + an inward green pulse.
-      for (var i = 0; i < nodes.length; i++) {
-        var n = nodes[i];
-        var r = (n.ring ? rOut : rIn) * (1 + 0.05 * Math.sin(t * 0.7 + n.bob));
-        var a = n.a0 + t * n.spin;
-        var x = cx + r * Math.cos(a);
-        var y = cy + r * Math.sin(a) * SQ;
-        var depth = (Math.sin(a) + 1) / 2;          // 0 = far side, 1 = near side
-
-        // edge: hub → node, green at the hub fading to indigo at the rim
-        var g = ctx.createLinearGradient(cx, cy, x, y);
-        g.addColorStop(0, C.edgeHub);
-        g.addColorStop(1, C.edgeRim);
-        ctx.strokeStyle = g; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(x, y); ctx.stroke();
-
-        // A pulse travelling from the node toward the hub.
-        var f = (t * 0.32 + n.pulse) % 1;
-        var px = x + (cx - x) * f, py = y + (cy - y) * f;
-        ctx.beginPath(); ctx.arc(px, py, 2.3, 0, Math.PI * 2);
-        ctx.fillStyle = alpha(C.trunk, (0.2 + 0.7 * f).toFixed(2));
-        ctx.shadowColor = C.pulseGlow; ctx.shadowBlur = 9;
-        ctx.fill(); ctx.shadowBlur = 0;
-
-        var s = 0.72 + 0.42 * depth;
-        n.el.style.transform = 'translate(' + x.toFixed(1) + 'px,' + y.toFixed(1) +
-          'px) translate(-50%,-50%) scale(' + s.toFixed(3) + ')';
-        n.el.style.opacity = (0.5 + 0.5 * depth).toFixed(3);
-        n.el.style.zIndex = String(10 + Math.round(depth * 20));
-      }
-      raf = window.requestAnimationFrame(frame);
-    }
-
-    var raf = window.requestAnimationFrame(frame);
+  (() => {
+    let thumbs = [];
+    try { thumbs = JSON.parse(localStorage.getItem('tc_gen_thumbs') || '[]'); } catch (_) {}
+    const loader = createLaunchLoader(document.querySelector('.gen-loader'), {
+      thumbs: Array.isArray(thumbs) ? thumbs : [],
+      statuses: ['Wiring up your playlist', 'Building on YouTube Music'],
+      detail: 'Keep this tab open. Your playlist opens here when it is ready.'
+    });
+    const destroy = () => {
+      loader.destroy();
+      window.removeEventListener('pagehide', destroy);
+      window.removeEventListener('app-page-leaving', destroy);
+    };
+    window.addEventListener('pagehide', destroy);
+    window.addEventListener('app-page-leaving', destroy);
   })();
   </script>
 </body>

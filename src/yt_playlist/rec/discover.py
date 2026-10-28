@@ -9,12 +9,13 @@ it, and which of your playlists it fits. Runs in the background worker; Last.fm 
 """
 import json
 import random
+import time
 from yt_playlist.core.accounts import catalog_client,main_client
 from yt_playlist.core.activity import check_stopping, WorkClosing
 
 import numpy as np
 
-from yt_playlist.util import genre_map
+from yt_playlist.util import genre_map, net
 from yt_playlist.util.matching import identity_key, normalize, track_artist
 from yt_playlist.util.thumbnails import best_thumb
 from yt_playlist.rec import artist_model, content_model, embed, embedding_vectors as vectors, rec_params, discovery_pool
@@ -44,15 +45,52 @@ def fetch_artist_info(ctx, name, browse_id=None):
             albums.append({"title": x.get("title"), "year": x.get("year"),
                            "browse_id": x.get("browseId"),
                            "thumbnail": best_thumb(x.get("thumbnails"))})
+        _check_album_alias(ctx, client, name, albums)
         return {"bio": a.get("description"),
                 "thumbnail": best_thumb(a.get("thumbnails")),
                 "subscribers": a.get("subscribers"),
                 "name": a.get("name") or name,
                 "browse_id": browse_id,            # the artist's channel, for the "Open in YouTube" link
                 "albums": albums}
+    except WorkClosing:
+        raise
     except Exception:  # noqa: BLE001 - network/parse/missing-method all degrade to "no info"
         ctx.logger.info("artist info fetch failed for %r (non-fatal)", name)
         return None
+
+
+def _check_album_alias(ctx, client, artist, discography):
+    """Compare at most one candidate pair, with no network work under a DB lock."""
+    from yt_playlist.core.album_aliases import _text, fingerprint
+    if not hasattr(client, 'get_album'):
+        return
+    candidates = ctx.store.collection.album_alias_candidates(a.get('title') for a in discography)
+    for remote in discography:
+        bid = remote.get('browse_id')
+        if not bid or not bid.startswith('MPRE'):
+            continue
+        for local in candidates:
+            other = local['browse_id']
+            if (other == bid or not other.startswith('MPRE') or
+                    _text(local['artist']) != _text(artist) or _text(local['title']) != _text(remote.get('title'))):
+                continue
+            if not ctx.store.collection.claim_album_alias_check(bid, other, time.time()):
+                continue
+            try:
+                check_stopping()
+                left = client.get_album(other)
+                check_stopping()
+                right = client.get_album(bid)
+                # Unknown or unequal responses do not even create a new local release.
+                comparison = fingerprint(left)
+                if comparison is not None and comparison == fingerprint(right):
+                    ctx.store.collection.observe_album_representation(other, left)
+                    ctx.store.collection.observe_album_representation(bid, right)
+            except WorkClosing:
+                raise
+            except Exception:
+                ctx.logger.debug('Album alias comparison unavailable for %s and %s', other, bid, exc_info=True)
+            return
 
 
 class ContentProjection:
@@ -112,21 +150,30 @@ class ContentProjection:
         Evaluation disables the precomputed artist block because its fitting history is shared
         with the reference embedding. Production keeps that relational feature.
         """
-        keys, V, idx = vectors.load_vectors(store)
-        if V is None:
-            return None
+        reference = vectors.load_vectors(store)
         dao = store.rec_query
         content, audio = dao.track_content(), dao.track_audio_features()
+        artist_vectors = artist_model.load_artist_vectors(store) if include_artist else None
+        refs = store.artists.track_keys(library=True) if include_artist else {}
+        artist_keys = store.artists.name_keys() if include_artist else {}
+        return cls.fit_from_inputs(reference, content, audio, lam=lam, training_keys=training_keys,
+                                   artist_vectors=artist_vectors, refs=refs, artist_keys=artist_keys)
+
+    @classmethod
+    def fit_from_inputs(cls, reference, content, audio, lam=1.0, *, training_keys=None,
+                        artist_vectors=None, refs=None, artist_keys=None):
+        """Fit detached evidence; each fold still learns its own feature statistics."""
+        _, V, idx = reference
+        if V is None:
+            return None
         if training_keys is not None:
             allowed = set(training_keys)
             idx = {key: row for key, row in idx.items() if key in allowed}
             content = {key: value for key, value in content.items() if key in idx}
             audio = {key: value for key, value in audio.items() if key in idx}
         model = content_model.build_content_model(content, audio)
-        artists, AV, aidx = (artist_model.load_artist_vectors(store) if include_artist
-                             else ([], None, {}))
-        refs = store.artists.track_keys(library=True)
-        artist_keys = store.artists.name_keys()
+        _, AV, aidx = artist_vectors if artist_vectors is not None else ([], None, {})
+        refs = refs or {}
         proj = cls(model, None, aidx, AV,artist_keys)
         rows = []
         for k in idx:                                   # only library tracks that ARE in the embedding
@@ -264,8 +311,17 @@ def new_artists(ctx, limit=15, max_anchors=30):
         nkey = name
         cached = store.artist_similarity.cached_similar(nkey, now)
         if cached is None:
-            cached = [[n, m] for n, m in lastfm.similar_artists(api_name, key)]
-            store.artist_similarity.cache_similar(nkey, cached, now)
+            with lastfm.access(store), net.probe_errors() as errors:
+                cached = [[n, m] for n, m in lastfm.similar_artists(api_name, key)]
+            for error in errors:
+                net.record_probe_failure(error)
+            if errors:
+                # Preserve the old similarity graph and its fetch time. An outage
+                # must not become a successful empty response cached for 14 days.
+                cached = cached or store.artist_similarity.cached_similar(
+                    nkey, now, ttl_days=float('inf')) or []
+            else:
+                store.artist_similarity.cache_similar(nkey, cached, now)
         for n, _ in cached:
             display.setdefault(normalize(n), n)
 
@@ -294,7 +350,8 @@ def new_artists(ctx, limit=15, max_anchors=30):
     for c in out:                                       # enrich the shown few with an artist image
         check_stopping()
         c["thumbnail"] = _artist_thumb(ctx, c["artist"])
-        c["genre"] = lastfm.artist_genre(c["artist"], key)   # #18: tag for the facet overlay
+        with lastfm.access(store):
+            c["genre"] = lastfm.artist_genre(c["artist"], key)   # #18: tag for the facet overlay
     return out
 
 

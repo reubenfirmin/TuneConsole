@@ -104,7 +104,7 @@ def build(ctx) -> APIRouter:
         radio = getattr(ctx, "radio", None)
         # The persisted session can already be playing before the radio panel has been opened
         # and its controller reattached. Use the same snapshot for attribution and the tab light.
-        session = radio.bootstrap()["state"] if radio is not None else {}
+        session = radio.state() if radio is not None else {}
         now_playing = bridge.now_playing
         seen_at = getattr(bridge, "now_playing_seen_at", None)
         if now_playing is not None and seen_at is not None and time.monotonic() - seen_at > 8:
@@ -139,6 +139,8 @@ def build(ctx) -> APIRouter:
             now_playing = {**now_playing, "source": source,
                            "snapshot_age": max(0, time.monotonic() - seen_at) if seen_at is not None else 0}
         return {"connected": bridge.connected, "now_playing": now_playing,
+                "resumable_player": bridge.resumable_player if bridge.connected and
+                bridge.resumable_player and bridge.resumable_player.get("paused") else None,
                 "sensor_health": getattr(bridge, "sensor_health", None),
                 "radio": bool(session.get("active")),
                 "radio_ready": bool(session.get("active") and not session.get("starting"))}
@@ -151,12 +153,18 @@ def build(ctx) -> APIRouter:
             url = ""
         if not url.startswith("https://music.youtube.com/"):
             return {"ok": False, "error": "url must be a music.youtube.com link"}
-        return await activity_for(ctx).to_thread(_play, url)
+        intent = bridge.begin_playback_intent()
+        return await activity_for(ctx).to_thread(_play, url, intent)
 
-    def _play(url):
+    def _play(url, intent):
         try:
-            bridge.send_control({"type": "navigate", "url": url})
             query = parse_qs(urlparse(url).query)
+            playlist = (query.get('list') or [''])[0].removeprefix('RDAMPL')
+            if playlist:
+                for pl in ctx.store.playlists.get_playlists():
+                    if pl.ytm_playlist_id == playlist and (ctx.store.playlist_recipes.get_recipe(pl.scope_ref) or {}).get('media') == 'video':
+                        return {'ok': True, 'tv_url': f'/?tv_playlist={pl.id}#tv'}
+            bridge.send_control({"type": "navigate", "url": url}, intent=intent)
             video_id = (query.get("v") or [None])[0]
             if video_id:
                 measurement.record_action(ctx.store, "start", ctx.now_fn(), video_id=video_id)
@@ -281,9 +289,61 @@ def build(ctx) -> APIRouter:
             return {"ok": False, "error": str(exc)}
 
     @router.post("/now-playing/toggle")
-    async def now_playing_toggle():
+    async def now_playing_toggle(action: str = "toggle", resume: bool = False, videoId: str = "",
+                                 confirm: bool = False):
+        if action not in ("toggle", "play", "pause"):
+            return {"ok": False, "error": "invalid playback action"}
+        frame = {"type": "playpause"}
+        if action != "toggle":
+            frame["action"] = action
+        if resume:
+            player = bridge.resumable_player
+            if not bridge.connected or not player or not player.get("paused") or not videoId or \
+                    player.get("video_id") != videoId:
+                return {"ok": False, "error": "Paused player is no longer available"}
+            frame.update(resumeOnly=True, videoId=videoId)
+        if confirm:
+            if action not in ("play", "pause") or not videoId:
+                return {"ok": False, "error": "A displayed song and playback action are required"}
+            player = bridge.resumable_player if resume else bridge.now_playing
+            if not player or player.get("video_id") != videoId:
+                return {"ok": False, "error": "The playing song changed. Try again."}
+            frame["videoId"] = videoId
+            paused = action == "pause"
+            started = time.monotonic()
+            connection_id = bridge.connection_id
+            command = asyncio.create_task(bridge.request_control(frame, timeout=5))
+            try:
+                while True:
+                    done, _ = await asyncio.wait({command}, timeout=.05)
+                    if done:
+                        status, body = command.result()
+                        result = json.loads(body)
+                        if (status == 200 and result.get("ok") and result.get("paused") is paused
+                                and result.get("videoId") == videoId):
+                            return {"ok": True, "paused": paused}
+                        return {"ok": False, "error": result.get("error") or "Playback was not confirmed"}
+                    # Identified store builds without control acknowledgements report actual media
+                    # state. Accept a fresh matching observation, never just a queued send, and
+                    # never resend a toggle whose delivery is uncertain. A new connection's
+                    # unreported capability must still wait for its native acknowledgement.
+                    observed = bridge.now_playing
+                    if (bridge.playback_confirmation is False and bridge.connection_id == connection_id
+                            and bridge.connected and observed
+                            and observed.get("video_id") == videoId and observed.get("paused") is paused
+                            and (bridge.now_playing_seen_at or 0) > started):
+                        return {"ok": True, "paused": paused}
+            except Exception:
+                logger.warning("playback not confirmed: action=%s video=%s", action, videoId, exc_info=True)
+                return {"ok": False, "error": "Playback was not confirmed. Open YouTube Music and try again."}
+            finally:
+                command.cancel()
+                try:
+                    await command
+                except (asyncio.CancelledError, Exception):
+                    pass
         try:
-            bridge.send_control({"type": "playpause"})
+            bridge.send_control(frame)
             return {"ok": True}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -316,12 +376,15 @@ def build(ctx) -> APIRouter:
         ping_task = asyncio.create_task(keepalive())
         store = getattr(ctx, "store", None)
         try:
-            if store is not None:
+            if store is not None and not getattr(store, 'activity_paused', False):
                 await run_in_threadpool(store.settings.set_setting, "bridge_paired", "1")
             clear = getattr(ctx, "clear_all_auth_expired", None)
             if callable(clear):
                 await run_in_threadpool(clear)
             logger.info("extension bridge connected")
+            wake = getattr(ctx, "sync_wake", None)
+            if wake is not None:
+                wake.set()
             while True:
                 msg = await ws.receive_json()
                 # No await separates this check from presence updates or reply
@@ -352,8 +415,11 @@ def build(ctx) -> APIRouter:
                     except (TypeError, ValueError):
                         logger.warning("malformed sensor-health frame, ignoring: %r", msg)
                         continue
+                    bridge.playback_confirmation = msg.get("playbackConfirmation") is True
                     bridge.sensor_health = {**counts, "healthy": bool(msg.get("healthy")),
                         "recovering": bool(msg.get("recovering")), "error": str(msg.get("error") or "")[:500]}
+                    if counts["ytm_tabs"] == 0:
+                        bridge.resumable_player = None
                     versions = msg.get("versions")
                     if isinstance(versions, list):
                         bridge.sensor_health["versions"] = [
@@ -363,9 +429,14 @@ def build(ctx) -> APIRouter:
                              "capture": _capture_diagnostics(item.get("capture"))}
                             for item in versions[:8] if isinstance(item, dict)]
                     continue
+                if kind == "player-closed":
+                    bridge.now_playing = bridge.resumable_player = None
+                    bridge.now_playing_seen_at = None
+                    continue
                 if kind == "now-heartbeat":
                     if msg.get("title"):
                         bridge.now_playing = _now_playing_snapshot(msg, bridge.now_playing)
+                        bridge.resumable_player = dict(bridge.now_playing)
                     if bridge.now_playing is not None:
                         bridge.now_playing_seen_at = time.monotonic()
                     if msg.get("title"):
@@ -373,6 +444,7 @@ def build(ctx) -> APIRouter:
                     continue
                 if kind == "play":
                     bridge.now_playing = _now_playing_snapshot(msg)
+                    bridge.resumable_player = dict(bridge.now_playing)
                     bridge.now_playing_seen_at = time.monotonic()
                     if (msg.get("paused") or msg.get("muted") or msg.get("tabMuted")
                             or msg.get("volume") == 0):
@@ -387,12 +459,15 @@ def build(ctx) -> APIRouter:
                     continue
                 if kind == "pevent":
                     now = getattr(ctx, "now_fn", time.time)()
-                    if msg.get("kind") == "state" and bridge.now_playing is not None:
-                        sv, nv = msg.get("videoId"), bridge.now_playing.get("video_id")
-                        if not sv or not nv or sv == nv:
-                            bridge.now_playing["paused"] = msg.get("state") == "paused"
+                    if msg.get("kind") == "state":
+                        for player in (bridge.now_playing, bridge.resumable_player):
+                            if player is not None:
+                                sv, nv = msg.get("videoId"), player.get("video_id")
+                                if not sv or not nv or sv == nv:
+                                    player["paused"] = msg.get("state") == "paused"
                     elif msg.get("kind") == "bye":
                         bridge.now_playing = None
+                        bridge.resumable_player = None
                         bridge.now_playing_seen_at = None
                     if store is not None:
                         try:
@@ -405,7 +480,8 @@ def build(ctx) -> APIRouter:
                 except (KeyError, ValueError, TypeError):
                     logger.warning("malformed bridge frame, ignoring: %r", msg)
                     continue
-                bridge.resolve(req_id, status, body, source_timezone=msg.get("timeZone"))
+                bridge.resolve(req_id, status, body, source_timezone=msg.get("timeZone"),
+                               response_headers=msg.get("headers"))
         except WebSocketDisconnect:
             pass
         finally:

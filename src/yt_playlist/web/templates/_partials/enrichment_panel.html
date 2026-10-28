@@ -1,4 +1,5 @@
 {# Local SVG illustrations share a single stroke style and inherit each provider's accent. #}
+{% from '_partials/provider_key.html' import key_entry with context %}
 {% macro provider_icon(name) -%}
 <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2"
      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
@@ -61,34 +62,15 @@
       </label>
 
       {% if p.key == 'lastfm_api_key' %}
-      <div class="provider-key" x-data="lastfmKey({{ 'true' if lastfm_configured else 'false' }})">
-        <div class="provider-key-saved" x-show="saved && !editing" x-cloak>
-          <span>✓ API key saved</span>
-          <button type="button" class="btn-ghost btn-sm" @click="editing = true">Replace</button>
-        </div>
-        <div class="provider-key-edit" x-show="editing" x-cloak>
-          <div class="provider-key-heading">
-            <label for="lastfm-api-key">Connect Last.fm</label>
-            <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">
-              Get a free key {{ arrow_icon('external') }}
-            </a>
-          </div>
-          <div class="btn-row">
-            <input id="lastfm-api-key" type="text" x-model="val" placeholder="API key"
-                   autocomplete="off" spellcheck="false" aria-describedby="lastfm-key-help"
-                   @keydown.enter.prevent="save()">
-            <button type="button" class="btn-primary btn-sm" :disabled="busy" @click="save()"
-                    x-text="busy ? 'Saving…' : 'Save key'"></button>
-          </div>
-          <p class="provider-key-help" id="lastfm-key-help">Your key is stored locally. On the
-            <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api</a>
-            form, leave <strong>Callback URL</strong> blank and ignore the <strong>Shared secret</strong>.
-            You only need the API key.</p>
-          <p class="notice err" x-show="err" x-text="err" role="alert" x-cloak></p>
-        </div>
-      </div>
+      {% call key_entry('lastfm', 'Last.fm', lastfm_configured, '/settings/lastfm-key', 'https://www.last.fm/api/account/create') %}
+        Your key is stored locally. On the
+        <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api</a>
+        form, leave <strong>Callback URL</strong> blank and ignore the <strong>Shared secret</strong>.
+        You only need the API key.
+      {% endcall %}
       {% endif %}
     </div>
     {% endfor %}
   </div>
+  {% if deepseek is defined %}{% include '_partials/album_description_settings.html' %}{% endif %}
 </div>

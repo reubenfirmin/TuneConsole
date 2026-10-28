@@ -1,0 +1,54 @@
+{% from '_album_actions.html' import album_play_control %}
+<section id="home-album-choices" class="album-choice-board" aria-label="Albums to play"
+         x-data='albumMenu({{ tuning|tojson }}, {{ tuning_defaults|tojson }}, {{ opportunity_id|tojson }})'
+         x-init="$nextTick(() => $dispatch('album-tuning-ready'))" @album-tuning-open.window="openTuning()"{% if preparing %}
+         hx-get="/home/album-choices" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+  {% if albums %}
+  <div class="album-editorial">
+    {% for a in albums %}
+    <article class="album-choice album-choice--{{ loop.cycle('panorama', 'reverse', 'inset') }}" aria-labelledby="album-story-title-{{ loop.index }}"
+             x-data="{ expanded: false }" data-classification="{{ a.classification }}"
+             {% if opportunity_id %}data-choice-opportunity="{{ opportunity_id }}" data-choice-option="{{ a.browse_id }}"{% endif %}>
+      <div class="album-sleeve">
+        <button class="album-choice-art{{ ' no-art' if not a.thumbnail }}" type="button" data-choice-action="open"
+           @click="expanded = !expanded" :aria-expanded="expanded" aria-controls="album-open-{{ loop.index }}"
+           aria-label="Open {{ a.title }} by {{ a.artist }} in place">
+          {% if a.thumbnail %}<img src="{{ a.thumbnail }}" alt="{{ a.title }} cover" loading="lazy" referrerpolicy="no-referrer">{% else %}<svg class="album-cover-placeholder" viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="33"/><circle cx="50" cy="50" r="22"/><circle cx="50" cy="50" r="4"/><path d="M13 13h22M13 13v22M87 87H65M87 87V65"/></svg>{% endif %}
+        </button>
+      </div>
+      <div class="album-story-copy">
+      <h3 class="album-choice-title" id="album-story-title-{{ loop.index }}"><button type="button" data-choice-action="open" @click="expanded = !expanded" :aria-expanded="expanded" aria-controls="album-open-{{ loop.index }}">{{ a.title }}</button></h3>
+      <p class="album-choice-artist"><a href="/artist?name={{ a.artist|urlencode }}" data-choice-action="open">{{ a.artist }}</a></p>
+      <div class="album-choice-facts">
+        {% if a.year %}<span>{{ a.year }}</span>{% endif %}
+        {% if a.genre %}<span class="gtag" title="{{ a.genre }}"><span class="gtag-label">{{ a.genre }}</span></span>{% endif %}
+        {% if a.familiarity %}<span class="album-familiarity album-familiarity--{{ a.familiarity.level }}" role="img"
+              aria-label="Listening familiarity for {{ a.title }}: {{ a.familiarity.label }}"
+              title="{{ a.familiarity.label }} Based on recorded track plays, not complete album listens."></span>{% endif %}
+      </div>
+      {% with notes=a.notes, notes_pending=a.notes_pending, notes_attempt=0, notes_scene=true %}{% include '_partials/album_notes.html' %}{% endwith %}
+      {% if a.rationale %}<p class="album-fit-note"><strong>Why you might like it:</strong> {{ a.rationale.text }}</p>{% endif %}
+      <div class="album-story-actions">
+      {{ album_play_control(a.browse_id, a.title, opportunity_id, css='album-choice-play') }}
+      <button class="album-choice-open" type="button" data-choice-action="open" @click="expanded = !expanded"
+              :aria-expanded="expanded" aria-controls="album-open-{{ loop.index }}" x-text="expanded ? 'Close album' : 'Open album'">Open album</button>
+      </div>
+      </div>
+      <div class="album-inline" id="album-open-{{ loop.index }}" x-show="expanded" x-cloak
+           x-effect="if (expanded) htmx.trigger($el, 'album-open')"
+           hx-get="/album/inline?browse={{ a.browse_id|urlencode }}&amp;opportunity={{ opportunity_id or '' }}"
+           hx-trigger="album-open once" hx-swap="innerHTML" aria-label="{{ a.title }} tracklist" aria-live="polite">
+        <p class="section-note">Loading tracks…</p>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="album-choice-empty">
+    <span class="album-empty-record" aria-hidden="true"></span>
+    <p>{% if filtered %}No records in these genres yet.{% elif preparing %}Pulling your records…{% else %}Your next records are still taking shape.{% endif %}</p>
+    {% if filtered %}<button class="btn-ghost" type="button" @click="openTuning()">Adjust selection</button>{% else %}<a href="/albums">Browse your albums</a>{% endif %}
+  </div>
+  {% endif %}
+  {% include '_partials/album_tuner.html' %}
+</section>

@@ -17,7 +17,7 @@ GENRE_POLICY_VERSION = 2
 _GENRE_PROVIDERS = frozenset(('musicbrainz', 'lastfm', 'discogs', 'deezer'))
 
 # Canonical registry: single source of truth. `key` names the settings entry holding that provider's
-# API key (only Last.fm needs one today); `requires` names a provider that must come before it.
+# API key exposed by the inline editor; `requires` names a provider that must come before it.
 PROVIDERS = [
     {"name": "musicbrainz",    "label": "MusicBrainz",    "key": None,             "requires": None,
      "blurb": "Genre & release year, by recording match."},
@@ -26,7 +26,7 @@ PROVIDERS = [
     {"name": "lastfm",         "label": "Last.fm",        "key": "lastfm_api_key", "requires": None,
      "blurb": "Genre from dense crowd tags. Needs a free API key."},
     {"name": "discogs",        "label": "Discogs",        "key": None,             "requires": None,
-     "blurb": "Genre & year. Works anonymously."},
+     "blurb": "Genre & year search needs DISCOGS_TOKEN or discogs_token in config.toml. Linked release facts work without a token."},
     {"name": "deezer",         "label": "Deezer",         "key": None,             "requires": None,
      "blurb": "Genre & year from Deezer's catalog."},
 ]
@@ -44,9 +44,10 @@ def provider_configuration(store, registry, config=None):
             continue
         status = ("disabled" if not p["enabled"] else
                   "available" if mod.available(store) else "unavailable")
-        # Order changes do not change the provider's answer. Last.fm resolves environment, saved
-        # and file credentials itself, so changes through any of those paths invalidate coverage.
-        key = mod.api_key(store) if p["name"] == "lastfm" and hasattr(mod, "api_key") else ""
+        # Credential changes through environment, settings or TOML invalidate the
+        # affected search coverage; provider order does not change its answer.
+        key = (mod.api_key(store) if p['name'] == 'lastfm' and hasattr(mod, 'api_key') else
+               mod.token(store) if p['name'] == 'discogs' and hasattr(mod, 'token') else '')
         inputs = {"version": 1, "key": key}
         if p['name'] in _GENRE_PROVIDERS:
             # Old broad answers need another lookup when the vocabulary or

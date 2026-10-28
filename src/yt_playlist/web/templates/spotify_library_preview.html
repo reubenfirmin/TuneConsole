@@ -22,8 +22,7 @@
       <tr>
         <td>{{ row.source.title }}</td><td>{{ row.source.artist }}</td>
         <td>{{ labels[row.status] }}</td>
-        <td>{% if row.match %}<a href="https://music.youtube.com/watch?v={{ row.match.videoId|urlencode }}"
-          target="_blank" rel="noopener">{{ row.match.title }} {{ arrow_icon('external') }}</a>{% else %}—{% endif %}</td>
+        <td>{% if row.match %}<a href="{{ track_url(row.match) }}">{{ row.match.title }}</a>{% else %}—{% endif %}</td>
       </tr>
       {% endfor %}
       </tbody>

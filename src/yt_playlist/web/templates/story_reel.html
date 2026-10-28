@@ -118,6 +118,7 @@ function reel(n) {
       };
       window.addEventListener('keydown', this._key);
     },
+    destroy() { clearTimeout(this._t); window.removeEventListener('keydown', this._key); },
     go(k) { this.i = Math.max(0, Math.min(this.n - 1, k)); },
     next() { if (this.i < this.n - 1) this.i++; else window.location.href = '/'; },
     prev() { this.go(this.i - 1); },

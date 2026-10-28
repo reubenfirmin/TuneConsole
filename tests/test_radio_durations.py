@@ -1,7 +1,7 @@
 """Confirmed Radio uploads retain their exact duration in the session and catalog."""
 import pytest
 from fastapi import FastAPI
-from fastapi.templating import Jinja2Templates
+from tests.template_support import web_templates
 from fastapi.testclient import TestClient
 
 from yt_playlist.web.radio_playlist_io import readback_durations
@@ -30,7 +30,7 @@ def test_initial_and_appended_radio_times_survive_readback_and_render(poc):
     play(c, 'v3')
     assert c.status()['tracks'][-1]['duration'] == 402
     # GET /radio/playlist reads the catalog, not the in-memory candidate dict.
-    c.ctx.templates = Jinja2Templates(directory='src/yt_playlist/web/templates')
+    c.ctx.templates = web_templates()
     app = FastAPI()
     app.include_router(radio_routes.build(c.ctx))
     play(c, 'v4')

@@ -1,7 +1,107 @@
 """Radio tuning streams, axis edits, decay and metadata refresh."""
+import json
+from pathlib import Path
+
 import pytest
 from playwright.sync_api import expect
 from tests.browser.radio_ui_support import radio_ui
+
+
+def test_middle_stream_transition_bends_around_fixed_control(page, radio_ui):
+    from tests.template_support import web_templates
+    radio_ui.playlist = web_templates().get_template('_partials/radio_playlist.html').render(
+        session=radio_ui.ready, tracks=radio_ui.tracks)
+    radio_ui.state = radio_ui.ready
+    expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
+    second = page.locator('.radio-direction[data-slot="1"]')
+    third = page.locator('.radio-direction[data-slot="2"]')
+    second.hover()
+    page.wait_for_timeout(1600)
+    transitions = []
+    for index, destination in enumerate([third, second]):
+        destination.hover()
+        samples = page.evaluate('''() => new Promise(resolve => {
+          const model = Alpine.$data(document.querySelector('.radio-home'));
+          const paths = [...document.querySelectorAll('.radio-junction-line, .radio-junction-flow')];
+          const control = document.querySelector('.radio-tune').getBoundingClientRect();
+          const x = control.x + control.width / 2, y = control.y + control.height / 2;
+          const frames = [];
+          const sample = () => {
+            let nearest = Infinity;
+            for (const path of paths) {
+              const length = path.getTotalLength(), matrix = path.getScreenCTM();
+              for (let step = 0; step <= 400; step++) {
+                const at = path.getPointAtLength(length * step / 400).matrixTransform(matrix);
+                // Check the unmasked drawing against the actual control, with
+                // one screen pixel of clearance. The approved spline can round
+                // inside its routing padding without touching the button.
+                nearest = Math.min(nearest, Math.hypot((at.x - x) / (control.width / 2 + 1),
+                  (at.y - y) / (control.height / 2 + 1)));
+              }
+            }
+            frames.push({nearest, x: model.junctionX, fork: model.junctionForkX,
+              outline: getComputedStyle(paths[0]).d, flow: getComputedStyle(paths[1]).d});
+            if (frames.length < 75) requestAnimationFrame(sample); else resolve(frames);
+          };
+          requestAnimationFrame(sample);
+        })''')
+        assert min(frame['nearest'] for frame in samples) >= 1
+        assert len({round(frame['x'], 2) for frame in samples}) > 10
+        assert max(abs(frame['x'] - frame['fork']) for frame in samples) > 10
+        transitions.append(samples)
+        page.screenshot(path=f'/tmp/tuneconsole-radio-411-organic-{index}.png')
+    Path('/tmp/tuneconsole-radio-411-frames.json').write_text(json.dumps(transitions))
+
+
+def test_junction_geometry_remains_continuous_around_control(page, radio_ui):
+    from tests.template_support import web_templates
+    radio_ui.playlist = web_templates().get_template('_partials/radio_playlist.html').render(
+        session=radio_ui.ready, tracks=radio_ui.tracks)
+    radio_ui.state = radio_ui.ready
+    expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
+    page.locator('.radio-direction[data-slot="1"]').hover()
+    page.wait_for_timeout(700)
+    jumps = page.evaluate(r'''() => {
+      const actual = Alpine.$data(document.querySelector('.radio-home'));
+      const model = radioArtwork();
+      model.artworkView = {connectedSlot: 1, directionCount: 4};
+      model.queueCenters = {...actual.queueCenters};
+      model.junctionHub = {...actual.junctionHub};
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      const data = (x, detail) => {
+        model.junctionX = model.junctionForkX = x;
+        const d = model.junctionStyle(1, detail).match(/path\("(.*)"\)/)[1];
+        path.setAttribute('d', d);
+        return {d, length: path.getTotalLength()};
+      };
+      const samples = d => {
+        path.setAttribute('d', d);
+        const length = path.getTotalLength(), points = [];
+        for (let at = 0; at <= length; at += 1) {
+          const p = path.getPointAtLength(at);
+          points.push([p.x, p.y]);
+        }
+        return points;
+      };
+      const distance = (a, b) => Math.max(...a.map(p =>
+        Math.sqrt(Math.min(...b.map(q => (p[0]-q[0])**2 + (p[1]-q[1])**2)))));
+      const jumps = [];
+      for (const detail of [false, true]) {
+        let previous = data(model.queueCenters[1], detail);
+        for (let x = model.queueCenters[1] + .5; x <= model.queueCenters[2]; x += .5) {
+          const next = data(x, detail);
+          if (Math.abs(next.length - previous.length) > 10) {
+            const before = samples(previous.d), after = samples(next.d);
+            const movement = Math.max(distance(before, after), distance(after, before));
+            if (movement > 5) jumps.push({x, detail, movement});
+          }
+          previous = next;
+        }
+      }
+      return jumps;
+    }''')
+    assert not jumps, jumps
+
 
 @pytest.mark.parametrize("width", [1440, 390])
 def test_tune_streams_modal_applies_all_axes_and_keeps_selected_stream_lit(page, radio_ui, width):

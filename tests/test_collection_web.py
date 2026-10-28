@@ -164,3 +164,61 @@ def test_save_album_client_error_returns_toast(store):
     assert 'hx-swap-oob="afterbegin:#toasts"' in r.text
     assert store.collection.get_saved_albums() == []           # nothing saved on failure
     assert fc.rated == []
+
+
+@pytest.mark.parametrize('ack', [False, {'status': 'STATUS_FAILED'}, {'status': 'STATUS_ERROR'}])
+@pytest.mark.parametrize('saved', [False, True])
+def test_rejected_album_change_preserves_account_memberships(store, ack, saved):
+    main = store.identities.upsert_identity('Main', 'cred', None, True)
+    other = store.identities.upsert_identity('Other', 'cred', 'other', False)
+    for owner in ([other] if saved else [main, other]):
+        store.collection.add_saved_album({'browse': 'B', 'title': 'Album'}, identity_id=owner)
+
+    class Rejected(AlbumClient):
+        def rate_playlist(self, playlist_id, rating):
+            super().rate_playlist(playlist_id, rating)
+            return ack
+
+    fc = Rejected()
+    client = _client(store, lambda: {main: fc, other: AlbumClient()})
+    before = store.collection.saved_album_owners('B')
+    response = client.post('/collection/' + ('save-album' if saved else 'unsave-album'),
+                           data={'browse_id': 'B', 'identity_id': main})
+    assert response.status_code == 422
+    assert 'did not confirm' in response.text
+    assert 'hx-refresh' not in response.headers
+    assert store.collection.saved_album_owners('B') == before
+    assert fc.rated == [('PLAUDIO', 'LIKE' if saved else 'INDIFFERENT')]
+
+
+@pytest.mark.parametrize('ack', [None, True, {}, {'status': 'STATUS_SUCCEEDED'}])
+def test_manual_and_import_album_saves_share_confirmation_and_metadata(store, ack):
+    from yt_playlist.library.spotify_library import _save_album
+
+    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+
+    class Confirmed(AlbumClient):
+        def rate_playlist(self, playlist_id, rating):
+            super().rate_playlist(playlist_id, rating)
+            return ack
+
+    fc = Confirmed()
+    client = _client(store, lambda: {iid: fc})
+    assert _refreshes(client.post('/collection/save-album', data={'browse_id': 'B'}))
+    manual = store.collection.get_saved_albums(identity_id=iid)
+    assert _refreshes(client.post('/collection/unsave-album', data={'browse_id': 'B'}))
+    assert store.collection.get_saved_albums(identity_id=iid) == []
+    _save_album(store, fc, {'browse_id': 'B', 'title': 'Fallback'}, iid)
+    assert store.collection.get_saved_albums(identity_id=iid) == manual
+
+
+@pytest.mark.parametrize('ack', [False, {'status': 'STATUS_FAILED'}])
+def test_import_album_rejection_does_not_publish_membership(store, ack):
+    from yt_playlist.library.spotify_library import _save_album
+
+    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+    fc = AlbumClient()
+    fc.rate_playlist = lambda *args: ack
+    with pytest.raises(ValueError, match='did not confirm'):
+        _save_album(store, fc, {'browse_id': 'B', 'title': 'Fallback'}, iid)
+    assert store.collection.get_saved_albums(identity_id=iid) == []

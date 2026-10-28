@@ -63,6 +63,8 @@ class Ctx:
     updater: object | None = None         # platform updater (Flatpak portal / macOS Sparkle)
     # Guards library sync so the background sync daemon and a manual POST /sync never run at once.
     sync_lock: object = field(default_factory=threading.Lock)
+    # An extension connection can start a due sync without waiting for the next periodic check.
+    sync_wake: object = field(default_factory=threading.Event)
     # A Spotify Account Data import may spend hours resolving tracks through the extension. This
     # both prevents duplicate jobs and lets packaged-app idle shutdown keep the process alive.
     spotify_import_lock: object = field(default_factory=threading.Lock)
@@ -76,6 +78,8 @@ class Ctx:
                 self.logger.warning("ignoring unreadable %s setting", AUTH_EXPIRED_KEY)
 
     def _persist_auth_expired(self):
+        if getattr(self.store, 'activity_paused', False):
+            return
         if self.auth_expired:
             self.store.settings.set_setting(AUTH_EXPIRED_KEY,
                                    json.dumps({str(k): v for k, v in self.auth_expired.items()}))
@@ -94,9 +98,10 @@ class Ctx:
 
     def clear_all_auth_expired(self):
         """Clear every expired flag (a re-auth / sign-out resolves the whole banner)."""
-        if self.auth_expired:
-            self.auth_expired.clear()
-            self._persist_auth_expired()
+        self.auth_expired.clear()
+        # A healthy bridge can clear RAM while repair discards writes. A fresh
+        # confirmation after repair must also remove the stale persisted flag.
+        self._persist_auth_expired()
 
     def now(self):
         return self.now_fn()

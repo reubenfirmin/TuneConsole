@@ -1,5 +1,3 @@
-import sqlite3
-
 import pytest
 
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
@@ -29,7 +27,6 @@ def test_upgrade_keeps_event_ids_shared_sources_and_unknown_artist_origins(tmp_p
     path = tmp_path / 'spotify.db'
     store = _predecessor(path)
     original = dict(store.conn.execute('SELECT * FROM play_events').fetchone())
-    backups = set((tmp_path / 'backups').glob('*.db'))
     # Collision with the new spelling must retain one source, without losing Takeout.
     store.conn.execute("INSERT INTO play_event_sources VALUES (?,'spotify_export')", (original['id'],))
     store.conn.commit()
@@ -40,12 +37,8 @@ def test_upgrade_keeps_event_ids_shared_sources_and_unknown_artist_origins(tmp_p
     assert {r[0] for r in store.conn.execute('SELECT source FROM play_event_sources')} == {'spotify_export','takeout'}
     assert store.conn.execute('SELECT source FROM discovery_artist_sources').fetchone()[0] == 'unknown'
     assert store.settings.get_setting('spotify_legacy_discovery_unattributed') == '1'
-    new_backups = set((tmp_path / 'backups').glob('*.db')) - backups
-    assert len(new_backups) == 1
-    with sqlite3.connect(new_backups.pop()) as backup:
-        assert backup.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-        assert backup.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 30
-        assert backup.execute('SELECT id FROM play_events').fetchone()[0] == original['id']
+    assert not (tmp_path / 'backups').exists()
+    assert store.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
     store.conn.close()
     reopened = Store(path)
     migrate(reopened.conn, registry=_registry())

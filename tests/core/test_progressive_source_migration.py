@@ -66,7 +66,7 @@ def test_interrupted_forward_repair_rolls_back_schema_and_data(tmp_path, monkeyp
             source_migration.apply(connection, context)
             raise RuntimeError('interrupted source projection')
 
-        monkeypatch.setattr(registry, 'MIGRATIONS', (*original[:34], Migration(35, original[34].name, interrupted, replaces_data=False)))
+        monkeypatch.setattr(registry, 'MIGRATIONS', (*original[:34], Migration(35, original[34].name, interrupted)))
         with pytest.raises(MigrationError, match='interrupted source projection'):
             migrate(conn)
         assert list(conn.iterdump()) == before

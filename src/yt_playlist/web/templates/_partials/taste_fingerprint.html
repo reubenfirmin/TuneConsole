@@ -2,6 +2,7 @@
          data-tuning-remaining="{{ fingerprint.tuning_remaining|default(0) }}"
          data-tuning-active="{{ 'true' if tuning_active else 'false' }}"
          data-vibe="{{ vibe }}" @home-vibe-sync.window="vibe = $event.detail"
+         @home-vibe-saving.window="close()" @home-vibe-edit.window="selectTab('vibe'); show()"
          @home-mix-open.window="close()" @home-mixes-applied.window="close()">
   <button type="button" class="fp-collapse" x-ref="launcher" @click="show()"
           :aria-expanded="(!collapsed).toString()" aria-haspopup="dialog" aria-controls="fp-dialog"
@@ -34,7 +35,7 @@
        @keydown.home.prevent="selectTab('vibe', true)" @keydown.end.prevent="selectTab('preferences', true)">
     <button type="button" role="tab" id="fp-vibe-tab" x-ref="vibeTab" aria-controls="fp-vibe-panel"
             :aria-selected="tab === 'vibe'" :tabindex="tab === 'vibe' ? 0 : -1"
-            @click="selectTab('vibe')" :title="vibe ? 'Vibe adjustment active' : 'Choose a vibe'">Vibe <span class="fp-tab-dot" aria-hidden="true" x-show="vibe" x-cloak></span></button>
+            @click="selectTab('vibe')" :title="vibe ? 'Vibe adjustment active' : 'Choose a vibe'">Vibe <span class="fp-tab-dot" aria-hidden="true" :hidden="!vibe" hidden></span></button>
     <button type="button" role="tab" id="fp-mixes-tab" x-ref="mixesTab" aria-controls="fp-mixes-panel"
             :aria-selected="tab === 'mixes'" :tabindex="tab === 'mixes' ? 0 : -1"
             @click="selectTab('mixes')">Genre focus</button>
@@ -42,9 +43,11 @@
             :aria-selected="tab === 'preferences'" :tabindex="tab === 'preferences' ? 0 : -1"
             @click="selectTab('preferences')">Nerd out</button>
   </div>
+  {# HTMX settles inline styles after Alpine initializes swapped controls; use hidden for tabs. #}
   <div class="fp-tab-panel" id="fp-mixes-panel" role="tabpanel" aria-labelledby="fp-mixes-tab"
-       x-show="tab === 'mixes'">
+       :hidden="tab !== 'mixes'" hidden>
     <div class="fp-intro"><h2>What are we playing?</h2><p>Pick a few favorites, mix them together, or let a shuffle surprise you.</p></div>
+    <p class="section-note" x-show="vibe" x-cloak>Your vibe finds matching music within your chosen genres.</p>
     <form id="home-mix-form" class="fp-mix-form"
           hx-post="/home/mix-genres" hx-target="#home-mode-cards" hx-swap="outerHTML"
           hx-disabled-elt="#home-mix-fields, #home-make-mixes"
@@ -64,10 +67,12 @@
     <p id="home-theme-summary" class="section-note fp-theme-status" role="status"></p>
   </div>
   <div class="fp-tab-panel" id="fp-vibe-panel" role="tabpanel" aria-labelledby="fp-vibe-tab"
-       x-show="tab === 'vibe'" x-cloak>
+       :hidden="tab !== 'vibe'" hidden>
     <div class="fp-intro"><h2>Meet the moment.</h2><p>Same taste in music. A different kind of day.</p></div>
     <form id="home-vibe-form" hx-post="/home/vibe" hx-target="#home-mode-cards" hx-swap="outerHTML"
-          hx-trigger="change" hx-sync="#fingerprint:queue last" hx-disabled-elt="find fieldset">
+          hx-trigger="change" hx-sync="#fingerprint:queue last" hx-disabled-elt="find fieldset"
+          @keydown.space="if ($event.target.matches('input[type=radio]:checked')) { $event.preventDefault(); close(); }"
+          @click="if ($event.target.matches('input[type=radio]')) close()">
       <fieldset class="fp-vibe-fields">
         <legend class="sr-only">Choose a vibe for your mixes</legend>
         <div class="fp-vibe-grid">
@@ -75,10 +80,7 @@
                  title="No extra vibe. Your genre focus and dials still apply.">
             <input type="radio" name="vibe" value="" :checked="!vibe" aria-label="Take it as it comes">
             <span class="fp-vibe-content">
-              <svg class="fp-vibe-icon" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <rect x="5" y="5" width="22" height="22" rx="6" transform="rotate(-8 16 16)"/>
-                <circle cx="11" cy="11" r="1"/><circle cx="16" cy="16" r="1"/><circle cx="21" cy="21" r="1"/>
-              </svg>
+              <img class="fp-vibe-art" src="/static/vibes/natural.webp" width="480" height="480" alt="" decoding="async">
               <span class="fp-vibe-check" aria-hidden="true">✓</span>
               <strong>Take it as it comes</strong><span class="fp-vibe-description">Your taste, without a mood in mind.</span>
             </span>
@@ -87,14 +89,7 @@
           <label class="fp-vibe-card" data-color="{{ preset.color }}" title="{{ preset.signals }}">
             <input type="radio" name="vibe" value="{{ key }}" :checked="vibe === '{{ key }}'" aria-label="{{ preset.label }}">
             <span class="fp-vibe-content">
-              <svg class="fp-vibe-icon" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                {% if preset.icon == 'feather' %}<path d="M7 26 23 10M12 21c-6-10 2-17 15-16 1 13-6 21-16 15M16 17v-6m0 6h6"/>
-                {% elif preset.icon == 'sun' %}<circle cx="16" cy="16" r="6"/><path d="M16 3v3m0 20v3M3 16h3m20 0h3M7 7l2 2m14 14 2 2M7 25l2-2M23 9l2-2"/>
-                {% elif preset.icon == 'orbit' %}<circle cx="16" cy="16" r="4"/><ellipse cx="16" cy="16" rx="14" ry="7" transform="rotate(-35 16 16)"/><path d="M12 4c7 1 13 12 10 23"/>
-                {% elif preset.icon == 'spark' %}<path d="m16 3 3.5 9.5L29 16l-9.5 3.5L16 29l-3.5-9.5L3 16l9.5-3.5Z"/>
-                {% elif preset.icon == 'moon' %}<path d="M25 21A12 12 0 0 1 11 5a12 12 0 1 0 14 16Z"/><path d="M23 4v6m-3-3h6"/>
-                {% else %}<path d="M3 17h6l4-10 6 19 4-12h6"/>{% endif %}
-              </svg>
+              <img class="fp-vibe-art" src="/static/vibes/{{ key }}.webp" width="480" height="480" alt="" decoding="async">
               <span class="fp-vibe-check" aria-hidden="true">✓</span>
               <strong>{{ preset.label }}</strong><span class="fp-vibe-description">{{ preset.description }}</span>
             </span>
@@ -103,15 +98,10 @@
         </div>
       </fieldset>
     </form>
-    <p id="home-vibe-status" class="fp-feedback" role="status">Pick a vibe. Your mixes update right away.</p>
-    <details class="fp-vibe-explainer"><summary>{{ arrow_icon('disclosure') }} What shapes a vibe?</summary>
-      <p>Tempo, energy, danceability, mood, acoustic character, instrumentalness, and loudness, where available. Genre energy helps fill the gaps. More audio detail means a closer match.</p>
-      <ul>{% for key, preset in (vibe_presets|default({})).items() %}<li><strong>{{ preset.label }}:</strong> {{ preset.signals }}</li>{% endfor %}</ul>
-    </details>
   </div>
   <div class="fp-tab-panel" id="fp-preferences-panel" role="tabpanel" aria-labelledby="fp-preferences-tab"
-       x-show="tab === 'preferences'" x-cloak>
-  <div class="fp-intro"><h2>A little more you.</h2><p>These dials and your vibe work together. If Genre focus is set to Funk only, turning up Techno won’t add Techno.</p></div>
+       :hidden="tab !== 'preferences'" hidden>
+  <div class="fp-intro"><h2>A little more you.</h2><p>A selected vibe leads the musical style. Genre focus sets which genres it can explore.</p></div>
   {# Genre variety is a single dial; per-genre and era weights live below. #}
   <div class="fp-preference-card">
     <div class="fp-preference-heading"><strong>How wide shall we wander?</strong><span>Genre variety</span></div>

@@ -31,7 +31,6 @@ document.addEventListener('htmx:afterSwap', (e) => {
     return (s || '').toLowerCase().replace(/\(.*?\)|\[.*?\]/g, '').replace(/\bfeat\.?.*$/, '')
       .replace(/[^a-z0-9]+/g, ' ').trim();
   }
-  function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
   function rowByVid(vid) {
     var sel = window.CSS && CSS.escape ? CSS.escape(vid) : vid;
     return document.querySelector('tr[data-vid="' + sel + '"]');
@@ -50,14 +49,17 @@ document.addEventListener('htmx:afterSwap', (e) => {
   function highlight(np) {
     var rows = document.querySelectorAll('tr[data-vid]');
     rows.forEach(function (r) { r.classList.remove('now-playing'); });
-    if (!np || !np.title) return false;
-    var match = np.video_id ? rowByVid(np.video_id) : null;
-    if (!match) {
+    if (!np) return false;
+    var matches = np.video_id ? Array.from(rows).filter(r => r.getAttribute('data-vid') === np.video_id) : [];
+    if (!np.video_id && np.title) {
       var nt = norm(np.title);
-      rows.forEach(function (r) { if (!match && norm(r.getAttribute('data-title')) === nt) match = r; });
+      rows.forEach(function (r) {
+        if (norm(r.getAttribute('data-title')) === nt &&
+            (!np.artist || norm(r.getAttribute('data-artist')) === norm(np.artist))) matches.push(r);
+      });
     }
-    if (match) { match.classList.add('now-playing'); return true; }
-    return false;
+    matches.forEach(r => r.classList.add('now-playing'));
+    return matches.length > 0;
   }
 
   function refreshCells() {
@@ -73,7 +75,16 @@ document.addEventListener('htmx:afterSwap', (e) => {
           var g = row.querySelector('.genre-display-wrap');
           if (g && !g.querySelector('.gtag')) {
             var hint = g.querySelector('.ghint');
-            if (hint) hint.outerHTML = '<span class="gtag">' + esc(c.genre) + '</span>';
+            if (hint) {
+              var badge = document.createElement('span');
+              badge.className = 'gtag';
+              badge.title = c.genre;
+              var label = document.createElement('span');
+              label.className = 'gtag-label';
+              label.textContent = c.genre;
+              badge.append(label);
+              hint.replaceWith(badge);
+            }
             row.setAttribute('data-genre', String(c.genre).toLowerCase());
           }
         }
@@ -94,13 +105,37 @@ document.addEventListener('htmx:afterSwap', (e) => {
     var data = window.playbackStatus.snapshot;
     highlight(data?.connected ? data.now_playing : null);
   }
+  var playsPending = false;
+  async function refreshPlays() {
+    if (playsPending || document.hidden) return;
+    var rows = [...document.querySelectorAll('tr[data-vid]:has(.track-plays)')];
+    var videos = [...new Set(rows.map(row => row.dataset.vid).filter(Boolean))];
+    if (!videos.length) return;
+    playsPending = true;
+    try {
+      for (var offset = 0; offset < videos.length; offset += 500) {
+        var response = await fetch('/album/track-plays?videos=' + encodeURIComponent(videos.slice(offset, offset + 500).join(',')));
+        if (!response.ok) continue;
+        var counts = (await response.json()).plays || {};
+        rows.forEach(function (row) {
+          var count = counts[row.dataset.vid];
+          if (!row.isConnected || !Number.isInteger(count) || count < 0) return;
+          row.dataset.plays = count;
+          row.querySelector('.track-plays .track-cell').textContent = count || '';
+        });
+      }
+    } catch (_) { /* Keep the last confirmed counts during a connection failure. */ }
+    finally { playsPending = false; }
+  }
   window.addEventListener('bridge-status', function (event) {
     highlight(event.detail?.connected ? event.detail.now_playing : null);
   });
-  document.addEventListener('htmx:afterSwap', highlightCurrent);
+  document.addEventListener('htmx:afterSwap', function () { highlightCurrent(); refreshPlays(); });
   document.addEventListener('DOMContentLoaded', function () { highlightCurrent(); refreshCells(); }, {once: true});
   highlightCurrent();
   refreshCells();
+  refreshPlays();
   setInterval(refreshCells, 2500);
+  setInterval(refreshPlays, 2500);
 })();
 

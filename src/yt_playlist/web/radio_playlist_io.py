@@ -72,8 +72,12 @@ def append_receipt(result):
 
 
 def matches_substitution(requested, row, receipt):
-    if (receipt.get("status") == "STATUS_SUCCEEDED" and receipt.get("videoId") == row["videoId"]
-            and receipt.get("setVideoId") and row.get("setVideoId") == receipt["setVideoId"]):
+    if receipt.get("status") == "STATUS_SUCCEEDED" and receipt.get("setVideoId"):
+        # Music can acknowledge the requested video but read back another upload
+        # with different credits. The playlist occurrence handle proves which
+        # row we added; differing handles must not fall back to metadata matching.
+        return row.get("setVideoId") == receipt["setVideoId"]
+    if row.get('playlistVideoId') == requested['video_id']:
         return True
     artist = track_artist(row)
     duration = row.get("duration_seconds") or parse_duration(row.get("duration"))
@@ -85,8 +89,10 @@ def matches_substitution(requested, row, receipt):
 
 
 class RadioPlaylistIO:
-    def __init__(self, playlists):
+    def __init__(self, playlists, *, paused=lambda: False):
         self.playlists = playlists
+        self.paused = paused
+        self._unpublished = set()
 
     def read(self, client, playlist: str, *, expected: list[str] | None = None) -> list[dict]:
         detail = client.get_playlist(playlist, limit=None)
@@ -105,9 +111,16 @@ class RadioPlaylistIO:
             raise PlaylistPending() from exc
 
     def publish(self, local_id: int, title: str, previous: list[dict], tracks: list[dict], now: float):
+        if local_id is None:
+            return
+        if self.paused():
+            self._unpublished.add(local_id)
+            return
         prefix = ([t["video_id"] for t in previous]
-                  if len(tracks) > len(previous) and list(tracks[:len(previous)]) == previous else None)
+                  if local_id not in self._unpublished and len(tracks) > len(previous)
+                  and list(tracks[:len(previous)]) == previous else None)
         self.playlists.publish_confirmed_tracks(local_id, title, tracks, now, expected_prefix=prefix)
+        self._unpublished.discard(local_id)
 
     @staticmethod
     def write(client, playlist: str, edit: PlaylistEdit):

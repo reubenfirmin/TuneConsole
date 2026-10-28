@@ -19,6 +19,7 @@ const messages = [];
 const listeners = {};
 const intervals = [];
 let now = 0;
+let playPauseClicks = 0;
 const video = { paused: true, currentTime: 12, duration: 200 };
 let thumbnail = "https://i.ytimg.com/vi/v1/hqdefault.jpg";
 let likeStatus = "";
@@ -30,6 +31,8 @@ const document = {
   addEventListener() {},
   querySelector(selector) {
     if (selector === "video") return video;
+    if (selector === "ytmusic-player-bar #play-pause-button") return {
+      querySelector: () => null, click() { playPauseClicks++; video.paused = !video.paused; }};
     if (selector === ".title.ytmusic-player-bar") return { textContent: "Exoskeleton (Official)" };
     if (selector === ".byline.ytmusic-player-bar") return { textContent: "GAUPA • Album" };
     if (selector === "img.image.ytmusic-player-bar") return { src: thumbnail };
@@ -58,6 +61,25 @@ const context = {
   console: { log() {}, warn() {} },
 };
 vm.runInNewContext(fs.readFileSync("extension/content.js", "utf8"), context);
+const control = (action, videoId='v1', actualVideo='v1') => {
+  listeners.runtime({type:'player-control',resumeOnly:true,action,videoId}, {}, () => {});
+  const probe=probes.at(-1).__tcSensorProbe;
+  listeners.message({source:window,data:{__tcSensorVersion:4,__tcSensorRevision:8,
+    __tcSensorProbeId:probe.id,__tcNow:{videoId:actualVideo,paused:video.paused}}});
+};
+now=16*60*1000;
+control('play'); assert.equal(playPauseClicks,1); assert.equal(video.paused,false);
+control('play'); assert.equal(playPauseClicks,1,'Play must not toggle an already playing video');
+control('pause'); assert.equal(playPauseClicks,2); assert.equal(video.paused,true);
+control('play','v1','other'); assert.equal(playPauseClicks,2,'a changed video cannot resume from stale state');
+control('toggle'); assert.equal(playPauseClicks,3); assert.equal(video.paused,false);
+let tvPause;
+listeners.runtime({type:'pause-for-tv'}, {}, reply => {tvPause=reply;});
+assert.equal(tvPause.ok,true); assert.equal(tvPause.paused,true);
+assert.equal(video.paused,true); assert.equal(playPauseClicks,4);
+listeners.runtime({type:'pause-for-tv'}, {}, reply => {tvPause=reply;});
+assert.equal(playPauseClicks,4,'TV takeover must never resume an already paused player');
+video.paused=true; messages.length=0; now=0;
 // A resync can precede the first MAIN tick. Unknown account is presence, never a main-account play.
 video.paused = false;
 listeners.runtime({type: "resync-now"}, {}, () => {});
@@ -223,6 +245,27 @@ assert.equal(messages.at(-1).albumBrowseId, "MPRE_v8");
 snapshot("v9", {videoId: "v8", likeStatus: "LIKE", albumBrowseId: "MPRE_v8"});
 assert.equal(messages.at(-1).likeStatus, "");
 assert.equal(messages.at(-1).albumBrowseId, "");
+// Native upload proof is independent of recording credits. The backend can use a known
+// catalog upload, while an unknown upload must be retried once its credits hydrate.
+const nativeSnapshot = (metadataVerified, brandKnown = true, paused = false) =>
+  listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorRevision: 10,
+    __tcNow: {title: 'Native title', artist: 'Uploader', videoId: 'native-id',
+      videoVerified: true, metadataVerified, brandKnown, brandId: 'brand-A', paused,
+      playerBar: {videoId: 'old-id', likeStatus: 'DISLIKE'}}}});
+nativeSnapshot(false, false);
+assert.equal(messages.at(-1).type, 'now-heartbeat');
+nativeSnapshot(false, true, true);
+assert.equal(messages.at(-1).type, 'now-heartbeat');
+nativeSnapshot(false);
+assert.equal(messages.at(-1).type, 'play');
+assert.equal(messages.at(-1).videoVerified, true);
+assert.equal(messages.at(-1).metadataVerified, false);
+assert.equal(messages.at(-1).likeStatus, '');
+nativeSnapshot(false);
+assert.equal(messages.at(-1).type, 'now-heartbeat');
+nativeSnapshot(true);
+assert.equal(messages.at(-1).type, 'play');
+assert.equal(messages.at(-1).metadataVerified, true);
 // Health pings ask MAIN for an immediate sample. An incomplete reply still proves MAIN liveness;
 // a legacy sensor cannot satisfy the versioned handshake.
 let health;
@@ -240,7 +283,8 @@ listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorProbeI
 assert.equal(health.ok, true);
 assert.equal(health.mainVersion, 4);
 assert.equal(health.mainRevision, 8);
-assert.equal(health.receiverRevision, 7);
+assert.equal(health.receiverRevision,
+  Number(fs.readFileSync('extension/content.js','utf8').match(/const RECEIVER_REVISION = (\d+)/)[1]));
 assert.equal(health.mainAgeMs, 0);
 assert.equal(health.capture.hasVideo, false);
 assert.equal(health.capture.accountKnown, false);
@@ -275,6 +319,18 @@ listeners.runtime({type: "sensor-ping", main: true}, {}, r => { health = r; });
 assert.equal(health.mainAgeMs, 20000);
 assert.equal(health.capture, null, 'an unanswered probe must not reuse older capture evidence');
 assert.equal(timeouts.size, 0);
+// Curation identity belongs to the request, independently of current player/account snapshots.
+const beforeCuration = messages.length;
+for (const brandKnown of [undefined, false]) listeners.message({source:window, data:{__tcCuration:{
+  kind:'rate', brandId:'', brandKnown, phase:'settled', success:true,
+}}});
+assert.equal(messages.length, beforeCuration, 'unknown and legacy curation cannot reach the worker');
+for (const brandId of ['', 'original-request-account']) listeners.message({source:window, data:{__tcCuration:{
+  kind:'rate', brandKnown:true, brandId, phase:'settled', success:true,
+}}});
+assert.equal(messages.length, beforeCuration + 2);
+assert.equal(messages.at(-2).brandId, '');
+assert.equal(messages.at(-1).brandId, 'original-request-account', 'forward the captured identity unchanged');
 (async () => {
   const reply = await new Promise(resolve => listeners.runtime({
     type: "fetch", method: "POST", url: "https://music.youtube.com/youtubei/v1/browse",
@@ -305,6 +361,7 @@ let data = {video_id: 'playing', title: 'Song', author: 'Artist'};
 let playerResponse = null;
 let config = {LOGGED_IN: true, DELEGATED_SESSION_ID: 'brand-A'};
 let bar = null;
+let nextControl = null;
 const windowHandlers = new Map();
 const video = {
   paused: false, currentTime: 12, duration: 200, muted: false, volume: 0.5,
@@ -327,6 +384,7 @@ const context = {
   document: {querySelector(selector) {
     if (selector === 'video') return video;
     if (selector === '#movie_player' && available) return player;
+    if (selector === 'ytmusic-player-bar .next-button') return nextControl;
     if (selector === 'ytmusic-player-bar') return bar;
     if (selector === '.title.ytmusic-player-bar' && bar) return {textContent: bar.title};
     if (selector === '.byline.ytmusic-player-bar' && bar) return {textContent: bar.artist + ' • Album'};
@@ -350,6 +408,25 @@ const sensorRevision = window.__tcNowPoller.revision;
 const tick = () => [...timers.values()].forEach(fn => fn());
 const latest = () => messages.filter(m => m.__tcNow).at(-1).__tcNow;
 const exits = () => messages.filter(m => m.__tcPlayer?.kind === 'track_exit');
+tick();
+const nextRequests = () => messages.filter(m => m.__tcPlayer?.kind === 'next');
+nextControl = {contains: target => target === nextControl, querySelector: () => null,
+               getAttribute: () => '', disabled: false};
+const click = trusted => windowHandlers.get('click')({isTrusted: trusted, target: nextControl,
+  composedPath: () => [nextControl]});
+click(false);
+assert.equal(nextRequests().length, 0, 'synthetic queue repairs are not explicit user skips');
+video.currentTime = 1;
+click(true);
+assert.equal(nextRequests().length, 1);
+assert.equal(nextRequests()[0].__tcPlayer.videoId, 'playing');
+assert.equal(nextRequests()[0].__tcPlayer.position, 1, 'an immediate explicit skip is retained');
+assert.equal(nextRequests()[0].__tcPlayer.brandId, 'brand-A');
+nextControl.disabled = true;
+click(true);
+assert.equal(nextRequests().length, 1, 'a disabled native control is not a request');
+nextControl = null;
+video.currentTime = 12;
 tick();
 assert.equal(latest().videoId, 'playing');
 assert.equal(latest().playlist, 'PL_playing');
@@ -435,6 +512,7 @@ assert.equal(latest().thumbnail, 'https://yt3.googleusercontent.com/album=w544')
 assert.equal(latest().title, 'Next');
 assert.equal(latest().artist, 'Artist');
 assert.equal(latest().metadataVerified, false, 'artwork alone must not validate recording credits');
+assert.equal(latest().videoVerified, true, 'native upload proof does not authorize uploader credits');
 playerResponse.videoDetails.videoId = 'playing';
 tick();
 assert.equal(latest().thumbnail, '', 'a stale player response must not supply the previous artwork');
@@ -448,6 +526,7 @@ assert.equal(latest().playlist, '', 'an actual queue clear must stay clear');
 available = false;
 tick();
 assert.equal(latest().videoId, '', 'unknown player state must not borrow a browsed ID');
+assert.equal(latest().videoVerified, false);
 assert.equal(latest().playlist, '');
 assert.equal(exits().length, 1);
 available = true;
@@ -464,8 +543,24 @@ tick();
 assert.equal(latest().brandKnown, true);
 assert.equal(latest().brandId, '', 'signed-in non-delegated config verifies the main account');
 video.volume = 0;
+const ticks = () => messages.filter(m => m.__tcPlayer?.kind === 'tick');
+const tickCount = ticks().length;
+now += 30000;
 tick();
 assert.equal(latest().muted, true);
+assert.equal(ticks().length, tickCount, 'zero-volume playback cannot emit listening ticks');
+handlers.get('play')();
+assert.equal(messages.at(-1).__tcPlayer.muted, true, 'state carries mute before its next heartbeat');
+assert.equal(messages.at(-1).__tcPlayer.volume, 0);
+video.volume = .5; video.muted = true;
+now += 30000;
+tick();
+assert.equal(ticks().length, tickCount, 'media-muted playback cannot emit listening ticks');
+video.muted = false;
+tick();
+assert.equal(ticks().length, tickCount + 1, 'audible partial playback resumes native listening evidence');
+assert.equal(ticks().at(-1).__tcPlayer.muted, false);
+assert.equal(ticks().at(-1).__tcPlayer.paused, false);
 assert(messages.every(m => m.__tcSensorVersion === 4));
 // A continuous media stream cannot stand in for unavailable or changing per-song timing.
 const originalPosition = player.getCurrentTime, originalDuration = player.getDuration;
@@ -521,7 +616,7 @@ assert.equal(handlers.size, 0);
 assert.equal(windowHandlers.size, 0);
 vm.runInNewContext(source, context);
 assert.equal(timers.size, 1, 'a stopped sensor must restart even at the same version');
-assert.equal(windowHandlers.size, 1);
+assert.equal(windowHandlers.size, 2);
 """
     result = subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parents[1],
                             text=True, capture_output=True, check=False)

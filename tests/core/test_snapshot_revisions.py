@@ -1,5 +1,7 @@
 """Publication follows consumed inputs, rather than all writes on a busy serving connection."""
+import gc
 import sqlite3
+import weakref
 
 import pytest
 
@@ -197,3 +199,79 @@ def test_scoped_capture_keeps_complete_counters_and_bounds_work_after_key_churn(
     assert len(complete) > 4000
     assert ('settings', 'key:unrelated-3999') in complete
     assert store._snapshot_revisions.capture(set()) == {}
+
+
+def test_publication_seeks_only_consumed_revisions(database, monkeypatch):
+    revisions = database._snapshot_revisions
+    original, captures = revisions.capture, []
+    def capture(dependencies=None):
+        captures.append(dependencies)
+        return original(dependencies)
+    monkeypatch.setattr(revisions, 'capture', capture)
+    with database.read_snapshot() as snapshot:
+        snapshot.store.settings.get_setting('input')
+        database.settings.set_setting('unrelated', 'changed')
+        assert snapshot.publish(lambda: None)
+    assert captures == [{('settings', 'key:input')}]
+
+
+@pytest.mark.parametrize('changed', [False, True])
+def test_declared_snapshot_guards_missing_inputs_without_capturing_other_keys(database, changed):
+    dependencies = {('settings', 'key:input')}
+    with database.read_snapshot(dependencies=dependencies) as snapshot:
+        assert snapshot.store.settings.get_setting('input') is None
+        database.settings.set_setting('input' if changed else 'unrelated', 'new')
+        assert snapshot.publish(lambda: None) is not changed
+
+
+def test_declared_snapshot_rejects_undeclared_reads_and_does_not_reuse_memo(database):
+    # Warm the ordinary memo while a setting has no revision counter yet.
+    with database.read_snapshot() as snapshot:
+        assert snapshot.store.memoized_read('probe', lambda: snapshot.store.settings.get_setting('input')) is None
+    database.settings.set_setting('input', 'new')
+    with database.read_snapshot(dependencies=set()) as snapshot:
+        assert snapshot.store.memoized_read('probe', lambda: snapshot.store.settings.get_setting('input')) == 'new'
+        with pytest.raises(RuntimeError, match='outside its declared revision scope'):
+            snapshot.publish(lambda: pytest.fail('published an unguarded input'))
+    assert not database.conn.in_transaction
+
+
+def test_revision_capture_batches_below_sqlite_parameter_limit(database):
+    with database.conn:
+        database.conn.executemany('INSERT INTO settings VALUES (?,?)',
+                                  [(f'input-{i}', 'value') for i in range(1200)])
+    dependencies = {('settings', f'key:input-{i}') for i in range(1200)}
+    previous = database.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+    try:
+        assert set(database._snapshot_revisions.capture(dependencies)) == dependencies
+    finally:
+        database.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous)
+
+
+def test_closed_snapshot_releases_memo_callback_without_waiting_for_cycle_collection(database):
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        with database.read_snapshot() as snapshot:
+            snapshot.store.settings.get_setting('input')
+            callback = weakref.ref(snapshot.store._memoized_read)
+        del snapshot
+        assert callback() is None
+    finally:
+        if collecting:
+            gc.enable()
+
+
+@pytest.mark.parametrize('changed', [False, True])
+def test_released_reader_keeps_original_guard_after_context_exit(database, changed):
+    database.settings.set_setting('input', 'old')
+    with database.read_snapshot() as snapshot:
+        assert snapshot.store.settings.get_setting('input') == 'old'
+        snapshot.release_reader()
+        snapshot.release_reader()
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            snapshot.store.conn.execute('SELECT 1')
+    database.settings.set_setting('input' if changed else 'foreground-setting', 'new')
+    published = []
+    assert snapshot.publish(lambda: published.append(True)) == (not changed)
+    assert published == ([] if changed else [True])

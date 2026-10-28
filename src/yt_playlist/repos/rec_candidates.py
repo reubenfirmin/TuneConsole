@@ -3,11 +3,50 @@
 These queries preserve SQL ordering and bounded limits. Surface composition,
 personalized scoring and lane selection remain in rec.surfaces above persistence.
 """
-from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.repos.base import LIKED_EXISTS, Repo, synchronized
 from yt_playlist.repos.rec_eligibility import exclude_ids
 
 
 class RecCandidatesRepo(Repo):
+    @synchronized
+    def revisit_candidates(self, now, *, keys=None, limit=90):
+        """Quiet liked/repeated songs, including actual generated-source listening.
+
+        Exact events count as plays; calendar-only imports contribute once on days
+        without an exact event. Membership in a generated playlist has no effect.
+        Twenty recorded plays gives a song the longer, six-month rest.
+        """
+        params = {'month': now - 30*86400, 'half_year': now - 183*86400, 'limit': limit}
+        restriction = ''
+        if keys is not None:
+            keys = list(dict.fromkeys(keys))
+            if not keys:
+                return []
+            names = []
+            for i, key in enumerate(keys):
+                params[f'key{i}'] = key
+                names.append(f':key{i}')
+            restriction = ' AND t.identity_key IN (' + ','.join(names) + ')'
+        rows = self.conn.execute(
+            'WITH names AS (SELECT t.identity_key key,MIN(t.title) title,MIN(t.artist) artist,'
+            'MIN(t.album) album,MIN(t.video_id) video_id,MIN(t.thumbnail) thumbnail,'
+            f'MAX(CASE WHEN {LIKED_EXISTS} THEN 1 ELSE 0 END) liked '
+            'FROM playable_library_tracks t WHERE t.video_id IS NOT NULL AND t.video_id<>\'\' '
+            f'AND {self._store.rec_eligibility.track_length_clause("t.duration_s")}{restriction} '
+            'GROUP BY t.identity_key), heard AS ('
+            'SELECT pe.identity_key,pe.played_at at FROM play_events pe JOIN names n ON n.key=pe.identity_key '
+            'UNION ALL SELECT d.identity_key,d.day_ts+86400 FROM listening_days d '
+            'JOIN names n ON n.key=d.identity_key WHERE NOT EXISTS ('
+            'SELECT 1 FROM play_events pe JOIN play_event_calendar c ON c.event_id=pe.id '
+            'WHERE pe.identity_key=d.identity_key AND pe.identity_id=d.identity_id AND c.day=d.day)), '
+            'totals AS (SELECT identity_key,COUNT(*) plays,MAX(at) last_played FROM heard GROUP BY identity_key) '
+            'SELECT n.*,COALESCE(h.plays,0) plays,h.last_played FROM names n '
+            'LEFT JOIN totals h ON h.identity_key=n.key '
+            'WHERE (n.liked=1 OR h.plays>=2) AND (h.last_played IS NULL OR '
+            'h.last_played<=CASE WHEN h.plays>=20 THEN :half_year ELSE :month END) '
+            'ORDER BY COALESCE(h.plays,0),h.last_played,n.key LIMIT :limit', params).fetchall()
+        return [dict(row) for row in rows]
+
     @synchronized
     def comfort_candidates(self, now, min_plays=4, recency_full_days=30, limit=50) -> list[dict]:
         """High-rotation favorites, demoted by how recently they were heard."""

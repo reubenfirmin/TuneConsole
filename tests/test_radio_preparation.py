@@ -55,7 +55,10 @@ def test_monitor_upgrades_fallback_to_distinct_prepared_streams_without_changing
     monkeypatch.setattr(content_model, "build_library_content", forbidden)
     monkeypatch.setattr(c.ctx.store.rec_model, "content_generation", forbidden)
     waits = iter([False, True])
-    monkeypatch.setattr(s.stop, "wait", lambda _: next(waits))
+    def wait(_):
+        if next(waits):
+            s.stop.set()
+    monkeypatch.setattr(s.wake, "wait", wait)
     c._monitor(s)
 
     assert s.candidates is not original and s.candidates is s.directions.candidates
@@ -177,7 +180,7 @@ def test_radio_refreshes_metadata_for_current_and_played_table_rows(poc, monkeyp
     # Use the production catalog refresh against the fixture's deterministic sampler.
     s.candidates.store = c.ctx.store
     s.candidates.affinities = {}
-    monkeypatch.setattr(s.candidates, "_energy", lambda tracks: None, raising=False)
+    monkeypatch.setattr(s.candidates, "_energy", lambda tracks: False, raising=False)
     monkeypatch.setattr(s.candidates, "refresh_metadata",
                         lambda tracks: RadioCandidates.refresh_metadata(s.candidates, tracks))
     c.listening.refresh_metadata(s)

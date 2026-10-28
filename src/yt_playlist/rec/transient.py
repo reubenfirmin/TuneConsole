@@ -20,6 +20,7 @@ from yt_playlist.rec import embedding_vectors as vectors, rec_params
 
 # Historical generated radio playlist IDs remain provenance after the deck controller's removal.
 _RADIO_SETTING_KEYS = ("radio_playlist_ytm", "radio_playlist_a_ytm", "radio_playlist_b_ytm")
+PREPARED_LEANS_INTERVAL_S = 300
 
 
 def radio_list_ids(store) -> list[str]:
@@ -33,12 +34,13 @@ def radio_list_ids(store) -> list[str]:
     all radio-queued, took over 3 of 7 picks). Machine-queued radio plays are therefore excluded
     from every plays-read that feeds the taste model; the user's OWN signals on those same tracks -
     skips, ratings, explicit steering - are unaffected, since those flow through their own channels.
-    Plays from any OTHER generated playlist still count: pressing play on a non-radio playlist is a
-    deliberate user action, not continuous machine playback. Trends/stats keep counting radio plays
-    (descriptive, a different pipeline)."""
+    Other generated sources also retain their provenance/identity quarantine in the history reader
+    and evidence_plays. Deliberate context choices enter through choice learning. Trends/stats keep
+    counting plays (descriptive, a different pipeline)."""
     ids = [store.settings.get_setting(k) for k in _RADIO_SETTING_KEYS]
     sessions = json.loads(store.settings.get_setting("radio_session_playlist_ids") or "[]")
-    return list(dict.fromkeys(i for i in ids + sessions if i))
+    transient = sorted(store.transient_radio_playlists.copy())
+    return list(dict.fromkeys(i for i in ids + sessions + transient if i))
 
 
 def evidence_plays(store, limit):
@@ -97,6 +99,12 @@ def facets_for(store, keys) -> dict:
         if k in artists:
             out.setdefault(f"artist:{artists[k]}", []).append(k)
     return out
+
+
+def prepared_facet_leans(store, now):
+    """Share a brief, dependency-guarded signal capture across preparation retries."""
+    return store.memoized_read(('prepared-facet-leans', int(now // PREPARED_LEANS_INTERVAL_S)),
+                               lambda: facet_leans(store, now))
 
 
 def facet_leans(store, now) -> dict:
@@ -166,8 +174,15 @@ def play_facet_leans(store, now) -> dict:
     play_hl = gp(store, "play_halflife_d")
     limit = gp(store, "recent_play_limit")
     leans: dict = {}
-    for k, ts in evidence_plays(store, limit):
-        for f in facets_for(store, [k]):                # one key -> its facets, each gets the play push
+    plays = evidence_plays(store, limit)
+    by_key = {}
+    # Read metadata once for the window, retaining each event's decay and the
+    # accumulation order used by the per-track calculation.
+    for facet, keys in facets_for(store, [k for k, _ in plays]).items():
+        for key in keys:
+            by_key.setdefault(key, []).append(facet)
+    for k, ts in plays:
+        for f in by_key.get(k, ()):
             leans[f] = leans.get(f, 0.0) + play_w * decay_weight(now - ts, play_hl)
     return leans
 

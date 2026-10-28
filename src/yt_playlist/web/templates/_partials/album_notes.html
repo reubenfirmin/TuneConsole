@@ -1,0 +1,18 @@
+<div class="album-sleeve-notes"{% if notes_pending|default(false) %}
+     hx-get="/home/album-notes?browse={{ a.browse_id|urlencode }}&amp;opportunity={{ opportunity_id or '' }}&amp;attempt={{ notes_attempt }}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+  {% if notes_scene|default(false) and notes.artwork %}
+  <div class="album-story-scene" aria-hidden="true"><img src="{{ notes.artwork.url }}" alt="" loading="lazy" referrerpolicy="no-referrer"></div>
+  <a class="album-art-credit" href="{{ notes.artwork.source_url }}" target="_blank" rel="noopener noreferrer">{{ notes.artwork.credit }}</a>
+  {% endif %}
+  {% if notes.review and 'wikipedia.org' not in notes.review.url and 'musicbrainz.org' not in notes.review.url %}
+  <blockquote class="album-review"><p>“{{ notes.review.excerpt }}”</p><cite><a href="{{ notes.review.url }}" target="_blank" rel="noopener noreferrer" data-choice-action="open">{{ notes.review.source }}</a></cite></blockquote>
+  {% if notes.review.score is number %}{% with rating={'value': notes.review.score, 'scale': 10, 'source': notes.review.source, 'url': notes.review.url} %}{% include '_partials/album_rating.html' %}{% endwith %}{% endif %}
+  {% endif %}
+  {% if notes.description and notes.description.kind|default('') != 'catalog' and 'wikipedia.org' not in notes.description.url and 'musicbrainz.org' not in notes.description.url %}
+  <p class="album-record-note">{% if notes.description.quote %}“{% endif %}{{ notes.description.text }}{% if notes.description.quote %}”{% endif %}</p>
+  {% if notes.description.kind|default('') != 'generated' %}<a class="album-note-source" href="{{ notes.description.url }}" target="_blank" rel="noopener noreferrer" data-choice-action="open">{{ notes.description.source }}</a>{% endif %}
+  {% endif %}
+  {% if notes.label or notes.track_count %}<p class="album-release-credit">{% if notes.label %}{{ notes.label }}{% endif %}{% if notes.label and notes.track_count %} · {% endif %}{% if notes.track_count %}{{ notes.track_count }} tracks{% endif %}</p>{% endif %}
+  {% if notes.rating and 'musicbrainz.org' not in notes.rating.url %}{% with rating=notes.rating %}{% include '_partials/album_rating.html' %}{% endwith %}{% endif %}
+  {% if notes.links %}<div class="album-note-links">{% for link in notes.links if 'musicbrainz.org' not in link.url and 'wikipedia.org' not in link.url %}<a href="{{ link.url }}" target="_blank" rel="noopener noreferrer" data-choice-action="open">{{ link.label }}</a>{% endfor %}</div>{% endif %}
+</div>

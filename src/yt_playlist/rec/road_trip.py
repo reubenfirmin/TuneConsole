@@ -260,7 +260,7 @@ def add_other_input(state: DraftState, store, client, item) -> DraftState:
         # widening for "alternative rock" would quietly stuff the mix with whatever else ranked.
         fresh = [c for c in fresh if road_trip_axes.matches(c, item["want"])]
     candidates._resolve_durations(store, client, fresh, cap=2)
-    state["pool"] = [c for c in state["pool"] if c["source"] == "mine"] + candidates.rank_other(theirs + fresh)
+    state["pool"] = [c for c in state["pool"] if c["source"] == "mine"] + candidates.rank_other(theirs + fresh, store)
     state["done_inputs"].append(name)
     if item.get("widen_key"):
         state.setdefault("done_widening", []).append(item["widen_key"])
@@ -350,7 +350,7 @@ def fill_own_facts(state: DraftState, store, now=0.0, count=OWN_FACT_LOOKUPS) ->
     bare = [c for c in own_candidates(store, now, state) if not (c["genre"] and c["year"])]
     bare.sort(key=lambda c: -c["engagement"])
     for c in bare[:count]:
-        facts = candidates._facts(c["title"], c["artist"])
+        facts = candidates.track_facts(store, c["title"], c["artist"])
         got = {"genre": c["genre"] or facts.get("genre") or "",
                "year": c["year"] or facts.get("year")}
         if got["genre"] or got["year"]:

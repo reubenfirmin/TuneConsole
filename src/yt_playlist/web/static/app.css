@@ -75,6 +75,14 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .sidebar-privacy { flex: none; color: var(--faint); font-size: var(--type-xs); }
 .sidebar-privacy:hover, .sidebar-privacy:focus-visible { color: var(--text); }
 
+@media (max-width: 24rem) {
+  .topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .65rem; }
+  .topbar .brand { grid-column: 1 / -1; min-width: 0; white-space: normal; }
+  .topbar .brand-name { overflow-wrap: anywhere; }
+  .topbar nav { grid-column: 1; margin-inline-start: 0; }
+  .topbar .sidebar-privacy { grid-column: 2; }
+}
+
 /* Tools dropdown (cleanup / move / actions / setup) at the right of the nav */
 .tools-menu { position: relative; display: flex; }
 .tools-btn {

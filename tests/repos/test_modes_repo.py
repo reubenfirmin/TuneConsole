@@ -1,3 +1,5 @@
+import sqlite3
+
 import numpy as np
 import pytest
 from yt_playlist.core.store import Store
@@ -69,6 +71,39 @@ def test_choice_learning_keeps_counts_distinct_and_uses_last_evidence_time(store
     rows = store.modes.choice_learning_rows()
     assert [(r["mode_id"], r["offered"], r["picked"], r["updated_at"]) for r in rows] == [
         (3, 0, 1, 50), (2, 2, 0, 40), (1, 2, 2, 30)]
+
+
+@pytest.mark.parametrize('file_backed', [False, True])
+@pytest.mark.parametrize('enclosing', [False, True])
+def test_failed_impression_batch_rolls_back_and_leaves_analytics_usable(tmp_path, file_backed, enclosing):
+    store = Store(tmp_path / 'library.db' if file_backed else ':memory:')
+    store.init_schema()
+    try:
+        store.modes.replace_modes([_mode(1, 'house', [], [1], 10, [])], [], 1)
+        store.modes.log_impressions(0, [('wheelhouse', 1)], 9)
+        if enclosing:
+            store.conn.execute('BEGIN')
+            store.conn.execute("INSERT INTO settings(key,value) VALUES('outer-write','retained')")
+        with pytest.raises(sqlite3.IntegrityError):
+            store.modes.log_impressions(1, [('wheelhouse', 1), ('explore', 999)], 10)
+        assert store.conn.in_transaction == enclosing
+        assert [tuple(row) for row in store.conn.execute(
+            'SELECT epoch,lane,mode_id FROM rec_mode_impressions')] == [(0, 'wheelhouse', 1)]
+        if enclosing:
+            assert store.conn.execute("SELECT value FROM settings WHERE key='outer-write'").fetchone()[0] == 'retained'
+            # Successful logging must also remain inside the caller's transaction.
+            store.modes.log_impressions(2, [('comfort', 1)], 10)
+            assert store.conn.in_transaction
+            store.conn.rollback()
+            assert store.conn.execute("SELECT value FROM settings WHERE key='outer-write'").fetchone() is None
+        assert not store.conn.in_transaction
+        assert store.modes.impression_counts() == {1: 1}
+        # A leaked write transaction blocks committed-data readers in memory.
+        assert store.rec_proposals.get_proposals('mode_bundles') is None
+        store.modes.log_impressions(1, [('wheelhouse', 1)], 11)
+        assert store.modes.impression_counts() == {1: 2}
+    finally:
+        store.conn.close()
 
 
 def test_genres_and_meta_for(store):

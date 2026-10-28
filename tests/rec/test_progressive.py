@@ -12,6 +12,7 @@ from yt_playlist.core import catalog as catalog_writes
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.store import Store
 from yt_playlist.rec import content_model, embedding_training, embedding_vectors, model_refresh, rec_params
+from yt_playlist.rec import musical_preparation, vibe_preparation
 from yt_playlist.rec.progressive import BASIS_STATE, Budget, Preparation
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.worker_queue import Job
@@ -37,12 +38,18 @@ def audio(store, tid, bpm):
 
 
 def drain(preparation, now=1000):
-    while preparation.store.prepared_content.has_pending():
+    store = preparation.store
+    for _ in range(500):
+        if (not store.prepared_content.has_pending() and not musical_preparation.due(store)
+                and not vibe_preparation.due(store)):
+            return
         assert preparation.capture(now)
+    pytest.fail('Input preparation did not drain')
 
 
 def test_empty_then_single_recording_can_prepare_without_coverage_gate(store):
     p = Preparation(store)
+    drain(p)  # Complete version/queue bootstrap before checking an idle library.
     assert not p.due(1000) and not p.fit(1000)
     tid = store.tracks.upsert_track('one', 'One', 'Artist', None, None)
     assert p.capture(1000)

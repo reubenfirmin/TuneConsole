@@ -12,7 +12,7 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     from tests.conftest import only_provider
     # stub MusicBrainz so the test never hits the network (one enrich_full yields genre, year, MBID)
     monkeypatch.setattr(mb, "enrich_full",
-                        lambda title, artist: {"S0": ("rock", "1998", None, [], []),
+                        lambda title, artist, *, observations=None: {"S0": ("rock", "1998", None, [], []),
                                                "S1": ("jazz", "2003", None, [], [])}.get(title, (None, None, None, [], [])))
     iid = store.identities.upsert_identity("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
@@ -39,7 +39,7 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
 
     # re-run after MusicBrainz gains a genre for v2. It fills the gap and v2 is now complete
     monkeypatch.setattr(mb, "enrich_full",
-                        lambda title, artist: ("ambient", "2010", None, [], []) if title == "Sx"
+                        lambda title, artist, *, observations=None: ("ambient", "2010", None, [], []) if title == "Sx"
                         else (None, None, None, [], []))
     jid2 = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid2}") as st:
@@ -85,6 +85,7 @@ def test_page_rejoins_active_enrichment(store):
 def test_discogs_fills_genre_and_year(store, monkeypatch):
     import json as _json
     import yt_playlist.providers.discogs as dc
+    store.settings.set_setting('discogs_token', 'fixture-token')
     # Styles map to the whitelist; the earliest year among matching releases wins.
     monkeypatch.setattr(dc, "_search", lambda q, tok: [
         {"title": "Underworld - Born Slippy", "year": "1996", "genre": ["Electronic"],
@@ -117,7 +118,7 @@ def test_lastfm_fills_missing_genre_and_year(store, monkeypatch):
     import yt_playlist.providers.lastfm as lf
     monkeypatch.setenv("LASTFM_API_KEY", "testkey")
     # stub the Last.fm lookup: (genre, year) per track; one fully unknown
-    monkeypatch.setattr(lf, "enrich", lambda title, artist, key:
+    monkeypatch.setattr(lf, "enrich", lambda title, artist, key, *, observations=None:
                         {"S0": ("Trip Hop", None), "S1": ("House", "2010")}.get(title, (None, None)))
     iid = store.identities.upsert_identity("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
@@ -178,40 +179,50 @@ def test_lastfm_stands_down_after_the_album_pages_keep_failing(monkeypatch):
     costs a request every time and no longer arrives. Genre and every other year source are
     untouched."""
     import yt_playlist.providers.lastfm as lf
+    from types import SimpleNamespace
+    from yt_playlist.integrations.lastfm import LastFmIAO, PAGE_FAIL_LIMIT, PAGE_COOLDOWN_S
     monkeypatch.setattr(lf, "_get", lambda params: {"track": {
         "album": {"url": "https://www.last.fm/music/A/B"},
         "toptags": {"tag": [{"name": "house"}]}}})           # tags carry no year
     attempts = []
 
-    def boom(url):
-        attempts.append(url)
-        raise urllib.error.HTTPError(url, 502, "Bad Gateway", {}, None)
+    def boom(request, **kwargs):
+        attempts.append(request.full_url)
+        raise urllib.error.HTTPError(request.full_url, 502, "Bad Gateway", {}, None)
 
-    monkeypatch.setattr(lf, "_fetch_text", boom)
-    monkeypatch.setattr(lf, "_page_fails", 0)
-    monkeypatch.setattr(lf, "_page_blocked_until", 0.0)
+    clock = [1000.0]
+    iao = LastFmIAO(now_fn=lambda: clock[0], monotonic_fn=lambda: clock[0],
+                    open_fn=boom, pacer=SimpleNamespace(wait=lambda: None))
+    monkeypatch.setattr(lf, '_iao', iao)
 
-    for _ in range(lf._PAGE_FAIL_LIMIT + 3):
+    for _ in range(PAGE_FAIL_LIMIT):
         assert lf.enrich("S", "A", "key") == ("House", None)   # genre still comes back
+        clock[0] += 30
+    for _ in range(3):
+        assert lf.enrich("S", "A", "key") == ("House", None)
 
-    assert len(attempts) == lf._PAGE_FAIL_LIMIT      # then it stopped asking
-    monkeypatch.setattr(lf, "_page_blocked_until", 0.0)        # cooldown elapses -> it tries again
+    assert len(attempts) == PAGE_FAIL_LIMIT
+    clock[0] += PAGE_COOLDOWN_S
     lf.enrich("S", "A", "key")
-    assert len(attempts) == lf._PAGE_FAIL_LIMIT + 1
+    assert len(attempts) == PAGE_FAIL_LIMIT + 1
 
 
 def test_lastfm_page_fetch_does_not_retry_a_server_error(monkeypatch):
     """A 502 is the server answering. Asking again a second later returned the same 502 in practice,
-    at twice the cost - so only connection-level failures are worth a retry."""
+    at twice the cost. Retry admission now belongs to the shared access object."""
     import yt_playlist.providers.lastfm as lf
+    from types import SimpleNamespace
+    from yt_playlist.integrations.base import IntegrationUnavailable
+    from yt_playlist.integrations.lastfm import LastFmIAO
     calls = []
 
     def fake_urlopen(req, timeout=None):
         calls.append(req.full_url)
         raise urllib.error.HTTPError(req.full_url, 502, "Bad Gateway", {}, None)
 
-    monkeypatch.setattr(lf.urllib.request, "urlopen", fake_urlopen)
-    with pytest.raises(urllib.error.HTTPError):
+    monkeypatch.setattr(lf, '_iao', LastFmIAO(open_fn=fake_urlopen,
+                                           pacer=SimpleNamespace(wait=lambda: None)))
+    with pytest.raises(IntegrationUnavailable):
         lf._fetch_text("https://www.last.fm/music/A/B")
     assert len(calls) == 1
 

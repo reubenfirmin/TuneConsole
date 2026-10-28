@@ -98,13 +98,37 @@ def test_prepared_songs_are_ready_when_discover_opens(live_app, store, page, wid
     expect(page.get_by_role("heading", name="Songs to discover")).to_be_visible()
     expect(tiles.first).to_be_visible()
     expect(page.get_by_text("Finding new music for you…", exact=True)).to_have_count(0)
-    expect(tiles.first.locator("a")).to_have_attribute("href", "https://music.youtube.com/watch?v=v0")
+    title = tiles.first.locator("a.tile-cover")
+    assert title.get_attribute("href").startswith("/track/v0?")
+    expect(tiles.first.locator("a.tile-play")).to_have_attribute("href", "https://music.youtube.com/watch?v=v0")
     tiles.first.scroll_into_view_if_needed()
     page.wait_for_timeout(1300)
     deltas = [row["offered_count"] - before[row["identity_key"]] for row in store.discovery.get_discovered_tracks()]
     assert max(deltas) == 1
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     page.screenshot(path=tmp_path / f"discovery-ready-songs-{width}.png", full_page=True)
+
+
+def test_visible_discovery_survives_a_model_reset_and_background_refresh(live_app, store, page):
+    store.settings.set_setting('last_sync_at', '1')
+    store.settings.set_setting('onboard_dismissed', '1')
+    store.discovery.upsert_discovered_album('retained', 'Artist', 'Still here after refresh', '2026', None, 1)
+    assert home_prepared.prepare(store, 1) is not None
+    page.goto(live_app + '/')
+    page.get_by_role('tab', name='Discover', exact=True).click()
+    tile = page.locator('#album-grid [data-discovery-id="retained"]')
+    expect(tile).to_be_visible()
+    with store.conn:
+        store.conn.execute("DELETE FROM rec_proposals WHERE surface IN "
+                           "('home_prepared','home_tuned','home_choice','mode_bundles','fresh_pool')")
+    page.evaluate("""() => htmx.ajax('GET', '/home/discovery', {
+        target: '#home-discovery', swap: 'outerHTML'})""")
+    expect(tile).to_be_visible()
+    expect(page.get_by_text('Finding new music for you…', exact=True)).to_have_count(0)
+    page.screenshot(path='/tmp/tuneconsole-417-discovery-after-refresh.png', full_page=True)
+    page.reload()
+    page.get_by_role('tab', name='Discover', exact=True).click()
+    expect(tile).to_be_visible()
 
 
 def test_missing_artist_art_appears_on_the_existing_discover_page(live_app, store, page, monkeypatch):

@@ -93,8 +93,10 @@ def build(ctx, views):
         return views.cards_safe(request, now_fn())
 
     @router.post("/home/refresh-cards")
-    def home_refresh_cards(request: Request):
+    def home_refresh_cards(request: Request, form=Depends(request_form)):
         now = now_fn()
+        from yt_playlist.rec import choice_evidence
+        choice_evidence.close_window(store, 'mixes', now, opportunity_id=form.get('opportunity_id', ''))
         store.rec_ledger.refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
         try:
             return views.cards_fragment(request, now, regenerating=True)

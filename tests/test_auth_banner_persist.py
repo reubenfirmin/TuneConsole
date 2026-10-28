@@ -56,6 +56,24 @@ def test_clear_all_wipes_banner():
     assert _ctx(store).auth_expired == {}                      # re-auth/sign-out clears it durably
 
 
+def test_healthy_extension_clears_warning_in_memory_during_repair_then_on_disk():
+    store = _store()
+    ctx = _ctx(store)
+    ctx.flag_auth_expired(1, 'Main')
+    store.activity_paused = True
+    store.conn.execute('PRAGMA query_only=ON')
+    ctx.clear_all_auth_expired()
+    assert ctx.auth_expired == {}
+    assert store.settings.get_setting(AUTH_EXPIRED_KEY)
+    store.conn.execute('PRAGMA query_only=OFF')
+    store.activity_paused = False
+    # The still-connected extension is freshly confirmed when background work
+    # resumes; an empty RAM dictionary must not leave a stale warning on disk.
+    ctx.clear_all_auth_expired()
+    assert _ctx(store).auth_expired == {}
+    assert store.settings.get_setting(AUTH_EXPIRED_KEY) is None
+
+
 def test_corrupt_setting_is_ignored():
     store = _store()
     store.settings.set_setting(AUTH_EXPIRED_KEY, "not json{")

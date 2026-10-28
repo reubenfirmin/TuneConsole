@@ -32,7 +32,7 @@ def test_takeout_coverage_upgrade_preserves_legacy_rows_without_inventing_author
     assert store.conn.execute('SELECT COUNT(*) FROM listening_observations').fetchone()[0] == 1
 
 
-def test_early_fixture_preserves_ids_and_backup(tmp_path):
+def test_early_fixture_preserves_ids_without_backups(tmp_path):
     path = tmp_path / 'legacy.db'
     with connect(path) as conn:
         conn.executescript((Path(__file__).parents[1] / 'fixtures/migrations/early_core.sql').read_text())
@@ -47,12 +47,8 @@ def test_early_fixture_preserves_ids_and_backup(tmp_path):
     store.init_schema()
     assert store.tracks is repo
     assert list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations'))) == before
-    backups = list((tmp_path / 'backups').glob('*.db'))
-    assert len(backups) == 1
-    with connect(backups[0]) as backup:
-        assert backup.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-        assert not backup.execute("SELECT 1 FROM sqlite_master WHERE name='schema_migrations'").fetchone()
-        assert backup.execute('SELECT id FROM tracks').fetchone()[0] == 17
+    assert not (tmp_path / 'backups').exists()
+    assert store.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
 
 
 def test_failure_rolls_back_ddl_data_and_version_then_resumes(tmp_path):
@@ -86,23 +82,32 @@ def test_baseline_failure_removes_history_and_all_changes(tmp_path):
 
 
 @pytest.mark.parametrize('journal', ['DELETE', 'WAL'])
-def test_backup_contains_committed_wal_and_failure_prevents_changes(tmp_path, journal):
+def test_upgrade_rolls_back_and_commits_without_a_backup_destination(tmp_path, journal):
     path = tmp_path / 'state.db'
+    # A file blocks creation of a backup directory. Migration safety must come
+    # from the transaction even when there is nowhere to store a snapshot.
+    blocked = tmp_path / 'backups'
+    blocked.write_text('existing file; leave untouched')
     with connect(path) as conn:
         conn.execute(f'PRAGMA journal_mode={journal}')
         conn.execute('CREATE TABLE data (v INTEGER)')
         conn.execute('INSERT INTO data VALUES (42)')
         conn.commit()
-        migration = Migration(1,'replace',lambda c,x: c.execute('DELETE FROM data'))
-        def fail(*args):
-            raise OSError('no backup space')
-        with pytest.raises(MigrationError, match='no backup space'):
-            migrate(conn, registry=[migration], snapshot=fail)
+        def interrupted(connection, context):
+            connection.execute('ALTER TABLE data ADD COLUMN changed INTEGER')
+            connection.execute('DELETE FROM data')
+            raise RuntimeError('interrupted replacement')
+        with pytest.raises(MigrationError, match='interrupted replacement'):
+            migrate(conn, registry=[Migration(1, 'replace', interrupted)])
         assert conn.execute('SELECT * FROM data').fetchall() == [(42,)]
-        migrate(conn, registry=[migration])
-    with connect(next((tmp_path / 'backups').glob('*.db'))) as backup:
-        assert backup.execute('SELECT * FROM data').fetchall() == [(42,)]
-        assert backup.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='schema_migrations'").fetchone()
+        migrate(conn, registry=[Migration(1, 'replace', lambda c,x: c.execute('DELETE FROM data'))])
+    with connect(path) as reopened:
+        assert reopened.execute('SELECT * FROM data').fetchall() == []
+        assert reopened.execute('SELECT version FROM schema_migrations').fetchall() == [(1,)]
+        assert reopened.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    assert blocked.read_text() == 'existing file; leave untouched'
+    assert list(tmp_path.glob('*.db')) == [path]
 
 
 def test_rejects_caller_transaction_without_committing_or_rolling_it_back():
@@ -182,16 +187,33 @@ def test_competing_startups_apply_once(tmp_path):
         assert conn.execute('SELECT version FROM schema_migrations').fetchall() == [(1,)]
 
 
-def test_process_death_rolls_back(tmp_path):
+@pytest.mark.parametrize('journal', ['DELETE', 'WAL'])
+def test_process_death_rolls_back(tmp_path, journal):
     path = tmp_path / 'state.db'
+    def first(conn, context):
+        conn.execute('CREATE TABLE evidence (value TEXT)')
+        conn.execute("INSERT INTO evidence VALUES ('original')")
+    with connect(path) as conn:
+        conn.execute(f'PRAGMA journal_mode={journal}')
+        migrate(conn, registry=[Migration(1, 'first', first)])
     source = '''import os,sqlite3,sys
-c=sqlite3.connect(sys.argv[1]); c.execute('BEGIN IMMEDIATE')
-c.execute('CREATE TABLE interrupted (id INTEGER)'); os._exit(7)
+from yt_playlist.core.migrations import Migration,migrate
+def interrupted(conn, context):
+    conn.execute('ALTER TABLE evidence ADD COLUMN changed INTEGER')
+    conn.execute("UPDATE evidence SET value='lost'")
+    os._exit(7)
+c=sqlite3.connect(sys.argv[1])
+migrate(c,registry=[Migration(1,'first',lambda c,x: None),Migration(2,'second',interrupted)])
 '''
     assert subprocess.run([sys.executable,'-c',source,str(path)]).returncode == 7
     with connect(path) as conn:
-        assert not conn.execute('SELECT name FROM sqlite_master').fetchall()
-        migrate(conn)
+        assert conn.execute('SELECT * FROM evidence').fetchall() == [('original',)]
+        assert conn.execute('SELECT version FROM schema_migrations').fetchall() == [(1,)]
+        migrate(conn, registry=[Migration(1, 'first', first), Migration(
+            2, 'second', lambda c,x: c.execute("UPDATE evidence SET value='done'"))])
+        assert conn.execute('SELECT * FROM evidence').fetchall() == [('done',)]
+        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    assert not (tmp_path / 'backups').exists()
 
 
 def test_fresh_and_current_create_no_backup(tmp_path):
@@ -210,7 +232,7 @@ def test_corrupted_versioned_schema_is_not_silently_repaired(tmp_path):
 
 
 @pytest.mark.parametrize('version', [8, 9])
-def test_installed_catalog_upgrades_with_original_trigger_and_verified_backup(tmp_path, version):
+def test_installed_catalog_upgrades_with_original_trigger_without_backups(tmp_path, version):
     from yt_playlist.core.migrations.registry import MIGRATIONS
     path = tmp_path / 'installed.db'
     with connect(path) as conn:
@@ -226,12 +248,6 @@ def test_installed_catalog_upgrades_with_original_trigger_and_verified_backup(tm
         conn.execute("INSERT INTO rec_vectors VALUES ('song|artist',x'01020304')")
         conn.commit()
         raw = conn.execute('SELECT id,raw_identity_key,video_id,played_at,source,is_generated FROM play_events ORDER BY id').fetchall()
-        def no_backup(*args):
-            raise OSError('backup unavailable')
-        with pytest.raises(MigrationError, match='backup unavailable'):
-            migrate(conn, snapshot=no_backup)
-        assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 9
-        assert conn.execute("SELECT sql FROM sqlite_master WHERE name='play_events_subject'").fetchone()[0] == installed_sql
     store = Store(path)
     store.init_schema()
     assert list(map(tuple, store.conn.execute('SELECT id,raw_identity_key,video_id,played_at,source,is_generated FROM play_events ORDER BY id'))) == raw
@@ -241,10 +257,6 @@ def test_installed_catalog_upgrades_with_original_trigger_and_verified_backup(tm
     assert not store.conn.execute('SELECT * FROM rec_vectors').fetchall()
     store.init_schema()
     assert list(map(tuple, store.conn.execute('SELECT identity_key,recording_id FROM play_events ORDER BY id'))) == subjects
-    backups = list((tmp_path / 'backups').glob('*.db'))
-    assert len(backups) == 1
-    with connect(backups[0]) as backup:
-        assert backup.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-        assert backup.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 9
-        assert backup.execute("SELECT sql FROM sqlite_master WHERE name='play_events_subject'").fetchone()[0] == installed_sql
+    assert not (tmp_path / 'backups').exists()
+    assert store.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
     store.conn.close()

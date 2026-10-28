@@ -103,6 +103,19 @@ def test_buffering_is_not_confirmed_and_is_never_toggled_back_to_pause(paused_pl
     assert page.evaluate("barClicks") == 0
 
 
+def test_manual_pause_interrupts_an_in_flight_playback_nudge(paused_player):
+    page = paused_player
+    result = page.evaluate("""async () => {
+      await nativePlay();
+      const nudge = ensurePlayback();
+      bridgeListener({type: 'player-control', action: 'pause'}, {}, () => {});
+      return await nudge;
+    }""")
+    assert result["playing"] is False
+    assert page.evaluate("document.querySelector('video').paused") is True
+    assert page.evaluate("barClicks") == 1, "a late recovery callback must not click Play again"
+
+
 def test_buffered_but_stalled_media_does_not_confirm_playback(paused_player):
     page = paused_player
     page.evaluate("""() => {

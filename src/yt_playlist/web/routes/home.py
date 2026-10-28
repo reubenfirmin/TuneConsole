@@ -2,10 +2,10 @@
 from fastapi import APIRouter, Request
 
 from yt_playlist.core import updatecheck
-from yt_playlist.rec import actions, home_prepared, onboarding, rec_params
+from yt_playlist.rec import actions, home_preferences, home_prepared, onboarding, rec_params, tv
 from yt_playlist.rec.home_cards import _epoch
 from yt_playlist.rec.trend_statistics import last_complete_month
-from yt_playlist.web.routes import home_board, home_discovery, home_generation, home_onboarding, home_tuning
+from yt_playlist.web.routes import home_board, home_discovery, home_generation, home_onboarding, home_tuning, home_tv
 from yt_playlist.web.routes.home_onboarding import lastfm_nudge_due, takeout_nag_due
 from yt_playlist.web.routes.home_views import HomeViews
 from yt_playlist.web.spotify_import import current_job as current_spotify_import_job
@@ -24,12 +24,13 @@ def build(ctx) -> APIRouter:
     router.include_router(home_discovery.build(ctx, views))
     router.include_router(home_onboarding.build(ctx))
     router.include_router(home_generation.build(ctx))
+    router.include_router(home_tv.build(ctx))
 
     @router.get("/")
     def home_page(request: Request):
         now = now_fn()
         dao = store.rec_ledger
-        for card in ROTATING_CARDS:   # one tick per genuine Home visit -> per-card rotation advances
+        for card in (() if getattr(store, 'activity_paused', False) else ROTATING_CARDS):
             if card == "cards":
                 started = store.modes.epoch_started_at(_epoch(store, card))
                 if started is not None and now - started >= MENU_MAX_AGE_S:
@@ -60,19 +61,35 @@ def build(ctx) -> APIRouter:
                     "tracks": [track for track in store.charts.playlist_tracks_detail(source.id)
                                if track.get("video_id") and track.get("available") != 0][:8]}
         radio_state = radio_bootstrap["state"]
-        radio_tracks = (store.charts.video_tracks_detail([t["video_id"] for t in radio_state["history"]])
-                        if radio_state.get("active") and radio_state.get("local_id") else [])
+        radio_tracks = ctx.radio.history_tracks(radio_state) if radio_state.get('active') else []
         collections = home_prepared.collections(store, views.prepared(now, request), now)
         views.queue_artist_images(collections, now)
         feed = views.feed_context(request, now)
+        if (not getattr(store, 'activity_paused', False)
+                and store.settings.get_setting('last_sync_at') is None
+                and not store.settings.get_setting('onboard_listening_format')
+                and not store.settings.get_setting('home_format')):
+            store.settings.set_setting('onboard_format_pending', '1')
+        albums_ready = onboarding.prepared_albums_ready(store, now)
+        # TV has its own prepared offers and recovery states. A temporary gap in
+        # Mix tapes must not return an existing TV listener to initial setup.
+        has_tv = bool((tv.cached(store) or {}).get('items')) or request.query_params.get('tv_playlist', '').isdecimal()
         # Imported likes, dismissal and fitted modes are not complete listening offers.
         # Returning Home during setup must retain the same useful first-run screen.
-        getting_started = (not feed["protos"] and
-                           (onboarding.initial_setup_pending(store, now) or onboarding.onboarding_active(store, now)))
+        getting_started = (home_preferences.choice_pending(store) or
+                           (not feed['protos'] and not albums_ready and not has_tv and
+                            (onboarding.initial_setup_pending(store, now) or onboarding.onboarding_active(store, now))))
         return templates.TemplateResponse(request, "home.html", {
+            'home_default_panel': home_preferences.default_panel(store,
+                albums_ready=albums_ready, mixes_ready=bool(feed['protos'])),
+            'onboard_format': store.settings.get_setting('onboard_listening_format'),
+            'onboard_format_pending': home_preferences.choice_pending(store),
+            'onboard_welcome_pending': store.settings.get_setting('onboard_welcomed') != '1',
             "radio_bootstrap": radio_bootstrap,
+            "tv_max_minutes": tv.max_minutes(store),
             "radio_tracks": radio_tracks,
-            "actions": actions.take_action(store, now, ctx.auth_expired),
+            "actions": actions.take_action(store, now,
+                {} if getattr(store, 'activity_paused', False) else ctx.auth_expired),
             "sync": actions.sync_status(store, now),
             "muted_count": len(store.rec_model.muted_artists()),   # transparency: what's being hidden
             **collections,

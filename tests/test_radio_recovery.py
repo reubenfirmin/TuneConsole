@@ -19,6 +19,25 @@ def test_append_uses_native_observation_instead_of_stale_bridge_video(poc):
     assert remote.adds == [["v4"]]
 
 
+def test_paired_session_restores_its_assignment_and_visible_plans_after_cache_change(poc):
+    from copy import deepcopy
+    c, remote, *_ = poc
+    c.start()
+    c.session.candidates.comparison = {'run_id': 7, 'arm': 'challenger', 'unit': 'old-day'}
+    play(c, 'v2')
+    c.suspend()
+    c._persist(c.session)
+    before = deepcopy(c.session.directions.slots)
+    saved = json.loads(c.ctx.store.settings.get_setting('radio_current_session'))
+    saved['fingerprint'] = 'previous-cache'
+    c.ctx.store.settings.set_setting('radio_current_session', json.dumps(saved))
+    restored = PlaylistRadio(c.ctx)
+    assert restored.join()['active']
+    assert restored.session.candidates.comparison == c.session.candidates.comparison
+    assert restored.session.directions.slots == before
+    assert remote.adds == []
+
+
 def test_refresh_request_is_not_acknowledgment_and_late_drift_is_repaired(poc):
     c, remote, *_ = poc
     c.start()

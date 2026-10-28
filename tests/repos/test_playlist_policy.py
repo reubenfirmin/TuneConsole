@@ -83,4 +83,4 @@ def test_populated_policy_upgrade_preserves_curation_and_is_idempotent(tmp_path)
     store.init_schema()
     assert store.playlists.is_quarantined_playlist('gen')
     assert store.playlists.get_playlist_groups()['gen'] == 'Road trips'
-    assert len(list((tmp_path / 'backups').glob('*.db'))) == 1
+    assert not (tmp_path / 'backups').exists()

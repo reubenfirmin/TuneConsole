@@ -1,5 +1,4 @@
 import json
-import sqlite3
 
 import pytest
 
@@ -84,7 +83,7 @@ def test_model_uses_credits_and_preserves_user_correction(store):
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
-def test_populated_upgrade_retains_literal_credit_state_feedback_and_backup(tmp_path):
+def test_populated_upgrade_retains_literal_credit_state_and_feedback_without_backups(tmp_path):
     s = Store(tmp_path / 'state.db')
     migrate(s.conn,registry=MIGRATIONS[:20])
     s.conn.execute("INSERT INTO recordings(id,identity_key) VALUES (1,'song|credit')")
@@ -124,10 +123,8 @@ def test_populated_upgrade_retains_literal_credit_state_feedback_and_backup(tmp_
     s.init_schema()
     assert s.artists.track_credits(1) == before
     assert not s.conn.execute('PRAGMA foreign_key_check').fetchall()
-    for backup in (tmp_path / 'backups').glob('*.db'):
-        with sqlite3.connect(backup) as conn:
-            assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-            assert conn.execute('SELECT artist FROM youtube_items').fetchone()[0] == 'Group, with comma'
+    assert not (tmp_path / 'backups').exists()
+    assert s.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
 
 
 @pytest.mark.parametrize('existing_references', ['none','album','both'])
@@ -180,8 +177,5 @@ def test_installed_v21_upgrades_references_atomically(tmp_path, monkeypatch, exi
     before = list(s.conn.iterdump())
     s.init_schema()
     assert list(s.conn.iterdump()) == before
-    for backup in (tmp_path / 'backups').glob('*.db'):
-        with sqlite3.connect(backup) as conn:
-            assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-            assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 21
-            assert conn.execute('SELECT COUNT(*) FROM rec_feedback').fetchone()[0] == 2
+    assert not (tmp_path / 'backups').exists()
+    assert s.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'

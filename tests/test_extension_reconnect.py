@@ -6,7 +6,9 @@ import subprocess
 import pytest
 
 
-@pytest.mark.parametrize("scenario", ["transition", "conflicting_bar", "playing", "paused", "continuous_stream"])
+@pytest.mark.parametrize("scenario", [
+    "transition", "conflicting_bar", "playing", "paused", "continuous_stream", "newer_main", "newer_receiver",
+])
 def test_reconnect_preserves_main_identity_and_verification(scenario):
     node = shutil.which("node")
     if node is None:
@@ -45,15 +47,29 @@ const document = {addEventListener() {}, querySelector(selector) {
 let runtime;
 const context = vm.createContext({window, document, navigator:{mediaSession:{metadata:null}}, URL,
   location:{href:'https://music.youtube.com/'}, Date:{now:()=>now}, Intl,
-  chrome:{runtime:{onMessage:{addListener(fn) {runtime=fn;}},sendMessage(msg) {sent.push(msg);}}},
+  chrome:{runtime:{onMessage:{addListener(fn) {runtime=fn;},
+    removeListener(fn) {if(runtime===fn)runtime=null;}},sendMessage(msg) {sent.push(msg);}}},
   setInterval(fn) {intervals.push(fn);return intervals.length;}, clearInterval() {},
   setTimeout() {}, clearTimeout() {}, console:{log() {}, warn() {}},
 });
 const flush = () => { while (queued.length) {const data=queued.shift();
   for (const fn of handlers) fn({source:window,data});} };
-vm.runInContext(fs.readFileSync('extension/content.js','utf8'),context);
-vm.runInContext(fs.readFileSync('extension/nowplaying_main.js','utf8'),context);
+const content = fs.readFileSync('extension/content.js','utf8');
+const main = fs.readFileSync('extension/nowplaying_main.js','utf8');
+vm.runInContext(scenario === 'newer_receiver'
+  ? content.replace(/const RECEIVER_REVISION = (\d+);/,
+    (_, revision) => `const RECEIVER_REVISION = ${Number(revision) + 1};`) : content, context);
+vm.runInContext(scenario === 'newer_main'
+  ? main.replace(/var SENSOR_REVISION = (\d+);/,
+    (_, revision) => `var SENSOR_REVISION = ${Number(revision) + 1};`) : main, context);
 flush();
+if (scenario === 'newer_main' || scenario === 'newer_receiver') {
+  const previous = scenario === 'newer_main' ? window.__tcNowPoller : window.__tcBridgeLoaded;
+  vm.runInContext(scenario === 'newer_main' ? main : content, context);
+  assert.equal(scenario === 'newer_main' ? window.__tcNowPoller : window.__tcBridgeLoaded, previous,
+    'reinjection by an older worker must not downgrade a compatible newer sensor');
+  assert.equal(previous.stopped, false);
+}
 sent.length=0;
 runtime({type:'resync-now'},{},()=>{});
 assert(queued.some(msg => msg.__tcSensorProbe), 'reconnect must request a fresh MAIN sample');
@@ -63,20 +79,21 @@ assert.equal(latest.videoId,'current', 'MAIN player identity must win over the o
 assert.equal(latest.position,20, 'reconnect carries a fresh interpolation anchor');
 assert.equal(latest.duration,null,'the app supplies the known track length');
 if (['transition','conflicting_bar'].includes(scenario)) {
-  assert.equal(latest.type,'now-heartbeat');
+  assert.equal(latest.type,'play');
+  assert.equal(latest.videoVerified,true);
   assert.equal(latest.metadataVerified,false);
-  assert.equal(sent.filter(msg => msg.type==='play').length,0);
+  assert.equal(sent.filter(msg => msg.type==='play').length,1);
   now += 6000;
   intervals[0](); // DOM-only fallback cannot promote the explicitly unverified sample.
   flush();
-  assert.equal(sent.filter(msg => msg.type==='play').length,0);
+  assert.equal(sent.filter(msg => msg.type==='play').length,1);
   barId=imageId='current';
   intervals[1](); flush();
   const plays=sent.filter(msg => msg.type==='play');
-  assert.equal(plays.length,1);
-  assert.equal(plays[0].videoId,'current');
-  assert.equal(plays[0].artist,'Recording artist');
-  assert.equal(plays[0].metadataVerified,true);
+  assert.equal(plays.length,2);
+  assert.equal(plays[1].videoId,'current');
+  assert.equal(plays[1].artist,'Recording artist');
+  assert.equal(plays[1].metadataVerified,true);
 } else {
   assert.equal(latest.metadataVerified,true);
   assert.equal(latest.paused,scenario==='paused');

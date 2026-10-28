@@ -1,0 +1,19 @@
+<div class="listening-edition" x-data='listeningEditorial({{ listening_edition|tojson }})' data-listening-edition>
+  <div class="le-stories">
+  {% for story in listening_edition.stories %}
+    <article class="le-story {{ 'le-lead' if loop.first else 'le-support' }} le-{{ story.visual }}{% if story.backdrop %} le-art-{{ story.art_side }}{% endif %}"
+             data-story-id="{{ story.id }}" aria-labelledby="le-title-{{ story.id }}">
+      {% if story.backdrop %}
+      <div class="le-backdrop" aria-hidden="true"><img src="{{ story.backdrop }}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentElement.remove()"></div>
+      {% endif %}
+      <div class="le-copy">
+        <h2 id="le-title-{{ story.id }}"><a class="le-story-link" href="{{ story.url }}">{{ story.title }}</a></h2>
+        <p class="le-evidence">{{ story.evidence }}</p>
+      </div>
+      <figure class="le-figure">
+        <div class="le-composition" x-html="composition({{ loop.index0 }})"></div>
+      </figure>
+    </article>
+  {% endfor %}
+  </div>
+</div>

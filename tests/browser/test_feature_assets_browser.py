@@ -33,7 +33,8 @@ def test_feature_loading_and_responsive_layout(page, live_app, path, feature, wi
     assert page.evaluate("typeof genOpenYT") == ("function" if path in ("/", "/road_trip") else "undefined")
     for factory in ("playerStatus", "genreDialog", "omniSearch"):
         assert page.evaluate(f"typeof {factory}") == "function"
-    assert ("table-controls.js" in scripts) == path.startswith(("/playlist", "/album", "/artist", "/cleanup", "/taste"))
+    assert ("table-controls.js" in scripts) == (path == "/" or path.startswith(
+        ("/playlist", "/album", "/artist", "/cleanup", "/taste")))
     assert ("library-playlists.js" in scripts) == path.startswith(("/playlist", "/move"))
     assert ("enrichment-panel.js" in scripts) == path.startswith(("/playlist/", "/album"))
     for script in scripts:
@@ -102,6 +103,7 @@ def test_removed_home_status_does_not_reopen_pending_sync_stream(page):
         let opened = 0;
         window.EventSource = class { constructor() { opened++; } };
         const status = homeStatus();
+        status.$el = document.body;
         status.init();
         status.destroy();
         resolveScan({json: async () => ({job_id: 10})});

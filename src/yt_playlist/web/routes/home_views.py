@@ -6,7 +6,7 @@ board and tuning routes.
 """
 from fastapi import Response
 
-from yt_playlist.rec import home_cards, home_prepared, home_vibe, mix_tuning, onboarding, rec_params
+from yt_playlist.rec import choice_evidence, home_cards, home_prepared, home_vibe, mix_tuning, onboarding, rec_params
 from yt_playlist.rec.home_cards import _epoch
 from yt_playlist.web.jobs import start_fresh_pool, start_library_pool
 from yt_playlist.web.theme import genre_tint
@@ -55,14 +55,39 @@ class HomeViews:
             if request.url.path == "/":
                 record = (onboarding._has_synced(store)
                           and not onboarding.onboarding_active(store, now))
+            record = record and not getattr(store, 'activity_paused', False)
             result = home_prepared.cards(store, payload, now, self.recommendations, self.schedule,
                                         record=record)
         context = vars(result).copy()
+        frozen_context = result.choice_context if result.choice_context is not None else (payload or {}).get('choice_context')
+        if result.protos and frozen_context is not None:
+            for proto in result.protos:
+                if proto.get('experiment'):
+                    proto['experiment']['ranker_controlled'] = False
+            options = [{"id": p["experiment_id"], "position": i + 1,
+                        "label": p["label"], "note": p["note"], "mode_id": p.get("mode_id"),
+                        **{key: p[key] for key in ('group_id', 'group_version') if key in p},
+                        "intent": p["lane"], "recipe": {k: v for k, v in p.get("recipe", {}).items()
+                                                        if k not in {"opportunity_id", "option_id"}},
+                        "tracks": p["tracks"], "assignment": p.get("assignment")} for i, p in enumerate(result.protos)]
+            try:
+                oid = choice_evidence.present(store, "mixes", options, now,
+                    context=frozen_context, window=result.epoch)
+                for proto in result.protos:
+                    proto["recipe"] = {**proto.get("recipe", {}), "opportunity_id": oid,
+                                       "option_id": proto["experiment_id"]}
+            except Exception:
+                self.ctx.logger.warning("Mix choice capture failed", exc_info=True)
         try:
-            attempt = max(0, int(request.query_params.get("prepare_attempt", "0")))
+            attempt = min(10, max(0, int(request.query_params.get("prepare_attempt", "0"))))
         except ValueError:
             attempt = 0
-        context["prepare_attempt"] = attempt + 1 if not live and payload is None and attempt < 10 else None
+        waiting = result.preparing or (not result.protos and bool(result.slots))
+        context["prepare_attempt"] = min(10, attempt + 1) if not live and waiting else None
+        # Preparation can outlast the first minute after a restart. Keep checking
+        # at a bounded rate until usable offers arrive instead of stranding the
+        # board after ten requests.
+        context["prepare_interval"] = min(30, 3 * 2 ** min(attempt, 4))
         context["genre_options"] = [option | {"tint": genre_tint(option["family"])}
                                     for option in result.genre_options]
         self.recommendations.audit(result.protos, now, request.url.path)
@@ -111,7 +136,7 @@ class HomeViews:
                                     use_genre_request=use_genre_request, genre_notice=genre_notice)
         response = self.templates.TemplateResponse(
             request, "_partials/mode_cards.html",
-            {**context, "regenerating": regenerating, "swap_oob": swap_oob})
+            {**context, "regenerating": regenerating, "swap_oob": swap_oob, "status_oob": True})
         return self.tuning_response(response, now)
 
     def cards_safe(self, request, now, *, swap_oob=False):
@@ -119,8 +144,11 @@ class HomeViews:
             return self.cards_fragment(request, now, swap_oob=swap_oob)
         except Exception:  # noqa: BLE001 - don't strand a fragment on a spinner
             self.ctx.logger.exception("home cards render failed")
+            if request.method == 'POST' and request.url.path == '/home/vibe':
+                # Keep the playable board mounted and let the visible vibe status offer a retry.
+                return Response(status_code=503)
             return self.templates.TemplateResponse(request, "_partials/mode_cards.html",
-                                                   {"protos": [], "swap_oob": swap_oob})
+                                                   {"protos": [], "swap_oob": swap_oob, "status_oob": True})
 
     def tuning_fragment(self, request, now):
         store = self.store

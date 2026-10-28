@@ -8,10 +8,12 @@ throttling and server errors count toward an outage; successful reads and valid 
 The waterfall also persists cooldowns and Retry-After deadlines across batches and restarts.
 """
 import urllib.error
+import math
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 from contextlib import contextmanager
 from contextvars import ContextVar
+from yt_playlist.integrations.base import IntegrationUnavailable
 
 _probe_errors = ContextVar("enrichment_probe_errors", default=None)
 
@@ -24,12 +26,15 @@ def record_probe_failure(reason):
 
 def retry_after(exc, now):
     """An HTTP Retry-After deadline, accepting both seconds and an HTTP date."""
+    if isinstance(exc, IntegrationUnavailable):
+        return exc.retry_at
     headers = getattr(exc, "headers", None)
     value = headers.get("Retry-After") if headers else None
     if value is None:
         return 0
     try:
-        return now + max(0, float(value))
+        seconds = float(value)
+        return now + max(0, seconds) if math.isfinite(seconds) else 0
     except (ValueError, TypeError):
         try:
             date = parsedate_to_datetime(value)
@@ -41,6 +46,8 @@ def retry_after(exc, now):
 
 
 def provider_outage(exc):
+    if isinstance(exc, IntegrationUnavailable):
+        return exc.outage
     return (is_unreachable(exc) or isinstance(exc, urllib.error.HTTPError)
             and (exc.code == 429 or exc.code >= 500))
 

@@ -14,7 +14,7 @@ from .runner import MigrationError
 
 
 CONTRACT_FLOOR = 32
-VERSION = 42
+VERSION = 51
 DEFINITION = Path(__file__).with_name('schema_v033.sql')
 SEED_SETTINGS = {
     'catalog_identity_version': '2',
@@ -30,6 +30,43 @@ TOKEN = re.compile(r"--[^\n]*|/\*.*?\*/|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|"
 
 
 def statements(version=VERSION):
+    if version == 51:
+        from .v051_listening_actions import statements as listening_statements
+        yield from statements(50)
+        yield from listening_statements()
+        return
+    if version == 50:
+        from .v050_musical_profiles import statements as musical_statements
+        yield from statements(49)
+        yield from musical_statements()
+        return
+    if version == 49:
+        from .v049_metadata_observations import statements as observation_statements
+        yield from statements(48)
+        yield from observation_statements()
+        return
+    if version == 48:
+        from .v048_playback_alternates import statements as alternate_statements
+        yield from statements(47)
+        yield from alternate_statements()
+        return
+    if version == 47:
+        from .v047_playlist_revisions import statements as playlist_statements
+        yield from statements(46)
+        yield from playlist_statements()
+        return
+    if version in (43, 46):  # These migrations only retire obsolete setting overrides.
+        yield from statements(version - 1)
+        return
+    if version == 45:
+        yield from statements(44)
+        yield "CREATE INDEX ix_actions_delete_pending ON actions(id DESC) WHERE status='delete_pending'"
+        return
+    if version == 44:
+        from .v044_prepared_content import statements as content_statements
+        yield from statements(43)
+        yield from content_statements()
+        return
     if version == 42:
         from .v042_foreign_calendar_scopes import statements as foreign_calendar_statements
         yield from statements(41)
@@ -217,10 +254,17 @@ def bootstrap(conn, registry, now):
     validate(conn)
 
 
-def validate(conn, version=VERSION):
+def validate(conn, version=VERSION, *, replaced=frozenset()):
     objects = {r[0]: (r[1], r[2]) for r in conn.execute(
         "SELECT name,type,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")}
+    if version == VERSION and 'album_primary_provider_ids' in objects:
+        from . import v062_album_aliases
+        if not replaced:
+            v062_album_aliases.validate(conn)
+        replaced = set(replaced) | v062_album_aliases.REPLACED
     for name, (kind, expected) in contract(version).items():
+        if name in replaced:
+            continue
         actual = objects.get(name)
         if actual is None or actual[0] != kind:
             raise MigrationError(f'Missing current {kind}: {name}')

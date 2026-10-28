@@ -1,7 +1,17 @@
 <section class="arrival" :class="{ 'is-importing': running }" aria-labelledby="arrival-title">
+  {% if onboard_format == 'albums' %}
+  {% set connect_copy = "Connect your music. We'll find whole albums for you to spend time with." %}
+  {% set learning_copy = "We're getting to know your music to find your next favorite records." %}
+  {% elif onboard_format == 'radio' %}
+  {% set connect_copy = "Connect your music. We'll find a flow of favorites and discoveries for you." %}
+  {% set learning_copy = "We're getting to know your music to tune your personal radio." %}
+  {% else %}
+  {% set connect_copy = "Connect your music. We'll build personal mixes and find your next favorites." %}
+  {% set learning_copy = "We're learning your music to build personal mixes and find your next favorites." %}
+  {% endif %}
   <div class="arrival-copy">
     <h1 id="arrival-title" x-text="connected || imported || running || songs > 0 ? 'Getting to know your music' : 'Welcome to TuneConsole'">Welcome to TuneConsole</h1>
-    <p class="arrival-intro" x-text="connected || imported || running || songs > 0 ? &quot;We're learning your music to build personal mixes and find your next favorites.&quot; : &quot;Connect your music. We'll build personal mixes and find your next favorites.&quot;">Connect your music. We'll build personal mixes and find your next favorites.</p>
+    <p class="arrival-intro" x-text="connected || imported || running || songs > 0 ? {{ learning_copy|tojson|forceescape }} : {{ connect_copy|tojson|forceescape }}">{{ connect_copy }}</p>
     <div class="arrival-setup" x-show="!connected && !imported && !running && !songs" x-cloak>
       <a class="btn btn-primary" href="https://chromewebstore.google.com/detail/opmmbolbdgdkphfocffpjpgmelkkjkcn"
          target="_blank" rel="noopener">Get the extension</a>
@@ -12,3 +22,13 @@
     <img class="arrival-illustration" src="/static/onboarding-arrival.png" alt="" fetchpriority="high">
   </div>
 </section>
+<div class="arrival-next">
+  <div class="arrival-progress" x-show="!starterReady && (connected || running || imported || songs > 0)" x-cloak
+       :class="{ 'is-working': !statusError && (connected || running) }" role="status" aria-live="polite">
+    <span class="arrival-wave" aria-hidden="true">
+      <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+    </span>
+    <span x-text="progressLabel">Bringing in your music</span>
+  </div>
+  <p class="arrival-learning">TuneConsole's recommendations will continue improving over the next few days as we learn about your music preferences.</p>
+</div>

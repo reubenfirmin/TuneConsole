@@ -11,11 +11,21 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_store_package_loads_worker_modules_and_saved_playlist_radio(tmp_path):
+@pytest.mark.parametrize("bootstrap", ["current", "legacy_bootstrap", "missing_receiver_option"])
+def test_store_package_loads_worker_modules_and_saved_playlist_radio(tmp_path, bootstrap):
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for the packaged worker smoke check")
     shutil.copytree(ROOT / "extension", tmp_path / "extension")
+    research = tmp_path / 'extension/audio_model/unused-research.bin'
+    research.parent.mkdir(exist_ok=True)
+    research.write_bytes(b'research assets must never enter the store ZIP')
+    if bootstrap != "current":
+        background = tmp_path / "extension" / "background.js"
+        source = background.read_text().replace("receiverRevision: TC_CONFIG.receiverRevision, ", "")
+        if bootstrap == "legacy_bootstrap":
+            source = source.replace("revision: TC_CONFIG.sensorRevision, ", "")
+        background.write_text(source)
     (tmp_path / "scripts").mkdir()
     shutil.copyfile(ROOT / "scripts" / "build-extension.sh", tmp_path / "scripts" / "build-extension.sh")
     built = subprocess.run(["bash", str(tmp_path / "scripts" / "build-extension.sh")],
@@ -27,6 +37,7 @@ def test_store_package_loads_worker_modules_and_saved_playlist_radio(tmp_path):
         manifest = json.loads(package.read("manifest.json"))
         assert manifest == {key: value for key, value in source.items() if key != "key"}
         assert "README.md" not in package.namelist()
+        assert not any(name.startswith('audio_model/') for name in package.namelist())
         package.extractall(tmp_path / "unpacked")
     script = r"""
 const assert = require('node:assert/strict');
@@ -35,6 +46,7 @@ const event = () => ({addListener(fn) { events.push(fn); }});
 const chrome = {
   runtime: {onMessage:event(), onStartup:event(), onInstalled:event()},
   tabs: {query:async () => [{id:7,url:'https://music.youtube.com/'}],
+         sendMessage:async () => ({ok:true,receiverRevision:10,mainVersion:4,mainRevision:10,mainAgeMs:0}),
          onRemoved:event(), onUpdated:event()},
   alarms: {create() {}, onAlarm:event()},
   scripting: {executeScript:async call => {
@@ -43,7 +55,7 @@ const chrome = {
   }},
 };
 class Socket { static OPEN = 1; static CLOSED = 3; constructor() { this.readyState=0; } }
-const {radio} = require('./tests/extension_worker.cjs').loadWorker({chrome, WebSocket:Socket,
+const {radio, sensors} = require('./tests/extension_worker.cjs').loadWorker({chrome, WebSocket:Socket,
   URL, console, setTimeout() {}, clearTimeout() {}}, process.argv[1]);
 (async () => {
   const result = await radio.update({playlist:'PL_fixture',videoIds:['first','next'],refresh:1,id:42});
@@ -56,6 +68,9 @@ const {radio} = require('./tests/extension_worker.cjs').loadWorker({chrome, WebS
   assert.equal(radioCalls[1].target.tabId,7);
   assert.deepEqual(JSON.parse(JSON.stringify(radioCalls[1].args)),
     [{playlist:'PL_fixture',videoIds:['first','next'],refresh:true}]);
+  assert.equal((await sensors.probe()).healthy,true,
+    'the packaged bootstrap must accept its own sensor revisions');
+  assert.equal((await sensors.ping(7,true,{nativeRating:true})).ok,true);
 })().catch(error => { console.error(error); process.exitCode=1; });
 """
     result = subprocess.run([node, "-e", script, str(tmp_path / "unpacked")], cwd=ROOT,

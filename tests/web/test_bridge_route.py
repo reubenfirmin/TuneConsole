@@ -75,9 +75,11 @@ def test_our_extension_origin_connects_and_round_trips():
         frame = ws.receive_json()
         assert frame["body"] == {"b": 1}
         ws.send_json({"id": frame["id"], "status": 200, "body": json.dumps({"ok": True}),
-                      "timeZone": "America/Costa_Rica"})
+                      "timeZone": "America/Costa_Rica",
+                      "headers": {"retry-after": "120", "authorization": "secret", "set-cookie": "secret"}})
         t.join(timeout=5)
         assert out["res"] == (200, json.dumps({"ok": True}))
+        assert out["res"].headers == {"Retry-After": "120"}
         assert bridge.source_timezone == "America/Costa_Rica"
 
 
@@ -89,6 +91,22 @@ def test_wrong_origin_rejected():
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect("/bridge/ws", headers={"origin": "https://evil.example"}) as ws:
             ws.receive_json()
+
+
+def test_extension_connection_wakes_sync_after_pairing_and_auth_reset():
+    from types import SimpleNamespace
+
+    wake = threading.Event()
+    store = _FakeStore()
+    cleared = []
+    ctx = SimpleNamespace(bridge=Bridge(), store=store, sync_wake=wake,
+                          clear_all_auth_expired=lambda: cleared.append(True))
+    app = FastAPI()
+    app.include_router(build_bridge_route(ctx))
+    with TestClient(app).websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}):
+        assert wake.wait(5)
+        assert store.settings.get_setting("bridge_paired") == "1"
+        assert cleared == [True]
 
 
 def test_dev_extension_origin_accepted():
@@ -439,8 +457,8 @@ def test_active_radio_links_to_specialist_view(store, active, playing, kind, url
     store.playlists.upsert_playlist(iid, "PL_other", "Another mix", 1, "", 1)
     bridge = Bridge()
     bridge.now_playing = {"title": "Song", "video_id": "v1", "playlist_ytm_id": playing}
-    radio = SimpleNamespace(active=active, bootstrap=lambda: {"state": {
-        "active": active, "playlist_id": "PL_radio", "title": "Radio Session"}})
+    radio = SimpleNamespace(active=active, state=lambda: {
+        "active": active, "playlist_id": "PL_radio", "title": "Radio Session"})
     app = FastAPI()
     app.include_router(build_bridge_route(SimpleNamespace(bridge=bridge, store=store, radio=radio)))
     source = TestClient(app).get("/bridge/status").json()["now_playing"]["source"]
@@ -586,6 +604,46 @@ def test_now_playing_toggle_returns_ok_false_when_not_connected():
     client = TestClient(_app(bridge))
     r = client.post("/now-playing/toggle")
     assert r.json()["ok"] is False
+
+
+@pytest.mark.parametrize("closed", ["player-closed", "bye", "no-tabs", "disconnect"])
+def test_long_paused_player_remains_resumable_after_display_expires(monkeypatch, closed):
+    from types import SimpleNamespace
+    from yt_playlist.web.routes import bridge as route
+
+    clock = [100.0]
+    monkeypatch.setattr(route, "time", SimpleNamespace(monotonic=lambda: clock[0], time=lambda: clock[0]))
+    bridge = Bridge()
+    client = TestClient(_app(bridge))
+    with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
+        ws.send_json({"type": "now-heartbeat", "title": "Paused song", "videoId": "paused-song",
+                      "paused": True, "metadataVerified": True})
+        deadline = time.time() + 2
+        while bridge.resumable_player is None and time.time() < deadline:
+            time.sleep(0.01)
+        assert bridge.resumable_player["video_id"] == "paused-song"
+        clock[0] += 16 * 60
+        status = client.get("/bridge/status").json()
+        assert status["now_playing"] is None
+        assert status["resumable_player"]["video_id"] == "paused-song"
+        response = client.post("/now-playing/toggle?action=play&resume=true&videoId=paused-song")
+        assert response.json() == {"ok": True}
+        assert ws.receive_json() == {"type": "playpause", "action": "play", "resumeOnly": True,
+                                     "videoId": "paused-song"}
+        assert client.post("/now-playing/toggle?resume=true&videoId=other").json()["ok"] is False
+        if closed == "disconnect":
+            bridge.disconnect()
+        else:
+            frame = {"type": closed} if closed == "player-closed" else (
+                {"type": "pevent", "kind": "bye"} if closed == "bye" else
+                {"type": "sensor-health", "ytmTabs": 0})
+            ws.send_json(frame)
+            deadline = time.time() + 2
+            while bridge.resumable_player is not None and time.time() < deadline:
+                time.sleep(0.01)
+        assert bridge.resumable_player is None
+        assert client.get("/bridge/status").json()["resumable_player"] is None
+        assert client.post("/now-playing/toggle?resume=true&videoId=paused-song").json()["ok"] is False
 
 
 @pytest.mark.parametrize("accepted", [True, False])

@@ -165,6 +165,72 @@ class SongClient(FakeClient):
         return [track]
 
 
+@pytest.mark.parametrize("discovery", ["visible", "delayed", "unreadable", "duplicate"])
+@pytest.mark.parametrize("interruption", ["reply_loss", "local_publication"])
+def test_creation_interruption_retains_marker_and_never_recreates_after_restart(
+        tmp_path, monkeypatch, discovery, interruption):
+    class LostCreation(SongClient):
+        visible = discovery != "delayed"
+        readable = discovery != "unreadable"
+
+        def create_playlist(self, title, description):
+            remote_id = super().create_playlist(title, description)
+            if interruption == "reply_loss":
+                raise TimeoutError("creation reply lost")
+            return remote_id
+
+        def get_library_playlists(self, limit=None):
+            if not self.readable:
+                raise ConnectionError("library unavailable")
+            rows = [{"playlistId": pid} for pid, _, _ in self.created] if self.visible else []
+            return rows + ([{"playlistId": "OTHER"}] if discovery == "duplicate" else [])
+
+        def get_playlist(self, playlistId, limit=None):
+            detail = super().get_playlist(playlistId, limit)
+            if self.created:
+                detail["description"] = self.created[0][2]
+            return detail
+
+    path = tmp_path / "creation.db"
+    store = Store(path); store.init_schema()
+    identity = store.identities.upsert_identity("Main", "bridge", None, True)
+    client = LostCreation()
+    raw = _playlists_zip(("Road songs", ["One", "Two"]))
+    with monkeypatch.context() as patch:
+        if interruption == "local_publication":
+            save = store.settings.set_setting
+
+            def fail_id_publication(key, value):
+                if key == f"spotify_library_imported_playlists:{identity}" and any(
+                        transfer.get("ytm_playlist_id") for transfer in json.loads(value).values()):
+                    raise OSError("interrupted before destination ID publication")
+                return save(key, value)
+
+            patch.setattr(store.settings, "set_setting", fail_id_publication)
+        first = import_spotify_library(store, raw, client, identity, 100)
+    assert first["playlists_failed"] == 1
+    assert "ytm_playlist_id" not in first["details"]["playlists"][0]
+    assert not client.added
+    store.conn.close()
+    store = Store(path); store.init_schema()
+    try:
+        retry = import_spotify_library(store, raw, client, identity, 101)
+        if discovery != "visible":
+            assert retry["playlists_failed"] == 1
+            assert not client.added
+            client.visible = client.readable = True
+            if discovery == "duplicate":
+                # Ambiguous ownership must remain unresolved, even on another retry.
+                assert import_spotify_library(store, raw, client, identity, 102)["playlists_failed"] == 1
+                return
+            retry = import_spotify_library(store, raw, client, identity, 102)
+        assert retry["playlists_imported"] == 1
+        assert [t["videoId"] for t in client._tracks["PL_NEW_0"]] == ["yt-One", "yt-Two"]
+    finally:
+        assert len(client.created) == 1
+        store.conn.close()
+
+
 def test_identical_contents_in_destination_are_skipped_even_in_a_different_order(store):
     identity = store.identities.upsert_identity("main", "bridge", None, True)
     playlist = store.playlists.upsert_playlist(identity, "PL_EXISTING", "Road songs", 2, "hash", 1)
@@ -225,6 +291,75 @@ def test_resume_reconciles_lost_batch_response_after_restart(tmp_path):
         assert [t["videoId"] for t in client._tracks[client.created[0][0]]] == ["yt-One", "yt-Two"]
     finally:
         store.conn.close()
+
+
+def test_large_import_publishes_each_confirmed_suffix_once(store, monkeypatch):
+    from yt_playlist.core import catalog
+
+    iid = store.identities.upsert_identity('Main', 'bridge', None, True)
+    client = SongClient()
+    titles = [f'Song {i:03}' for i in range(250)]
+    upserts, statements, commits = [], [], []
+    upsert = catalog.upsert
+    publish = store.playlists.publish_confirmed_tracks
+    store.conn.set_trace_callback(statements.append)
+    store.conn.execute('CREATE TEMP TABLE membership_writes(kind TEXT)')
+    for op in ('INSERT', 'DELETE'):
+        store.conn.execute(f"CREATE TEMP TRIGGER count_import_{op} AFTER {op} ON playlist_items "
+                           f"BEGIN INSERT INTO membership_writes VALUES ('{op}'); END")
+
+    def track(conn, video, *args, **kwargs):
+        upserts.append(video)
+        return upsert(conn, video, *args, **kwargs)
+
+    def atomic(*args, **kwargs):
+        start = len(statements)
+        result = publish(*args, **kwargs)
+        commits.append(sum(sql == 'COMMIT' for sql in statements[start:]))
+        return result
+
+    monkeypatch.setattr(catalog, 'upsert', track)
+    monkeypatch.setattr(store.playlists, 'publish_confirmed_tracks', atomic)
+    try:
+        report = import_spotify_library(store, _playlists_zip(('Large', titles)), client, iid, 100)
+    finally:
+        store.conn.set_trace_callback(None)
+    assert report['playlists_imported'] == 1 and report['tracks_imported'] == 250
+    assert upserts == ['yt-' + title for title in titles]
+    assert commits == [1] * 5  # empty destination, three confirmed batches, final order
+    assert [row[0] for row in store.conn.execute('SELECT kind FROM membership_writes')] == ['INSERT'] * 250
+    playlist, = store.playlists.get_playlists()
+    assert playlist.track_count == 250
+    assert [row[0] for row in store.conn.execute(
+        'SELECT video_id FROM playlist_items WHERE playlist_id=? ORDER BY position', (playlist.id,))] == [
+            'yt-' + title for title in titles]
+
+
+def test_failed_second_batch_rolls_back_locally_and_resumes_same_remote_destination(store, monkeypatch):
+    from yt_playlist.core import catalog
+
+    iid = store.identities.upsert_identity('Main', 'bridge', None, True)
+    client = SongClient()
+    titles = [f'Song {i:03}' for i in range(250)]
+    raw = _playlists_zip(('Large', titles))
+    upsert = catalog.upsert
+
+    def failing(conn, video, *args, **kwargs):
+        if video == 'yt-Song 150':
+            raise RuntimeError('injected second-batch failure')
+        return upsert(conn, video, *args, **kwargs)
+
+    monkeypatch.setattr(catalog, 'upsert', failing)
+    assert import_spotify_library(store, raw, client, iid, 100)['playlists_failed'] == 1
+    playlist, = store.playlists.get_playlists()
+    assert playlist.track_count == 100
+    assert len(store.playlists.get_playlist_track_ids(playlist.id)) == 100
+    assert store.tracks.identity_key_for_video('yt-Song 100') is None
+    monkeypatch.setattr(catalog, 'upsert', upsert)
+    report = import_spotify_library(store, raw, client, iid, 200)
+    assert report['playlists_imported'] == 1 and report['tracks_imported'] == 50
+    assert len(client.created) == 1
+    assert store.playlists.get_playlist(playlist.id).track_count == 250
 
 
 def test_one_failed_playlist_does_not_stop_the_others(store):

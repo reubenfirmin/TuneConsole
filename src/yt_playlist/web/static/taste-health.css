@@ -64,7 +64,7 @@
 .model-health-activity .model-health-metric { display: flex; flex-direction: column; align-items: flex-start; }
 .model-health-activity .model-health-breakdown-list { align-self: stretch; }
 .model-health-activity .taste-detail-link { margin-top: 1rem; }
-.taste-health .model-health-caution { padding: .75rem 1rem; border-inline-start: 3px solid var(--warn);
+.taste-health .model-health-caution { padding: .75rem 1rem;
   background: color-mix(in srgb, var(--warn) 6%, var(--surface-card)); color: var(--text); font-size: var(--type-ui); }
 .model-health-breakdown { margin-top: 1rem; }
 .model-health-breakdown > summary { padding-block: .5rem; font-size: var(--type-ui); cursor: pointer; }
@@ -116,6 +116,9 @@
 .selection-comparison tr > :first-child { text-align: left; padding-left: 0; }
 .selection-comparison tr > :last-child { padding-right: 0; }
 .selection-comparison tfoot :is(th, td) { border-bottom: 0; font-weight: 600; }
+.selection-outcomes { --table-min: 0; }
+.selection-outcomes :is(th, td) { overflow-wrap: anywhere; }
+.selection-outcomes tr > :first-child { width: 34%; }
 .selection-key { display: inline-block; width: .85rem; border-top: 3px solid var(--teal); margin: 0 .45rem .2rem 0; }
 .selection-key.previous { border-color: var(--dim); border-top-style: dashed; }
 .selection-note { margin: .85rem 0 0; color: var(--dim); font-size: var(--type-sm); }
@@ -141,7 +144,7 @@
 .selection-schedule strong { color: var(--text); font-weight: 500; }
 .selection-schedule .selection-note { margin-top: .65rem; }
 .selection-schedule .selection-gate { max-width: 36rem; }
-.selection-footer { display: flex; justify-content: space-between; align-items: center; gap: 1rem 2rem;
+.selection-footer { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 1rem 2rem;
   margin-top: 1.25rem; }
 .selection-footer p { margin: .4rem 0 0; color: var(--dim); font-size: var(--type-sm); }
 .selection-footer a { font-size: var(--type-ui); }

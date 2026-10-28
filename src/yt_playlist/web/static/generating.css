@@ -17,8 +17,11 @@
 }
 /* Drifting parallax starfield: reuses the Clusters starfield (.cluster-stars) wholesale. */
 .gen-stage .cluster-stars { z-index: 0; }
+.gen-loader { --loader-copy-height: 6rem; position: absolute; inset: 0; }
+.gen-visual { position: absolute; inset: 3rem 0 calc(var(--loader-copy-height) + 3rem); }
+.is-loader-paused *, .is-loader-paused *::before, .is-loader-paused *::after { animation-play-state: paused !important; }
 /* Canvas: warped dot-grid + edges with inward green pulses. Behind the thumbnail nodes. */
-.gen-fx { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+.gen-fx { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
 .gen-orbit { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
 
 /* Central hub: the playlist being assembled, the brand EQ mark in a pulsing green ring. */
@@ -74,20 +77,22 @@
 /* Console status block, bottom-left: live system state with a blinking cursor. */
 .gen-copy { position: absolute; z-index: 5; left: clamp(1.4rem, 5vw, 4rem); right: clamp(1.4rem, 5vw, 4rem); bottom: clamp(1.4rem, 6vh, 4rem);
   max-width: 32rem; }
-.gen-status {
-  font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.14em; text-transform: lowercase;
-  color: var(--trunk); display: inline-flex; align-items: center; gap: 0.55rem;
+.gen-stage .gen-status {
+  font-family: var(--font-mono); font-size: clamp(1rem, 2.4vw, 1.5rem); font-weight: 500;
+  line-height: 1.5; letter-spacing: .015em; margin: 0 0 .65rem; text-transform: lowercase;
+  color: var(--trunk); display: flex; align-items: center; gap: 0.55rem;
 }
+.gen-dot, .gen-cursor { flex-shrink: 0; }
 .gen-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--trunk);
   box-shadow: 0 0 9px var(--trunk); animation: gen-blink 1.5s ease-in-out infinite; }
 .gen-cursor { width: 8px; height: 1.05em; background: var(--trunk); display: inline-block;
   margin-left: -0.1rem; animation: gen-caret 1.05s steps(1) infinite; }
 @keyframes gen-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 @keyframes gen-caret { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
-.gen-stage .gen-title {
-  font-family: var(--font-display); font-weight: 600; font-size: clamp(1.8rem, 4.6vw, 2.7rem);
-  line-height: 1.2; letter-spacing: -0.012em; margin: 0.7rem 0 0.75rem; color: var(--text);
-  white-space: normal; overflow: visible; text-overflow: clip;
-}
 .gen-sub { font-family: var(--font-sans); color: var(--dim); font-size: 1rem; line-height: 1.55;
   margin: 0; max-width: 36ch; }
+@media (max-width: 600px) {
+  .gen-node { width: 44px; height: 44px; border-radius: 9px; }
+  .gen-stage .gen-status { font-size: 1rem; }
+  .gen-sub { font-size: .85rem; }
+}

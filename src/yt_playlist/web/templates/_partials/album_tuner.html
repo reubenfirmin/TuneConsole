@@ -1,0 +1,39 @@
+<dialog class="radio-tuning-dialog album-tuning-dialog" x-ref="albumTuner" aria-labelledby="album-tuning-title"
+        @click="if ($event.target === $el) $el.close()">
+  <form class="radio-tuning-panel" @submit.prevent="apply()">
+    <button class="radio-tuning-close" type="button" @click="$refs.albumTuner.close()" aria-label="Close album tuning"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    <h2 id="album-tuning-title">Long play</h2>
+    {% if genres %}
+    <fieldset class="album-tuning-genres"><legend>Genres</legend>
+      <div>
+        <button class="album-genres-all" type="button" :aria-pressed="!genres.length" @click="genres = []; reset = false">All genres</button>
+        {% for genre in genres %}<label><input type="checkbox" value="{{ genre.key }}" x-model="genres" @change="reset = false"><span>{{ genre.label }}</span></label>{% endfor %}
+      </div>
+    </fieldset>
+    {% endif %}
+    <div class="radio-tuning-controls">
+      {% for axis in tuning_axes %}
+      <div class="radio-tuning-axis" :style="'--dial-color:{{ axis.color }};--dial-value:' + draft.{{ axis.key }} + '%;--dial-turn:' + (draft.{{ axis.key }} * .2 - 10) + 'deg'">
+        <label for="album-tune-{{ axis.key }}"><span>{{ axis.low }}</span><span>{{ axis.high }}</span></label>
+        <div class="radio-tuning-fader">
+          <div class="radio-tuning-scale" aria-hidden="true">
+            <svg viewBox="0 0 400 48" preserveAspectRatio="none"><path class="radio-tuning-rail" d="M0 24H400"/><path class="radio-tuning-ticks" d="M0 18v12m40-10v8m40-8v8m40-8v8m40-8v8m80-8v8m40-8v8m40-8v8m40-8v8m40-10v12"/><path class="radio-tuning-center" d="M200 8v7m0 18v7"/></svg>
+            <span class="radio-tuning-thumb"><svg viewBox="0 0 32 32">
+              <circle cx="16" cy="16" r="11"/><path d="M16 10v12"/>
+            </svg></span>
+          </div>
+          <input type="range" min="0" max="100" step="5" id="album-tune-{{ axis.key }}"
+                 aria-label="{{ axis.low }} to {{ axis.high }}" x-model.number="draft.{{ axis.key }}" @input="reset = false">
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    <p class="album-tuning-scope">Use these settings for 4 hours.{% if tuning.remaining %} Currently active.{% endif %}</p>
+    <p class="album-tuning-error" x-show="error" x-text="error" role="alert" x-cloak></p>
+    <footer class="radio-tuning-actions">
+      <button type="button" class="radio-tuning-reset" @click="resetDraft()">Reset</button>
+      <button type="button" class="radio-tuning-reset" @click="apply(true)" :disabled="busy" x-text="refreshing ? 'Refreshing…' : 'Refresh selection'">Refresh selection</button>
+      <button type="submit" class="btn btn-primary" :disabled="busy" x-text="busy && !refreshing ? 'Applying…' : 'Apply'">Apply</button>
+    </footer>
+  </form>
+</dialog>

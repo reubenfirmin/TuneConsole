@@ -369,6 +369,9 @@ def test_legacy_upgrade_then_first_structured_sync_preserves_mute_and_reopens(tm
     migrate(s.conn,registry=REGISTRY)
     s._bind_repositories()
     old = s.artists.track_credits(1)[0]['artist_id']
+    upgrade.validate(s.conn)
+    # Historical migration assertions precede current runtime operations.
+    s.init_schema()
     iid = s.identities.upsert_identity('main','credential',None,True)
     client = FakeClient(tracks={'P':[{'videoId':'v','title':'Song','duration_seconds':200,
                                       'artists':[{'name':'Artist','id':'verified'}]}]})
@@ -380,14 +383,14 @@ def test_legacy_upgrade_then_first_structured_sync_preserves_mute_and_reopens(tm
     before = list(s.conn.iterdump())
     s.conn.close()
     s = Store(path)
-    migrate(s.conn,registry=REGISTRY)
+    s.init_schema()
     assert list(s.conn.iterdump())==before
     assert s.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
     s.conn.close()
-    assert list((tmp_path/'backups').glob('*.db'))
+    assert not (tmp_path/'backups').exists()
 
 
-def test_failed_additive_upgrade_restores_installed_version_and_verified_backup(tmp_path):
+def test_failed_additive_upgrade_restores_installed_version_without_backups(tmp_path):
     path = tmp_path/'state.db'
     s = Store(path)
     migrate(s.conn,registry=MIGRATIONS[:26])
@@ -400,11 +403,9 @@ def test_failed_additive_upgrade_restores_installed_version_and_verified_backup(
     with pytest.raises(MigrationError,match='interrupted redirect'):
         migrate(s.conn,registry=(*MIGRATIONS[:26],Migration(27,'artist_identity_redirects',fail)))
     assert list(s.conn.iterdump())==before
-    backups = list((tmp_path/'backups').glob('*.db'))
-    assert backups
-    with sqlite3.connect(backups[0]) as conn:
-        assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]==26
-        assert conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
+    assert not (tmp_path/'backups').exists()
+    assert s.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]==26
+    assert s.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
     s.conn.close()
 
 

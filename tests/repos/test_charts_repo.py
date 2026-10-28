@@ -23,6 +23,30 @@ def test_top_tracks_ranks_by_plays(store):
     assert top[0]["plays"] == 2 and top[1]["plays"] == 1
 
 
+def test_targeted_playlist_recency_preserves_current_history_and_generated_plays(store):
+    iid, playlist = _seed(store)
+    other = store.playlists.upsert_playlist(iid, "OTHER", "Other", 0, "", 0)
+    track = store.tracks.upsert_track("outside", "Outside", "Artist", "", 180)
+    store.playlists.set_playlist_tracks(other, [track])
+    first_key = store.conn.execute("SELECT identity_key FROM tracks WHERE video_id='v1'").fetchone()[0]
+    store.playlists.mark_generated_playlist("P1")
+    # Synced history is projected at canonical day times rather than the raw
+    # import timestamp. A generated play must leave that organic evidence alone.
+    baseline = store.charts.get_playlist_track_recency(playlist_id=playlist)
+    store.history.record_play_event(iid, first_key, "v1", 200_000, playlist_ytm_id="P1")
+
+    ordinary = store.charts.get_playlist_track_recency(playlist_id=playlist)
+    current = store.charts.get_playlist_track_recency(playlist_id=playlist, include_generated=True)
+
+    assert set(ordinary) == set(current) == {playlist}
+    assert ordinary == baseline
+    assert max(at for at in ordinary[playlist] if at is not None) < 200_000
+    assert max(current[playlist]) == 200_000
+    assert current == {playlist: store.charts.get_playlist_track_recency(include_generated=True)[playlist]}
+    assert store.charts.get_playlist_track_recency(playlist_id=other) == {other: [None]}
+    assert store.charts.get_playlist_track_recency(playlist_id=-1) == {}
+
+
 def test_top_artists_sums_plays(store):
     _seed(store)
     top = store.charts.top_artists()
@@ -54,7 +78,8 @@ def test_playlist_ticker_artwork_prefers_cover_and_falls_back_to_track_art(store
     store.playlists.set_playlist_tracks(cover, [track])
     store.playlists.set_playlist_tracks(fallback, [track])
 
-    assert store.charts.ticker_thumbnails("playlist") == {"With cover": "/playlist.png", "Track art": "/track.png"}
+    assert store.charts.ticker_thumbnails("playlist") == {
+        f"@playlist:{cover}": "/playlist.png", f"@playlist:{fallback}": "/track.png"}
 
 
 def test_playlist_tracks_detail_marks_liked(store):
@@ -182,6 +207,26 @@ def test_story_artist_songs_follow_structured_collaboration_credits(store):
         'Together', 'Solo'}
     assert store.charts.story_tracks(since=0, artist='Unknown') == []
     assert store.charts.story_tracks(since=0) == []
+
+
+def test_story_examples_deduplicate_displayed_songs_before_limiting(store):
+    iid = store.identities.upsert_identity('me', 'c', None, True)
+    for video, title in [('first', 'Wise One'), ('copy', 'Wise One'),
+                         ('remaster', 'Wise One (2020 Remaster)'),
+                         ('other', 'Giant Steps'), ('live', 'Wise One (Live)')]:
+        entry = store.tracks.upsert_track(video, title, 'John Coltrane', '', 180)
+        store.tracks.set_track_enrichment(entry, 'Free jazz', None)
+    # Repeated exact uploads win the history ranking, yet must not consume every slot.
+    for index, video in enumerate(['first', 'copy', 'remaster', 'other', 'live']):
+        key = store.tracks.identity_key_for_video(video)
+        store.history.import_listening_events(iid, [(key, video, 10 * 86400 - index * 86400)])
+    recordings = store.conn.execute('SELECT COUNT(*) FROM recordings').fetchone()[0]
+    for selection in ({'artist': 'John Coltrane'}, {'genres': ['Free jazz']}):
+        songs = store.charts.story_tracks(since=0, **selection)
+        assert [song['video_id'] for song in songs] == ['first', 'other', 'live']
+        assert store.charts.story_tracks(since=0, limit=0, **selection) == []
+    assert store.conn.execute('SELECT COUNT(*) FROM recordings').fetchone()[0] == recordings == 5
+    assert store.conn.execute('SELECT COUNT(*) FROM play_events').fetchone()[0] == 5
 
 
 def test_story_activity_requires_recent_listening_and_preserves_collaboration_credits(store):

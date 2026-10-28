@@ -152,6 +152,23 @@
 .takeout-file-label { cursor: pointer; margin: 0; }
 .visually-hidden-file { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
 .flush-margin { margin: 0; }
+.provider-settings-form { display: contents; }
+.provider-card--fixed { margin-top: .7rem; }
+.provider-card--fixed .provider-icon { grid-column: 2; }
+.provider-card--fixed .provider-meta { grid-column: 3; }
+.provider-card--fixed .provider-toggle { grid-column: 4; }
+.provider-icon--deepseek { --provider-accent: var(--teal); }
+.provider-options, .provider-notice { grid-column: 3 / -1; }
+.provider-options { margin-top: 1rem; }
+.provider-limit { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem .75rem;
+  color: var(--dim); font-size: var(--type-ui); }
+.provider-limit label { margin: 0; }
+.provider-limit input { width: 5rem; max-width: 100%; }
+.provider-limit > span { color: var(--faint); font-size: var(--type-xs); }
+.provider-options > button { margin-top: .6rem; }
+@media (max-width: 600px) {
+  .provider-options, .provider-notice { grid-column: 2 / -1; }
+}
 /* Setup's title and instructions use the available content width. */
 main.page-setup .page-head {
   grid-template-columns: minmax(0, 1fr);

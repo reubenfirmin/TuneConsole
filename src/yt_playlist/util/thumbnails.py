@@ -4,6 +4,8 @@ ytmusicapi returns thumbnails smallest-first. Naively taking the largest (`[-1]`
 video-backed entries, whose largest is `…/maxresdefault.jpg`, a size YouTube only generates for
 some videos, so it 404s for the rest. `hqdefault.jpg` always exists, so we downgrade to it.
 """
+import re
+from urllib.parse import urlsplit, urlunsplit
 
 # YouTube does not 404 when it has no cover: it serves a generic grey disc from this path, so a
 # thumbnail URL is not proof of a cover. Uploads (privately owned releases) get these almost always,
@@ -24,3 +26,15 @@ def best_thumb(thumbnails):
     if not url:
         return None
     return url.replace("maxresdefault", "hqdefault")
+
+
+def detail_thumb(url):
+    """Request album artwork at the detail view's size from its existing source."""
+    try:
+        parts = urlsplit(url)
+        if (parts.hostname or '').endswith('.googleusercontent.com'):
+            return urlunsplit(parts._replace(path=re.sub(
+                r'=w\d+-h\d+(?=-|$)', '=w800-h800', parts.path)))
+    except ValueError:
+        pass
+    return url

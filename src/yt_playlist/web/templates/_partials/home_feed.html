@@ -3,38 +3,25 @@
   <section class="home-mixes" aria-labelledby="home-mixes-title">
     <h2 class="section" id="home-mixes-title">Made for your library</h2>
     <p class="section-note">Ready-to-shape playlists drawn from what you save, play, and revisit.</p>
-    {% include "_partials/mode_cards.html" %}
-    {% if not protos %}
-    <p class="section-note" role="status">Your next mixes will appear as your library is prepared.</p>
-    {% endif %}
+    <div class="home-mix-board">
+      {% include "_partials/mode_cards.html" %}
+      {% if fingerprint.families or has_modes %}{% include "_partials/taste_fingerprint.html" %}{% endif %}
+    </div>
+    <p class="section-note mix-preparation-note" role="status">Your next mixes will appear as your library is prepared.</p>
   </section>
-  {# Steering stays attached to this fragment: changing it replaces #home-feed so the four choices
-     and their controls update atomically. #}
-  {% if fingerprint.families or has_modes %}{% include "_partials/taste_fingerprint.html" %}{% endif %}
-  {# More mixes are coming while the model is still learning. Revealed by JS when the loaded card row
-     has 1-3 generated playlists (hidden at 0 — that's the warming-up state — and at the full 4). #}
-  <section class="card gen-more" id="gen-more" hidden>
-    <span class="gen-more-icon" aria-hidden="true">✦</span>
-    <p>More playlist recommendations will appear here as the model keeps learning your taste.</p>
-  </section>
-  <script>
-    (function () {
-      function syncGenMore() {
-        var row = document.getElementById('home-mode-cards');
-        var more = document.getElementById('gen-more');
-        if (!row || !more) return;
-        var n = row.querySelectorAll('.gen-card').length;
-        more.hidden = !!row.dataset.genreNotice || !(n >= 1 && n < 4);
-      }
-      // Re-sync on EVERY swap/settle: the card row swaps with hx-swap="outerHTML" (initial load and
-      // the per-card regenerate button), and htmx fires those events with a target that is NOT the
-      // new #home-mode-cards node, so any id-filtered listener goes stale (seen live: the message
-      // stayed visible under a full 4-card row). The count is a cheap querySelectorAll.
-      document.body.addEventListener('htmx:afterSwap', syncGenMore);
-      document.body.addEventListener('htmx:afterSettle', syncGenMore);
-      syncGenMore();
-    })();
-  </script>
+  {# Main and the dashboard panels retain entrance transforms. Keep fixed feedback at body level;
+     Alpine removes the teleport when this feed is replaced or the page is left. #}
+  <template x-data x-teleport="body">
+  <aside id="home-vibe-feedback" class="home-vibe-feedback" x-data="homeVibeFeedback()" hidden aria-label="Vibe update">
+    <span class="home-vibe-progress" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+    <div class="home-vibe-feedback-copy" role="status" aria-live="polite" aria-atomic="true">
+      <strong id="home-vibe-feedback-title"></strong>
+      <p id="home-vibe-feedback-detail"></p>
+    </div>
+    <button type="button" class="home-vibe-edit" onclick="window.dispatchEvent(new CustomEvent('home-vibe-edit'))">Change vibe</button>
+    <button type="button" class="home-vibe-dismiss" aria-label="Dismiss vibe update" onclick="dismissHomeVibeFeedback()">×</button>
+  </aside>
+  </template>
   <div id="steer-toast" class="steer-toast" x-data="{show:false}" x-show="show" x-cloak x-transition
        @mixes-reranked.window="show=true; setTimeout(()=>show=false, 3500)"
        x-init="$nextTick(() => { if (sessionStorage.getItem('steered')) { sessionStorage.removeItem('steered'); show=true; setTimeout(()=>show=false, 3500); } })">

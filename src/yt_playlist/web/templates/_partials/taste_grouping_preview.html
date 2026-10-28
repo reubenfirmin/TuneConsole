@@ -1,0 +1,48 @@
+<div class="section-note" role="status" data-group-phase="{{ group_progress.phase or 'waiting' }}">
+{% if not group_progress.enabled %}
+  <p>Musical group preparation is paused.</p>
+{% elif group_progress.phase == 'failed' %}
+  <p>Musical groups could not be updated. Preparation will retry automatically.</p>
+{% elif group_progress.phase == 'deferred' %}
+  {% if group_progress.reason == 'inputs-changed' %}
+  <p>New musical details arrived during preparation. Another update is queued.</p>
+  {% elif group_progress.reason == 'serving-work' %}
+  <p>Musical group preparation is waiting for your current choices to finish updating.</p>
+  {% elif group_progress.reason == 'preview-pending' %}
+  <p>Preparing the updated musical groups for display.</p>
+  {% else %}
+  <p>Musical groups could not finish within the preparation limit. Another attempt is queued.</p>
+  {% endif %}
+{% elif group_progress.phase == 'preparing' %}
+  <p>Updating musical groups from the details available so far.</p>
+{% elif not grouping %}
+  {% if group_progress.prepared %}
+  <p>Waiting to group the musical details available so far.</p>
+  {% else %}
+  <p>Waiting for the first library recordings to be prepared.</p>
+  {% endif %}
+{% endif %}
+<p>{{ group_progress.prepared }} library recording{{ 's' if group_progress.prepared != 1 else '' }} prepared{% if group_progress.pending_recordings %}; {{ group_progress.pending_recordings }} recording{{ 's' if group_progress.pending_recordings != 1 else '' }} queued for preparation{% endif %}.</p>
+{% if group_progress.sources %}
+<p>Musical details still being processed: {% for scope, count in group_progress.sources|dictsort %}{{ count }} {{ scope }} detail update{{ 's' if count != 1 else '' }}{% if not loop.last %}, {% endif %}{% endfor %}. Groups can update while this work continues.</p>
+{% endif %}
+{% if grouping and (grouping.updating or group_progress.phase in ['preparing', 'deferred', 'failed']) %}
+<p>Showing the last completed groups while the next update is prepared.</p>
+{% endif %}
+</div>
+{% if grouping %}
+<p class="section-note">{{ grouping.counts.known }} recordings grouped{% if grouping.counts.unknown %}; {{ grouping.counts.unknown }} awaiting a supported match{% endif %}.</p>
+<div class="taste-grouping-preview" data-generation="{{ grouping.generation }}">
+{% for group in grouping.groups %}
+  <article class="card" data-group-version="{{ group.version }}"
+           x-show="!query || {{ (group.name ~ ' ' ~ (group.subtitle or '') ~ ' ' ~ (group.parent_name or ''))|lower|tojson|forceescape }}.includes(query.toLocaleLowerCase())">
+    {% if group.parent_name %}<p class="section-note">Part of {{ group.parent_name }}</p>{% endif %}
+    <h3>{{ group.name }}</h3>
+    {% if group.subtitle %}<p>{{ group.subtitle }}</p>{% endif %}
+    <p class="section-note">{{ group.size }} recording{{ 's' if group.size != 1 else '' }} · {% if group.mix_ready %}Enough variety for a full mix{% else %}An interest to keep exploring{% endif %}</p>
+  </article>
+{% else %}
+  <p class="section-note">No distinct groups have enough evidence to describe yet.</p>
+{% endfor %}
+</div>
+{% endif %}

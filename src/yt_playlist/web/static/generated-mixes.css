@@ -80,13 +80,6 @@ button.fresh-pool-action:focus-visible { outline: 3px solid var(--accent-2); out
   align-items: flex-start; gap: 0.5rem; }
 .gen-foot-note { color: var(--dim); font-size: var(--type-xs); line-height: 1.4; }
 .gen-done { justify-content: center; }
-/* "More mixes coming" note, shown below the taste panel while the model still produces < 4 cards. */
-.gen-more { display: flex; align-items: center; gap: .875rem; margin-bottom: 1.375rem; }
-/* display:flex above beats the UA stylesheet's [hidden] rule, so the JS reveal toggle silently
-   stopped hiding this card (seen live: it sat under a full 4-mix row). Re-assert the attribute. */
-.gen-more[hidden] { display: none; }
-.gen-more-icon { flex: none; color: var(--accent-2); font-size: var(--type-lg); }
-.gen-more p { margin: 0; color: var(--dim); font-size: var(--type-body); line-height: 1.5; }
 
 /* "Generated" pinned as its own collapsible card above the playlists table */
 .gen-grp { border: 1px solid var(--accent); margin-bottom: .9375rem; }

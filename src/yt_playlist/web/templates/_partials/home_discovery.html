@@ -18,7 +18,7 @@
   <div class="tile-grid" id="discovery-track-grid">
     {% for t in discovery_tracks %}
     {{ tile('track', t.thumbnail, t.title, t.artist,
-            "https://music.youtube.com/watch?v=" ~ t.video_id|urlencode, discovery_id=t.key, badge=false) }}
+            track_url(t), play="https://music.youtube.com/watch?v=" ~ t.video_id|urlencode, discovery_id=t.key, badge=false) }}
     {% endfor %}
   </div>
   {% endif %}

@@ -47,5 +47,7 @@
   {% else %}
   <p class="knob-origin" id="default-param-{{ p.name }}">Default {{ p.default_label }}</p>
   {% endif %}
+  {% if p.effective_note %}<p class="knob-origin album-effective-note">{{ p.effective_note }}</p>{% endif %}
+  {% if p.effective_reset %}<button type="button" class="btn-ghost" hx-post="/taste/reset-album-tuning" hx-swap="none">Clear temporary album adjustments</button>{% endif %}
 </div>
 {% endif %}

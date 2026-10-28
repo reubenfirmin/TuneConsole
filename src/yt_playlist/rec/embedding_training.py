@@ -29,12 +29,18 @@ class FittedVectors(NamedTuple):
 
 def build_vectors_from_baskets(baskets, dim=DIM, method="svd", weights=None) -> FittedVectors:
     check_stopping()
+    baskets = canonical_baskets(baskets)
     keys = sorted({k for b in baskets for k in b})
     if len(keys) < dim + MIN_VOCAB_MARGIN:
         return FittedVectors([], np.zeros((0, dim), dtype=np.float32))
     if method == "item2vec":
         return item2vec(baskets, keys, dim)
     return svd(baskets, keys, dim, weights)
+
+
+def canonical_baskets(baskets):
+    """Use the fingerprint's ordering while retaining repeated basket evidence."""
+    return sorted(sorted(set(basket)) for basket in baskets)
 
 
 def cooc_weights(plays):

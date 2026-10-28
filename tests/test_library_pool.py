@@ -85,8 +85,18 @@ def test_catalog_skeleton_click_ranks_once_preserves_genres_and_survives_restart
     assert 'data-title="Catalog song ' in client.get("/home/cards").text
     assert 'data-title="Catalog song ' in _client(store).get("/home/cards").text
     assert len(calls) == 1
-    # A new menu cannot reuse the preceding selection's cached pool.
-    assert 'data-title="Catalog song ' not in client.post("/home/refresh-cards").text
+    # Restart preparation can legitimately publish these songs in a new menu.
+    # The preceding job/cache must still be scoped to its original choice window.
+    from yt_playlist.rec.home_cards import _epoch
+    refreshed = client.post("/home/refresh-cards")
+    assert refreshed.status_code == 200
+    assert _epoch(store, 'cards') == 2
+    assert f'/home/library-pool/{job_id}' not in refreshed.text
+    assert library_pool.pick(store, 1000, {
+        'lane': 'explore', 'epoch': 2, 'include_genres': ['jazz', 'techno', 'trance'],
+        'avoid_genres': []}) == []
+    assert client.post('/home/library-pool', data=data).status_code == 400
+    assert len(calls) == 1
 
 
 def test_empty_and_failed_library_builds_stop_polling_and_offer_retry(store, monkeypatch):

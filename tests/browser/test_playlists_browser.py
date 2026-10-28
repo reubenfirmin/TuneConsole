@@ -284,16 +284,25 @@ def test_shift_selection_uses_clicked_occurrence_of_duplicate(recent_pl_app, pag
 
 @pytest.mark.parametrize("width", [1280, 390])
 def test_recent_and_generated_layout_and_promotion(recent_pl_app, page, width, tmp_path):
+    from datetime import datetime, timezone
     page.set_viewport_size({"width": width, "height": 900})
+    page.clock.set_fixed_time(datetime.fromtimestamp(2_000_000, tz=timezone.utc))
     page.emulate_media(reduced_motion="reduce")
     page.goto(f"{recent_pl_app}/playlists")
     page.wait_for_load_state("networkidle")
     recent, generated = page.locator(".playlist-new"), page.locator(".playlist-generated")
+    expect(recent.get_by_role('columnheader', name='Playlist', exact=True)).to_be_visible()
+    expect(recent.locator('.playlist-created').first).to_have_text('Created today')
+    if width > 1000:
+        expect(recent.get_by_role('columnheader', name='Last played', exact=True)).to_be_visible()
+        header = page.locator('.playlist-table-card thead th').first
+        assert header.evaluate('el => getComputedStyle(el).backgroundColor') == header.locator('xpath=following-sibling::th[1]').evaluate('el => getComputedStyle(el).backgroundColor')
     recent_box = recent.bounding_box()
     for section in [recent, page.locator(".playlist-table-card")]:
         box = section.get_by_role("checkbox").first.bounding_box()
         assert box["x"] >= 0 and box["x"] + box["width"] <= width
     page.screenshot(path=tmp_path / f"new-playlists-{width}.png", full_page=True)
+    page.screenshot(path=f'/tmp/tuneconsole-playlists-412-{width}.png', full_page=True)
     expect(recent.get_by_role("button", name="Promote to library", exact=True)).to_have_count(0)
     page.get_by_role("button", name="Generated playlists", exact=False).click()
     expect(recent).to_be_hidden()
@@ -323,6 +332,52 @@ def test_recent_and_generated_layout_and_promotion(recent_pl_app, page, width, t
 def test_no_recent_playlists_hides_the_section(live_pl_app, page):
     page.goto(f"{live_pl_app}/playlists")
     expect(page.get_by_role("region", name="New playlists")).to_be_hidden()
+
+
+@pytest.mark.parametrize('width', [1280, 390])
+def test_new_playlist_distinguishes_creation_from_its_own_listening(live_pl_data, page, width):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from yt_playlist.library import player_events
+
+    store, account = live_pl_data['store'], live_pl_data['identity']
+    now = 2_000_000
+    track = store.tracks.upsert_track('phase-song', 'Sombrero', 'Phase 09', None, 300)
+    playlist = store.playlists.upsert_playlist(account, 'PLphase09', 'Phase 09 - Sombrero (2021 Remaster)',
+                                              1, '', now, created_at=now - 2 * 86400)
+    store.playlists.set_playlist_tracks(playlist, [track])
+    store.history.record_history_plays(account, now - 120 * 86400,
+                                      [store.tracks.identity_key_for_video('phase-song')], source_timezone='UTC')
+    page.set_viewport_size({'width': width, 'height': 900})
+    page.clock.set_fixed_time(datetime.fromtimestamp(now, tz=timezone.utc))
+    page.goto(live_pl_data['base'] + '/playlists')
+    row = page.locator(f'#new-playlists tr[data-playlist-id="{playlist}"]')
+    expect(row.locator('.playlist-created')).to_have_text('Created 2d ago')
+    expect(row.locator('.pl-activity')).to_have_attribute('aria-label', '0 playlist listening sessions (partial listens count)')
+    if width > 720:
+        expect(row.locator('.lastcol')).to_have_text('No recorded listen')
+        assert row.locator('.lastcol').evaluate('''el => {
+            const text = document.createRange(); text.selectNodeContents(el);
+            return text.getBoundingClientRect().right <= el.getBoundingClientRect().right;
+        }''')
+    else:
+        expect(row.locator('.playlist-playback')).to_have_text('No recorded playlist listening')
+        assert row.locator('.playlist-playback').evaluate('el => el.scrollWidth <= el.clientWidth')
+    assert '4mo' not in row.inner_text()
+    page.screenshot(path=f'/tmp/tuneconsole-412-listening-{width}-unknown.png', full_page=True)
+    # A short partial listen changes recency, without requiring a completion.
+    for _ in range(2):
+        player_events.handle_player_event(SimpleNamespace(store=store), {
+            'kind': 'tick', 'videoId': 'phase-song', 'playlist': 'PLphase09',
+            'position': 12, 'duration': 300}, now - 5)
+    page.reload()
+    expect(row.locator('.playlist-created')).to_have_text('Created 2d ago')
+    expect(row.locator('.pl-activity')).to_have_attribute('aria-label', '1 playlist listening session (partial listens count)')
+    if width > 720:
+        expect(row.locator('.lastcol')).to_have_text('today')
+    else:
+        expect(row.locator('.playlist-playback')).to_have_text('Last listened today')
+    page.screenshot(path=f'/tmp/tuneconsole-412-listening-{width}-partial.png', full_page=True)
 
 
 def test_activity_normalization_is_linear_and_tracks_live_changes(recent_pl_app, page):

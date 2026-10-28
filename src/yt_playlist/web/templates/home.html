@@ -4,8 +4,13 @@
 {% block page_styles %}
 <link rel="stylesheet" href="/static/generating.css?v={{ asset_v }}">
 <link rel="stylesheet" href="/static/radio.css?v={{ asset_v }}">
+<link rel="stylesheet" href="/static/album-choices.css?v={{ asset_v }}">
+<script src="/static/generating.js?v={{ asset_v }}"></script>
+<link rel="stylesheet" href="/static/tv.css?v={{ asset_v }}" data-persistent>
+<script src="/static/tv.js?v={{ asset_v }}"></script>
 <script src="/static/radio-artwork.js?v={{ asset_v }}"></script>
 <script src="/static/radio.js?v={{ asset_v }}"></script>
+<script src="/static/album-choices.js?v={{ asset_v }}"></script>
 {% endblock %}
 {# Transient success toast (e.g. re-authed with auto-sync on, nothing for them to do). Mirrors the
    OOB error toast: Alpine auto-dismisses after 5s. Renders into base.html's #toasts container. #}
@@ -16,6 +21,9 @@
   <button type="button" class="toast-x" @click="show = false" aria-label="Dismiss">×</button>
 </div>
 {% endif %}{% endblock %}
+{% block persistent_content %}
+{% include "_partials/tv.html" %}
+{% endblock %}
 {% block body %}
 {% if flash %}
 <div class="notice ok banner" x-data="{ show: true }" x-show="show" x-cloak>
@@ -65,15 +73,17 @@
 
   {% if sync.last_synced_ago and not onboarding %}
   {% set spotify_result_waiting = spotify_library_job and spotify_library_job.status in ('done', 'error', 'preview') %}
-  {% set dash_default = 'notices' if spotify_result_waiting else ('start' if onboarding else 'directions') %}
+  {% set dash_default = 'notices' if spotify_result_waiting else ('start' if onboarding else home_default_panel|default('directions')) %}
   {% set has_notices = show_takeout_nag or actions or show_intro or show_lastfm_nudge or
       show_identities_nudge or show_backend_update or recap or spotify_library_job %}
   <div class="home-dashboard"
        :class="{'is-radio': panel === 'radio'}"
-       x-data="{ panel: location.hash.slice(1) || '{{ dash_default }}',
-                 go(p) { this.panel = p; history.replaceState(null, '', '#' + p); window.dispatchEvent(new Event('hashchange')); } }"
+       x-data="{ panel: location.hash.slice(1) || '{{ dash_default }}', albumTuningReady: false,
+                 go(p) { this.panel = p; history.replaceState(null, '', '#' + p); window.dispatchEvent(new Event('hashchange')); fetch('/home/format', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: new URLSearchParams({panel:p})}).catch(() => {}); } }"
        @hashchange.window="panel = location.hash.slice(1) || '{{ dash_default }}'"
+       @album-tuning-ready.window="albumTuningReady = true"
        x-init='$nextTick(() => { if (!$el.querySelector(`[data-dash="${panel}"]`)) go({{ dash_default|tojson }}) })'>
+    <div class="dash-navigation">
     <nav class="dash-nav" aria-label="Home areas" role="tablist"
          @keydown.right.prevent="$event.target.nextElementSibling?.focus()"
          @keydown.left.prevent="$event.target.previousElementSibling?.focus()">
@@ -89,6 +99,15 @@
               @click="go('radio')">On air <span class="dash-on-air-dot" x-show="radioPlaybackState" x-cloak
                 :class="{'is-paused': radioPlaybackState === 'paused'}"
                 aria-hidden="true"></span></button>
+      <button type="button" role="tab" :class="{ on: panel === 'album-choices' }" :aria-selected="panel === 'album-choices'"
+              @click="go('album-choices')">Long play</button>
+      <button type="button" role="tab" :class="{ on: panel === 'tv' }" :aria-selected="panel === 'tv'"
+              :aria-description="tvPlaying && panel !== 'tv' ? 'TV is playing' : null"
+              @click="go('tv')">TV<span class="dash-tv-dot" x-show="tvPlaying && panel !== 'tv'" x-cloak aria-hidden="true"></span></button>
+      {% if not onboarding %}
+      <button type="button" role="tab" :class="{ on: panel === 'discover' }" :aria-selected="panel === 'discover'"
+              @click="go('discover')">Discover</button>
+      {% endif %}
       {% if not onboarding and (rediscover_albums or rediscover) %}
       <button type="button" role="tab" :class="{ on: panel === 'rediscover' }" :aria-selected="panel === 'rediscover'"
               @click="go('rediscover')">Revisit</button>
@@ -96,17 +115,32 @@
       {% if not onboarding %}
       <button type="button" role="tab" :class="{ on: panel === 'recent' }" :aria-selected="panel === 'recent'"
               @click="go('recent')">Into recently</button>
-      <button type="button" role="tab" :class="{ on: panel === 'discover' }" :aria-selected="panel === 'discover'"
-              @click="go('discover')">Discover</button>
       {% endif %}
       {% if has_notices %}
       <button type="button" role="tab" :class="{ on: panel === 'notices' }" :aria-selected="panel === 'notices'"
               @click="go('notices')">Needs attention <span class="dash-attention-dot" aria-hidden="true"></span></button>
       {% endif %}
     </nav>
+    <button class="album-tune" type="button" x-show="panel === 'album-choices'" x-cloak
+            :disabled="!albumTuningReady"
+            @click="$dispatch('album-tuning-open')" aria-label="Adjust album parameters"
+            aria-haspopup="dialog" title="Adjust parameters">
+      <svg viewBox="0 0 32 24" aria-hidden="true"><path d="M3 5h5m6 0h15M3 12h16m6 0h4M3 19h8m6 0h12"/><circle cx="11" cy="5" r="3"/><circle cx="22" cy="12" r="3"/><circle cx="14" cy="19" r="3"/></svg>
+    </button>
+    <button class="album-tune" type="button" x-show="panel === 'tv'" x-cloak
+            @click="$dispatch('tv-tuning-open')" aria-label="Adjust TV parameters" aria-haspopup="dialog" title="Adjust parameters">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="10" width="26" height="19" rx="4"/><path d="m10 4 6 6 6-6M8 29v2m16-2v2"/><circle cx="9" cy="3" r="2"/><circle cx="23" cy="3" r="2"/><rect x="7" y="14" width="14" height="11" rx="2"/><path d="M25 15v2m0 4v2"/></svg>
+    </button>
+    </div>
 
     <section class="dash-panel dash-radio" data-dash="radio" role="tabpanel" x-show="panel === 'radio'" x-cloak>
       {% include "_partials/radio.html" %}
+    </section>
+    <section class="dash-panel" data-dash="album-choices" role="tabpanel" x-show="panel === 'album-choices'" x-cloak>
+      <div hx-get="/home/album-choices" hx-trigger="load" hx-swap="innerHTML"></div>
+    </section>
+    <section class="dash-panel dash-tv" data-dash="tv" role="tabpanel" x-show="panel === 'tv'" x-cloak>
+      <div class="tv-slot"></div>
     </section>
 
     {% if onboarding %}

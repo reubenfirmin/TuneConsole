@@ -5,10 +5,15 @@ Tables are created by numbered migrations. The interest signal (which artists ar
 scanning) is computed live from your library: play counts, playlist participation, saved albums.
 """
 import json
+from contextlib import contextmanager, ExitStack
+from yt_playlist.core import album_aliases
 
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 from yt_playlist.core import catalog, artists, albums
+from yt_playlist.core.activity import WorkBudgetExceeded, work_budget
+from yt_playlist.core.db_diagnostics import database_operation
 from yt_playlist.core.discovery_sources import retain as retain_source
+from yt_playlist.repos import discovery_cache, proposal_cache
 
 # Audio/content columns persisted per discovered track (mirrors the library `tracks` audio set).
 _DTRACK_AUDIO = ("bpm", "energy", "danceability", "mood_happy", "mood_sad", "mood_relaxed",
@@ -80,7 +85,7 @@ class DiscoveryRepo(Repo):
     @synchronized
     def delete_discovered_albums(self, browse_ids) -> int:
         """Delete the given pooled albums (rotation / bounds enforcement). Returns the count removed."""
-        ids = list(browse_ids)
+        ids = list({album_aliases.primary_id(self.conn, bid) for bid in browse_ids})
         if not ids:
             return 0
         self.conn.executemany("DELETE FROM discovered_albums WHERE browse_id=?", [(b,) for b in ids])
@@ -213,9 +218,12 @@ class DiscoveryRepo(Repo):
         """Check a bounded prepared selection without reading/scoring either full pool."""
         albums, artists_found = {}, {}
         if album_ids:
+            aliases = {bid: album_aliases.primary_id(self.conn, bid) for bid in album_ids}
             qs = ",".join("?" for _ in album_ids)
             albums = {r["browse_id"]: dict(r) for r in self.conn.execute(
-                f"SELECT browse_id,artist,title,genre,year,thumbnail FROM discovered_albums WHERE browse_id IN ({qs})", list(album_ids))}
+                f"SELECT browse_id,artist,title,genre,year,thumbnail FROM discovered_albums WHERE browse_id IN ({qs})", list(aliases.values()))}
+            albums = {bid: {**albums[preferred], 'browse_id': bid}
+                      for bid, preferred in aliases.items() if preferred in albums}
         if artist_ids:
             qs = ",".join("?" for _ in artist_ids)
             artists_found = {r["artist_id"]: dict(r) for r in self.conn.execute(
@@ -247,7 +255,8 @@ class DiscoveryRepo(Repo):
                 "ON CONFLICT(recording_id) DO NOTHING", (rid,entry_id,now))
             if source_browse_id:
                 retain_source(self.conn, rid, source_browse_id, video_id or None, now)
-                if self.conn.execute("SELECT 1 FROM discovered_albums WHERE browse_id=?", (source_browse_id,)).fetchone():
+                if self.conn.execute("SELECT 1 FROM discovered_albums WHERE browse_id=?",
+                                     (album_aliases.primary_id(self.conn, source_browse_id),)).fetchone():
                     albums.link(self.conn,entry_id,source_browse_id,source='discovery')
             self.conn.execute(
                 "UPDATE catalog_tracks SET genre=COALESCE(genre,?),mb_year=COALESCE(mb_year,?) WHERE id=?",
@@ -275,40 +284,63 @@ class DiscoveryRepo(Repo):
             + (" WHERE source_type=?" if source_type else ""),
             (source_type,) if source_type else ())}
 
-    @synchronized
     def remove_discovery_source(self, key, source_token, held_keys=()) -> bool:
         """Remove one contribution; only the last source can remove a candidate."""
-        with self.conn:
-            self.conn.execute(
-                "DELETE FROM discovery_sources WHERE source_token=? AND recording_id="
-                "(SELECT id FROM recordings WHERE identity_key=?)", (source_token, key))
-            if key in set(held_keys):
-                return False
-            row = self.conn.execute(
+        with (database_operation('DiscoveryRepo.remove_discovery_source'), work_budget(20),
+              self._cleanup_snapshot() as snapshot):
+            reader = snapshot.store
+            held = set(held_keys) | reader.rec_eligibility.generated_track_keys()
+            row = reader.conn.execute(
                 "SELECT d.recording_id FROM discovery_memberships d JOIN recordings r ON r.id=d.recording_id "
                 "WHERE r.identity_key=? AND NOT EXISTS(SELECT 1 FROM discovery_sources s "
-                "WHERE s.recording_id=d.recording_id)", (key,)).fetchone()
-            if row is None:
-                return False
-            self.conn.execute("DELETE FROM discovery_memberships WHERE recording_id=?", (row[0],))
-            self._prune_cached_tracks({key})
-            return True
+                "WHERE s.recording_id=d.recording_id AND s.source_token<>?)", (key, source_token)).fetchone()
+            remove = row is not None and key not in held
+            rows = proposal_cache.logical_rows(reader.conn, store=reader) if remove else []
+            snapshot.release_reader()
+            prepared = discovery_cache.prepare(rows, {key}) if remove else []
+            prepared = discovery_cache.stage(self._store.rec_proposals, prepared)
+
+            def publish():
+                # ReadSnapshot owns the transaction and already holds this reentrant
+                # lock. Keep shared connection ownership explicit at the SQL boundary.
+                with self._lock:
+                    self.conn.execute(
+                        "DELETE FROM discovery_sources WHERE source_token=? AND recording_id="
+                        "(SELECT id FROM recordings WHERE identity_key=?)", (source_token, key))
+                    if remove:
+                        self.conn.execute("DELETE FROM discovery_memberships WHERE recording_id=?", (row[0],))
+                        discovery_cache.publish(self.conn, prepared)
+
+            if not snapshot.publish(publish):
+                raise WorkBudgetExceeded('Discovery source removal inputs changed; retry cleanup')
+            return remove
+
+    @contextmanager
+    def _cleanup_snapshot(self):
+        if self._lock.held_by_current_thread:
+            raise RuntimeError('Discovery cleanup must prepare outside the serving lock')
+        # Capture table counters, without copying every historical per-record
+        # revision. Publication still guards only the tables actually consumed.
+        with ExitStack() as stack:
+            with self._lock:
+                dependencies = {(table, '') for table in self._store._snapshot_revisions.tables
+                                if table not in proposal_cache.TABLES}
+                dependencies.update(proposal_cache.dependencies(self.conn))
+                snapshot = stack.enter_context(self._store.read_snapshot(dependencies=dependencies))
+            yield snapshot
 
     def _prune_cached_tracks(self, gone_keys):
-        def prune(value):
-            if isinstance(value, list):
-                return [prune(item) for item in value if not isinstance(item, dict)
-                        or item.get('key', item.get('identity_key')) not in gone_keys]
-            if isinstance(value, dict):
-                return {key: prune(item) for key, item in value.items()}
-            return value
-
-        for row in self.conn.execute('SELECT surface,payload FROM rec_proposals').fetchall():
-            payload = json.loads(row['payload'])
-            cleaned = prune(payload)
-            if cleaned != payload:
-                self.conn.execute('UPDATE rec_proposals SET payload=? WHERE surface=?',
-                                  (json.dumps(cleaned), row['surface']))
+        """Prune caches independently; deletion callers prepare in their own snapshot."""
+        with (database_operation('DiscoveryRepo._prune_cached_tracks'), work_budget(20),
+              self._cleanup_snapshot() as snapshot):
+            reader = snapshot.store
+            rows = proposal_cache.logical_rows(reader.conn, store=reader)
+            reader.conn.execute('SELECT 1 FROM library_memberships LIMIT 1').fetchone()
+            reader.conn.execute('SELECT 1 FROM recordings LIMIT 1').fetchone()
+            snapshot.release_reader()
+            prepared = discovery_cache.prepare(rows, set(gone_keys))
+            prepared = discovery_cache.stage(self._store.rec_proposals, prepared)
+            return snapshot.publish(lambda: discovery_cache.publish(self.conn, prepared))
 
     @staticmethod
     def _dtrack_row(r) -> dict:
@@ -329,6 +361,8 @@ class DiscoveryRepo(Repo):
         if kind == 'artist':
             col = 'artist_id'
             ids = [artists.lookup(self.conn,i,exact=True) for i in ids]
+        elif kind == 'album':
+            ids = {album_aliases.primary_id(self.conn, bid) for bid in ids}
         self.conn.executemany(
             f"UPDATE {tbl} SET last_shown=?, first_shown=COALESCE(first_shown, ?), "
             f"offered_count=offered_count+1 WHERE {col}=?", [(now, now, i) for i in ids])
@@ -343,6 +377,8 @@ class DiscoveryRepo(Repo):
         if kind == 'artist':
             col = 'artist_id'
             ids = [artists.lookup(self.conn,i,exact=True) for i in ids]
+        elif kind == 'album':
+            ids = {album_aliases.primary_id(self.conn, bid) for bid in ids}
         shown = []
         for item_id in dict.fromkeys(ids):
             if not self.conn.execute(f"SELECT 1 FROM {tbl} WHERE {col}=?", (item_id,)).fetchone():
@@ -357,6 +393,14 @@ class DiscoveryRepo(Repo):
     @synchronized
     def get_discovered_tracks(self) -> list:
         return [self._dtrack_row(r) for r in self.conn.execute("SELECT * FROM discovered_tracks")]
+
+    @synchronized
+    def identity_keys_for_video(self, video_id) -> list[str]:
+        """Resolve discovery membership without decoding unrelated metadata or cached-only items."""
+        return [r[0] for r in self.conn.execute(
+            "SELECT DISTINCT r.identity_key FROM discovery_memberships d "
+            "JOIN catalog_entries e ON e.id=d.entry_id AND e.recording_id=d.recording_id "
+            "JOIN recordings r ON r.id=e.recording_id WHERE e.video_id=?", (video_id,))]
 
     @synchronized
     def discovered_tracks_by_keys(self, keys, *, available_only=False) -> dict:
@@ -454,47 +498,60 @@ class DiscoveryRepo(Repo):
                                       "found_at", "first_shown", "offered_count", "legacy_offered_count")},
                  "gc_at": self._gc_at(r["first_shown"], gc_days)} for r in rows]
 
-    @synchronized
     def gc_discovery_pool(self, now, gc_days, held_track_keys) -> dict:
         """Expire old suggestions. Unshown tracks age from discovery instead of living forever.
 
         Albums/artists retain their first-view lifetime. Tracks in live generated playlists are held.
         Purge removed tracks from materialized recommendations in the same transaction.
         """
-        cutoff = now - gc_days * 86400
-        out = {}
-        for key, tbl in (("albums", "discovered_albums"), ("artists", "discovered_artists")):
-            count = self.conn.execute(f'SELECT COUNT(*) FROM {tbl} WHERE first_shown IS NOT NULL AND first_shown < ?', (cutoff,)).fetchone()[0]
-            cur = self.conn.execute(
-                f"DELETE FROM {tbl} WHERE first_shown IS NOT NULL AND first_shown < ?", (cutoff,))
-            out[key] = count
-        held = set(held_track_keys or ())
-        rows = self.conn.execute(
-            "SELECT identity_key,recording_id FROM discovered_tracks "
-            "WHERE COALESCE(first_shown, found_at) < ? "
-            "AND NOT EXISTS(SELECT 1 FROM discovery_sources s WHERE "
-            "s.recording_id=discovered_tracks.recording_id AND s.last_found_at>=?)",
-            (cutoff,cutoff)).fetchall()
-        gone = [r["identity_key"] for r in rows if r["identity_key"] not in held]
-        if gone:
-            # Keep successful album-fetch markers after expiry, so the next discovery tick cannot
-            # immediately refill an expired album. These are fetch history, never queue entries.
+        with (database_operation('DiscoveryRepo.gc_discovery_pool'), work_budget(20),
+              self._cleanup_snapshot() as snapshot):
+            reader = snapshot.store
+            cutoff = now - gc_days * 86400
+            tables = (("albums", "discovered_albums"), ("artists", "discovered_artists"))
+            out = {key: reader.conn.execute(
+                f'SELECT COUNT(*) FROM {tbl} WHERE first_shown IS NOT NULL AND first_shown < ?',
+                (cutoff,)).fetchone()[0] for key, tbl in tables}
+            held = set(held_track_keys or ()) | reader.rec_eligibility.generated_track_keys()
+            rows = reader.conn.execute(
+                "SELECT identity_key,recording_id FROM discovered_tracks "
+                "WHERE COALESCE(first_shown, found_at) < ? "
+                "AND NOT EXISTS(SELECT 1 FROM discovery_sources s WHERE "
+                "s.recording_id=discovered_tracks.recording_id AND s.last_found_at>=?)",
+                (cutoff, cutoff)).fetchall()
+            gone = {r['identity_key'] for r in rows if r['identity_key'] not in held}
             source_tokens = {s[0] for r in rows if r['identity_key'] in gone
-                             for s in self.conn.execute(
+                             for s in reader.conn.execute(
                                  'SELECT source_token FROM discovery_sources WHERE recording_id=?',
                                  (r['recording_id'],))}
-            self.conn.executemany("INSERT OR IGNORE INTO settings(key,value) VALUES (?, '1')",
-                                  [("discovery_tracks_fetched:" + token,) for token in source_tokens])
-            self.conn.executemany("DELETE FROM discovered_tracks WHERE identity_key=?", [(k,) for k in gone])
-            self.conn.executemany("DELETE FROM settings WHERE key=?",
-                                  [("enrich_attempts:" + k,) for k in gone
-                                   if not self.conn.execute("SELECT 1 FROM tracks WHERE identity_key=?", (k,)).fetchone()])
-            self._prune_cached_tracks(set(gone))
-        out["tracks"] = len(gone)
-        self.conn.execute("DELETE FROM discovery_visible_impressions WHERE shown_at < ?",
-                          (now - 90 * 86400,))
-        self.conn.commit()
-        return out
+            attempts = [('enrich_attempts:' + key,) for key in gone if not reader.conn.execute(
+                'SELECT 1 FROM tracks WHERE identity_key=?', (key,)).fetchone()]
+            cached = proposal_cache.logical_rows(reader.conn, store=reader) if gone else []
+            snapshot.release_reader()
+            prepared = discovery_cache.prepare(cached, gone) if gone else []
+            prepared = discovery_cache.stage(self._store.rec_proposals, prepared)
+
+            def publish():
+                # Only prepared writes run here; the snapshot still owns the
+                # revision check, transaction, commit and subsequent checkpoint.
+                with self._lock:
+                    for _key, tbl in tables:
+                        self.conn.execute(f'DELETE FROM {tbl} WHERE first_shown IS NOT NULL AND first_shown < ?',
+                                          (cutoff,))
+                    if gone:
+                        # Fetch history prevents the next scan from refilling expired albums.
+                        self.conn.executemany("INSERT OR IGNORE INTO settings(key,value) VALUES (?, '1')",
+                                              [('discovery_tracks_fetched:' + token,) for token in source_tokens])
+                        self.conn.executemany('DELETE FROM discovered_tracks WHERE identity_key=?',
+                                              [(key,) for key in gone])
+                        self.conn.executemany('DELETE FROM settings WHERE key=?', attempts)
+                        discovery_cache.publish(self.conn, prepared)
+                    self.conn.execute('DELETE FROM discovery_visible_impressions WHERE shown_at < ?',
+                                      (now - 90 * 86400,))
+
+            if not snapshot.publish(publish):
+                raise WorkBudgetExceeded('Discovery pool cleanup inputs changed; retry cleanup')
+            return {**out, 'tracks': len(gone)}
 
     def mark_shown(self, kind, ids, now) -> None:
         """Back-compat alias for mark_offered: stamp a surfacing (last_shown + first_shown + offered_count).

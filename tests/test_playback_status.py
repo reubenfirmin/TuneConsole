@@ -32,7 +32,8 @@ function row(vid) {
 let rows = [row('one'), row('two')];
 document.readyState = 'loading';
 document.body = new EventTarget();
-document.getElementById = id => id === 'home' && homePage ? {} : null;
+const homeElement = {closest: () => null, querySelector: () => null};
+document.getElementById = id => id === 'home' && homePage ? homeElement : null;
 document.querySelectorAll = selector => selector === 'tr[data-vid]' ? rows : [];
 document.querySelector = selector => selector === 'tr[data-vid]' ? rows[0] :
   rows.find(r => selector === 'tr[data-vid="' + r.vid + '"]') || null;
@@ -70,6 +71,7 @@ const first = mountDock();
 let home;
 if (homePage) {
   home = vm.runInContext('homeStatus()', context);
+  home.$el = homeElement;
   window.addEventListener('bridge-status', e => home.applyBridgeStatus(e.detail));
   home.init(); home.init();
 }
@@ -151,7 +153,21 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(count('/bridge/status'), before + 2);
   assert.equal(replacement.nowPlaying.video_id, 'two');
   assert(rows[1].classList.contains('now-playing'));
+  // A visible tab gets fresh song identity immediately, even if background
+  // timers have been throttled. Hidden events do not add another status poll.
+  document.hidden = true;
+  const hiddenCount = count('/bridge/status');
+  document.dispatchEvent(new Event('visibilitychange')); await flush();
+  assert.equal(count('/bridge/status'), hiddenCount);
+  response = () => Promise.resolve({ok: true, json: async () => snapshot('one')});
+  document.hidden = false;
+  document.dispatchEvent(new Event('visibilitychange')); await flush();
+  assert.equal(count('/bridge/status'), hiddenCount + 1);
+  assert.equal(replacement.nowPlaying.video_id, 'one');
+  assert(rows[0].classList.contains('now-playing'));
   window.playbackStatus.stop();
+  document.dispatchEvent(new Event('visibilitychange')); await flush();
+  assert.equal(count('/bridge/status'), hiddenCount + 1, 'a suspended document stays stopped');
   home?.destroy();
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """

@@ -168,14 +168,40 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
     }
   }
 
-  async function playPause() {
-    const tab = await pickTab();
-    if (!tab) return;
-    try { await chrome.tabs.sendMessage(tab.id, {type: "playpause"}); }
+  async function playPause(frame = {}) {
+    // A retained paused player must never fall through to an unrelated browsing tab.
+    const tab = frame.resumeOnly ? (await musicTabs.list()).find(t => t.id === playbackTabId) : await pickTab();
+    if (!tab) {
+      if (frame.resumeOnly) send({type: "player-closed"});
+      return {ok: false, error: "No music player is available"};
+    }
+    // A manual pause must win over startup recovery, including an in-flight nudge.
+    if (frame.action !== "play" && rescue?.tabId === tab.id &&
+        (!frame.videoId || !rescue.videoId || frame.videoId === rescue.videoId)) cancelRescue();
+    const confirmed = Number.isSafeInteger(frame.id) && frame.id > 0;
+    const guarded = confirmed || frame.resumeOnly || frame.action;
+    if (guarded) {
+      const minimum = confirmed ? 14 : 9;
+      let receiver = await sensors.ping(tab.id, false);
+      if (!(receiver.reply?.receiverRevision >= minimum)) {
+        await sensors.inject(tab.id);
+        receiver = await sensors.ping(tab.id, false);
+      }
+      if (!(receiver.reply?.receiverRevision >= minimum))
+        return {ok: false, error: "Reload YouTube Music to update its TuneConsole controls"};
+    }
+    const message = {type: guarded ? "player-control" : "playpause"};
+    if (frame.action) message.action = frame.action;
+    if (confirmed) Object.assign(message, {confirm: true, videoId: frame.videoId});
+    if (frame.resumeOnly) Object.assign(message, {resumeOnly: true, videoId: frame.videoId});
+    const deliver = async () => await chrome.tabs.sendMessage(tab.id, message) ||
+      {ok: false, error: "Playback was not confirmed. Check YouTube Music before trying again."};
+    try { return await deliver(); }
     catch (e) {
-      if (!isMissingReceiver(e)) return;
+      if (!isMissingReceiver(e)) return {ok: false, error: "Playback was not confirmed. Check YouTube Music before trying again."};
       await sensors.inject(tab.id);
-      try { await chrome.tabs.sendMessage(tab.id, {type: "playpause"}); } catch (e2) {}
+      try { return await deliver(); }
+      catch (e2) { return {ok: false, error: "The YouTube Music player is unavailable"}; }
     }
   }
 
@@ -189,7 +215,29 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
     }
   }
 
+  async function pauseForTv() {
+    // Cancel a pending playback rescue before it can resume audio behind TV.
+    cancelRescue();
+    return musicTabs.coordinate(async () => {
+      for (const tab of await musicTabs.list()) {
+        let receiver = await sensors.ping(tab.id, false);
+        if (!(receiver.reply?.receiverRevision >= 11)) {
+          await sensors.inject(tab.id);
+          receiver = await sensors.ping(tab.id, false);
+        }
+        if (!(receiver.reply?.receiverRevision >= 11))
+          return {ok: false, error: 'Reload the TuneConsole browser extension'};
+        const reply = await chrome.tabs.sendMessage(tab.id, {type: 'pause-for-tv'});
+        if (!reply?.ok || reply.paused !== true) return {ok: false, error: 'Audio pause was not confirmed'};
+        playingTabs.delete(tab.id);
+      }
+      return {ok: true, paused: true};
+    });
+  }
+
   async function relayMessage(msg, sender) {
+    if (msg.type === 'pevent' && ['rate', 'playlist_edit', 'feedback', 'subscription', 'share_intent'].includes(msg.kind)
+        && msg.brandKnown !== true) return;
     const srcTabId = sender && sender.tab && sender.tab.id;
     if ((msg.type === "play" || msg.type === "now-heartbeat") && srcTabId != null) {
       msg = Object.assign({}, msg, {muted: !!msg.muted || msg.volume === 0});
@@ -205,7 +253,7 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
         muted: !!msg.muted || msg.volume === 0});
       const pending = pendingPlays.get(srcTabId);
       if (msg.type === "now-heartbeat" && !msg.paused && !msg.muted && !owner.mutedInfo?.muted &&
-          msg.brandKnown && msg.metadataVerified !== false && pending &&
+          msg.brandKnown && (msg.metadataVerified !== false || msg.videoVerified === true) && pending &&
           msg.videoId === pending.videoId && msg.brandId === pending.brandId) {
         msg = Object.assign({}, pending, msg, {type: "play"});
       }
@@ -218,23 +266,31 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
         msg = Object.assign({}, msg, {type: "now-heartbeat"});
       }
     }
-    if (msg.type === "pevent" && ["state", "bye"].includes(msg.kind)) {
+    if (msg.type === "pevent" && ["state", "tick", "bye"].includes(msg.kind)) {
       const owner = await pickTab();
       if (owner) playbackTabId = owner.id;
-      if (playbackTabId != null && srcTabId !== playbackTabId) return;
+      if (!owner || srcTabId !== playbackTabId) return;
+      // Native events can arrive before the matching now-playing heartbeat.
+      // Use both their sampled media state and the last known state for legacy
+      // sensors. A muted sole tab can still be selected for controls.
+      if ((msg.kind === "tick" || (msg.kind === "state" && msg.state === "playing")) &&
+          (owner.mutedInfo?.muted || mediaMutedTabs.has(srcTabId) ||
+           msg.muted || msg.volume === 0 || msg.paused)) return;
     }
     if (msg.type === "play") {
       const delivered = send({type: "play", title: msg.title, artist: msg.artist,
         metadataVerified: msg.metadataVerified !== false,
+        videoVerified: msg.videoVerified === true,
         thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
         playlist: msg.playlist || "", albumBrowseId: msg.albumBrowseId || "",
         position: msg.position, duration: msg.duration,
-        brandId: msg.brandId || "", paused: !!msg.paused, muted: !!msg.muted,
+        brandId: msg.brandId || "", brandKnown: msg.brandKnown, paused: !!msg.paused, muted: !!msg.muted,
         tabMuted: !!msg.tabMuted, timeZone: msg.timeZone});
       if (delivered) pendingPlays.delete(srcTabId);
     } else if (msg.type === "now-heartbeat") {
       send({type: "now-heartbeat", title: msg.title, artist: msg.artist,
         metadataVerified: msg.metadataVerified !== false,
+        videoVerified: msg.videoVerified === true,
         thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
         playlist: msg.playlist || "", albumBrowseId: msg.albumBrowseId || "", paused: !!msg.paused,
         position: msg.position, duration: msg.duration,
@@ -253,10 +309,13 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
     playingTabs.delete(tabId);
     mediaMutedTabs.delete(tabId);
     pendingPlays.delete(tabId);
-    if (playbackTabId === tabId) playbackTabId = null;
+    if (playbackTabId === tabId) {
+      playbackTabId = null;
+      relay = relay.then(() => send({type: "player-closed"}));
+    }
     if (rescue && rescue.tabId === tabId) cancelRescue();
   }
 
-  return {pickTab, navigate, rate: ratings.rate, next, playPause, refreshView, receive, removed, cancelRescue,
+  return {pickTab, navigate, rate: ratings.rate, next, playPause, pauseForTv, refreshView, receive, removed, cancelRescue,
     get drained() { return relay; }};
 }

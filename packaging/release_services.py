@@ -1,6 +1,7 @@
 """Focused publication prerequisites and public endpoint verification; no application suite."""
 import argparse
 import base64
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -17,6 +18,10 @@ from rehearse_publisher import rehearse
 from flatpak.verify_metadata import verify_cache
 
 
+# Cloudflare rejects urllib's default user agent even for public repository files.
+PUBLIC_USER_AGENT = "TuneConsole-release-verifier/1 (+https://github.com/reubenfirmin/TuneConsole)"
+
+
 def report(message):
     print(message, flush=True)
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
@@ -24,24 +29,42 @@ def report(message):
             stream.write(message + "\n\n")
 
 
-def registry_open(request, operation):
+class RegistryPreflightError(RuntimeError):
+    """Only operation names and numeric statuses may reach the CI log."""
+
+    def __init__(self, operation, status=None):
+        self.operation = operation
+        self.status = status
+        super().__init__(f"GHCR {operation}" + (f" (HTTP {status})" if status is not None else ""))
+
+
+def registry_response(request, operation, expected_status):
     try:
-        return urllib.request.urlopen(request, timeout=30)
+        response = urllib.request.urlopen(request, timeout=30)
     except urllib.error.HTTPError as exc:
-        # Upload locations can contain credentials; expose only the named operation and status.
-        report(f"FAILED: GHCR {operation} (HTTP {exc.code}).")
-        raise
+        raise RegistryPreflightError(operation, exc.code) from None
+    except (urllib.error.URLError, TimeoutError):
+        raise RegistryPreflightError(operation) from None
+    if response.status != expected_status:
+        status = response.status
+        response.close()
+        raise RegistryPreflightError(operation, status)
+    report(f"GHCR {operation}: HTTP {response.status}")
+    return response
 
 
-def registry_upload_location(request, response):
+def registry_upload_location(request, response, name):
     location = urllib.parse.urljoin(request.full_url, response.headers["Location"])
-    if urllib.parse.urlparse(location)[:2] != ("https", "ghcr.io"):
-        raise ValueError("GHCR returned an unexpected upload origin")
+    target = urllib.parse.urlsplit(location)
+    upload_prefix = f"/v2/{name}/blobs/uploads/"
+    if (target.scheme != "https" or target.netloc != "ghcr.io" or target.fragment
+            or not target.path.startswith(upload_prefix) or target.path == upload_prefix):
+        raise RegistryPreflightError("upload location validation")
     return location
 
 
 def registry_permissions(image):
-    """Prove push permission by uploading one fixed, untagged two-byte blob."""
+    """Prove push permission by completing one fixed, untagged two-byte blob."""
     name = image.removeprefix("ghcr.io/")
     if name == image or not name or "@" in name or ":" in name:
         raise ValueError("Expected a GHCR repository without tag or digest")
@@ -50,32 +73,27 @@ def registry_permissions(image):
     query = urllib.parse.urlencode({"service": "ghcr.io", "scope": f"repository:{name}:pull,push"})
     request = urllib.request.Request("https://ghcr.io/token?" + query,
                                      headers={"Authorization": "Basic " + credentials})
-    with registry_open(request, "token request") as response:
+    with registry_response(request, "token request", 200) as response:
         token = json.load(response)["token"]
     headers = {"Authorization": "Bearer " + token, "Content-Type": "application/octet-stream"}
     request = urllib.request.Request(f"https://ghcr.io/v2/{name}/blobs/uploads/",
                                      method="POST", data=b"", headers=headers)
-    with registry_open(request, "upload initiation") as response:
-        if response.status != 202:
-            raise ValueError("GHCR did not accept a disposable upload")
-        location = registry_upload_location(request, response)
-    # Use the OCI empty JSON payload: zero-byte blobs are not portable. Transfer
-    # it with PATCH before completing the session; GHCR returned 404 when we
-    # attempted to complete an upload without transferring any content first.
+    with registry_response(request, "upload initiation", 202) as response:
+        location = registry_upload_location(request, response, name)
+    # Use the proven POST/PATCH/PUT probe. Transfer the fixed OCI empty JSON
+    # payload before finalizing; completing an empty session without first
+    # transferring content returned 404 in the hosted investigation.
     blob = b"{}"
     request = urllib.request.Request(location, method="PATCH", data=blob,
                                      headers={**headers, "Content-Range": "0-1"})
-    with registry_open(request, "blob transfer") as response:
-        if response.status != 202:
-            raise ValueError("GHCR did not accept the blob transfer")
-        # Registries can replace the session URL and its state after each chunk.
-        location = registry_upload_location(request, response)
+    with registry_response(request, "blob transfer", 202) as response:
+        location = registry_upload_location(request, response, name)
+    # Preserve the registry's updated opaque session state exactly.
     digest = urllib.parse.urlencode({"digest": "sha256:" + hashlib.sha256(blob).hexdigest()})
     location += ("&" if "?" in location else "?") + digest
     request = urllib.request.Request(location, method="PUT", data=b"", headers=headers)
-    with registry_open(request, "upload completion") as response:
-        if response.status != 201:
-            raise ValueError("GHCR did not complete the blob upload")
+    with registry_response(request, "upload completion", 201):
+        pass
 
 
 def pages_permissions(backend):
@@ -98,6 +116,9 @@ def preflight(backend, tag, revision, rehearsal_tag, *, stable):
     ):
         try:
             check()
+        except RegistryPreflightError as exc:
+            report(f"FAILED: {service}: {exc}. Check this service's credentials and permissions.")
+            failures.append(service)
         except Exception as exc:
             # Subprocess and HTTP exceptions can contain auth-bearing response
             # URLs or headers. Report the service and type without dumping them.
@@ -117,18 +138,41 @@ def preflight(backend, tag, revision, rehearsal_tag, *, stable):
         else:
             report("Verified: recoverable stable-channel baseline (rechecked under the production lock before promotion)")
     if failures:
-        raise RuntimeError("Publication preflight failed: " + ", ".join(failures))
+        raise RuntimeError("Publication preflight failed: " + ", ".join(failures)) from None
+
+
+class PublicVerificationError(RuntimeError):
+    """Identify the anonymous operation without logging credentials or response bodies."""
+
+    def __init__(self, url, status=None):
+        target = urllib.parse.urlsplit(url)
+        safe_url = urllib.parse.urlunsplit(
+            (target.scheme, target.netloc.rsplit("@", 1)[-1], target.path, "", ""))
+        super().__init__(f"Public download GET {safe_url}" +
+                         (f" (HTTP {status})" if status is not None else " failed"))
+
+
+@contextmanager
+def public_response(url):
+    # Deliberately anonymous: a release must work for users without CI credentials.
+    request = urllib.request.Request(url, headers={"User-Agent": PUBLIC_USER_AGENT})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            yield response
+    except urllib.error.HTTPError as exc:
+        raise PublicVerificationError(url, exc.code) from None
+    except (urllib.error.URLError, TimeoutError):
+        raise PublicVerificationError(url) from None
 
 
 def public_bytes(url):
-    # Deliberately anonymous: a release must work for users without CI credentials.
-    with urllib.request.urlopen(url, timeout=30) as response:
+    with public_response(url) as response:
         return response.read()
 
 
 def public_download(url, digest):
     checksum = hashlib.sha256()
-    with urllib.request.urlopen(url, timeout=30) as response:
+    with public_response(url) as response:
         while block := response.read(1024 * 1024):
             checksum.update(block)
     if checksum.hexdigest() != digest:

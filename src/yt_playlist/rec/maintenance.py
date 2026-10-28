@@ -4,47 +4,7 @@ import time
 from typing import Callable
 
 from yt_playlist.core.activity import WorkClosing
-
-# These are source tables, never recommendation checkpoints or player telemetry.
-# Polling reads connection-local revision counters, not the library itself.
-CATALOG = {'recordings', 'youtube_items', 'catalog_entries', 'library_memberships',
-           'entry_field_choices', 'track_artists', 'artists', 'artist_redirects'}
-PLAYLISTS = {'playlists', 'playlist_items', 'unresolved_playlist_items', 'playlist_scopes',
-             'playlist_group', 'playlist_provenance', 'hidden_playlists', 'identities'}
-SOURCES = {
-    'trends': CATALOG | PLAYLISTS | {'play_events', 'play_event_calendar',
-        'listening_observations', 'rec_feedback', 'album_tracks', 'albums',
-        'album_library_memberships', 'album_provider_ids'},
-    'cleanup': CATALOG | PLAYLISTS | {'cleanup_ignored', 'suppressed_overlaps',
-        'overlap_ignored', 'overlap_kept', 'ignored_merges'},
-}
-SURFACES = {'trends': 'trend_rollups', 'cleanup': 'cleanup'}
-DEPENDENCIES = {kind: {(table, '') for table in tables} for kind, tables in SOURCES.items()}
-DEPENDENCIES['trends'].add(('settings', 'key:takeout_imported_at'))
-
-
-def inputs(store, kind, now):
-    return input_fingerprints(store, (kind,), now)[kind]
-
-
-def input_fingerprints(store, kinds, now):
-    """Capture just the summaries' dependencies once under the serving lock."""
-    dependencies = set().union(*(DEPENDENCIES[kind] for kind in kinds))
-    with store._lock:
-        revisions = store._snapshot_revisions.capture(dependencies)
-        # Importers can write through another connection. Conservatively refresh
-        # on their commits; ordinary playback writes use this connection and only
-        # relevant source changes invalidate these jobs.
-        external = store.conn.execute('PRAGMA data_version').fetchone()[0]
-        placeholders = ','.join('?' for _ in kinds)
-        present = {row[0] for row in store.conn.execute(
-            f'SELECT surface FROM rec_proposals WHERE surface IN ({placeholders})',
-            tuple(SURFACES[kind] for kind in kinds))}
-    return {kind: (
-        tuple(sorted((table, revision) for (table, key), revision in revisions.items()
-                     if (table, key) in DEPENDENCIES[kind])),
-        external, int(now // 86400) if kind == 'trends' else None, SURFACES[kind] in present,
-    ) for kind in kinds}
+from yt_playlist.rec.summary_inputs import DEPENDENCIES, SURFACES, input_fingerprints, inputs
 
 
 class Projections:
@@ -57,12 +17,27 @@ class Projections:
         self.active = set()
         self.retry_at = {}
         self.failures = {}
+        self.requested = set()
 
-    def poll(self):
+    def request(self, kind):
+        with self.lock:
+            self.requested.add(kind)
+        self.poll(kinds=(kind,))
+
+    def failed(self, kind):
+        with self.lock:
+            return bool(self.failures.get(kind))
+
+    def poll(self, *, kinds=None):
         if not self.accepting():
             return
         pending = {}
-        for kind, fingerprint in input_fingerprints(self.store, SURFACES, self.now_fn()).items():
+        from yt_playlist.core.features import listening_charts_enabled
+        if kinds is None:
+            kinds = tuple(kind for kind in SURFACES
+                          if (kind != 'analytics' or listening_charts_enabled())
+                          and (kind != 'model_health' or kind in self.requested))
+        for kind, fingerprint in input_fingerprints(self.store, kinds, self.now_fn()).items():
             with self.lock:
                 if (kind not in self.active and fingerprint != self.completed.get(kind)
                         and time.monotonic() >= self.retry_at.get(kind, 0)):
@@ -74,11 +49,12 @@ class Projections:
                     self.active.difference_update(pending)
 
     def run(self, kind):
-        from yt_playlist.rec import actions, trend_rollups
+        from yt_playlist.rec import actions, listening_analytics, model_health, trend_rollups
         result = None
         try:
             fingerprint = inputs(self.store, kind, self.now_fn())
-            target = trend_rollups.build if kind == 'trends' else actions.refresh_cleanup
+            target = {'trends': trend_rollups.build, 'cleanup': actions.refresh_cleanup,
+                      'analytics': listening_analytics.build, 'model_health': model_health.prepare}[kind]
             result = self.execute(kind + ' summary', target, self.store, self.now_fn())
             return result
         except WorkClosing:
@@ -98,4 +74,4 @@ class Projections:
                     # concurrent edit cannot be marked clean accidentally.
                     self.completed[kind] = (*fingerprint[:-1], True)
                     self.failures[kind] = 0
-                    self.retry_at[kind] = time.monotonic() + 30
+                    self.retry_at[kind] = time.monotonic() + (120 if kind == 'analytics' else 30)

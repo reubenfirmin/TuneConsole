@@ -30,7 +30,8 @@ def build(ctx) -> APIRouter:
                 for b in story["beats"]
             ]}
         response = templates.TemplateResponse(request, "story_reel.html", {"story": story})
-        store.settings.set_setting("recap_viewed_month", month)
+        if not getattr(store, 'activity_paused', False):
+            store.settings.set_setting("recap_viewed_month", month)
         return response
 
     return router

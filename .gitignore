@@ -17,7 +17,13 @@ docs/
 *.db*
 backups/
 logs/
+.env.local
+# Personal listening models and evaluation reports.
+experiments/audio_lab/local/
 ppr_shadow_log.jsonl
+
+# Local signing notes.
+/packaging/flatpak/SIGNING.local.md
 
 # Flatpak build output (OSTree repo, bundle repo, builder scratch) — CI regenerates these; never track.
 packaging/flatpak/repo/

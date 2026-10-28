@@ -42,7 +42,7 @@ manifest.write_text(json.dumps(m, indent=2) + "\n")
 
 PY
 
-( cd "$STAGE" && zip -rq "$ZIP_ABS" . -x ".*" -x "*/.*" -x "*.map" )
+( cd "$STAGE" && zip -rq "$ZIP_ABS" . -x ".*" -x "*/.*" -x "*.map" -x "audio_model/*" )
 
 echo "Built $ZIP"
 echo "Development key stripped for the Web Store."

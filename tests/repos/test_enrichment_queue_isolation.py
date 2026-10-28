@@ -66,11 +66,18 @@ def test_snapshot_candidates_are_revalidated_before_job_admission(database, monk
         database.enrichment_state.reconcile_provider_configuration({
             "deezer": {"fingerprint": "refresh", "status": "available"}})
     original = database.read_snapshot
+    changed = False
 
     @contextmanager
     def changed_reader():
+        nonlocal changed
         with original() as snapshot:
             yield snapshot
+            if changed:
+                return
+            # One concurrent change, including when reconciliation opens its
+            # own coverage snapshot while this injection is being applied.
+            changed = True
             if change in ("completed", "pass_changed"):
                 database.enrichment_queue.mark_recordings_enriched([first["recording_id"]], 1001)
                 if change == "pass_changed":
@@ -108,3 +115,86 @@ def test_snapshot_reader_retains_its_own_pinned_queue(database):
         database.enrichment_queue.mark_recordings_enriched([first["recording_id"]], 1000)
         assert [t["title"] for t in snapshot.store.enrichment_queue.next_enrich_batch(2)] == ["First", "Second"]
     assert [t["title"] for t in database.enrichment_queue.next_enrich_batch(2)] == ["Second"]
+
+
+@pytest.mark.parametrize('operation', ['coverage', 'remaining', 'stats', 'resweep', 'reconcile'])
+def test_enrichment_scans_allow_foreground_reads_and_writes(database, monkeypatch, operation):
+    database.enrichment_queue.mark_enriched([1, 2], 10)
+    database.enrichment_state.record_enrichment_attempt('first|artist', 'musicbrainz', {}, now=10)
+    entered, release = threading.Event(), threading.Event()
+    boundary = 'read_snapshot' if operation == 'resweep' else 'read_view'
+    original = getattr(database, boundary)
+
+    @contextmanager
+    def paused_reader():
+        with original() as view:
+            reader = view.store if boundary == 'read_snapshot' else view
+            assert reader.conn is not database.conn
+
+            def progress():
+                entered.set()
+                assert release.wait(5), 'Serving request was blocked by an enrichment scan'
+                return 0
+
+            reader.conn.set_progress_handler(progress, 1)
+            yield view
+
+    monkeypatch.setattr(database, boundary, paused_reader)
+    operations = {
+        'coverage': database.enrichment_reports.coverage_stats,
+        'remaining': database.enrichment_reports.queue_remaining,
+        'stats': database.enrichment_reports.queue_stats,
+        'resweep': lambda: database.enrichment_queue.resweep_batch(2, 500, providers=['deezer'], now=1000),
+        'reconcile': lambda: database.enrichment_state.reconcile_provider_configuration({
+            'deezer': {'fingerprint': 'original', 'status': 'available'}}),
+    }
+    with ThreadPoolExecutor(2) as pool:
+        work = pool.submit(operations[operation])
+        try:
+            assert entered.wait(5)
+
+            def foreground():
+                database.settings.set_setting('interactive', 'saved')
+                return database.settings.get_setting('interactive')
+
+            assert pool.submit(foreground).result(2) == 'saved'
+        finally:
+            release.set()
+        work.result(5)
+    assert not database.conn.in_transaction
+
+
+@pytest.mark.parametrize('change', ['pass', 'retry', 'cooldown', 'removed', 'provider', 'pending', 'metadata'])
+def test_resweep_rechecks_current_inputs_after_snapshot_selection(database, monkeypatch, change):
+    database.enrichment_queue.mark_enriched([1, 2], 10)
+    first = dict(database.conn.execute("SELECT * FROM catalog_tracks WHERE video_id='one'").fetchone())
+    original = database.read_snapshot
+
+    @contextmanager
+    def changed_reader():
+        with original() as snapshot:
+            yield snapshot
+        if change == 'pass':
+            database.enrichment_queue.mark_recordings_enriched([first['recording_id']], 1001)
+        elif change in ('retry', 'cooldown'):
+            database.enrichment_state.record_enrichment_attempt(first['identity_key'], 'deezer', {},
+                retry=True, cooldown=change == 'cooldown', now=1000)
+        else:
+            with database.conn:
+                if change == 'removed':
+                    database.conn.execute('DELETE FROM library_memberships WHERE entry_id=?', (first['id'],))
+                elif change == 'provider':
+                    database.conn.execute("UPDATE enrichment_provider_config SET fingerprint='changed'")
+                elif change == 'pending':
+                    database.conn.execute("INSERT INTO enrichment_provider_jobs VALUES (?,'deezer')",
+                                          (first['recording_id'],))
+                elif change == 'metadata':
+                    database.conn.execute('UPDATE recordings SET genre=?,bpm=?,energy=?,danceability=? '
+                        'WHERE id=?', ('House', 120, .5, .5, first['recording_id']))
+                    database.conn.execute("UPDATE youtube_items SET mb_year='2000' WHERE video_id=?",
+                                          (first['video_id'],))
+
+    monkeypatch.setattr(database, 'read_snapshot', changed_reader)
+    result = database.enrichment_queue.resweep_batch(2, 500, providers=['deezer'], now=1000)
+    expected = [] if change in ('cooldown', 'provider') else ['Second']
+    assert [t['title'] for t in result] == expected

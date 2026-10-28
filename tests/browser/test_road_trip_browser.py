@@ -122,6 +122,108 @@ def test_recipe_loader_covers_lookup_save_and_failure(live_road_trip_app, page, 
     expect(page.locator('#road-trip-body').locator('..')).to_have_js_property('inert', False)
 
 
+@pytest.fixture
+def paused_road_trip_builds(monkeypatch):
+    workers = []
+    monkeypatch.setattr(road_trip_route, '_spawn', workers.append)
+    yield
+    for worker in workers:
+        worker.release()
+
+
+@pytest.mark.parametrize('edit', ['genre', 'duration', 'slider', 'name'])
+def test_progress_preserves_queued_and_uncommitted_edits_then_resumes(
+        live_road_trip_app, paused_road_trip_builds, page, edit):
+    base_url, store = live_road_trip_app
+    rid = store.road_trip.save_road_trip_recipe(None, 'Pending edits', 50, [], ['Rock'], 60, 1000)
+    page.set_default_timeout(10000)
+    pending = []
+
+    def progress(route):
+        response = route.fetch()
+        pending.append((route, response.body()))
+
+    page.route('**/road_trip/draft/*/progress', progress)
+    page.goto(f'{base_url}/road_trip')
+    page.evaluate("""() => {
+      window.realTimeout = window.setTimeout; window.queuedSteers = [];
+      window.setTimeout = (fn, ms, ...args) => {
+        if (ms === 350) {
+          queuedSteers.push(() => fn(...args)); return realTimeout(() => {}, 3600000);
+        }
+        if (ms === 900) return realTimeout(() => {}, 3600000);
+        return realTimeout(fn, ms, ...args);
+      };
+    }""")
+    page.locator('.rt-saved-routes summary').click()
+    page.locator('.rt-gen-btn').click()
+    expect(page.locator('.rt-draft.is-building')).to_be_visible()
+    form = page.locator('.rt-form').element_handle()
+
+    def request_progress():
+        count = len(pending)
+        with page.expect_request(f'**/road_trip/draft/{rid}/progress'):
+            page.evaluate("""rid => { htmx.ajax('GET', '/road_trip/draft/' + rid + '/progress',
+              {target: '#road-trip-body', swap: 'innerHTML'}); }""", rid)
+        # Pump Playwright until the interception has read the server's old snapshot.
+        page.wait_for_timeout(50)
+        assert len(pending) == count + 1
+        return pending[-1]
+
+    poll, old_body = request_progress()
+    if edit in ('duration', 'slider'):
+        mix = page.locator('.rt-step').filter(has=page.locator('summary strong', has_text='Shape the mix'))
+        if not mix.evaluate('el => el.open'):
+            mix.locator('summary').click()
+    if edit == 'genre':
+        page.locator('.rt-step summary').filter(has_text='Passenger music').click()
+        genre = page.get_by_role('combobox', name='Add a passenger genre', exact=True)
+        genre.fill('Funk')
+        page.locator('.rt-suggestion').get_by_text('funk', exact=True).click()
+    elif edit == 'duration':
+        page.get_by_role('button', name='30 min', exact=True).click()
+    elif edit == 'slider':
+        page.locator('#rt-familiarity').evaluate("""el => {
+          el.focus(); el.value = '80'; el.dispatchEvent(new Event('input', {bubbles: true}));
+        }""")
+    else:
+        page.get_by_role('button', name='Rename', exact=True).click()
+        page.get_by_role('textbox', name='Route name', exact=True).fill('An unfinished new name')
+    poll.fulfill(body=old_body, content_type='text/html')
+    page.wait_for_timeout(50)
+    assert page.evaluate('form => form.isConnected', form)
+    assert store.road_trip.get_road_trip_recipe(rid)['name'] == 'Pending edits'
+
+    # A second old poll must also stay obsolete after the save's new editor is mounted.
+    stale_poll, stale_body = request_progress()
+    if edit == 'name':
+        page.get_by_role('button', name='Save name', exact=True).click()
+    else:
+        if edit == 'slider':
+            page.locator('#rt-familiarity').dispatch_event('change')
+        page.evaluate("""() => {
+          window.setTimeout = realTimeout;
+          queuedSteers.splice(0).forEach(run => run());
+        }""")
+    page.wait_for_function('form => !form.isConnected', arg=form)
+    saved_form = page.locator('.rt-form').element_handle()
+    stale_poll.fulfill(body=stale_body, content_type='text/html')
+    page.wait_for_timeout(50)
+    assert page.evaluate('form => form.isConnected', saved_form)
+    recipe = store.road_trip.get_road_trip_recipe(rid)
+    if edit == 'genre':
+        assert 'Funk' in {canonical_genre(g) for g in recipe['genres']}
+    elif edit == 'duration':
+        assert recipe['target_minutes'] == 30
+    elif edit == 'slider':
+        assert recipe['familiarity_pct'] == 80
+    else:
+        assert recipe['name'] == 'An unfinished new name'
+    fresh_poll, fresh_body = request_progress()
+    fresh_poll.fulfill(body=fresh_body, content_type='text/html')
+    page.wait_for_function('form => !form.isConnected', arg=saved_form)
+
+
 def test_build_curate_then_save_road_trip_recipe(live_road_trip_app, page, monkeypatch):
     base_url, store = live_road_trip_app
     page.goto(f"{base_url}/road_trip")

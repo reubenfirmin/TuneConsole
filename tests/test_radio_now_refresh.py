@@ -61,13 +61,14 @@ def test_hidden_radio_monitor_refreshes_invalid_now_evidence(active, monkeypatch
             assert len(workers) == 1 and not reads
             workers[0][0][0]()
         if ticks[0] > 3:
+            session.stop.set()
             return True
         controller.ctx.bridge.now_playing = {"video_id": remote.ids[-1], "playlist_ytm_id": "PLSESSION",
                                              "paused": False, "position": 30, "duration": 300}
         controller.ctx.bridge.now_playing_seen_at = time.monotonic()
         return False
 
-    monkeypatch.setattr(session.stop, "wait", wait)
+    monkeypatch.setattr(session.wake, "wait", wait)
     controller._monitor(session)
     assert not session.error and remote.adds
     assert len(workers) == 1

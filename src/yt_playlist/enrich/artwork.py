@@ -11,10 +11,13 @@ def retry_due(store, now_fn, *, should_stop=lambda: False, on_progress=lambda ev
         track = store.tracks.catalog_subject(job["entry_id"])
         if not track:
             continue
-        if needs_art(track):
-            outcome = coverart.lookup(job["release_ids"])
+        # A retained archive cover remains usable while its recorded refresh
+        # retries. A later user/YouTube/other-provider cover completes the job.
+        if needs_art(track) or store.tracks.artwork_source(track['id']) == 'coverart':
+            with coverart.access(store):
+                outcome = coverart.lookup(job["release_ids"])
             if outcome.url:
-                store.tracks.set_track_art(track["id"], outcome.url)
+                store.tracks.set_track_art(track["id"], outcome.url, source='coverart')
         else:
             outcome = coverart.CoverResult("found", track.get("thumbnail"))
         store.enrichment_state.record_artwork_result(track["id"], job["release_ids"], outcome, now_fn())

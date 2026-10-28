@@ -68,7 +68,7 @@
 {% macro styles() -%}
 <section class="card card--data viz-dim mode-layers">
   <h2 class="section section-flush">Listening styles <span class="scope-tag">current · session · saved</span></h2>
-  <p class="section-note">Styles are groups of similar songs that can span genres. The model automatically groups tracks using genre, release decade and available sound features such as tempo, energy and mood. One genre can contain several styles.</p>
+  <p class="section-note">{% if viz.modes.adaptive %}These are the dynamic music groups used by Home. Tracks connect through supported genre and sound similarities; groups can split or rejoin as details arrive. <a href="#groups" @click.prevent="select('groups')">Explore music groups</a>.{% else %}Styles are groups of similar songs that can span genres. The model automatically groups tracks using genre, release decade and available sound features such as tempo, energy and mood. One genre can contain several styles.{% endif %}</p>
   {% if viz.modes.modes and not viz.modes.styles_current %}<p class="section-note">The saved grouping is from the previous model. Current and session comparisons are unavailable until the styles are updated for the current model.</p>{% endif %}
 
   <div class="layer-row">
@@ -99,11 +99,14 @@
     </div>
   </div>
 
-  <p class="vb-legend"><span class="muted">The Current layer only chooses among your existing listening styles. It does not change individual track scores.</span></p>
+  <p class="vb-legend"><span class="muted">{% if viz.modes.adaptive %}Current and Session compare recent listening with your saved music groups. They describe listening balance; they do not change group boundaries.{% else %}The Current layer only chooses among your existing listening styles. It does not change individual track scores.{% endif %}</span></p>
 </section>
 {%- endmacro %}
 
 {% macro style_tracks() -%}
+{% if viz.modes.adaptive %}
+<p class="section-note">See broad groups, smaller interests, representative artists and mix availability in <a href="#groups" @click.prevent="select('groups')">Music groups</a>.</p>
+{% else %}
 <section class="card taste-modes">
   <h3 class="taste-style-tracks-title">Inside the styles</h3>
   <p class="section-note">Names reflect each group’s most common genres, so different styles can share a name. These tracks are the closest matches to each group’s center. Matching colors connect them to the bars above.</p>
@@ -123,7 +126,7 @@
           <span class="mode-track-art art-album" aria-hidden="true">
             {% if t.thumbnail %}<img src="{{ t.thumbnail }}" alt="" width="48" height="48" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
           </span>
-          <span class="mode-track-copy"><span class="t-title">{{ t.title }}</span><span class="t-artist">{{ t.artist }}</span></span>
+          <span class="mode-track-copy">{% if t.video_id %}<a class="t-title" href="{{ track_url(t) }}">{{ t.title }}</a>{% else %}<span class="t-title">{{ t.title }}</span>{% endif %}<span class="t-artist">{{ t.artist }}</span></span>
         </li>
         {% endfor %}
       </ul>
@@ -134,6 +137,7 @@
   <p class="muted">Listening styles appear once enough tracks have genre, era, and audio information.</p>
   {% endif %}
 </section>
+{% endif %}
 {%- endmacro %}
 
 {# ── Facet axes: the multiplier chain the ranker literally composes ───────── #}

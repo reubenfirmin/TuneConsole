@@ -5,7 +5,7 @@
 .chart .barhead, .chart .barcell { width: 38%; }
 .playbar { display: block; height: 0.55rem; min-width: 2px; border-radius: 3px;
   background: linear-gradient(90deg, var(--accent), var(--teal)); }
-/* ticker charts (genre/year/album/playlist): ranked bar (recent share) + corpus tick + whisker */
+/* ticker charts (genre/year/album/playlist): ranked bar (recent share) + whisker */
 .chart.ticker .tkcell { width: 44%; }
 .chart.ticker .tklabel { max-width: 13rem; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; }
@@ -16,8 +16,6 @@
 .tk-bar { left: 0; top: 50%; transform: translateY(-50%); height: 0.62rem; min-width: 2px;
   border-radius: 3px; }
 .tk-bar.over { box-shadow: 0 0 0 1px color-mix(in srgb, var(--up) 55%, transparent); }
-/* corpus tick: dashed vertical mark at the library share */
-.tk-corpus { top: 0; bottom: 0; width: 0; border-left: 2px dashed var(--teal); opacity: 0.9; }
 /* earlier (1y) marker: faint dot showing where it sat a year ago (trend = bar end vs this) */
 .tk-open { top: 50%; transform: translate(-50%, -50%); width: 5px; height: 5px; border-radius: 50%;
   background: var(--surface); box-shadow: 0 0 0 1.5px var(--dim); opacity: 0.85; }
@@ -166,13 +164,6 @@
   background: var(--canvas);
   transform: rotate(45deg);
 }
-:is(.page-charts, .chart-key-popup) .key-library::after {
-  content: "";
-  position: absolute;
-  left: 1.15rem;
-  inset-block: -.15rem;
-  border-inline-start: 3px solid var(--teal);
-}
 :is(.page-charts, .chart-key-popup) .chart-key-help {
   flex-basis: 100%;
   color: var(--text);
@@ -285,15 +276,6 @@
 .page-charts .tk-bar.over {
   background: var(--accent);
   box-shadow: none;
-}
-.page-charts .tk-corpus {
-  z-index: 4;
-  border-inline-start-color: var(--teal);
-  border-inline-start-width: 3px;
-  border-inline-start-style: solid;
-}
-.page-charts .chart-warm {
-  color: var(--teal);
 }
 .page-charts .tk-open {
   z-index: 5;

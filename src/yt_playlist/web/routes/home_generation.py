@@ -7,7 +7,7 @@ from yt_playlist.core.accounts import client_for
 from yt_playlist.core.activity import activity_for
 from yt_playlist.library import playlist_generated, playlist_navigation
 from yt_playlist.library.playlist_writes import PlaylistAddUncertain
-from yt_playlist.rec import measurement
+from yt_playlist.rec import choice_evidence, measurement
 from yt_playlist.web.context import request_form
 from yt_playlist.web.jobs import start_playlist_enrichment
 
@@ -20,6 +20,8 @@ def build(ctx):
     def home_generate(request: Request, form=Depends(request_form)):
         """Materialize a proto-playlist as a real YouTube playlist, auto-grouped 'Generated' so the
         rec engine ignores it until it's played. The card's surviving rows are posted as `tracks`."""
+        bridge = getattr(ctx, "bridge", None)
+        intent = bridge.begin_playback_intent() if bridge is not None else None
         name = (form.get("name") or "").strip()
         try:
             tracks = json.loads(form.get("tracks") or "[]")
@@ -51,14 +53,20 @@ def build(ctx):
                 # playlist exists (playlist_navigation.navigate_when_ready), on a background thread so this
                 # response is not held for the poll. The result template never opens a YouTube tab.
                 watch_url = f"https://music.youtube.com/watch?list={res['new_ytm']}"
-                bridge = getattr(ctx, "bridge", None)
                 if bridge is not None and getattr(bridge, "connected", False):
                     activity_for(ctx).start_thread(playlist_navigation.navigate_when_ready,
-                        args=(client, bridge, res["new_ytm"], watch_url))
+                        args=(client, bridge, res["new_ytm"], watch_url), kwargs={"intent": intent})
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
                 if res.get("pid") and res.get("added"):
                     measurement.record_action(store, "save", now_fn(), playlist_id=res["pid"],
                                               event_id=f"generate:{res['new_ytm']}", generated=True)
+                    if isinstance(recipe, dict) and recipe.get("opportunity_id") and recipe.get("option_id"):
+                        for kind in ("choice", "save"):
+                            choice_evidence.safe_respond(store, recipe["opportunity_id"], kind, now_fn(),
+                                option_id=recipe["option_id"], action_id=f"generate:{res['new_ytm']}:{kind}",
+                                details={"playlist_id": res["pid"], "tracks": tracks})
+                        if ctx.rec_worker:
+                            ctx.rec_worker.trigger_home_refresh()
                 if isinstance(recipe, dict) and recipe.get("mode_id") is not None and res.get("pid"):
                     try:
                         store.modes.log_pick(res["pid"], int(recipe["mode_id"]), now_fn(),

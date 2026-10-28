@@ -270,18 +270,22 @@ class HistoryRepo(Repo):
 
     @synchronized
     def record_play_event(self, identity_id, identity_key, video_id, played_at,
-                          playlist_ytm_id=None, like_status=None, *, source_timezone=None) -> bool:
+                          playlist_ytm_id=None, like_status=None, *, source_timezone=None,
+                          context_choice=False) -> bool:
         """#75 Persist one live now-playing report from the extension. The content script re-reports
         the SAME track when its likeStatus changes, so a report matching the identity's latest event
         (same key, within _LIVE_DEDUP_S) updates that row (like_status; playlist id only if missing)
         instead of logging a second play. Snapshot generated policy with the playlist context so
-        promotion cannot rewrite a play's provenance. Returns True when a NEW play was recorded."""
+        promotion cannot rewrite a play's provenance. A selected full-record context is likewise
+        quarantined from organic per-track learning. Returns True when a NEW play was recorded."""
         is_generated = self.conn.execute(
             "SELECT EXISTS(SELECT 1 FROM quarantined_playlists q "
             "JOIN playlist_scopes s ON s.ref=q.ytm WHERE q.name=? "
             "AND (s.provider_id=? OR 'RDAMPL' || s.provider_id=?) "
             "AND (s.identity_id IS NULL OR s.identity_id=?))",
             (GENERATED_GROUP, playlist_ytm_id, playlist_ytm_id, identity_id)).fetchone()[0]
+        transient_radio = (playlist_ytm_id or '').removeprefix('RDAMPL') in self._store.transient_radio_playlists
+        is_generated = int(bool(is_generated or context_choice or transient_radio))
         with self.conn:
             listening.calendar(self.conn,identity_id,source_timezone)
             subject = catalog.play_key(self.conn,identity_key,video_id)
@@ -349,7 +353,7 @@ class HistoryRepo(Repo):
                 "latest_day": latest_day}
 
     @synchronized
-    def play_events_since(self, since_ts, exclude_list_ids=None) -> list[dict]:
+    def play_events_since(self, since_ts, exclude_list_ids=None, *, taste_only=False) -> list[dict]:
         """#75 Play events at/after since_ts, oldest first.
 
         `exclude_list_ids`, when given, drops rows whose playlist_ytm_id is in that set (#93v2: a
@@ -359,18 +363,23 @@ class HistoryRepo(Repo):
         are ALWAYS kept regardless of the exclusion set: no provenance means the play was not
         attributed to any machine-queued playlist (a direct search/album play, or a pre-provenance
         row), so it is user-driven and must still count."""
+        # Taste consumers additionally retain generated provenance after a playlist is
+        # removed. Descriptive callers keep the complete event stream by default.
+        evidence = ("AND COALESCE(is_generated,0)=0 AND NOT EXISTS "
+                    "(SELECT 1 FROM quarantined_playlists q WHERE q.ytm=playlist_ytm_id) "
+                    if taste_only else "")
         if exclude_list_ids:
             excl = list(exclude_list_ids)
             placeholders = ",".join("?" * len(excl))
             q = ("SELECT identity_id, identity_key, video_id, played_at, playlist_ytm_id, like_status "
                  f"FROM play_events WHERE played_at>=? "
                  f"AND (playlist_ytm_id IS NULL OR playlist_ytm_id NOT IN ({placeholders})) "
-                 "ORDER BY played_at, id")
+                 + evidence + "ORDER BY played_at, id")
             rows = self.conn.execute(q, (since_ts, *excl)).fetchall()
         else:
             rows = self.conn.execute(
                 "SELECT identity_id, identity_key, video_id, played_at, playlist_ytm_id, like_status "
-                "FROM play_events WHERE played_at>=? ORDER BY played_at, id", (since_ts,)).fetchall()
+                "FROM play_events WHERE played_at>=? " + evidence + "ORDER BY played_at, id", (since_ts,)).fetchall()
         return [dict(r) for r in rows]
 
     @synchronized

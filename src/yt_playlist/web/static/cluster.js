@@ -59,7 +59,8 @@ function clusterCanvas() {
       });
       this._fg = fg;
 
-      this._resize(); window.addEventListener('resize', () => this._resize());
+      this._resizing = () => this._resize();
+      this._resize(); window.addEventListener('resize', this._resizing);
       this._layoutObserver = new ResizeObserver(() => {
         this._resize();
         const h = this.$refs.center.offsetHeight;
@@ -72,7 +73,8 @@ function clusterCanvas() {
       });
       this._layoutObserver.observe(document.getElementById('cluster-canvas'));
       this._layoutObserver.observe(this.$refs.center);
-      window.addEventListener('pagehide', () => this._flushState());
+      this._leaving = () => this._flushState();
+      window.addEventListener('pagehide', this._leaving);
       // Mid-edge info dot clicks, intercepted at pointerdown in the CAPTURE phase — BEFORE force-graph's
       // own canvas handler. A dot often sits over a card, where force-graph would otherwise start a node
       // drag (so no click ever fires). Catching it here guarantees the dot opens its "why connected?".
@@ -92,6 +94,9 @@ function clusterCanvas() {
       this._refreshSwitcher();
       if (from) {
         history.replaceState(null, '', location.pathname);
+        // Keep the local canvas mounted while loading. A failed link must not leave
+        // an empty graph attached to its storage ID (camera autosaves can run here).
+        this._afterInit(this.restore());
         this._loadFrom(from);
       } else if (seed) {
         // Deep-link from the "Explore [X] in your catalog" card: auto-seed and grow a few rings,
@@ -107,6 +112,18 @@ function clusterCanvas() {
       }
       fetch('/clusters/genres').then(r => r.json())
         .then(d => { this.families = d.families || []; this.genres = d.genres || []; }).catch(() => {});
+    },
+    destroy() {
+      this._flushState();
+      this._searchToken = this._deepLinkToken = this._loadStateToken = this._seedChangeToken = null;
+      this._canvasRevision++;
+      this._layoutObserver?.disconnect();
+      window.removeEventListener('resize', this._resizing);
+      window.removeEventListener('pagehide', this._leaving);
+      clearTimeout(this._hoverT);
+      cancelAnimationFrame(this._boostRAF);
+      this._fg?._destructor();
+      this._fg = null;
     },
     _afterInit(restored) {
       const context = this._graphContext();
@@ -125,8 +142,23 @@ function clusterCanvas() {
         const response = await fetch('/clusters/state/' + encodeURIComponent(from));
         const state = response.ok ? await response.json() : null;
         if (!current()) return;
-        this._afterInit(state && this._applyState(state));
-      } catch (e) { if (current()) this._afterInit(false); }
+        const decoded = ClusterCanvases.decode(state, () => Math.floor(Math.random() * 0x100000000));
+        if (!decoded) throw new Error('Invalid saved cluster');
+        this._flushState();
+        const previousId = this.activeId;
+        // Reopening a saved playlist always makes a local copy, just like a seed
+        // link. Never publish it into an unrelated canvas's persistence identity.
+        this._setActive(ClusterCanvases.newId());
+        try {
+          this._applyState(decoded);
+          this._writeState();
+        } catch (e) {
+          this._loadActive(previousId);
+          this.clusterError = 'Could not open the saved cluster.';
+          return;
+        }
+        this._afterInit(true);
+      } catch (e) { if (current()) this.clusterError = 'Could not open the saved cluster.'; }
       finally { if (this._loadStateToken === token) this._loadStateToken = null; }
     },
     // Auto-build a cluster from a deep link: name it `label`, focus an optional genre, resolve the

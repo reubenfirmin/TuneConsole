@@ -1,0 +1,52 @@
+<div class="tv-home tv-session" x-data="tvHome({{ tv_max_minutes|tojson }})" x-show="visible" x-cloak
+     @tv-tuning-open.window="openParams()" @playback-requested.window="externalPlayback()">
+  <template x-teleport="body">
+    <div class="tv-backdrop" aria-hidden="true" x-show="visible && playing" x-cloak>
+      <template x-for="(image, index) in backdrop" :key="image">
+        <img :src="image" alt="" referrerpolicy="no-referrer" @error="artFailed(image)">
+      </template>
+    </div>
+  </template>
+  <div class="tv-theater">
+    <div class="tv-player" x-ref="player"></div>
+    <div class="tv-loading gen-stage" x-show="generating" x-cloak role="status" aria-live="polite">
+      {% with loader_tv=true, loader_status='Generating TV session' %}{% include "_partials/launch_loader.html" %}{% endwith %}
+    </div>
+    <div class="tv-idle" x-show="(!playerMounted || finished) && !generating">
+      <span class="tv-mark" aria-hidden="true"><svg viewBox="0 0 48 48"><rect x="5" y="10" width="38" height="29" rx="5"/><path d="m19 3 5 7 5-7M21 19l10 6-10 6Z"/></svg></span>
+      <h2 x-text="error ? 'Let’s find something to watch' : 'Music worth watching'">Music worth watching</h2>
+      <p x-text="error || 'Videos picked from your taste. Press play and see what comes on.'"></p>
+      <button type="button" class="btn btn-primary" x-show="ready || items.length || error || playerError" :disabled="starting || loading" @click="start()">Play TV</button>
+    </div>
+  </div>
+  <nav class="tv-filmstrip" x-ref="filmstrip" aria-label="TV playlist" x-show="sessionStarted && (playerMounted || finished)" x-cloak>
+    <template x-for="(video, index) in revealed" :key="video.queue_id">
+      <button type="button" class="tv-film" :class="{'is-current': index === selected}"
+              :aria-current="index === selected ? 'true' : null" :aria-label="(index === selected ? 'Now playing: ' : index > selected ? 'Up next: ' : 'Play: ') + video.title"
+              :disabled="starting || connecting || failed.includes(index)" @click="select(index)">
+        <img :src="video.thumbnail || null" x-show="video.thumbnail" alt="" referrerpolicy="no-referrer" @error="$el.style.visibility = 'hidden'">
+      </button>
+    </template>
+  </nav>
+  <p class="tv-message" role="status" aria-live="polite" x-show="error || playerError" x-text="error || playerError"></p>
+  <button type="button" class="btn" x-show="playerError && waiting" @click="another()">Reset TV</button>
+  <dialog x-ref="params" class="radio-tuning-dialog tv-params" @click="if ($event.target === $el) $el.close()" aria-labelledby="tv-params-title">
+    <form @submit.prevent="applyParams()">
+      <h2 id="tv-params-title">TV parameters</h2>
+      <div class="radio-tuning-axis tv-length" :style="'--dial-value:' + (draft / (lengths.length - 1) * 100) + '%;--dial-turn:' + (draft - 10) + 'deg'">
+        <div class="tv-length-label"><label for="tv-max-minutes">Maximum video length</label><output for="tv-max-minutes" x-text="lengthLabel"></output></div>
+        <div class="radio-tuning-fader">
+          <div class="radio-tuning-scale" aria-hidden="true">
+            <svg viewBox="0 0 400 48" preserveAspectRatio="none"><path class="radio-tuning-rail" d="M0 24H400"/><path class="radio-tuning-ticks" d="M0 18v12m40-10v8m40-8v8m40-8v8m40-8v8m40-8v8m40-8v8m40-8v8m40-8v8m40-8v8m40-10v12"/></svg>
+            <span class="radio-tuning-thumb"><svg viewBox="0 0 32 32"><circle cx="16" cy="17" r="10"/><path d="M16 10v7l5 3M12 3h8m-4 0v4m9 2 2-2"/></svg></span>
+          </div>
+          <input id="tv-max-minutes" type="range" min="0" :max="lengths.length - 1" step="1" x-model.number="draft" :aria-valuetext="lengthLabel">
+        </div>
+        <div class="tv-length-ends" aria-hidden="true"><span>1 minute</span><span>Unlimited</span></div>
+      </div>
+      <p class="section-note">Applies to each video in your next playlist.</p>
+      <button type="button" class="btn tv-reset" @click="$refs.params.close(); another()" :disabled="starting || connecting">Reset playlist</button>
+      <div class="tv-dialog-actions"><button type="button" class="btn" @click="$refs.params.close()">Cancel</button><button class="btn btn-primary" type="submit">Apply</button></div>
+    </form>
+  </dialog>
+</div>

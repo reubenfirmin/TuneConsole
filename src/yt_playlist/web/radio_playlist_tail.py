@@ -18,6 +18,7 @@ class TailView:
     known: Mapping[str, dict]
     stale_states: tuple[tuple[str, ...], ...] = ()
     skip_requested: bool = False
+    heard: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -34,11 +35,16 @@ class TailDecision:
 
 
 class RadioPlaylistTail:
-    def __init__(self, tracks, proposed, slot, *, choice_id=None):
+    def __init__(self, tracks, proposed, slot, *, choice_id=None, play=None, excluded=(), play_prefix=None):
         self.allowed = {tuple(t["video_id"] for t in tracks)}
         self.proposed = list(proposed)
         self.slot = slot
         self.choice_id = choice_id
+        # Playback intent is live only: checkpoints can resume queue edits, never autoplay.
+        self.play = play
+        # Queue repair survives a restart; the command to start playback does not.
+        self.play_prefix = tuple(play_prefix) if play_prefix is not None else None
+        self.excluded = list(excluded)
         self.confirmed = next(iter(self.allowed))
         self.write: PendingWrite | None = None
         self.saved = False
@@ -85,6 +91,8 @@ class RadioPlaylistTail:
 
     def adopt(self, ids: tuple[str, ...], requested: dict, accepted: dict):
         self.proposed = [accepted if t["video_id"] == requested["video_id"] else t for t in self.proposed]
+        if self.play and self.play['video_id'] == requested['video_id']:
+            self.play = {**self.play, 'video_id': accepted['video_id']}
         self.allowed.add(ids)
         self.write = PendingWrite(PlaylistEdit('add', ids, track=accepted),
                                   self.write.started_at if self.write else None)
@@ -115,6 +123,18 @@ class RadioPlaylistTail:
         if position < view.furthest:
             return TailDecision()
         history = ids[:position + 1]
+        cleanup_start = position + 1
+        selected = self.proposed[0]['video_id'] if self.proposed else None
+        if self.play_prefix is not None and selected in ids and position >= ids.index(selected):
+            # Playback may start while the previous future is still being removed.
+            # Those intervening songs are not listened history merely because
+            # they now precede the selected song in the temporary saved queue.
+            selected_index = ids.index(selected)
+            history = [video for index, video in enumerate(history)
+                       if video in self.play_prefix or video in view.heard or index >= selected_index]
+            cleanup_start = len(self.play_prefix)
+        elif self.play or self.play_prefix is not None:
+            self.play_prefix = tuple(history)
         proposed = [t for t in self.proposed if t["video_id"] not in history and t["video_id"] not in view.blocked]
         target = proposed[:LOOKAHEAD]
         desired = history + [t["video_id"] for t in target]
@@ -124,10 +144,10 @@ class RadioPlaylistTail:
         missing = next((t for t in target if t["video_id"] not in ids), None)
         duration = player.get("duration") or view.tracks[position].get("duration")
         progress = player.get("position")
-        if (not missing and not view.skip_requested
+        if (not missing and not view.skip_requested and not self.play and self.play_prefix is None
                 and (not duration or progress is None or duration - progress < 8)):
             return TailDecision()
-        extra = next((t for t in remote[position + 1:] if t["videoId"] not in desired), None)
+        extra = next((t for t in remote[cleanup_start:] if t["videoId"] not in desired), None)
         after = list(ids)
         if missing:
             after.append(missing["video_id"])

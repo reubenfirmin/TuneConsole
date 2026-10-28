@@ -6,7 +6,7 @@ rotating log, with permitted services grouped by purpose. Enforcement lives in
 """
 from fastapi import APIRouter, Request
 
-from yt_playlist.egress import ALLOWED_DOMAINS, ALLOWED_REQUESTS, guard
+from yt_playlist.egress import ALLOWED_DOMAINS, ALLOWED_REQUESTS, ALLOWED_POST_REQUESTS, guard
 
 
 _DOMAIN_GROUPS = (
@@ -64,6 +64,7 @@ def build(ctx) -> APIRouter:
                 for group in _DOMAIN_GROUPS
             ],
             "allowed_requests": sorted(ALLOWED_REQUESTS),
+            "allowed_post_requests": sorted(ALLOWED_POST_REQUESTS),
             "rows": rows,
         })
 

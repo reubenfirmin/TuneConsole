@@ -54,7 +54,7 @@ def test_discogs_original_recording_cannot_supply_remix_genre_or_year(monkeypatc
         {'id': 1, 'title': 'Artist - Song', 'genre': ['Rock'], 'year': 1970},
         {'id': 2, 'title': 'Artist - Song (Club Remix)', 'style': ['Deep House'], 'year': 2024},
     ])
-    monkeypatch.setattr(discogs, '_get', lambda *a: {'tracklist': [{'title': 'Song'}],
+    monkeypatch.setattr(discogs, '_get', lambda *a, **kw: {'tracklist': [{'title': 'Song'}],
                                                   'artists': [{'name': 'Artist'}]})
     assert discogs.enrich('Song (Club Remix)', 'Artist') == ('Deep House', '2024')
 

@@ -64,20 +64,6 @@ def test_day_counts_source_applies_the_generated_quarantine(store):
     assert tr.day_counts_source(store) == [(10, "b", 1)]
 
 
-def test_repetition_series_returns_only_latest_four_eligible_timestamps_per_key(store):
-    _generated(store, 1, "PL_gen")
-    for day in (0, 14, 22, 26, 28, 7):
-        _ev(store, "a", day * DAY)
-    _ev(store, "a", 40 * DAY, playlist="PL_gen")
-    _ev(store, "b", 9 * DAY)
-    _ev(store, "b", 9 * DAY)
-    _ev(store, "generated_only", 50 * DAY, playlist="PL_gen")
-    assert tr.repetition_series(store) == {
-        "a": [14 * DAY, 22 * DAY, 26 * DAY, 28 * DAY],
-        "b": [9 * DAY, 9 * DAY],
-    }
-
-
 # --- Task 2.2: the first-play index ---------------------------------------------------------------
 
 def test_first_play_index_retains_earlier_coarse_evidence_when_a_ledger_exists(store):
@@ -160,21 +146,19 @@ def _owned(store, pid, tid, key, artist, ytm="PL_own", generated=False):
     store.conn.commit()
 
 
-def test_compute_weeks_does_not_call_a_catalog_artist_new():
+def test_compute_months_does_not_call_a_catalog_artist_new():
     """An artist already in your playlists is not a discovery, whenever we first happened to see them."""
     dc = [(10, "a", 3)]
     meta = {"a": ("Underworld", None)}
-    weeks = stats.compute_weeks(dc, meta, {"Underworld": 10}, {"a": 10},
-                             catalog_artists={"Underworld"}, catalog_keys={"a"})
+    weeks = stats.compute_months(dc, meta, {"Underworld": 10}, catalog_artists={"Underworld"})
     assert weeks[0]["new_artist_plays"] == 0
     assert weeks[0]["new_artists"] == 0
-    assert weeks[0]["new_track_plays"] == 0
 
 
-def test_compute_weeks_counts_an_artist_absent_from_the_catalog():
+def test_compute_months_counts_an_artist_absent_from_the_catalog():
     dc = [(10, "a", 3)]
     meta = {"a": ("Brand New Act", None)}
-    weeks = stats.compute_weeks(dc, meta, {"Brand New Act": 10}, {"a": 10}, catalog_artists=set())
+    weeks = stats.compute_months(dc, meta, {"Brand New Act": 10}, catalog_artists=set())
     assert weeks[0]["new_artist_plays"] == 3
     assert weeks[0]["new_artists"] == 1
 
@@ -194,10 +178,9 @@ def test_build_treats_a_migrated_library_as_known(store):
     _ev(store, "a", 11 * DAY)
     store.trends.refresh_first_play()
     dc = tr.day_counts_source(store)
-    weeks = stats.compute_weeks(dc, store.trends.track_meta(),
+    weeks = stats.compute_months(dc, store.trends.track_meta(),
                              store.trends.first_play_map("artist"),
-                             store.trends.first_play_map("track"),
-                             store.trends.catalog_artists(), store.trends.catalog_track_keys())
+                             store.trends.catalog_artists())
     assert sum(w["new_artist_plays"] for w in weeks) == 0
 
 
@@ -210,10 +193,9 @@ def test_build_still_finds_a_true_discovery(store):
     _ev(store, "fresh", 10 * DAY)
     store.trends.refresh_first_play()
     dc = tr.day_counts_source(store)
-    weeks = stats.compute_weeks(dc, store.trends.track_meta(),
+    weeks = stats.compute_months(dc, store.trends.track_meta(),
                              store.trends.first_play_map("artist"),
-                             store.trends.first_play_map("track"),
-                             store.trends.catalog_artists(), store.trends.catalog_track_keys())
+                             store.trends.catalog_artists())
     assert sum(w["new_artist_plays"] for w in weeks) == 1
     assert sum(w["new_artists"] for w in weeks) == 1
 
@@ -224,8 +206,7 @@ def test_a_generated_playlist_does_not_make_an_artist_familiar(store):
     _ev(store, "sug", 10 * DAY)                     # played, but NOT from the generated playlist
     store.trends.refresh_first_play()
     dc = tr.day_counts_source(store)
-    weeks = stats.compute_weeks(dc, store.trends.track_meta(),
+    weeks = stats.compute_months(dc, store.trends.track_meta(),
                              store.trends.first_play_map("artist"),
-                             store.trends.first_play_map("track"),
-                             store.trends.catalog_artists(), store.trends.catalog_track_keys())
+                             store.trends.catalog_artists())
     assert sum(w["new_artists"] for w in weeks) == 1

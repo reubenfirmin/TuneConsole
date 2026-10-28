@@ -38,7 +38,7 @@ def test_pause_resume_reaches_global_player(live_app, page, path, width):
         frame = json.loads(extension.recv(timeout=5))
         while frame == {"ping": 1}:
             frame = json.loads(extension.recv(timeout=5))
-        assert frame == {"type": "playpause"}
+        assert frame == {"id": frame["id"], "type": "playpause", "action": "play", "videoId": "v_pause"}
         # Wait for a real status poll after the extension acknowledges resume; this also checks
         # that a subsequent poll does not undo the optimistic click's visual state.
         extension.send(json.dumps({"type": "pevent", "kind": "state", "state": "playing",
@@ -52,3 +52,38 @@ def test_pause_resume_reaches_global_player(live_app, page, path, width):
             expect(equalizer).to_be_visible()
         expect(widget.locator(".hs-now")).not_to_have_class(re.compile(r"\bpaused\b"))
         expect(equalizer.locator("i").first).to_have_css("animation-play-state", "running")
+
+
+@pytest.mark.parametrize("failure", [None, "network", "invalid_json"])
+def test_card_waits_for_confirmation_and_reports_failed_requests(live_app, page, tmp_path, failure):
+    status = {"connected": True, "now_playing": {
+        "title": "Confirmed song", "artist": "Artist", "video_id": "confirmed", "paused": False}}
+    page.route("**/bridge/status", lambda route: route.fulfill(json=status))
+    requests = []
+    page.route("**/now-playing/toggle?*", lambda route: requests.append(route))
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.goto(live_app + "/artists")
+    player = page.locator(".global-now-playing")
+    pause = player.get_by_role("button", name="Pause", exact=True)
+    pause.click()
+    expect(pause).to_be_disabled()
+    expect(pause).to_have_attribute("aria-busy", "true")
+    assert len(requests) == 1
+    assert "action=pause" in requests[0].request.url
+    assert "videoId=confirmed" in requests[0].request.url
+    page.evaluate("Alpine.$data(document.querySelector('.global-now-playing')).toggle()")
+    assert len(requests) == 1, "a pending command cannot be submitted twice"
+    if failure == "network":
+        requests[0].abort()
+    elif failure == "invalid_json":
+        requests[0].fulfill(content_type="text/plain", body="unavailable")
+    else:
+        status["now_playing"]["paused"] = True
+        requests[0].fulfill(json={"ok": True, "paused": True})
+    if failure:
+        expect(page.locator("#playback-error")).to_contain_text("Playback was not confirmed")
+        expect(pause).to_be_enabled()
+    else:
+        expect(player.get_by_role("button", name="Play", exact=True)).to_be_enabled()
+        expect(page.locator("#playback-error")).to_have_count(0)
+    page.screenshot(path=tmp_path / f"playback-{failure or 'confirmed'}.png")

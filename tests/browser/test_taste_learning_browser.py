@@ -198,7 +198,7 @@ def test_other_learning_shows_real_choices_sources_and_dated_saved_changes(live_
     page.locator(".learning-other").screenshot(path=str(tmp_path / f"other-learning-{width}.png"), animations="disabled")
     changes.screenshot(path=str(tmp_path / f"saved-changes-{width}.png"), animations="disabled")
     choices.get_by_role("link", name="Explore mix choice learning").click()
-    expect(page.get_by_role("tab", name="Generated playlists", exact=True)).to_have_attribute("aria-selected", "true")
+    expect(page.get_by_role("tab", name="Listening choices", exact=True)).to_have_attribute("aria-selected", "true")
     assert errors == []
 
 

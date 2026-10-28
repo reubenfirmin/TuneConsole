@@ -13,7 +13,7 @@ import uuid
 
 import pytest
 
-pytest_plugins = ["ci_test_shards", "local_test_workers"]
+pytest_plugins = ["ci_test_shards", "local_test_workers", "tests.browser_fixtures"]
 
 
 # Deliberately independent of checkout, cwd, TMPDIR, and pytest's cache directory.
@@ -22,6 +22,22 @@ _LOCK_PATH = Path(f"/tmp/tuneconsole-tests-{os.getuid()}.lock")
 
 
 def pytest_addoption(parser):
+    parser.addoption('--listening-acceptance-url', default=None, metavar='URL',
+        help='Inspect Charts in an already running app without recording review impressions.')
+    parser.addoption('--listening-acceptance-db', default=None, metavar='PATH',
+        help='Run listening visual acceptance against a read-only copy of this saved database.')
+    parser.addoption('--policy-recovery-source', default=None, metavar='PATH',
+        help='Rehearse policy recovery against a read-only saved database under the shared test lock.')
+    parser.addoption('--policy-recovery-output', default=None, metavar='PATH',
+        help='Keep the verified backup, compact candidate and report in this new directory.')
+    parser.addoption('--group-readonly-db', default=None, metavar='PATH',
+        help='Benchmark musical groups using read-only prepared inputs from this database.')
+    parser.addoption('--group-snapshot', default=None, metavar='PATH',
+        help='Save or replay the local musical-group input snapshot.')
+    parser.addoption('--group-report', default=None, metavar='PATH',
+        help='Write the musical-group benchmark report to this local path.')
+    parser.addoption('--vibe-readonly-db', default=None, metavar='PATH',
+        help='Rehearse vibe migration and startup on an isolated copy of this read-only database.')
     parser.addoption(
         "--test-lock-wait", type=float, default=0, metavar="SECONDS",
         help="Wait up to SECONDS for the shared test lock (default: fail immediately).",
@@ -37,6 +53,10 @@ def pytest_addoption(parser):
     parser.addoption(
         "--live-radio-trace", default=None, metavar="PATH",
         help="Retain the live Radio acceptance trace at PATH instead of pytest's temporary directory.",
+    )
+    parser.addoption(
+        "--live-radio-song-smoke", action="store_true",
+        help="Limit live stream-song acceptance to one middle-of-stream click and its playback latency.",
     )
 
 

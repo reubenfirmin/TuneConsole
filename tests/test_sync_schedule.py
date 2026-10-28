@@ -184,3 +184,103 @@ def test_reconnect_retry_survives_a_busy_manual_sync_lock(store, monkeypatch):
     assert client.reads["PL1"] == 2
     assert client.reads["PL0"] == client.reads["listing"] == 1
     assert ctx.work.wait(0)
+
+
+@pytest.mark.parametrize("initially_connected", [False, True], ids=["new-connection", "already-connected"])
+def test_first_sync_starts_without_waiting_for_periodic_poll(store, monkeypatch, initially_connected):
+    import logging
+    import threading
+    from types import SimpleNamespace
+
+    from yt_playlist.core.activity import Activity
+    from yt_playlist.web import jobs
+
+    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    client = CountedClient()
+    stop, wake, observed, finished = (threading.Event() for _ in range(4))
+
+    class Connection:
+        connection_id = 1
+        is_connected = initially_connected
+
+        @property
+        def connected(self):
+            value = self.is_connected
+            observed.set()
+            return value
+
+    bridge = Connection()
+    ctx = SimpleNamespace(store=store, work=Activity(), jobs=jobs.SyncJobs(), sync_lock=threading.Lock(),
+        client_provider=lambda: {iid: client}, now_fn=lambda: 100,
+        rec_worker=None, enrich_worker=None, flag_auth_expired=None, clear_auth_expired=None,
+        logger=logging.getLogger(__name__))
+    original = jobs.run_library_sync
+
+    def sync_and_signal(*args, **kwargs):
+        try:
+            return original(*args, **kwargs)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(jobs, "run_library_sync", sync_and_signal)
+    worker = threading.Thread(target=_background_sync_loop, args=(ctx, None, bridge),
+        kwargs={"stop": stop, "wake": wake, "poll_s": 60}, daemon=True)
+    worker.start()
+    try:
+        assert observed.wait(5), "startup did not check the connection immediately"
+        if not initially_connected:
+            bridge.is_connected = True
+            wake.set()
+        assert finished.wait(5), "the first import waited for the periodic poll"
+        assert ctx.jobs.get(1).done and not ctx.jobs.get(1).error
+        assert client.reads["listing"] == client.reads["PL0"] == 1
+    finally:
+        stop.set()
+        wake.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert ctx.work.wait(0)
+
+
+def test_slow_update_check_cannot_delay_an_extension_connection(store, monkeypatch):
+    import logging
+    import threading
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+    from yt_playlist.web import app as web_app
+    from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
+
+    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    client = CountedClient()
+    checking, finish_update, synced = (threading.Event() for _ in range(3))
+    original_updates = web_app._background_update_loop
+
+    def slow_update(ctx):
+        checking.set()
+        assert finish_update.wait(15)
+
+    monkeypatch.setattr(web_app, "_maybe_check_update", slow_update)
+    monkeypatch.setattr(web_app, "_background_update_loop",
+                        lambda ctx, stop: original_updates(ctx, stop, poll_s=.01))
+    monkeypatch.setattr(web_app, "_background_sync_loop", _background_sync_loop)
+    app = web_app.create_app(store, lambda: {iid: client}, now_fn=lambda: 100, background_work=True)
+    ctx = app.state.ctx
+    worker = SimpleNamespace(start_ticker=lambda: None, trigger_mode_refresh=lambda: None,
+        trigger=synced.set, shutdown=lambda: None, join=lambda timeout: None)
+    ctx.rec_worker = ctx.enrich_worker = worker
+    monkeypatch.setattr(ctx.radio, "prepare", lambda: None)
+    ctx.logger = logging.getLogger(__name__)
+    try:
+        with TestClient(app) as browser:
+            try:
+                assert checking.wait(5)
+                with browser.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}):
+                    assert synced.wait(5), "a blocked release request held up initial sync"
+                    assert not finish_update.is_set()
+                    assert client.reads["listing"] == client.reads["PL0"] == 1
+            finally:
+                finish_update.set()
+    finally:
+        finish_update.set()
+    assert ctx.work.wait(0)

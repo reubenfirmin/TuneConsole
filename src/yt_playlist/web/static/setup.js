@@ -1,4 +1,4 @@
-// Setup → Enrichment tab: drag to reorder metadata providers (SortableJS, same as playlist rows),
+// Setup Enrichment tab: drag to reorder metadata providers (SortableJS, same as playlist rows),
 // toggle to enable/disable. `providers` carries each {name, requires}; a provider must stay after
 // the one it requires (AcousticBrainz after MusicBrainz), enforced live in onMove so the DOM never
 // reaches an invalid state. Order + enabled flags persist to /setup/enrichment (config only).
@@ -41,17 +41,19 @@ function enrichmentTab(providers) {
   };
 }
 
-// Inline Last.fm API-key field inside the Enrichment tab's Last.fm card. Saves to the same
-// /settings/lastfm-key route the per-playlist modal uses; flips to a "✓ saved" state on success.
-function lastfmKey(configured) {
+// Shared Last.fm / DeepSeek key entry: visible input, Save key, saved state and Replace.
+function providerKey(configured, endpoint) {
   return {
     saved: configured, editing: !configured, val: '', busy: false, err: '',
     save() {
       const key = (this.val || '').trim();
       if (!key) { this.err = 'Enter a key.'; return; }
       this.busy = true; this.err = '';
-      htmx.ajax('POST', '/settings/lastfm-key', { values: { key }, swap: 'none' })
-        .then(() => { this.busy = false; this.saved = true; this.editing = false; this.val = ''; })
+      htmx.ajax('POST', endpoint, { values: { key }, swap: 'none' })
+        .then(() => {
+          this.busy = false; this.saved = true; this.editing = false; this.val = '';
+          this.$dispatch('provider-key-saved');
+        })
         .catch(() => { this.busy = false; this.err = 'Could not save that key.'; });
     },
   };

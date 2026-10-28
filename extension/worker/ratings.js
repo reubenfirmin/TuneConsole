@@ -30,13 +30,13 @@ function createNativeRatings({pickTab, sensors, send}) {
     if (!valid(job)) return {ok: false, error: "Native rating deadline expired"};
     // Probe both implementation revisions before delivery. A healthy old receiver must never
     // receive a command whose cancellation/deadline semantics it does not implement.
-    let health = await sensors.ping(job.tabId);
+    let health = await sensors.ping(job.tabId, true, {nativeRating: true});
     if (!valid(job)) return {ok: false, error: "Native rating cancelled or expired"};
     if (!health.ok && !job.reinjected) {
       job.reinjected = true;
       await sensors.inject(job.tabId);
       if (!valid(job)) return {ok: false, error: "Native rating cancelled or expired"};
-      health = await sensors.ping(job.tabId);
+      health = await sensors.ping(job.tabId, true, {nativeRating: true});
     }
     if (!valid(job)) return {ok: false, error: "Native rating cancelled or expired"};
     if (!health.ok) return {ok: false, retryable: !health.outdatedReceiver,

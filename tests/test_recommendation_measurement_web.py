@@ -107,7 +107,7 @@ def test_open_start_and_scorecard_range_are_observed_without_inventing_a_play(me
     # A disconnected extension must not count as a successful request.
     assert http.post("/play", json={"url": "https://music.youtube.com/watch?v=seed"}).json()["ok"] is False
     assert scorecard.recommendation_scorecard(store, 90, 105)["start"] == 0
-    monkeypatch.setattr(ctx.bridge, "send_control", lambda frame: None)
+    monkeypatch.setattr(ctx.bridge, "send_control", lambda frame, *, intent: True)
     response = http.post("/play", json={"url": "https://music.youtube.com/watch?list=RDAMPLPL"}).json()
     assert response["ok"] is True, response
     score = http.get("/taste/scorecard", params={"start": 90, "end": 105}).json()
@@ -143,8 +143,13 @@ def test_migration_from_previous_schema_preserves_old_impressions_and_new_ledger
     path = tmp_path / "measurement.db"
     store = Store(path)
     migrate(store.conn, registry=MIGRATIONS[:8])
-    store._bind_repositories()
-    store.rec_ledger.record_served_impressions("legacy", "home", [{"key": "old|artist", "rank": 1}], 50)
+    # Seed the previous schema using its own columns, before policy bases exist.
+    with store.conn:
+        store.conn.execute(
+            'INSERT INTO rec_served_impressions '
+            '(request_id,surface,lane,identity_key,rank,model_version,provenance,served_at) '
+            'VALUES (?,?,?,?,?,?,?,?)',
+            ('legacy', 'home', '', 'old|artist', 1, 'legacy', '{}', 50))
     store.init_schema()
     measurement.record_recommendations(store, "home", [{"key": "new|artist", "score": .4}], 100)
     store.rec_ledger.record_recommendation_outcomes("save", "save", ["new|artist"], 110)

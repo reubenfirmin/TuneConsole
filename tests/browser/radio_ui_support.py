@@ -17,7 +17,7 @@ def radio_ui(live_app, store, page):
               for i in range(16)]
     api = SimpleNamespace(state={"active": False}, starts=[], playlists=[], stops=[],
                           hold_playlist=False, errors=[], tracks=tracks)
-    api.ready = {"active": True, "starting": False, "playlist_id": "PLRADIO", "local_id": 1,
+    api.ready = {"active": True, "starting": False, "can_play_songs": True, "playlist_id": "PLRADIO", "local_id": 1,
                  "tracks": tracks[:3], "history_count": 1, "title": "Radio Session",
                  "directions": [{"slot": i, "id": f"direction{i}", "active": i == 0,
                                  "label": ["Stay here", "Deeper", "Brighter", "Further"][i],
@@ -59,4 +59,4 @@ def radio_ui(live_app, store, page):
     page.goto(f"{live_app}/#radio")
     expect(page.locator(".radio-seed")).to_have_count(16)
     yield api
-    assert not api.errors
+    assert not api.errors, api.errors

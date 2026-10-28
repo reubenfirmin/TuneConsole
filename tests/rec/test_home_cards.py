@@ -57,6 +57,8 @@ def test_other_genre_fallback_records_only_final_offer_once(store, monkeypatch):
 
 
 def test_chosen_genres_reach_ranker_and_stay_on_final_recipe(store, monkeypatch):
+    from tests.mode_fixtures import seed_modes
+    seed_modes(store, 7)
     store.rec_proposals.put_proposals("home_genre_request", {"epoch": 0, "include_genres": ["jazz"]}, 1000)
     home = service(store)
     calls = []

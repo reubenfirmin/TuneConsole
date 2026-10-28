@@ -459,7 +459,12 @@ def test_public_verification_downloads_bytes_and_checks_signed_architectures(can
     base = "https://github.com/reubenfirmin/TuneConsole/releases/download/v1.2.3/"
     urls = []
 
-    def public_response(url, timeout):
+    def public_response(request, timeout):
+        # Cloudflare rejects Python's default user agent with error 1010. Public
+        # checks identify the client while remaining independent of CI tokens.
+        assert request.get_header("User-agent").startswith("TuneConsole-release-verifier/")
+        assert request.get_header("Authorization") is None
+        url = request.full_url
         urls.append(url)
         assert timeout == 30
         if url.startswith(base):
@@ -493,6 +498,7 @@ def test_public_verification_downloads_bytes_and_checks_signed_architectures(can
                                '</component></components>')
         return subprocess.CompletedProcess(args, 0, stdout="com.tuneconsole.TuneConsole\n")
 
+    monkeypatch.setenv("GITHUB_TOKEN", "must-not-be-sent-to-public-endpoints")
     monkeypatch.setattr(release_services.urllib.request, "urlopen", public_response)
     monkeypatch.setattr(release_services.subprocess, "run", run)
     backend = FakeBackend(latest="v1.2.3")

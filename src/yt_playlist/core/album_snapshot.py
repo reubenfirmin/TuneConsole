@@ -5,13 +5,14 @@ from ytmusicapi.continuations import get_continuation_params
 from ytmusicapi.mixins._utils import prepare_order_params, validate_order_parameter
 from ytmusicapi.navigation import GRID
 from ytmusicapi.parsers.library import get_library_contents, parse_albums
-from ytmusicapi.parsers.browsing import parse_content_list, parse_playlist
+from ytmusicapi.parsers.browsing import parse_playlist
 
 
 class LibrarySnapshotError(ValueError):
-    def __init__(self, resource, reason, response, page):
+    def __init__(self, resource, reason, response, page, *, item=None):
         self.reason = reason
-        super().__init__(f"{resource} snapshot {reason}; page={page}; shape={response_shape(response)}")
+        position = f"; item={item}" if item is not None else ""
+        super().__init__(f"{resource} snapshot {reason}; page={page}{position}; shape={response_shape(response)}")
 
 
 class PlaylistSnapshot(list):
@@ -48,6 +49,12 @@ def response_shape(response):
             for key, child in reversed(list(islice(value.items(), 32))):
                 if key in known:
                     found.add(key)
+                if key == 'musicTwoRowItemRenderer' and isinstance(child, dict):
+                    for field in ('title', 'subtitle', 'navigationEndpoint', 'menu', 'thumbnailRenderer'):
+                        item = child.get(field)
+                        kind = ('missing' if field not in child else 'null' if item is None else
+                                'object' if isinstance(item, dict) else 'other')
+                        found.add(f'{key}.{field}={kind}')
                 if key == 'musicPlaylistShelfRenderer' and isinstance(child, dict):
                     fields = {'contents', 'continuations', 'trackingParams', 'playlistId',
                               'collapsedItemCount', 'contentsMultiSelectable', 'messageRenderer'}
@@ -108,17 +115,66 @@ def complete_library_playlists(client):
     playlists = PlaylistSnapshot()
     for page_no, items in _complete_grid(client, {"browseId": "FEmusic_liked_playlists"}, "playlist-library"):
         # The create tile is optional; do not discard a real first playlist.
-        tiles = [item for item in items if not _create_tile(item)]
-        if any(not isinstance(item, dict) or "musicTwoRowItemRenderer" not in item for item in tiles):
-            raise LibrarySnapshotError("playlist-library", "unsupported playlist grid item", {"items": tiles}, page_no)
-        try:
-            parsed = parse_content_list(tiles, parse_playlist)
-        except (KeyError, TypeError, IndexError):
-            raise LibrarySnapshotError("playlist-library", "malformed playlist grid item", {"items": tiles}, page_no) from None
-        if len(parsed) != len(tiles) or any(not p.get("playlistId") for p in parsed):
-            raise LibrarySnapshotError("playlist-library", "unidentified playlist grid item", {"items": tiles}, page_no)
-        playlists.extend(parsed)
+        for index, item in enumerate(items):
+            if _create_tile(item):
+                continue
+            if not isinstance(item, dict) or "musicTwoRowItemRenderer" not in item:
+                raise LibrarySnapshotError("playlist-library", "unsupported playlist grid item", item,
+                                           page_no, item=index)
+            try:
+                playlists.append(_library_playlist(item["musicTwoRowItemRenderer"]))
+            except (KeyError, TypeError, IndexError, ValueError):
+                raise LibrarySnapshotError("playlist-library", "malformed playlist grid item", item,
+                                           page_no, item=index) from None
     return playlists
+
+
+def _tile_value(value, *path):
+    for key in path:
+        if isinstance(value, dict) and isinstance(key, str):
+            value = value.get(key)
+        elif isinstance(value, list) and isinstance(key, int) and key < len(value):
+            value = value[key]
+        else:
+            return None
+    return value
+
+
+def _library_playlist(renderer):
+    """Require membership evidence, but allow incomplete presentation metadata.
+
+    ytmusicapi requires a linked title and subtitle object even though a tile can
+    identify its playlist through its own browse endpoint. Detail reads supply
+    the authoritative title and contents later; never omit an unidentified tile.
+    """
+    browse_ids = [_tile_value(renderer, *path, 'navigationEndpoint', 'browseEndpoint', 'browseId')
+                  for path in (('title', 'runs', 0), ())]
+    browse_ids = [bid for bid in browse_ids if bid is not None]
+    if (not browse_ids or any(not isinstance(bid, str) or not bid.startswith('VL') or len(bid) <= 2
+                              for bid in browse_ids) or len(set(browse_ids)) != 1):
+        raise ValueError('Missing or conflicting playlist browse endpoints')
+    playlist_id = browse_ids[0][2:]
+    try:
+        playlist = parse_playlist(renderer)
+    except (KeyError, TypeError, IndexError, AttributeError):
+        # Missing subtitles, non-text runs and unlinked titles are display
+        # variants, not evidence that all preceding library pages are invalid.
+        title = _tile_value(renderer, 'title', 'simpleText')
+        if not isinstance(title, str):
+            runs = _tile_value(renderer, 'title', 'runs')
+            title = (''.join(run['text'] for run in runs
+                             if isinstance(run, dict) and isinstance(run.get('text'), str))
+                     if isinstance(runs, list) else None)
+        menu = _tile_value(renderer, 'menu', 'menuRenderer', 'items')
+        playlist = {'playlistId': playlist_id, 'title': title,
+                    'owned': any(_tile_value(item, 'menuNavigationItemRenderer', 'navigationEndpoint',
+                                             'playlistEditorEndpoint', 'playlistId') == playlist_id
+                                 for item in (menu if isinstance(menu, list) else []))}
+    thumbnails = _tile_value(renderer, 'thumbnailRenderer', 'musicThumbnailRenderer', 'thumbnail', 'thumbnails')
+    playlist['thumbnails'] = ([thumb for thumb in thumbnails
+                               if isinstance(thumb, dict) and isinstance(thumb.get('url'), str)]
+                              if isinstance(thumbnails, list) else [])
+    return playlist
 
 
 def _create_tile(item):

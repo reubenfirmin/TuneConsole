@@ -16,3 +16,11 @@ def publish_personal_mix(store, now=1000):
                                     [], [], home_cards._epoch(store, "cards"), None)
     home_prepared.remember(store, store.rec_proposals.get_proposals("home_prepared"), result, now)
     return tracks
+
+
+def publish_personal_album(store, now=1000):
+    seed_catalog_track(store, 'album track|artist', 'Album track', 'Artist', video_id='album-track')
+    store.rec_proposals.put_proposals('album_prepared', {
+        'built_at': now, 'context': {}, 'items': [{
+            'browse_id': 'first-album', 'title': 'Your next record', 'artist': 'Artist',
+            'classification': 'discovery', 'score': .9, 'genre': 'Jazz'}]}, now)

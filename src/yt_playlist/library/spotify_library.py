@@ -7,11 +7,14 @@ import json
 import logging
 import re
 import zipfile
+from copy import deepcopy
+from uuid import uuid4
 
-from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.library.album_fetch import shareable_album_tracks
+from yt_playlist.library import album_writes
 from yt_playlist.library.playlist_mutation import _read as _read_playlist
 from yt_playlist.library.playlist_mutation import apply_playlist_permutation
+from yt_playlist.library.playlist_snapshot import http_status
 from yt_playlist.util.matching import fuzzy_ratio, identity_key, normalize, track_artist
 from yt_playlist.util.retry import with_retry
 from yt_playlist.util.thumbnails import best_thumb
@@ -283,19 +286,8 @@ def _album_skip_reason(source, markers, saved, editions):
 def _save_album(store, client, candidate, identity_id):
     """Use the existing YouTube album-like operation and retain YouTube catalog metadata."""
     album = with_retry(lambda: client.get_album(candidate["browse_id"])) or {}
-    audio_id = album.get("audioPlaylistId")
-    if not audio_id:
-        raise ValueError("YouTube Music cannot save that candidate as an album")
-    result = client.rate_playlist(audio_id, "LIKE")
-    if result is False or (isinstance(result, dict) and result.get("status") not in (None, "STATUS_SUCCEEDED")):
-        raise ValueError("YouTube Music did not confirm the album save")
-    artist = ", ".join(a.get("name", "") for a in (album.get("artists") or []) if a.get("name"))
-    store.collection.add_saved_album({
-        "browse": candidate["browse_id"], "title": album.get("title") or candidate["title"],
-        "artist": artist or candidate.get("artist") or "", "year": album.get("year") or candidate.get("year"),
-        "type": album.get("type"), "thumbnail": best_thumb(album.get("thumbnails")) or candidate.get("thumbnail"),
-        "credits": album.get("artists"),
-    }, identity_id=identity_id)
+    album_writes.set_saved(store, client, identity_id, candidate['browse_id'], album,
+                          saved=True, fallback=candidate)
 
 
 def _album_as_playlist(store, client, source, candidate, identity_id, now):
@@ -317,23 +309,38 @@ def _playlist_transfers(store, identity_id):
     return key, value
 
 
-def _remember_playlist(store, identity_id, remote_id, title, tracks, now):
-    """Record only YouTube metadata and confirmed destination membership."""
-    ids, keys = [], []
-    for track in tracks:
-        video = track.get("videoId")
-        if not video:
-            continue
-        artist = track_artist(track)
-        album = track.get("album") or {}
-        album = album.get("name", "") if isinstance(album, dict) else album
-        ids.append(store.tracks.upsert_track(video, track.get("title") or "", artist, album,
-                                      track.get("duration_seconds"),
-                                      thumbnail=best_thumb(track.get("thumbnails"))))
-    keys = [store.tracks.catalog_subject(tid)["identity_key"] for tid in ids]
-    local_id = store.playlists.upsert_playlist(identity_id, remote_id, title, len(set(ids)), content_hash(keys), now)
-    store.playlists.set_playlist_tracks(local_id, ids)
-    store.playlists.ensure_playlist_thumbnail(local_id)
+class _PlaylistPublication:
+    """One import's confirmed prefix, normalized once and published atomically."""
+    def __init__(self, store, identity_id, remote_id, title, now):
+        self.store, self.destination = store, (identity_id, remote_id)
+        self.title, self.now = title, now
+        self.playlist_id = None
+        self.previous = []
+        self.cache = {}
+
+    def publish(self, tracks):
+        normalized, seen = [], set()
+        for track in tracks:
+            video = track.get('videoId')
+            if not video or video in seen:
+                continue
+            seen.add(video)
+            cached = self.cache.get(video)
+            if cached is None or cached[0] != track:
+                album = track.get('album') or {}
+                row = {'video_id': video, 'title': track.get('title') or '', 'artist': track_artist(track),
+                       'album': album.get('name', '') if isinstance(album, dict) else album,
+                       'duration': track.get('duration_seconds'), 'thumbnail': best_thumb(track.get('thumbnails'))}
+                cached = self.cache[video] = (deepcopy(track), row)
+            normalized.append(cached[1])
+        # Metadata changes and reordering require a full reconciliation. The
+        # repository also verifies that no independent local edit changed order.
+        prefix = ([row['video_id'] for row in self.previous]
+                  if normalized[:len(self.previous)] == self.previous else None)
+        self.playlist_id = self.store.playlists.publish_confirmed_tracks(
+            self.playlist_id, self.title, normalized, self.now,
+            expected_prefix=prefix, destination=self.destination)
+        self.previous = normalized
 
 
 def _order_imported_tracks(client, remote_id, source_videos):
@@ -363,18 +370,32 @@ def _transfer_playlist(store, client, identity_id, playlist, fingerprint, now):
     transfer = transfers.get(fingerprint)
     resumed = transfer is not None
     if transfer is None:
-        remote_id = client.create_playlist(playlist["name"], "Imported from Spotify by TuneConsole")
-        # Save the remote identity before the first add. A failed or lost batch response can then
-        # be reconciled against that same remote playlist, even after restarting the application.
-        transfer = {"ytm_playlist_id": remote_id, "complete": False, "updated_at": now, "last_run_added": 0}
+        transfer = {"creation_phase": "prepared", "marker": f"TuneConsole Spotify {uuid4().hex}",
+                    "complete": False, "updated_at": now, "last_run_added": 0}
         transfers[fingerprint] = transfer
         store.settings.set_setting(state_key, json.dumps(transfers))
-        tracks = []
-    else:
-        remote_id = transfer["ytm_playlist_id"]
-        transfer["last_run_added"] = 0
+    if not transfer.get("ytm_playlist_id"):
+        if transfer["creation_phase"] == "prepared":
+            transfer["creation_phase"] = "creating"
+            store.settings.set_setting(state_key, json.dumps(transfers))
+            try:
+                remote_id = client.create_playlist(
+                    playlist["name"], "Imported from Spotify by TuneConsole\n" + transfer["marker"])
+                if not isinstance(remote_id, str) or not remote_id.strip():
+                    raise ValueError("YouTube did not return the created playlist identity")
+            except Exception as exc:
+                if http_status(exc) in (400, 401, 403):
+                    transfer["creation_phase"] = "prepared"
+                    store.settings.set_setting(state_key, json.dumps(transfers))
+                raise
+        else:
+            remote_id = _find_import_creation(client, transfer["marker"])
+        transfer.update(ytm_playlist_id=remote_id, creation_phase="created")
         store.settings.set_setting(state_key, json.dumps(transfers))
-        tracks = _read_playlist(client, remote_id)
+    remote_id = transfer["ytm_playlist_id"]
+    transfer["last_run_added"] = 0
+    store.settings.set_setting(state_key, json.dumps(transfers))
+    tracks = _read_playlist(client, remote_id) if resumed else []
     # Retain the source slot for every accepted match, including across failed lookups on a retry.
     positions = transfer.setdefault("source_video_ids", [None] * len(playlist["resolution"]))
     for index, row in enumerate(playlist["resolution"]):
@@ -383,7 +404,8 @@ def _transfer_playlist(store, client, identity_id, playlist, fingerprint, now):
     intended = list(dict.fromkeys(video for video in positions if video))
     transfer.update(complete=False, order_verified=False)
     store.settings.set_setting(state_key, json.dumps(transfers))
-    _remember_playlist(store, identity_id, remote_id, playlist["name"], tracks, now)
+    publication = _PlaylistPublication(store, identity_id, remote_id, playlist['name'], now)
+    publication.publish(tracks)
     present = {t.get("videoId") for t in tracks}
     pending = [video for video in intended if video not in present]
     added = 0
@@ -395,16 +417,35 @@ def _transfer_playlist(store, client, identity_id, playlist, fingerprint, now):
         tracks = _read_playlist(client, remote_id)
         if not set(batch) <= {t["videoId"] for t in tracks}:
             raise ValueError("YouTube has not confirmed the imported playlist batch")
-        _remember_playlist(store, identity_id, remote_id, playlist["name"], tracks, now)
+        publication.publish(tracks)
         added += len(batch)
         transfer["last_run_added"] = added
         store.settings.set_setting(state_key, json.dumps(transfers))
     tracks = _order_imported_tracks(client, remote_id, intended)
-    _remember_playlist(store, identity_id, remote_id, playlist["name"], tracks, now)
+    publication.publish(tracks)
     transfer.update(complete=not any(row["status"] == "lookup_failed"
                                      for row in playlist["resolution"]), order_verified=True, updated_at=now)
     store.settings.set_setting(state_key, json.dumps(transfers))
     return remote_id, added, resumed
+
+
+def _find_import_creation(client, marker):
+    """Resolve an ambiguous create by its durable marker; never replay the write."""
+    playlists = client.get_library_playlists(limit=None)
+    if not isinstance(playlists, list):
+        raise ValueError("Couldn't read the library to recover the Spotify playlist")
+    matches = set()
+    for playlist in playlists:
+        remote_id = playlist.get("playlistId")
+        if not remote_id:
+            raise ValueError("Incomplete library response while recovering the Spotify playlist")
+        detail = client.get_playlist(remote_id, limit=None)
+        if marker in (detail.get("description") or "").splitlines():
+            matches.add(remote_id)
+    if len(matches) != 1:
+        raise ValueError("Spotify playlist creation is unconfirmed. Retry the import to locate "
+                         "its recovery marker; no new playlist was created.")
+    return matches.pop()
 
 
 def import_spotify_library(store, raw, client, identity_id, now, *, prepared=None) -> dict:
@@ -513,7 +554,8 @@ def import_spotify_library(store, raw, client, identity_id, now, *, prepared=Non
                       "tracks_found": len(playlist["tracks"]), "tracks_added": 0,
                       "tracks_unmatched": len(unmatched)}
             if fingerprint in current:
-                failed["ytm_playlist_id"] = current[fingerprint]["ytm_playlist_id"]
+                if current[fingerprint].get("ytm_playlist_id"):
+                    failed["ytm_playlist_id"] = current[fingerprint]["ytm_playlist_id"]
                 failed["tracks_added"] = current[fingerprint].get("last_run_added", 0)
                 report["tracks_imported"] += failed["tracks_added"]
             report["details"]["playlists"].append(failed)

@@ -1,11 +1,9 @@
 import logging
-import sqlite3
 import time
-import uuid
-from contextlib import closing
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable
+
+from yt_playlist.core import db_space
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +22,6 @@ class Migration:
     version: int
     name: str
     apply: Callable
-    replaces_data: bool = True
 
 
 def history(conn, registry):
@@ -42,31 +39,6 @@ def history(conn, registry):
         if row[0] != migration.version or row[1] != migration.name or not isinstance(row[2], (int, float)):
             raise MigrationError("Migration history is not the supported contiguous prefix")
     return len(rows)
-
-
-def verified_backup(conn, source_version, target_version, backup_dir=None):
-    path = conn.execute("PRAGMA database_list").fetchone()[2]
-    if not path:  # in-memory stores have no original file to protect
-        return None
-    source = Path(path).resolve()
-    destination = Path(backup_dir) if backup_dir is not None else source.parent / 'backups'
-    destination.mkdir(parents=True, exist_ok=True)
-    name = f"state-{source_version or 'legacy'}-to-{target_version}-{time.time_ns()}-{uuid.uuid4().hex[:8]}.db"
-    backup = destination / name
-    # Read the committed snapshot on another connection while BEGIN IMMEDIATE reserves the writer.
-    # Calling backup() on the writing connection itself can wait forever.
-    try:
-        with closing(sqlite3.connect(source.as_uri() + '?mode=ro', uri=True)) as reader:
-            with closing(sqlite3.connect(backup)) as target:
-                reader.backup(target)
-                result = target.execute('PRAGMA integrity_check').fetchall()
-                if result != [('ok',)]:
-                    raise MigrationError(f"Backup failed integrity check: {backup}")
-    except BaseException:
-        backup.unlink(missing_ok=True)
-        raise
-    log.info("Verified migration backup: %s", backup)
-    return backup
 
 
 def validate_catalog(conn, version):
@@ -137,7 +109,44 @@ def validate_version(conn, version):
     """Use the current contract at its floor; frozen validators serve older upgrades."""
     from . import current
     if version >= current.CONTRACT_FLOOR:
-        current.validate(conn, min(version, current.VERSION))
+        from . import v062_album_aliases
+        current.validate(conn, min(version, current.VERSION),
+                         replaced=v062_album_aliases.REPLACED if version >= 62 else frozenset())
+        if version >= 53:
+            from . import v053_shared_policies
+            v053_shared_policies.validate(conn)
+        if 54 <= version < 61:
+            from . import v054_audio_vibes
+            v054_audio_vibes.validate(conn)
+        if version >= 55:
+            from . import v055_audio_vibe_labels
+            v055_audio_vibe_labels.validate(conn)
+        if version >= 56:
+            from . import v056_audio_session_labels
+            v056_audio_session_labels.validate(conn)
+        if version >= 57:
+            from . import v057_audio_vibe_runs
+            v057_audio_vibe_runs.validate(conn)
+        if 58 <= version < 61:
+            from . import v058_predicted_vibes
+            v058_predicted_vibes.validate(conn)
+        if version >= 59:
+            from . import v059_group_publication
+            v059_group_publication.validate(conn)
+        if version >= 60:
+            from . import v060_group_build_expiry
+            v060_group_build_expiry.validate(conn)
+        if version >= 61:
+            from . import v061_recording_vibes
+            v061_recording_vibes.validate(conn)
+        if version >= 62:
+            v062_album_aliases.validate(conn)
+        if version >= 63:
+            from . import v063_proposal_cache
+            v063_proposal_cache.validate(conn)
+        if version >= 64:
+            from . import v064_musical_link_retractions
+            v064_musical_link_retractions.validate(conn)
         return
     from .v001_baseline import validate
     if version < 8:
@@ -152,11 +161,12 @@ def validate_version(conn, version):
     validate_catalog(conn, version)
 
 
-def migrate(conn, *, registry=None, backup_dir=None, snapshot=verified_backup, clock=time.time):
+def migrate(conn, *, registry=None, clock=time.time):
     """Apply one version per transaction; preserve earlier commits if a later version fails.
 
     Store serializes its connection; SQLite's write reservation serializes independent startups.
-    Tests may inject a registry and snapshot policy, without touching application data paths.
+    DDL, data changes and the version record commit together; SQLite rolls back an
+    interrupted version without copying the database. Tests may inject a registry.
     """
     production = registry is None
     if production:
@@ -167,7 +177,6 @@ def migrate(conn, *, registry=None, backup_dir=None, snapshot=verified_backup, c
         raise MigrationError("Invalid migration registry")
     if conn.in_transaction:
         raise MigrationError("Cannot migrate with an outstanding caller transaction")
-    backed_up = False
     fresh = None
     while True:
         try:
@@ -187,10 +196,6 @@ def migrate(conn, *, registry=None, backup_dir=None, snapshot=verified_backup, c
                 conn.rollback()
                 return
             migration = registry[current]
-            nonempty = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").fetchone())
-            if nonempty and not fresh and not backed_up and migration.replaces_data:
-                snapshot(conn, current, registry[-1].version, backup_dir)
-                backed_up = True
             if current == 0:
                 conn.execute('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at REAL NOT NULL)')
             migration.apply(conn, Context(clock()))
@@ -207,4 +212,4 @@ def migrate(conn, *, registry=None, backup_dir=None, snapshot=verified_backup, c
                 raise
             version = locals().get('migration')
             label = f'{version.version} ({version.name})' if version else 'validation/locking'
-            raise MigrationError(f'Database migration {label} failed: {exc}') from exc
+            raise MigrationError(f'Database migration {label} failed: {exc}' + db_space.failure_hint(conn, exc)) from exc

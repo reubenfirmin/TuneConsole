@@ -1,11 +1,10 @@
-{% extends "base.html" %}{% from "_macros.html" import sort_indicator %}{% block title %}{{ album.title if album else 'Album' }} · TuneConsole{% endblock %}{% block page_class %}page-album{% endblock %}{% block body %}
-{% from "_partials/song_menu_button.html" import song_menu %}
+{% extends "base.html" %}{% block title %}{{ album.title if album else 'Album' }} · TuneConsole{% endblock %}{% block page_class %}page-album{% endblock %}{% block body %}
 {% if not album %}
 <div class="page-head">
   <h1>Album unavailable</h1>
   <p>Couldn't load this album.{% if browse_id %}
     <a href="https://music.youtube.com/browse/{{ browse_id }}" target="_blank" rel="noopener"
-       data-yt-info>Open it on YouTube Music {{ arrow_icon('external') }}</a>.{% endif %}
+       data-yt-info>Open it on YouTube Music</a>.{% endif %}
     A connected account is required to fetch album details.</p>
 </div>
 {% else %}
@@ -32,21 +31,8 @@
       <span class="stat"><strong>{{ album.tracks|length }}</strong>&nbsp;track{{ '' if album.tracks|length == 1 else 's' }}</span>
     </p>
     <div class="pl-actions">
-      <a class="cta" href="https://music.youtube.com/browse/{{ browse_id }}" target="_blank" rel="noopener">▶ Play on YouTube Music</a>
-      {% if saved %}<span class="tag teal">✓ In your library</span>
-      {% elif is_upload %}
-      {# Your own upload: it is already in your library, and there is no audio playlist to like, so
-         there is nothing a save button could do here. #}
-      <span class="tag teal">✓ Your upload</span>
-      {% else %}
-      <form hx-post="/collection/save-album" hx-swap="none" class="inline">
-        <input type="hidden" name="browse_id" value="{{ browse_id }}">
-        <button type="submit" class="btn-ghost">Save Album to Library</button>
-      </form>{% endif %}
+      {% include '_partials/album_controls.html' %}
     </div>
-    {% if not in_library and library_track_count %}
-    <p class="section-note">{{ library_track_count }} of {{ album.tracks|length }} tracks in your library. The album is not saved.</p>
-    {% endif %}
   </div>
   {# Enrichment runs over the album's tracks once they're folded into the library, which happens when
      you save it (or immediately, if it's your own upload), so the icons are always shown (parity
@@ -111,6 +97,10 @@
   </div>
 </div>
 
+{% if notes is defined and (notes.description or notes.artist_note or notes.review) %}
+<div class="album-page-notes">{% with a=editorial %}{% include '_partials/album_notes.html' %}{% endwith %}</div>
+{% endif %}
+
 {% if tracks %}
 <div class="enrich-strip" x-show="running || finished" x-cloak x-transition>
   <div class="enrich-bar"><i :style="`width:${pct}%`"></i></div>
@@ -118,62 +108,21 @@
 </div>
 {% endif %}
 
-<div class="card library-table-card">
-  {% if tracks %}
-  {# Folded-in library tracks: genre/year fill in live; edits use the shared song menu. #}
-  <table class="track-table" x-data="rowSort(0)">
-    <thead><tr>
-      <th class="num col-thumb">#</th>
-      <th class="col-thumb"></th>
-      <th class="liked-col col-like"></th>
-      <th class="sorth" tabindex="0" role="button" @click="sortBy('title')" @keydown.enter.space.prevent="sortBy('title')">Song{{ sort_indicator('title') }}</th>
-      <th class="sorth" tabindex="0" role="button" @click="sortBy('artist')" @keydown.enter.space.prevent="sortBy('artist')">Artist{{ sort_indicator('artist') }}</th>
-      <th class="sorth num col-year" tabindex="0" role="button" @click="sortBy('year')" @keydown.enter.space.prevent="sortBy('year')">Year{{ sort_indicator('year') }}</th>
-      <th class="sorth col-last" tabindex="0" role="button" @click="sortBy('genre')" @keydown.enter.space.prevent="sortBy('genre')">Genre{{ sort_indicator('genre') }}</th>
-      <th class="sorth num col-count" tabindex="0" role="button" @click="sortBy('plays')" @keydown.enter.space.prevent="sortBy('plays')">Plays{{ sort_indicator('plays') }}</th>
-      <th class="sorth num col-length" tabindex="0" role="button" @click="sortBy('len')" @keydown.enter.space.prevent="sortBy('len')">Length{{ sort_indicator('len') }}</th>
-      <th class="col-action"></th>
-    </tr></thead>
-    <tbody x-ref="body">
-      {% for t in tracks %}{% set idx = loop.index %}{% include "_partials/album_track_row.html" %}{% endfor %}
-    </tbody>
-  </table>
-  <datalist id="genrelist">{% for g in genres %}<option value="{{ g }}"></option>{% endfor %}</datalist>
-  {% else %}
-  {# Not in your library yet. Read-only preview from YouTube. Save it to enrich. #}
-  <table class="track-table">
-    <thead><tr>
-      <th class="num col-thumb">#</th><th class="col-thumb"></th>
-      <th>Song</th><th>Artist</th><th class="num col-length">Length</th>
-      <th class="col-action"></th>
-    </tr></thead>
-    <tbody>
-    {% for t in album.tracks %}
-    <tr class="srow">
-      <td class="num"><div class="track-cell"><span class="rownum">{{ loop.index }}</span></div></td>
-      <td>
-        <div class="track-cell">
-        <span class="pl-cover">
-          {% if album.thumbnail %}<img class="pl-thumb" src="{{ album.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
-          {% if t.video_id %}<a class="pl-play" href="https://music.youtube.com/watch?v={{ t.video_id }}"
-             target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>{% endif %}
-        </span>
-        </div>
-      </td>
-      <td class="t-wrap" title="{{ t.title }}">
-        <div class="track-cell track-cell--text"><span class="ptitle">{{ t.title }}</span></div></td>
-      <td class="t-wrap" title="{{ t.artist or album.artist }}"><div class="track-cell track-cell--text">{% if t.artist or album.artist %}<a class="alink"
-          href="/artist?name={{ (t.artist or album.artist)|urlencode }}">{{ t.artist or album.artist }}</a>{% endif %}</div></td>
-      <td class="num mono"><div class="track-cell">{{ t.duration or '' }}</div></td>
-      <td class="rowmenu"><div class="track-cell">{{ song_menu(dict(t, artist=t.artist or album.artist, album=album.title, thumbnail=album.thumbnail, album_browse=browse_id)) }}</div></td>
-    </tr>
-    {% else %}
-      <tr><td colspan="6" class="empty">This album has no listed tracks.</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-</div>
+{% include '_partials/album_tracks.html' %}
+<datalist id="genrelist">{% for g in genres %}<option value="{{ g }}"></option>{% endfor %}</datalist>
+
+{% if companion %}
+<details class="album-page-companion" data-choice-opportunity="{{ companion_recipe.opportunity_id }}" data-choice-option="companion">
+  <summary data-choice-action="open">Continue from this record · {{ companion|length }} tracks</summary>
+  <ol>{% for track in companion %}<li>{{ track.artist }} · <a href="{{ track_url(track) }}">{{ track.title }}</a></li>{% endfor %}</ol>
+  <form hx-post="/home/generate" hx-target="this" hx-swap="outerHTML">
+    <input type="hidden" name="name" value="Around {{ album.title }}">
+    <input type="hidden" name="tracks" value="{{ companion|tojson|forceescape }}">
+    <input type="hidden" name="recipe" value="{{ companion_recipe|tojson|forceescape }}">
+    <button class="btn-ghost">Save &amp; play companion mix</button>
+  </form>
+</details>
+{% endif %}
 
 <!-- Last.fm API key modal -->
 <template x-teleport="body">
@@ -198,4 +147,7 @@
 </template>
 </div>
 {% endif %}
+{% endblock %}
+{% block page_styles %}
+<link rel="stylesheet" href="/static/album-choices.css?v={{ asset_v }}">
 {% endblock %}

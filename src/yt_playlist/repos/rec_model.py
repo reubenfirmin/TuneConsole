@@ -59,7 +59,7 @@ class RecModelRepo(Repo):
         now = time.time() if now is None else now
         return {r["axis"]: (0.0 if r["axis"].startswith("genre:") and r["weight"] == 0.0
                             else _reverted(r["weight"], r["updated_at"], now, revert_halflife_d))
-                for r in self.conn.execute("SELECT axis, weight, updated_at FROM rec_weights")}
+                for r in self.conn.execute("SELECT axis, weight, updated_at FROM rec_weights").fetchall()}
 
     @synchronized
     def nudge_weight(self, axis, factor, lo=_WEIGHT_MIN, hi=_WEIGHT_MAX, now=None, revert_halflife_d=60.0) -> float:
@@ -152,7 +152,8 @@ class RecModelRepo(Repo):
     @synchronized
     def suppressed_keys(self, surface, now, scope="", *, keys=None) -> set:
         """Keys to hide on a surface: dismissed/muted/snoozed (surface-scoped) PLUS YouTube dislikes
-        and explicit genre mutes (global, every surface). Feedback honors any 'until' expiry.
+        and explicit genre mutes and temporary skip breaks (global, every surface).
+        Feedback honors any 'until' expiry; skip breaks expire from raw exit history.
 
         A zero preference is an eligibility rule, including for unscored and cached candidates;
         lowering a score alone would still let muted tracks fill an otherwise sparse card.
@@ -168,6 +169,7 @@ class RecModelRepo(Repo):
             "AND (until IS NULL OR until>?)" + clause,
             (surface, scope or "", now, *(keys or []))).fetchall()
         blocked = {r["item_key"] for r in rows}
+        blocked.update(self._store.player_events.skip_blackouts(now, keys=keys))
         blocked.update(r[0] for r in self.conn.execute(
             "SELECT DISTINCT r.identity_key FROM rec_feedback f "
             "JOIN track_artists ta ON ta.artist_id=f.artist_id "
@@ -224,6 +226,34 @@ class RecModelRepo(Repo):
         """Reconcile an un-disliked track: drop its dislike row (un-suppress)."""
         self.conn.execute("DELETE FROM rec_feedback WHERE item_key=? AND kind='dislike'", (identity_key,))
         self.conn.commit()
+
+    @synchronized
+    def unban(self, identity_key, now) -> None:
+        """Allow a recording locally until a new explicit confirmed dislike.
+
+        Retained account/upload ratings stay intact. The typed feedback row
+        follows verified recording reassociation and survives sync and restart.
+        """
+        identity_key = catalog.resolve_key(self.conn, identity_key) or identity_key
+        recording = self.conn.execute('SELECT id FROM recordings WHERE identity_key=?', (identity_key,)).fetchone()
+        with self.conn:
+            cutoff = self.conn.execute(
+                "SELECT MAX(ir.observed_at) FROM item_ratings ir JOIN youtube_items y "
+                "ON y.video_id=ir.video_id JOIN recordings r ON r.id=y.recording_id "
+                "WHERE r.identity_key=? AND ir.source='api' AND ir.status='DISLIKE'",
+                (identity_key,)).fetchone()[0]
+            # A local allowance supersedes every retained command, even after
+            # the wall clock moved backwards. A later command advances this cutoff.
+            cutoff = max(now, cutoff) if cutoff is not None else now
+            self.conn.execute("DELETE FROM rec_feedback WHERE item_key=? AND kind='dislike'", (identity_key,))
+            self.conn.execute(
+                'INSERT INTO rec_feedback(surface,item_key,kind,scope,created_at,target_type,recording_id) '
+                "VALUES ('rating_override',?,'unban','',?,?,?) "
+                'ON CONFLICT(surface,item_key,scope) DO UPDATE SET '
+                'kind=excluded.kind,created_at=excluded.created_at,target_type=excluded.target_type,'
+                'recording_id=excluded.recording_id',
+                (identity_key, cutoff, 'recording' if recording else 'legacy_unresolved',
+                 recording[0] if recording else None))
 
     @synchronized
     def disliked_identity_keys(self) -> set:
@@ -387,6 +417,20 @@ class RecModelRepo(Repo):
         self.conn.commit()
 
     @synchronized
+    def muted_album_ids(self, browse_ids, now) -> set:
+        """Current artist mutes over canonical credits of a bounded release cohort."""
+        browse_ids = list(dict.fromkeys(browse_ids))
+        if not browse_ids:
+            return set()
+        return {row[0] for row in self.conn.execute(
+            "SELECT DISTINCT p.provider_id FROM album_provider_ids p "
+            "JOIN album_artists a ON a.album_id=p.album_id "
+            "JOIN rec_feedback f ON f.artist_id=a.artist_id "
+            "WHERE p.provider='youtube' AND f.kind='mute' AND (f.until IS NULL OR f.until>?) "
+            "AND p.provider_id IN (" + ','.join('?' for _ in browse_ids) + ")",
+            (now, *browse_ids))}
+
+    @synchronized
     def muted_artists(self) -> set:
         """Artist names the user has muted (stored as item_key 'artist:<name>')."""
         rows = self.conn.execute("SELECT item_key,artist_id FROM rec_feedback WHERE kind='mute'").fetchall()
@@ -407,7 +451,7 @@ class RecModelRepo(Repo):
     def feedback_summary(self) -> dict:
         """{kind: count} of stored feedback events, for the Taste Model page."""
         return {r["kind"]: r["c"] for r in self.conn.execute(
-            "SELECT kind, COUNT(*) c FROM rec_feedback GROUP BY kind")}
+            "SELECT kind, COUNT(*) c FROM rec_feedback WHERE kind<>'unban' GROUP BY kind")}
 
     @synchronized
     def recent_rating_inputs(self, since, until) -> dict:

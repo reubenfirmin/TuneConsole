@@ -183,15 +183,17 @@
   background: var(--warn);
   border-radius: 50%;
 }
-.page-home .dash-on-air-dot {
+.page-home .dash-on-air-dot,
+.page-home .dash-tv-dot {
   display: inline-block;
   width: .6rem;
   height: .6rem;
   margin-inline-start: .35rem;
   vertical-align: middle;
   border-radius: 50%;
-  background: var(--on-air);
 }
+.page-home .dash-on-air-dot { background: var(--on-air); }
+.page-home .dash-tv-dot { background: var(--tv-playing); }
 .page-home .dash-on-air-dot.is-paused {
   background: var(--dim);
 }

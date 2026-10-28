@@ -12,7 +12,7 @@ import hashlib
 import json
 import uuid
 
-from yt_playlist.rec import (arc_energy, home_audit, home_themes, home_vibe, journeys,
+from yt_playlist.rec import (arc_energy, home_audit, home_themes, home_vibe, journeys, musical_character,
                              measurement, mix_tuning, ordering, rec_params, recipes, surfaces)
 from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.repos.modes import ModesRepo
@@ -76,6 +76,9 @@ class CardsResult:
     requested_genres: list[str]
     epoch: int
     vibe: str | None
+    choice_context: dict | None = None
+    preparing: bool = False
+    preference_notice: str | None = None
 
 
 @dataclass
@@ -88,6 +91,7 @@ def experiment_id(proto):
     """Identity of the choice, independent of its current track order or cache generation."""
     recipe = proto.get("recipe") or {}
     choice = {"lane": proto["lane"], "mode": proto.get("mode_id"),
+              "group_version": proto.get('group_version'),
               "ranker": proto.get("ranker"), "genres": recipe.get("genre_request"),
               "vibe": recipe.get("vibe"), "facets": recipe.get("facets")}
     return hashlib.sha256(json.dumps(choice, sort_keys=True).encode()).hexdigest()[:24]
@@ -109,31 +113,69 @@ def _order_by_journey(store, items, journey, seed, selection_data=None):
     dao = store.rec_query
     decades, lastp = dao.track_decades(keys), dao.track_last_played(keys)
     plays = selection_data["plays"] if selection_data is not None else dao.play_counts()
-    genres = {(field(it, "key") or ""): (field(it, "genre") or "") for it in items}
-    audio = selection_data["audio"] if selection_data is not None else dao.track_audio_features()
-    arc = arc_energy.arc_energies(keys, genres, audio)
+    profiles = musical_character.load(store, [field(it, 'key') for it in items
+        if not (isinstance(it, dict) and 'musical' in it)])
+    # A prepared selection owns its profile until its next worker publication.
+    profiles.update({field(it, 'key'): it['musical'] for it in items
+                     if isinstance(it, dict) and 'musical' in it})
+    arc = arc_energy.arc_energies(keys, profiles)
 
     def feat(it):
         key, genre = field(it, "key") or "", field(it, "genre") or ""
         return {"artist": field(it, "artist") or "", "genre": genre,
-                "energy": arc.get(key, genre_map.energy(genre)), "decade": decades.get(key),
+                "energy": arc.get(key, .5), "decade": decades.get(key),
                 "plays": plays.get(key, 0), "recency": lastp.get(key, 0.0)}
 
     return journeys.journey_order(items, journey, seed, feat)
 
 
+def _group_cards(store, now, epoch, prepared, include, avoid):
+    from yt_playlist.rec import group_home
+    groups = group_home.inputs(store, now, prepared)
+    if not groups:
+        return None
+    return {'cards': group_home.assemble(store, now, epoch, groups, include=include, avoid=avoid),
+            'context': groups['context']}
+
+
+def _complete_card(store, card, now, epoch, prepared, selection_data):
+    rolled = recipes.roll_recipe(store, card['lane'], seed=f"{epoch}:{card['mode_id']}", now=now,
+        **({'leans': prepared['leans'], 'dists': prepared['dists']} if prepared is not None else {}))
+    journey, dj = rolled.get('journey', 'shuffle'), rolled.get('dj', {})
+    tracks = _order_by_journey(store, card['tracks'], journey, dj.get('seed', 0), selection_data)
+    shadow = card.get('counterfactual')
+    if shadow:
+        shadow = {**shadow, 'tracks': _order_by_journey(store, shadow['tracks'], journey,
+                                                      dj.get('seed', 0), selection_data)}
+    proto = _proto(store, card['lane'], card['label'], tracks, now) | {
+        'mode_id': card['mode_id'], 'ranker': card['ranker'], 'experiment': card.get('experiment'),
+        'counterfactual': shadow,
+        'recipe': {'model': 'vibe' if home_vibe.current(store, now) else 'mode', 'lane': card['lane'],
+                   'mode_id': card['mode_id'], 'ranker': card['ranker'], 'journey': journey, 'dj': dj,
+                   'musical_version': musical_character.VERSION}}
+    if card.get('group_version'):
+        identity = {key: card[key] for key in ('group_id', 'group_version', 'group_generation')}
+        proto.update(identity)
+        proto['recipe'].update(identity, model='musical-group')
+    return proto
+
+
 def _epoch(store, card):
+    if card == 'cards':
+        return mix_tuning.card_epoch(store)
     cap = max(1, rec_params.get_param(store, "erosion_view_cap"))
     return max(0, store.rec_ledger.card_views(card) - 1) // cap
 
 
-def _rolled_theme(store, lane, pool, now):
+def _rolled_theme(store, lane, pool, now, preparation=None):
     dists = recipes.pool_facets(store, pool)
     avoid = {"genres": set(), "eras": set()}
     for other in _ROW_LANES:
         this_one = other == lane
         recipe = recipes.roll_recipe(store, other, seed=f"{other}:{_epoch(store, other)}",
-                                     now=now, avoid=avoid, dists=dists if this_one else None)
+                                     now=now, avoid=avoid,
+                                     dists=dists if this_one else (preparation or {}).get('dists'),
+                                     **({'leans': preparation['leans']} if preparation is not None else {}))
         if this_one:
             return recipe
         avoid["genres"] |= set(recipe.get("facets", {}).get("genres", []))
@@ -141,10 +183,10 @@ def _rolled_theme(store, lane, pool, now):
     return recipes.roll_recipe(store, lane, seed=f"{lane}:{_epoch(store, lane)}", now=now, dists=dists)
 
 
-def _carded(store, lane, label, pool, now):
+def _carded(store, lane, label, pool, now, preparation=None):
     pool = ordering.attach_genres(store, list(pool))
-    recipe = _rolled_theme(store, lane, pool, now)
-    focused = recipes.theme_filter(store, pool, recipe.get("facets", {}))
+    recipe = _rolled_theme(store, lane, pool, now, preparation)
+    focused = pool if home_vibe.current(store, now) else recipes.theme_filter(store, pool, recipe.get("facets", {}))
     focused = home_vibe.rank(store, now, focused)
     items = (focused[:PROTO_SIZE] if home_vibe.current(store, now) else
              surfaces.rotate_sample(focused[:PROTO_SIZE * 2], PROTO_SIZE, _epoch(store, lane)))
@@ -164,6 +206,8 @@ def _record_served_cards(store, protos, now):
         ranker = proto.get("ranker") or "lane"
         comparison = uuid.uuid4().hex
         experiment = proto.get("experiment")
+        if proto.get("assignment") and not experiment:
+            experiment = {"assignment": proto["assignment"], "ranker_controlled": False}
         if experiment:
             experiment = {**experiment, "comparison_id": comparison}
         for track_position, track in enumerate(proto["tracks"], 1):
@@ -174,8 +218,10 @@ def _record_served_cards(store, protos, now):
                          "serving_context": {**details.get("serving_context", {}), "ranker": ranker,
                                              "card_position": card_position, "track_position": track_position,
                                              "recipe": proto.get("recipe", {})}})
-        share = experiment["share"] if experiment else None
-        propensity = (share if ranker == "ppr" else 1 - share) if share is not None else 1.0
+        share = experiment.get("share") if experiment else None
+        assignment = (experiment or {}).get("assignment") or {}
+        propensity = assignment.get("probability", (share if ranker == "ppr" else 1 - share)
+                                    if share is not None else 1.0)
         offers.append({"items": rows, "ranker": ranker,
             "request_id": comparison + ":live", "experiment": experiment, "propensity": propensity})
         if experiment and (shadow := proto.get("counterfactual")):
@@ -185,7 +231,7 @@ def _record_served_cards(store, protos, now):
     measurement.record_offers(store, "home", offers, now)
 
 
-def _one_card(store, card, now, *, avoid_genres=(), include_genres=(), exclude_keys=()):
+def _one_card(store, card, now, *, avoid_genres=(), include_genres=(), exclude_keys=(), preparation=None):
     if card == "wheelhouse":
         pool = list(surfaces.for_you(store, now, limit=ROTATION_POOL))
     elif card == "explore":
@@ -194,7 +240,8 @@ def _one_card(store, card, now, *, avoid_genres=(), include_genres=(), exclude_k
         pool = list(surfaces.comfort_listening(store, now, limit=ROTATION_POOL))
     elif card == "fresh":
         from yt_playlist.rec import fresh_pool
-        pool = fresh_pool.pick(store, now, include_genres, avoid_genres, size=ROTATION_POOL)
+        pool = fresh_pool.pick(store, now, include_genres, avoid_genres, size=ROTATION_POOL,
+                               bundles=(preparation or {}).get('bundles'))
     else:
         return None
     if exclude_keys:
@@ -204,7 +251,7 @@ def _one_card(store, card, now, *, avoid_genres=(), include_genres=(), exclude_k
         pool = home_themes.matching_genres(store, pool, avoid=avoid_genres, include=include_genres)
     if not pool or ((avoid_genres or include_genres) and len(pool) < 4):
         return None
-    return _carded(store, card, _CARD_LABELS[card], pool, now)
+    return _carded(store, card, _CARD_LABELS[card], pool, now, preparation)
 
 
 class HomeCards:
@@ -217,6 +264,8 @@ class HomeCards:
         return self.genre_options if self.genre_options is not None else home_themes.genre_options(self.store)
 
     def audit(self, protos: list[dict], now: float, source: str) -> None:
+        if getattr(self.store, 'activity_paused', False):
+            return
         try:
             home_audit.record(self.store, protos, now, source=source, epoch=_epoch(self.store, "cards"),
                               card_epochs={p["lane"]: _epoch(self.store, p["lane"]) for p in protos})
@@ -234,7 +283,9 @@ class HomeCards:
         mix_tuning.expire(store, now)
         epoch = _epoch(store, "cards") if request.epoch is None else request.epoch
         genres = store.rec_proposals.get_proposals("home_genre_request") or {}
-        active = request.use_genre_request and genres.get("epoch") == _epoch(store, "cards")
+        vibe = home_vibe.current(store, now)
+        saved = request.use_genre_request and mix_tuning.genre_active(store, genres)
+        active = saved
         avoid = set(genres.get("avoid_genres", [])) if active else set()
         include = set(genres.get("include_genres", [])) if active else set()
         filters = {}
@@ -243,32 +294,29 @@ class HomeCards:
         if include:
             filters["include_genres"] = include
         prepared = (self.selection_data or {}).get('preparation')
-        cards = mode_surfaces.assemble_cards(store, now, epoch, **filters,
+        checkpoint = (prepared or {}).get('checkpoint')
+        group_key = ('home-group-cards', checkpoint, epoch, tuple(sorted(include)), tuple(sorted(avoid)))
+        groups = (store.memoized_read(group_key, lambda: _group_cards(store, now, epoch, prepared, include, avoid))
+                  if checkpoint is not None else _group_cards(store, now, epoch, prepared, include, avoid))
+        cards = (groups['cards'] if groups else
+                 mode_surfaces.assemble_cards(store, now, epoch, **filters,
                                              **({"mode_order": request.mode_order} if request.mode_order is not None else {}),
-                                             **({'preparation': prepared} if prepared is not None else {}))
+                                             **({'preparation': prepared} if prepared is not None else {})))
         assembly = (prepared or {}).get('assembly')
-        bundles = assembly['bundles'] if assembly is not None else store.rec_proposals.get_proposals('mode_bundles')
+        bundles = (prepared['bundles'] if prepared is not None else
+                   assembly['bundles'] if assembly is not None else store.rec_proposals.get_proposals('mode_bundles'))
         if include:
             cards = [c for c in cards if c["lane"] != "fresh"]
         if cards:
             protos = []
             for card in cards:
-                rolled = recipes.roll_recipe(store, card["lane"], seed=f"{epoch}:{card['mode_id']}", now=now,
-                    **({'leans': prepared['leans'], 'dists': prepared['dists']} if prepared is not None else {}))
-                journey, dj = rolled.get("journey", "shuffle"), rolled.get("dj", {})
-                tracks = _order_by_journey(store, card["tracks"], journey, dj.get("seed", 0), self.selection_data)
-                shadow = card.get("counterfactual")
-                if shadow:
-                    shadow = {**shadow, "tracks": _order_by_journey(store, shadow["tracks"], journey,
-                                                                  dj.get("seed", 0), self.selection_data)}
-                protos.append(_proto(store, card["lane"], card["label"], tracks, now)
-                              | {"mode_id": card["mode_id"], "ranker": card["ranker"],
-                                 "experiment": card.get("experiment"), "counterfactual": shadow,
-                                 "recipe": {"model": "mode", "lane": card["lane"], "mode_id": card["mode_id"],
-                                            "ranker": card["ranker"], "journey": journey, "dj": dj}})
+                key = ('home-complete-card', checkpoint, epoch, card['lane'], card.get('group_version'),
+                       card.get('mode_id'), tuple(t['key'] for t in card['tracks']))
+                complete = lambda: _complete_card(store, card, now, epoch, prepared, self.selection_data)
+                protos.append(store.memoized_read(key, complete) if checkpoint is not None else complete())
             if request.record:
                 self.record_modes(protos, epoch, now)
-        elif assembly is not None and not assembly['modes']:
+        elif not vibe and assembly is not None and not assembly['modes']:
             # Cold imports have prepared library pools before modes can be fitted.
             # This only assembles cached candidates; ranking stays in the worker.
             protos = []
@@ -286,7 +334,7 @@ class HomeCards:
                     proto = _carded(store, lane, _CARD_LABELS[lane], pool[:ROTATION_POOL], now)
                     if len(proto['tracks']) >= 4:
                         protos.append(proto)
-        elif (prepared is not None or (filters and bundles and store.modes.list_modes(active_only=True))):
+        elif (groups or vibe or prepared is not None or (filters and bundles and store.modes.list_modes(active_only=True))):
             protos = []
         else:
             protos = []
@@ -296,7 +344,7 @@ class HomeCards:
                     options["exclude_keys"] = [ordering._field(t, "key") for p in protos for t in p["tracks"]]
                 if proto := _one_card(store, name, now, **options):
                     protos.append(proto)
-        if filters and not protos and not include:
+        if filters and not protos and not include and not vibe:
             return self.cards(replace(request, use_genre_request=False,
                               genre_notice="No other genre themes are ready yet. Here are your usual mixes."))
         parameters = {"include_genres": sorted(include), "avoid_genres": sorted(avoid)}
@@ -328,7 +376,6 @@ class HomeCards:
                               else {"kind": "other_genres", "avoid": sorted(avoid)})
             for proto in protos:
                 proto["recipe"] = {**(proto.get("recipe") or {}), "genre_request": recipe_request}
-        vibe = home_vibe.current(store, now)
         for proto in protos:
             if vibe:
                 proto["recipe"] = {**(proto.get("recipe") or {}), "vibe": vibe}
@@ -337,7 +384,8 @@ class HomeCards:
         if request.record:
             self.record_offer(protos, now)
         return CardsResult(protos, slots, notice, notice if not filters else None,
-                           self.options(), sorted(include), epoch, vibe)
+                           self.options(), sorted(genres.get('include_genres', [])) if saved else [], epoch, vibe,
+                           choice_context=groups['context'] if groups else None)
 
     def record_modes(self, protos, epoch, now):
         try:
@@ -403,16 +451,32 @@ class HomeCards:
 
     def built_fresh(self, parameters, now):
         include, avoid = parameters["include_genres"], parameters["avoid_genres"]
+        preparation = (self.selection_data or {}).get('preparation')
+        if vibe := home_vibe.current(self.store, now):
+            from yt_playlist.rec import vibe_pools
+            tracks = vibe_pools.pick(self.store, now, vibe, 'fresh',
+                                     include_genres=include, avoid_genres=avoid)
+            if len(tracks) < 4:
+                return None
+            proto = _carded(self.store, 'fresh', _CARD_LABELS['fresh'], tracks, now,
+                            preparation=preparation)
+            if include or avoid:
+                proto['recipe']['genre_request'] = ({'kind': 'chosen_genres', 'include': include} if include
+                                                    else {'kind': 'other_genres', 'avoid': avoid})
+            return proto
         if include:
             from yt_playlist.rec import fresh_pool
-            tracks = fresh_pool.pick(self.store, now, include, avoid)
+            tracks = fresh_pool.pick(self.store, now, include, avoid,
+                                     bundles=(preparation or {}).get('bundles'))
             if not tracks:
                 return None
             proto = _proto(self.store, "fresh", _CARD_LABELS["fresh"], tracks, now)
-            proto["recipe"] = recipes.roll_recipe(self.store, "fresh", seed=f"fresh:{_epoch(self.store, 'fresh')}", now=now)
+            proto["recipe"] = recipes.roll_recipe(self.store, "fresh", seed=f"fresh:{_epoch(self.store, 'fresh')}", now=now,
+                **({'leans': preparation['leans'], 'dists': preparation['dists']} if preparation is not None else {}))
             proto["recipe"]["facets"] = {"genres": include}
         else:
-            proto = _one_card(self.store, "fresh", now, **({"avoid_genres": avoid} if avoid else {}))
+            proto = _one_card(self.store, "fresh", now, preparation=preparation,
+                              **({"avoid_genres": avoid} if avoid else {}))
         if proto is not None:
             if len(proto["tracks"]) < 4:
                 return None

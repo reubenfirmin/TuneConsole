@@ -29,14 +29,31 @@ def experiment_report(store, start, end, now):
     mature_end = min(end, now - 24 * 3600)
     inputs, shadows = store.rec_ledger.experiment_inputs(start, end, max(start, mature_end))
     report = summarize(inputs, start, max(start, mature_end))
-    for bucket in report["by_experiment"].values():
+    provenance = {}
+    # Inspect the exact mature live rows summarized above. Old cohorts outside
+    # the report, pending offers and shadows cannot support or veto a decision.
+    for row in inputs[0]:
+        trace = json.loads(row['provenance'])
+        experiment = trace.get('experiment') or {}
+        label = experiment.get('cohort', 'unknown') + ':' + trace.get('ranker', 'unknown')
+        evidence = provenance.setdefault(label, {'controlled': 0, 'uncontrolled': 0, 'legacy_cache': 0})
+        probability = trace.get('propensity')
+        controlled = (experiment.get('ranker_controlled') is True
+                      and type(probability) in (int, float) and math.isfinite(probability)
+                      and 0 < probability < 1)
+        evidence['controlled' if controlled else 'uncontrolled'] += 1
+        evidence['legacy_cache'] += int((experiment.get('ppr_policy') or {}).get('algorithm')
+                                        == 'unknown-legacy-cache')
+    for label, bucket in report["by_experiment"].items():
         bucket["powered"] = bucket["clusters"] >= MIN_EXPERIMENT_CLUSTERS
+        bucket['assignment_provenance'] = provenance[label]
     return {"schema": 1, "start": start, "end": end, "mature_before": mature_end,
             "live": report["by_experiment"], "counterfactual": shadows,
             "by_lane": report["by_lane"], "by_mode": report["by_mode"],
             "min_clusters_per_arm": MIN_EXPERIMENT_CLUSTERS,
             "uncertainty": "Wilson 95% intervals on epoch/mode clusters, repeated views pooled",
-            "promotion_rule": "100 mature clusters per arm; disjoint acceptance intervals; "
+            "promotion_rule": "Affirmative controlled ranker assignment with nonzero probability for both arms; "
+                              "100 mature clusters per arm; disjoint acceptance intervals; "
                               "no worse sustained-listening or skip intervals",
             "counterfactual_outcomes": None}
 

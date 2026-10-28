@@ -152,7 +152,7 @@
   gap: clamp(1.25rem, 3.5vw, 2.75rem);
   align-items: stretch;
 }
-:is(.page-playlist, .page-album) .release-hero {
+:is(.page-playlist, .page-album, .page-track) .release-hero {
   display: flex;
   position: relative;
   isolation: isolate;
@@ -164,7 +164,7 @@
   border-block: 0;
   background: linear-gradient(120deg, var(--surface-raised), var(--surface-inset));
 }
-:is(.page-playlist, .page-album) .release-hero::before {
+:is(.page-playlist, .page-album, .page-track) .release-hero::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -175,10 +175,10 @@
     color-mix(in srgb, var(--shadow-ink) 28%, transparent) 100%);
   pointer-events: none;
 }
-:is(.page-playlist, .page-album) .release-hero::after {
+:is(.page-playlist, .page-album, .page-track) .release-hero::after {
   content: none;
 }
-:is(.page-playlist, .page-album) .release-hero .pl-art {
+:is(.page-playlist, .page-album, .page-track) .release-hero .pl-art {
   position: absolute;
   inset: 0;
   z-index: 0;
@@ -191,7 +191,7 @@
   border-radius: 0;
   box-shadow: none;
 }
-:is(.page-playlist, .page-album) .release-hero .pl-art img {
+:is(.page-playlist, .page-album, .page-track) .release-hero .pl-art img {
   object-fit: cover;
   object-position: center 42%;
   filter: saturate(.82) contrast(1.04) brightness(.72);
@@ -211,16 +211,47 @@
   height: 100%;
   transform: none;
 }
-:is(.page-playlist, .page-album) .release-hero .pl-headmain {
+:is(.page-playlist, .page-album, .page-track) .release-hero .pl-headmain {
   position: relative;
   z-index: 2;
   width: min(54rem, calc(100% - 3rem));
   justify-content: flex-end;
   padding: 0;
 }
-:is(.page-playlist, .page-album) .release-hero h1 {
+:is(.page-playlist, .page-album, .page-track) .release-hero h1 {
   color: var(--light-source);
   text-shadow: 0 2px 18px var(--shadow-ink);
+}
+.page-playlist .release-hero .pl-generated-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .45rem .65rem;
+  margin-block-end: clamp(1.5rem, 3vw, 2.75rem);
+  color: var(--light-source);
+  font-size: var(--type-sm);
+  line-height: 1.4;
+}
+.page-playlist .release-hero :is(.pl-type-badge, .pl-version) {
+  display: inline-block;
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: .3rem .7rem;
+  border: 1px solid color-mix(in srgb, var(--light-source) 30%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--shadow-ink) 80%, transparent);
+  overflow-wrap: anywhere;
+}
+.page-playlist .release-hero .pl-type-badge {
+  background: color-mix(in srgb, var(--accent) 40%, var(--shadow-ink));
+  font-weight: 650;
+}
+.page-playlist .release-hero .pl-version {
+  font-variant-numeric: tabular-nums;
+}
+.page-playlist .release-hero .pl-generated-date {
+  color: color-mix(in srgb, var(--light-source) 84%, transparent);
+  font-size: var(--type-body);
 }
 :is(.page-playlist, .page-album) .pl-actions {
   display: flex;
@@ -229,6 +260,7 @@
   gap: .65rem;
   margin-block-start: 1.15rem;
 }
+.page-playlist .pl-actions .pl-stats { margin: 0; }
 .playlist-radio {
   display: inline-flex;
   align-items: center;
@@ -273,6 +305,20 @@
   box-shadow: 0 5px 16px color-mix(in srgb, var(--shadow-ink) 34%, transparent);
   flex-basis: auto;
 }
+/* Tools occupy real layout space, including when metadata wraps or text grows. */
+.page-playlist .release-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1rem;
+}
+.page-playlist .release-hero .pl-headmain { width: 100%; }
+.page-playlist .release-hero .head-tools {
+  position: relative;
+  inset: auto;
+  align-self: start;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
 :is(.page-playlist, .page-album) .release-hero .head-icon {
   width: 2.35rem;
   min-width: 2.35rem;
@@ -294,10 +340,6 @@
 :is(.page-playlist, .page-album) .release-hero .conflict-icon {
   grid-column: auto;
 }
-.page-playlist .pl-identity {
-  color: color-mix(in srgb, var(--light-source) 62%, transparent);
-  font-size: var(--type-sm);
-}
 :is(.page-playlist, .page-album) .release-hero .pl-stats {
   color: color-mix(in srgb, var(--light-source) 76%, transparent);
   text-shadow: 0 1px 8px var(--shadow-ink);
@@ -314,6 +356,10 @@
   color: var(--light-source);
   text-decoration: underline;
 }
+.page-album .album-release-hero .album-library.on {
+  color: var(--canvas);
+  background: var(--accent);
+}
 
 @media (max-width: 45rem) {
   .artist-hero {
@@ -323,12 +369,15 @@
   .library-hero h1 {
     font-size: clamp(2.25rem, 11vw, 3.5rem);
   }
-  :is(.page-playlist, .page-album) .release-hero {
+  :is(.page-playlist, .page-album, .page-track) .release-hero {
     min-height: 13rem;
   }
-  :is(.page-playlist, .page-album) .release-hero .pl-headmain {
+  :is(.page-playlist, .page-album, .page-track) .release-hero .pl-headmain {
     width: 100%;
   }
+  .page-playlist .release-hero { grid-template-columns: minmax(0, 1fr); }
+  .page-playlist .release-hero .pl-headmain { grid-column: 1 / -1; grid-row: 2; }
+  .page-playlist .release-hero .head-tools { grid-column: 1; grid-row: 1; justify-self: end; }
 }
 @media (max-width: 32rem) {
   .artist-hero {

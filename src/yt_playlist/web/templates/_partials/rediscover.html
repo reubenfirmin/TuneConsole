@@ -1,10 +1,10 @@
 {# A return surface, deliberately unlike Discover's catalog grid. One dormant album becomes the
    memory to step back into; the rest form a small trail, followed by old personal playlists. #}
-{% if rediscover_albums or rediscover %}
+{% if rediscover_albums or rediscover or rediscover_tracks %}
 <section id="rediscover">
   <header class="redis-intro">
-    <h2 class="section">Something you used to love</h2>
-    <p>Saved music that has quietly fallen out of your rotation.</p>
+    <h2>Back in your orbit</h2>
+    <p>Saved music that you haven't played recently</p>
   </header>
   {% if rediscover_albums %}
   {% set lead = rediscover_albums[0] %}
@@ -12,13 +12,11 @@
     <a class="redis-memory-art art-album{{ ' no-art' if not lead.thumbnail }}" href="/album?browse={{ lead.browse_id }}">
       {% if lead.thumbnail %}<img src="{{ lead.thumbnail }}" alt="" referrerpolicy="no-referrer"
            onerror="this.closest('.redis-memory-art').classList.add('no-art'); this.remove()">{% endif %}
-      <span class="redis-memory-cue" aria-hidden="true">{{ arrow_icon('right') }}</span>
     </a>
     <div class="redis-memory-copy">
-      <p>Bring this one back</p>
       <h3><a href="/album?browse={{ lead.browse_id }}">{{ lead.title }}</a></h3>
       <span>{{ lead.artist }}{% if lead.year %} · {{ lead.year }}{% endif %}</span>
-      <a class="redis-open" href="/album?browse={{ lead.browse_id }}">Open album {{ arrow_icon('right') }}</a>
+      <a class="redis-open" href="/album?browse={{ lead.browse_id }}">Open album</a>
     </div>
   </div>
   {% if rediscover_albums|length > 1 %}
@@ -38,32 +36,54 @@
     {% for p in rediscover %}
     <div class="card card--interactive redis-card">
       <header class="redis-head">
-        <span class="gen-th art-playlist{{ ' no-art' if not p.thumbnail }}">{% if p.thumbnail %}<img src="{{ p.thumbnail }}"
+        <span class="redis-sleeve" aria-hidden="true"><span class="gen-th art-playlist{{ ' no-art' if not p.thumbnail }}">{% if p.thumbnail %}<img src="{{ p.thumbnail }}"
              alt="" loading="lazy" referrerpolicy="no-referrer"
-             onerror="this.closest('.gen-th').classList.add('no-art'); this.remove()">{% endif %}</span>
+             onerror="this.closest('.gen-th').classList.add('no-art'); this.remove()">{% endif %}</span></span>
         <span class="redis-meta">
           <a class="redis-title" href="/playlist/{{ p.id }}" title="Open in TuneConsole">{{ p.title }}</a>
-          <span class="redis-sub">{{ p.track_count }} track{{ 's' if p.track_count != 1 }}{% if p.last_played %} · tracks typically last played {{ p.last_played }}{% else %} · mostly never played{% endif %}</span>
+          <span class="redis-sub">{{ p.track_count }} track{{ 's' if p.track_count != 1 }}{% if p.last_played %} · tracks typically last played {{ p.last_played }}{% else %} · rarely played{% endif %}</span>
         </span>
+        <a class="redis-play" href="https://music.youtube.com/playlist?list={{ p.ytm|urlencode }}"
+           target="_blank" rel="noopener" aria-label="Play {{ p.title }}" title="Play {{ p.title }}">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M8 4.5v15L20 12Z"/></svg>
+        </a>
       </header>
-      <ol class="redis-list">
+      <table class="track-table redis-tracks" aria-label="{{ p.title }} tracks">
+        <colgroup><col class="redis-number"><col class="redis-art"><col><col></colgroup>
+        <thead><tr><th class="num">#</th><th aria-label="Playback"></th><th>Song</th><th>Artist</th></tr></thead>
+        <tbody>
         {% for t in p.tracks %}
-        <li class="redis-row">
-          <span class="redis-row-title">{{ t.title }}</span>
-          <span class="redis-row-artist">{{ t.artist }}</span>
-        </li>
+        <tr class="srow"{% if t.video_id %} data-vid="{{ t.video_id }}"{% endif %}>
+          <td class="num"><div class="track-cell"><span class="rownum">{{ loop.index }}</span></div></td>
+          <td><div class="track-cell"><span class="pl-cover">
+            {% if t.thumbnail %}<img class="pl-thumb" src="{{ t.thumbnail }}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+            {% if t.video_id %}<a class="pl-play" href="https://music.youtube.com/watch?v={{ t.video_id|urlencode }}&amp;list={{ p.ytm|urlencode }}"
+               target="_blank" rel="noopener" title="Play {{ t.title }} on YouTube Music">▶</a>{% endif %}
+          </span></div></td>
+          <td class="t-wrap"><div class="track-cell track-cell--text">{% if t.video_id %}<a class="ptitle" href="{{ track_url(t) }}">{{ t.title }}</a>{% else %}<span class="ptitle">{{ t.title }}</span>{% endif %}</div></td>
+          <td class="t-wrap"><div class="track-cell track-cell--text"><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></div></td>
+        </tr>
         {% endfor %}
-        {% if p.track_count > p.tracks|length %}
-        <li class="redis-more">…and {{ p.track_count - p.tracks|length }} more</li>
-        {% endif %}
-      </ol>
-      <footer class="redis-foot">
-        <a class="redis-play" href="https://music.youtube.com/playlist?list={{ p.ytm }}"
-           target="_blank" rel="noopener"><span>▶</span> Play</a>
-        <a class="redis-edit" href="/playlist/{{ p.id }}">View playlist {{ arrow_icon('right') }}</a>
-      </footer>
+        </tbody>
+      </table>
     </div>
     {% endfor %}
+  </div>
+  {% endif %}
+  {% if rediscover_tracks %}
+  <div class="redis-song-shelf">
+    <header class="redis-song-intro"><h3>A little out of rotation</h3><p>Familiar songs, given room to return.</p></header>
+    <div class="redis-song-grid" aria-label="Songs to revisit">
+      {% for t in rediscover_tracks %}
+      <a class="redis-song" href="https://music.youtube.com/watch?v={{ t.video_id|urlencode }}" target="_blank" rel="noopener" aria-label="Play {{ t.title }} by {{ t.artist }}">
+        <span class="redis-song-art art-track{{ ' no-art' if not t.thumbnail }}">
+          {% if t.thumbnail %}<img src="{{ t.thumbnail }}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentElement.classList.add('no-art'); this.remove()">{% endif %}
+          <svg class="redis-song-play" viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M8 4.5v15L20 12Z"/></svg>
+        </span>
+        <span class="redis-song-copy"><strong>{{ t.title }}</strong><small>{{ t.artist }}</small></span>
+      </a>
+      {% endfor %}
+    </div>
   </div>
   {% endif %}
 </section>

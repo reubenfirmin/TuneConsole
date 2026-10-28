@@ -46,7 +46,7 @@ def test_evaluation_excludes_targets_and_feature_fitting_inputs(store, monkeypat
         keys.append(f"track {i}|artist")
     vectors = np.eye(30, dtype=np.float32)
     monkeypatch.setattr(embed, "load_vectors", lambda s: (keys, vectors, {k: i for i, k in enumerate(keys)}))
-    original_fit = discover.ContentProjection.fit
+    original_fit = discover.ContentProjection.fit_from_inputs
     original_model = content_model.build_content_model
     original_solve = np.linalg.solve
     active_training = set()
@@ -64,12 +64,11 @@ def test_evaluation_excludes_targets_and_feature_fitting_inputs(store, monkeypat
                 assert np.all(rhs[:, i] == 0)
         return original_solve(lhs, rhs)
 
-    def fit(cls, s, *, training_keys, include_artist):
+    def fit(cls, reference, content, audio, *, training_keys):
         nonlocal active_training
-        assert not include_artist
         active_training = set(training_keys)
         assert len(active_training) == 24
-        projection = original_fit(s, training_keys=training_keys, include_artist=include_artist)
+        projection = original_fit(reference, content, audio, training_keys=training_keys)
         predict = projection.predict
 
         def held_out(genre, year, audio):
@@ -85,7 +84,7 @@ def test_evaluation_excludes_targets_and_feature_fitting_inputs(store, monkeypat
     monkeypatch.setattr(np.linalg, "solve", solve)
     monkeypatch.setattr(discover.artist_model, "load_artist_vectors",
                         lambda s: pytest.fail("evaluation must not use shared artist features"))
-    monkeypatch.setattr(discover.ContentProjection, "fit", classmethod(fit))
+    monkeypatch.setattr(discover.ContentProjection, "fit_from_inputs", classmethod(fit))
     result = eval_recs.projection_recall(store, k=5)
     assert sorted(tested) == sorted(keys)
     assert result["eligible"] == result["trials"] == 30

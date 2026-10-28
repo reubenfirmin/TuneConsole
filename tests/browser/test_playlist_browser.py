@@ -10,6 +10,8 @@ import threading
 import time
 import re
 import json
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import uvicorn
@@ -73,6 +75,284 @@ def test_rename_playlist_updates_heading(live_playlist_app, page):
     # survives a reload (persisted, not just a DOM poke)
     page.goto(f"{base}/playlist/{pid}")
     expect(page.get_by_role("heading", name="Renamed Mix")).to_be_visible()
+
+
+@pytest.mark.parametrize('width,font_scale', [
+    (320, 1), (320, 1.5), (320, 2), (390, 1), (390, 1.5), (720, 1.5), (1440, 1)])
+def test_generated_heading_keeps_the_full_title_when_editing_and_after_rename(
+        live_playlist_app, page, width, font_scale, tmp_path):
+    base, pid, store = (live_playlist_app[key] for key in ('base', 'pid', 'store'))
+    original = 'Metal & "more" - More in your wheelhouse - October 26 2026 #12'
+    store.playlists.set_playlist_title(pid, original, 1)
+    store.playlists.mark_generated_playlist('PL1')
+    page.set_viewport_size({'width': width, 'height': 950})
+    page.goto(f'{base}/playlist/{pid}')
+    if font_scale != 1:
+        page.add_style_tag(content=f'html {{ font-size: {font_scale * 100}% !important; }}')
+    page.evaluate('document.fonts.ready')
+    heading = page.get_by_role('heading', name='Metal & "more"', exact=True)
+    expect(heading).to_be_visible()
+    expect(page.locator('.pl-type-badge')).to_have_text('More in your wheelhouse')
+    expect(page.locator('.pl-version')).to_have_text('Version 12')
+    expect(page.locator('time.pl-generated-date')).to_have_text('October 26, 2026')
+    expect(page.locator('time.pl-generated-date')).to_have_attribute('datetime', '2026-10-26')
+    expect(page.locator('.pl-generated-meta time')).to_have_count(1)
+    assert page.locator('.pl-generated-meta').bounding_box()['y'] < heading.bounding_box()['y']
+    page.screenshot(path=str(tmp_path / 'generated-playlist.png'), full_page=True)
+    layout = page.evaluate('''() => ({width:innerWidth,scrollWidth:document.documentElement.scrollWidth,
+      overflow:[...document.querySelectorAll('body *')].map(el => ({tag:el.tagName,
+        cls:typeof el.className === 'string' ? el.className : '',text:el.textContent.slice(0,80),
+        right:el.getBoundingClientRect().right,width:el.getBoundingClientRect().width}))
+        .filter(el => el.right > innerWidth + 1 && el.width)})''')
+    (tmp_path / 'generated-playlist-layout.json').write_text(json.dumps(layout, indent=2))
+    assert layout['scrollWidth'] <= width, layout
+    for selector in ('.topbar .brand', '.sidebar-privacy'):
+        bounds = page.locator(selector).bounding_box()
+        assert bounds and 0 <= bounds['x'] < bounds['x'] + bounds['width'] <= width
+    assert page.locator('.release-hero').evaluate('''hero => {
+      const bounds = hero.getBoundingClientRect();
+      const tools = hero.querySelector('.head-tools').getBoundingClientRect();
+      const contained = r => r.left >= bounds.left && r.right <= bounds.right + 1
+          && r.top >= bounds.top && r.bottom <= bounds.bottom + 1;
+      const controlsFit = [...hero.querySelectorAll('.head-tools,.head-icon')]
+        .filter(el => el.getClientRects().length).every(el => contained(el.getBoundingClientRect()));
+      return controlsFit && [...hero.querySelectorAll('h1,.pl-type-badge,.pl-version,.pl-generated-date')].every(el => {
+        const r = el.getBoundingClientRect();
+        const overlapsTools = Math.min(r.right, tools.right) > Math.max(r.left, tools.left)
+          && Math.min(r.bottom, tools.bottom) > Math.max(r.top, tools.top);
+        return contained(r) && !overlapsTools;
+      });
+    }''')
+    for name in ('app.css', 'library-tables.css', 'library-controls.css', 'library-entities.css'):
+        css = page.request.get(f'{base}/static/{name}')
+        assert css.status == 200
+        assert css.body() == (Path(__file__).resolve().parents[2]
+                              / 'src/yt_playlist/web/static' / name).read_bytes()
+    row = page.locator('#playlist-track-body tr').first
+    expect(row.locator('.drag-handle')).to_be_visible()
+    expect(row.locator('.like-btn')).to_be_visible()
+    menu_button = row.get_by_role('button', name='More actions for Song A', exact=True)
+    bounds = menu_button.bounding_box()
+    assert bounds and 0 <= bounds['x'] < bounds['x'] + bounds['width'] <= width
+    menu_button.click()
+    menu = page.get_by_role('menu')
+    expect(menu).to_be_visible()
+    expect(menu.get_by_role('menuitem', name='Edit Metadata', exact=True)).to_be_visible()
+    page.keyboard.press('Escape')
+    expect(menu).not_to_be_visible()
+    heading.focus()
+    heading.press('Enter')
+    editor = page.locator('input.title-input')
+    expect(editor).to_have_value(original)
+    editor.fill('Canceled draft')
+    editor.press('Escape')
+    expect(heading).to_be_visible()
+    assert store.playlists.get_playlist(pid).title == original
+    heading.click()
+    expect(editor).to_have_value(original)
+    renamed = 'Ambient - Comfort listening - October 27 2026 #2'
+    editor.fill(renamed)
+    editor.press('Enter')
+    expect(page.get_by_role('heading', name='Ambient', exact=True)).to_be_visible()
+    expect(page.locator('.pl-type-badge')).to_have_text('Comfort listening')
+    expect(page.locator('.pl-version')).to_have_text('Version 2')
+    expect(page.locator('time.pl-generated-date')).to_have_text('October 27, 2026')
+    assert store.playlists.get_playlist(pid).title == renamed
+    assert live_playlist_app['client'].edited == [('PL1', {'title': renamed})]
+    page.reload()
+    expect(page.get_by_role('heading', name='Ambient', exact=True)).to_be_visible()
+    if font_scale != 1:
+        page.add_style_tag(content=f'html {{ font-size: {font_scale * 100}% !important; }}')
+    page.evaluate('document.fonts.ready')
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+
+
+@pytest.mark.parametrize('width', [390, 1440])
+@pytest.mark.parametrize('video', [False, True])
+def test_playlist_header_groups_play_radio_and_counts(live_playlist_app, page, width, video):
+    base, pid, store = (live_playlist_app[key] for key in ('base', 'pid', 'store'))
+    store.identities.upsert_identity('Other', 'other-cred', 'other-brand', False)
+    if video:
+        playlist = store.playlists.get_playlist(pid)
+        store.playlist_recipes.set_recipe(playlist.scope_ref, {'media': 'video'})
+    page.set_viewport_size({'width': width, 'height': 950})
+    page.goto(f'{base}/playlist/{pid}')
+    actions = page.locator('.release-hero .pl-actions')
+    play = actions.get_by_role('link' if video else 'button',
+                               name='Play on TV' if video else 'Play on YouTube Music', exact=True)
+    expect(play).to_be_visible()
+    expect(play.locator('svg')).to_have_count(1)
+    expect(play).to_have_text('')
+    if video:
+        expect(play).to_have_attribute('href', f'/?tv_playlist={pid}#tv')
+    expect(page.locator('.release-hero')).not_to_contain_text('Account:')
+    counts = actions.locator('.pl-stats')
+    expect(counts).to_contain_text('2 tracks')
+    expect(counts).to_contain_text('0 total plays')
+    radio = actions.get_by_role('link', name='Start radio from this playlist', exact=True)
+    expect(radio).to_have_attribute('href', f'/?radio_playlist={pid}#radio')
+    assert counts.bounding_box()['x'] >= radio.bounding_box()['x'] + radio.bounding_box()['width']
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+
+
+@pytest.mark.parametrize('width', [390, 1440])
+def test_playlist_header_follows_only_its_confirmed_queue_without_relaunching(live_playlist_app, page, width):
+    base, pid = (live_playlist_app[key] for key in ('base', 'pid'))
+    status = {'connected': True, 'now_playing': {
+        'video_id': 'v0', 'title': 'Song A', 'artist': 'Artist X',
+        'playlist_ytm_id': 'PL1', 'paused': False}}
+    pending, launches, errors = [], [], []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.route('**/bridge/status', lambda route: route.fulfill(json=status))
+    page.route('**/now-playing/toggle?*', lambda route: pending.append(route))
+
+    def launch(route):
+        launches.append(route.request.post_data_json)
+        route.fulfill(json={'ok': True})
+
+    page.route('**/play', launch)
+    page.set_viewport_size({'width': width, 'height': 950})
+    page.goto(f'{base}/playlist/{pid}')
+    header = page.locator('.pl-actions .playlist-play')
+    player = page.locator('.global-now-playing')
+
+    def assert_state(playing):
+        label = 'Pause' if playing else 'Play'
+        expect(header).to_have_attribute('aria-label', label + ' on YouTube Music')
+        expect(header).to_have_attribute('title', label + ' on YouTube Music')
+        expect(header.locator('path')).to_have_attribute('d',
+            'M6 4h4v16H6zm8 0h4v16h-4z' if playing else 'M7 3.5v17l14-8.5Z')
+        expect(player.get_by_role('button', name=label, exact=True)).to_be_visible()
+
+    assert_state(True)
+    for index, action in enumerate(['pause', 'play']):
+        header.click()
+        expect(header).to_be_disabled()
+        expect(header).to_have_attribute('aria-busy', 'true')
+        assert_state(action == 'pause')  # Wait for observation; no optimistic icon flip.
+        header.evaluate('el => Alpine.$data(el).play()')
+        assert len(pending) == index + 1
+        assert parse_qs(urlsplit(pending[-1].request.url).query) == {
+            'action': [action], 'videoId': ['v0'], 'confirm': ['true']}
+        status['now_playing']['paused'] = action == 'pause'
+        pending[-1].fulfill(json={'ok': True, 'paused': action == 'pause'})
+        expect(header).to_be_enabled()
+        assert_state(action == 'play')
+    assert launches == []
+    page.reload()
+    assert_state(True)
+
+    # A shared song does not identify the displayed queue. Each must launch normally.
+    for queue in [
+        {'playlist_ytm_id': 'OTHER'},
+        {'playlist_ytm_id': 'ALBUM', 'source': {'kind': 'album'}},
+        {'playlist_ytm_id': 'PL1', 'source': {'kind': 'radio'}},
+        {},
+    ]:
+        status['now_playing'] = {'video_id': 'v0', 'title': 'Song A', 'artist': 'Artist X',
+                                 'paused': False, **queue}
+        page.evaluate('window.playbackStatus.refresh()')
+        expect(header).to_have_attribute('aria-label', 'Play on YouTube Music')
+        expect(player.get_by_role('button', name='Pause', exact=True)).to_be_visible()
+        with page.expect_response('**/play'):
+            header.click()
+        expect(header).to_be_enabled()
+    assert launches == [{'url': 'https://music.youtube.com/playlist?list=PL1'}] * 4
+    assert len(pending) == 2
+
+    status.update(connected=False, now_playing={
+        'video_id': 'v0', 'playlist_ytm_id': 'PL1', 'paused': False})
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(header).to_have_attribute('aria-label', 'Play on YouTube Music')
+
+    # A paused background player's last confirmed queue resumes through its owned player.
+    status.update(connected=True, now_playing=None, resumable_player={
+        'video_id': 'v0', 'playlist_ytm_id': 'PL1', 'paused': True})
+    page.evaluate('window.playbackStatus.refresh()')
+    header.click()
+    expect(header).to_be_disabled()
+    assert parse_qs(urlsplit(pending[-1].request.url).query) == {
+        'action': ['play'], 'videoId': ['v0'], 'confirm': ['true'], 'resume': ['true']}
+    status.update(now_playing={
+        'video_id': 'v0', 'title': 'Song A', 'artist': 'Artist X',
+        'playlist_ytm_id': 'PL1', 'paused': False}, resumable_player=None)
+    pending[-1].fulfill(json={'ok': True, 'paused': False})
+    expect(header).to_be_enabled()
+    assert_state(True)
+    assert len(pending) == 3 and len(launches) == 4
+    expect(page).to_have_url(f'{base}/playlist/{pid}')
+    assert len(page.context.pages) == 1
+    assert errors == []
+
+
+def test_initial_playlist_launch_times_out_once_and_allows_deliberate_retry(live_playlist_app, page):
+    base, pid = (live_playlist_app[key] for key in ('base', 'pid'))
+    requests, toggles = [], []
+    page.route('**/bridge/status', lambda route: route.fulfill(json={'connected': False}))
+
+    def launch(route):
+        requests.append(route.request.post_data_json)
+        if len(requests) > 1:
+            route.fulfill(json={'ok': True})
+
+    page.route('**/play', launch)
+    page.on('request', lambda request: toggles.append(request.url)
+            if '/now-playing/toggle' in request.url else None)
+    page.clock.install()
+    page.set_viewport_size({'width': 390, 'height': 850})
+    page.goto(f'{base}/playlist/{pid}')
+    header = page.get_by_role('button', name='Play on YouTube Music', exact=True)
+    header.click()
+    expect(header).to_be_disabled()
+    expect(header).to_have_attribute('aria-busy', 'true')
+    page.clock.fast_forward(13000)
+    expect(header).to_be_enabled()
+    expect(header).not_to_have_attribute('aria-busy', 'true')
+    expect(page.locator('#playback-error')).to_contain_text('Couldn’t start playback')
+    assert requests == [{'url': 'https://music.youtube.com/playlist?list=PL1'}]
+    page.clock.fast_forward(13000)
+    assert len(requests) == 1, 'a timeout must not replay an uncertain launch automatically'
+    with page.expect_response('**/play'):
+        header.click()
+    expect(header).to_be_enabled()
+    expect(page.locator('#playback-error')).to_have_count(0)
+    assert requests == [{'url': 'https://music.youtube.com/playlist?list=PL1'}] * 2
+    assert toggles == []
+    assert len(page.context.pages) == 1
+    expect(page).to_have_url(f'{base}/playlist/{pid}')
+
+
+@pytest.mark.parametrize('failure', ['rejected', 'network', 'invalid_json', 'unconfirmed'])
+def test_playlist_header_retains_observed_state_when_control_is_not_confirmed(live_playlist_app, page, failure):
+    base, pid = (live_playlist_app[key] for key in ('base', 'pid'))
+    status = {'connected': True, 'now_playing': {
+        'video_id': 'v0', 'title': 'Song A', 'artist': 'Artist X',
+        'playlist_ytm_id': 'PL1', 'paused': False}}
+    pending, launches = [], []
+    page.route('**/bridge/status', lambda route: route.fulfill(json=status))
+    page.route('**/now-playing/toggle?*', lambda route: pending.append(route))
+    page.on('request', lambda request: launches.append(request.url) if request.url.endswith('/play') else None)
+    page.goto(f'{base}/playlist/{pid}')
+    header = page.get_by_role('button', name='Pause on YouTube Music', exact=True)
+    header.click()
+    expect(header).to_be_disabled()
+    if failure == 'network':
+        pending[0].abort()
+    elif failure == 'invalid_json':
+        pending[0].fulfill(content_type='text/plain', body='unavailable')
+    else:
+        pending[0].fulfill(json={'ok': failure == 'unconfirmed', 'paused': False})
+    expect(page.locator('#playback-error')).to_contain_text('Playback was not confirmed')
+    expect(header).to_be_enabled()
+    expect(page.locator('.global-now-playing').get_by_role('button', name='Pause', exact=True)).to_be_visible()
+    assert len(pending) == 1 and launches == []
+    header.click()
+    expect(header).to_be_disabled()
+    status['now_playing']['paused'] = True
+    pending[-1].fulfill(json={'ok': True, 'paused': True})
+    expect(page.get_by_role('button', name='Play on YouTube Music', exact=True)).to_be_enabled()
+    expect(page.locator('#playback-error')).to_have_count(0)
+    assert len(pending) == 2 and launches == []
 
 
 def test_set_year_from_song_menu(live_playlist_app, page):
@@ -303,7 +583,7 @@ def test_enrich_updates_cells_live(live_playlist_app, page, monkeypatch):
     import yt_playlist.providers.musicbrainz as mb
     from tests.conftest import only_provider
     monkeypatch.setattr(mb, "enrich_full",
-                        lambda title, artist: ("Electronic", "1998", None, [], []) if title == "Song B"
+                        lambda title, artist, *, observations=None: ("Electronic", "1998", None, [], []) if title == "Song B"
                         else (None, None, None, [], []))
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
     only_provider(live_playlist_app["store"], "musicbrainz")
@@ -352,7 +632,7 @@ def test_generated_feedback_updates_after_enrich_and_metadata_edit(live_playlist
     store.playlists.set_playlist_group('PL1', 'Generated')
     store.playlists.mark_generated_playlist('PL1')
     only_provider(store, 'musicbrainz')
-    monkeypatch.setattr(mb, 'enrich_full', lambda *args: ('Techno', '1995', None, [], []))
+    monkeypatch.setattr(mb, 'enrich_full', lambda *args, **kwargs: ('Techno', '1995', None, [], []))
     page.goto(f"{live_playlist_app['base']}/playlist/{pid}")
     page.get_by_role('button', name='Detailed feedback', exact=True).click()
     expect(page.get_by_text('These tracks need genre and release-year information.')).to_be_visible()

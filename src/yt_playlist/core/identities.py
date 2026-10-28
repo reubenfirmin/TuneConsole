@@ -20,6 +20,14 @@ STUB_AUTH = {
 
 
 class BridgeClient(YTMusic):
+    def get_video_storyboard(self, video_id):
+        # get_song intentionally strips storyboards from the player response.
+        # Keep this metadata-only read on the same authenticated browser bridge.
+        response = self._send_request('player', {'videoId': video_id})
+        if (response.get('videoDetails') or {}).get('videoId') != video_id:
+            return {}
+        return response.get('storyboards') or {}
+
     def get_history(self):
         from yt_playlist.core.history_snapshot import history_snapshot
         return history_snapshot(self)
@@ -50,4 +58,5 @@ class BridgeClient(YTMusic):
 def build_client(cfg: IdentityConfig, bridge) -> YTMusic:
     # All network I/O is executed by the extension via the bridge session; STUB_AUTH just satisfies
     # ytmusicapi's own construction and auth checks. brand_account_id still selects the identity.
-    return BridgeClient(STUB_AUTH, cfg.brand_account_id, requests_session=BridgeSession(bridge))
+    return BridgeClient(STUB_AUTH, cfg.brand_account_id,
+                        requests_session=BridgeSession(bridge, identity=cfg.brand_account_id))

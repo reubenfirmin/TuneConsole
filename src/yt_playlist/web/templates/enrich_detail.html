@@ -33,7 +33,7 @@
       <thead><tr><th scope="col">Track</th><th scope="col">Artist</th><th scope="col">{{ 'Pass' if view == 'queue' else 'Field coverage' }}</th><th scope="col">Last checked</th></tr></thead>
       <tbody>
       {% for track in rows %}
-      <tr><td>{{ track.title }}</td><td>{{ track.artist or 'Unknown artist' }}</td>
+      <tr><td>{% if track.video_id %}<a href="{{ track_url(track) }}">{{ track.title }}</a>{% else %}{{ track.title }}{% endif %}</td><td>{{ track.artist or 'Unknown artist' }}</td>
         {% if view == 'queue' %}
         <td>{{ 'Re-enrichment' if track.last_enriched_at is not none else 'First enrichment' }}</td>
         {% else %}

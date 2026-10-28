@@ -68,10 +68,10 @@ def prepare(reader, now, *, keep_collaborative=False, memory_bytes=None, fit_cac
     """Return serialized writes; never change the reader or the serving model."""
     method = reader.settings.get_setting("rec_embed_method") or "svd"
     dim = int(reader.settings.get_setting("rec_dim") or training.DIM)
-    baskets = reader.rec_evidence.rec_baskets()
+    baskets = training.canonical_baskets(reader.rec_evidence.rec_baskets())
     weights = (training.cooc_weights(reader.rec_query.play_counts())
                if reader.settings.get_setting("rec_cooc_weighting") == "1" else None)
-    fit_inputs = _fingerprint([method, dim, sorted(sorted(set(b)) for b in baskets), weights])
+    fit_inputs = _fingerprint(['canonical-baskets-1', method, dim, baskets, weights])
     settings, vectors = {"rec_refresh_version": VERSION}, {}
     if keep_collaborative:
         settings["rec_fit_inputs"] = fit_inputs

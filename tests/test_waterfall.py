@@ -179,8 +179,10 @@ def test_real_provider_request_outcome_controls_completion_and_retains_audit(sto
             raise urllib.error.HTTPError(req.full_url, failure, "test", {}, None)
         return io.StringIO('{"recordings": []}')
 
-    monkeypatch.setattr(musicbrainz.urllib.request, "urlopen", request)
-    monkeypatch.setattr(musicbrainz._pacer, "wait", lambda: None)
+    from types import SimpleNamespace
+    from yt_playlist.integrations.musicbrainz import MusicBrainzIAO
+    monkeypatch.setattr(musicbrainz, '_iao', MusicBrainzIAO(open_fn=request,
+                        pacer=SimpleNamespace(wait=lambda: None)))
     completed = run_waterfall(store, [track], _cfg(("musicbrainz", True)), lambda e: None,
                               registry={"musicbrainz": musicbrainz})
     assert bool(completed) == checked

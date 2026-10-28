@@ -71,7 +71,7 @@ def test_fresh_and_current_do_not_call_historical_bootstrap_or_validation(monkey
         (migration.version, migration.name) for migration in registry.MIGRATIONS]
 
 
-@pytest.mark.parametrize('version', [1, 7, 8, 10, 11, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42])
+@pytest.mark.parametrize('version', [1, 7, 8, 10, 11, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 48])
 def test_every_supported_predecessor_family_matches_current_contract(tmp_path, version):
     with connect(tmp_path / 'upgrade.db') as conn:
         migrate(conn, registry=registry.MIGRATIONS[:version])
@@ -89,15 +89,8 @@ def test_every_supported_predecessor_family_matches_current_contract(tmp_path, v
         before = list(conn.iterdump())
         migrate(conn)
         assert list(conn.iterdump()) == before
-    backups = list((tmp_path / 'backups').glob('*.db'))
-    assert len(backups) == any(m.replaces_data for m in registry.MIGRATIONS[version:])
-    if backups:
-        with connect(backups[0]) as backup:
-            assert backup.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-            # Additive versions may commit before the first destructive step.
-            backup_version = next(m.version - 1 for m in registry.MIGRATIONS[version:] if m.replaces_data)
-            assert backup.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == backup_version
-            assert backup.execute("SELECT value FROM settings WHERE key='personal-setting'").fetchone()[0] == 'retain'
+        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    assert not (tmp_path / 'backups').exists()
 
 
 @pytest.mark.parametrize('has_counts_view', [False, True])
@@ -181,14 +174,13 @@ def test_installed_optional_generated_column_is_migrated_with_all_event_evidence
         assert list(conn.iterdump()) == before
 
 
-def test_policy_repair_failure_restores_column_data_history_and_verified_backup(tmp_path, monkeypatch):
+def test_policy_repair_failure_restores_column_data_and_history_without_backups(tmp_path, monkeypatch):
     path = tmp_path / 'state.db'
     with connect(path) as conn:
         policy_predecessor(conn)
         conn.execute("INSERT INTO play_events(identity_id,identity_key,played_at,is_generated) VALUES (1,'song|artist',1,1)")
         conn.commit()
         before = list(conn.iterdump())
-        prior_backups = set((tmp_path / 'backups').glob('*.db'))
         original = registry.MIGRATIONS
         def interrupted(connection, context):
             original[31].apply(connection, context)
@@ -197,11 +189,8 @@ def test_policy_repair_failure_restores_column_data_history_and_verified_backup(
         with pytest.raises(MigrationError, match='interrupted after policy replacement'):
             migrate(conn)
         assert list(conn.iterdump()) == before
-        new_backups = set((tmp_path / 'backups').glob('*.db')) - prior_backups
-        assert len(new_backups) == 1
-        with connect(new_backups.pop()) as backup:
-            assert list(backup.iterdump()) == before
-            assert backup.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        assert not (tmp_path / 'backups').exists()
+        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
         monkeypatch.setattr(registry, 'MIGRATIONS', original)
         migrate(conn)
         current.validate(conn)

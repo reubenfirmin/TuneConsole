@@ -75,6 +75,10 @@ class ServingLock:
         self._local = threading.local()
         self._diagnostics = LockWaitDiagnostics()
 
+    @property
+    def held_by_current_thread(self):
+        return bool(getattr(self._local, 'releases', ()))
+
     def acquire(self, blocking=True, timeout=-1):
         background = _BACKGROUND.get()
         return database_lock_wait(self._acquire, blocking, timeout,

@@ -1,5 +1,5 @@
 {% from "_partials/song_menu_button.html" import song_menu %}
-{% if session.local_id %}
+{% if session.playlist_id %}
 {% include "_partials/radio_drawing.html" %}
 <div class="card library-table-card radio-track-scroll">
   <table class="track-table" aria-label="{{ session.title }}">
@@ -20,12 +20,11 @@
              target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
         </span></div></td>
         {% with video_id=t.video_id, liked=t.liked %}{% include "_partials/liked_cell.html" %}{% endwith %}
-        <td class="t-wrap" title="{{ t.title }}"><div class="track-cell track-cell--text"><a class="ptitle" href="{{ play_url }}"
-            target="_blank" rel="noopener" data-yt-info>{{ t.title }}</a></div></td>
+        <td class="t-wrap" title="{{ t.title }}"><div class="track-cell track-cell--text"><a class="ptitle" href="{{ track_url(t) }}">{{ t.title }}</a></div></td>
         <td class="t-wrap" title="{{ t.artist }}"><div class="track-cell track-cell--text"><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></div></td>
         <td class="t-wrap" title="{{ t.album }}"><div class="track-cell track-cell--text">{% if t.album_browse %}<a class="alink" href="/album?browse={{ t.album_browse }}">{{ t.album }}</a>{% else %}<span class="muted">{{ t.album }}</span>{% endif %}</div></td>
         <td class="num mono"><div class="track-cell"><span class="ydisplay">{{ t.year or '—' }}</span></div></td>
-        <td class="t-wrap" title="{{ t.genre or '' }}"><div class="track-cell track-cell--text"><span class="genre-display-wrap">{% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted">—</span>{% endif %}</span></div></td>
+        <td class="t-wrap mb-genre" title="{{ t.genre or '' }}"><div class="track-cell track-cell--text"><span class="genre-display-wrap">{% if t.genre %}<span class="gtag" title="{{ t.genre }}"><span class="gtag-label">{{ t.genre }}</span></span>{% else %}<span class="muted">—</span>{% endif %}</span></div></td>
         <td class="num mono"><div class="track-cell">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% else %}<span class="muted" aria-label="Duration unavailable">—</span>{% endif %}</div></td>
         <td class="rowmenu"><div class="track-cell">{{ song_menu(t, {"play_url": play_url}) }}</div></td>
       </tr>

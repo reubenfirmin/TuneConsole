@@ -52,14 +52,17 @@
 .song-menu-trigger--mood.has-mood-less { background: var(--accent-soft); }
 .song-menu-trigger--mood:is(:hover, :focus-visible) { background: var(--surface-2); }
 .song-inline-actions { display: inline-flex; align-items: center; justify-content: flex-end; gap: .1rem; }
-.song-action-menu { position: fixed; inset: auto; margin: 0; min-width: 14rem;
+.song-action-menu { position: fixed; inset: auto; margin: 0;
+  /* Text enlargement must not let the minimum override the viewport maximum. */
+  min-width: min(14rem, calc(100vw - 1rem));
   max-width: calc(100vw - 1rem); max-height: calc(100dvh - 1rem); overflow-y: auto;
   background: var(--surface); border: 1px solid var(--border-2); border-radius: 10px;
   box-shadow: 0 16px 40px -12px color-mix(in srgb, var(--shadow-ink) 70%, transparent); padding: 0.3rem; }
-.song-action-menu button { display: block; width: 100%; text-align: left; background: transparent;
+.song-action-menu :is(button, a[role="menuitem"]) { display: block; width: 100%; text-align: left; background: transparent;
   border: none; box-shadow: none; color: var(--text); font-weight: 500; font-size: var(--type-ui);
-  padding: 0.6rem; border-radius: 6px; cursor: pointer; }
-.song-action-menu button:hover, .song-action-menu button:focus-visible { background: var(--accent-soft); box-shadow: none; }
+  padding: 0.6rem; border-radius: 6px; cursor: pointer; white-space: normal; overflow-wrap: anywhere; }
+.song-action-menu :is(button, a[role="menuitem"]):is(:hover, :focus-visible) { background: var(--accent-soft); box-shadow: none; }
+.song-action-menu a[role="menuitem"] { box-sizing: border-box; text-decoration: none; }
 .song-action-menu button.danger { color: var(--danger); }
 .song-action-menu button.danger:hover { background: var(--danger-soft); }
 .song-action-menu [role="group"] { border-top: 1px solid var(--border); margin-top: .25rem; padding-top: .25rem; }

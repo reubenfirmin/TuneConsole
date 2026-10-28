@@ -1,0 +1,7 @@
+[
+  {"id":"relaxed","path":"mood_relaxed/mood_relaxed-msd-musicnn-1","class":"relaxed"},
+  {"id":"aggressive","path":"mood_aggressive/mood_aggressive-msd-musicnn-1","class":"aggressive"},
+  {"id":"happy","path":"mood_happy/mood_happy-msd-musicnn-1","class":"happy"},
+  {"id":"sad","path":"mood_sad/mood_sad-msd-musicnn-1","class":"sad"},
+  {"id":"deam","path":"deam/deam-musicnn-msd-1","metadata":"deam/deam-msd-musicnn-1","range":[1,9]}
+]

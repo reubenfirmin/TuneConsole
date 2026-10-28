@@ -5,76 +5,97 @@ Discogs search results carry structured `genre`, `style` and `year` fields. Styl
 results matching the requested artist and title can supply metadata. Among those releases, take
 the earliest year (avoids reissue dates) and the first recognized style/genre.
 
-Works anonymously (25 requests/min) or, with a free personal access token, faster (60/min). Set a
-token via $DISCOGS_TOKEN or `discogs_token` in config.toml / the settings table. It's optional.
+Search requires a personal token via $DISCOGS_TOKEN or `discogs_token` in config.toml / settings.
+Linked master/release facts remain publicly readable without a token.
 """
 import logging
 import re
-import urllib.parse
-import urllib.request
-
-from yt_playlist.providers import credentials, genres, transport
-from yt_playlist.providers.base import EnrichmentResult, RateLimiter
+from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.integrations.base import IntegrationUnavailable
+from yt_playlist.integrations.discogs import DiscogsIAO, TIMEOUT_S
+from yt_playlist.providers import descriptive_tags, genres
+from yt_playlist.providers.base import EnrichmentResult
 from yt_playlist.util import net
 from yt_playlist.util.matching import normalize, recording_title
 
 name = "discogs"
+manages_availability = True
 
 logger = logging.getLogger(__name__)
 
-_API = "https://api.discogs.com"
-_USER_AGENT = "yt-playlist/0.1 +https://4rc.io"
-_HTTP_TIMEOUT_S = 20                       # cap each request so a stalled socket can't wedge a run
-_pacer = RateLimiter(2.5)                  # interval is set per-call in _pace() (token-dependent)
-_breaker = net.CircuitBreaker()           # stop a run once the host looks unreachable
+_iao = DiscogsIAO()
+
+
+def access(store=None):
+    return _iao.context(store)
 
 
 def token(store=None, config_path=None):
     """Optional Discogs token: $DISCOGS_TOKEN, then the settings table, then config.toml."""
-    return credentials.resolve(env_name="DISCOGS_TOKEN", setting_name="discogs_token",
-                               store=store, config_path=config_path)
+    return _iao.token(store, config_path=config_path)
 
 
 def available(store=None) -> bool:
-    return True
+    """Track enrichment needs search credentials; linked public reads do not."""
+    return token(store) is not None
 
 
 def tripped() -> bool:
-    return _breaker.tripped()
+    return not _iao.availability().ready(_iao.now())
 
 
 def reset() -> None:
-    _breaker.reset()
+    """Batch boundaries cannot reset shared access cooldowns or retained facts."""
 
 
 def probe(track, store=None, tok=None) -> EnrichmentResult:
     """Read-only lookup: genre & year from Discogs releases."""
     tok = tok or token(store)
-    genre, year = enrich(track["title"], track["artist"], tok)
+    observations = []
+    with access(store):
+        genre, year = enrich(track["title"], track["artist"], tok, observations=observations)
     fields = {}
     if genre:
         fields["genre"] = genre
     if year:
         fields["year"] = year
-    return EnrichmentResult("discogs", fields)
+    return EnrichmentResult("discogs", fields, tuple(observations))
 
 
-def _pace(tok):
-    interval = 1.1 if tok else 2.5            # 60/min authenticated, 25/min anonymous
-    _pacer.wait(interval)
+def search_releases(query=None, *, artist=None, title=None, limit=5,
+                    store=None, tok=None, timeout=TIMEOUT_S):
+    params = {'type': 'release', 'per_page': str(limit)}
+    if query is not None:
+        params['q'] = query
+    if artist is not None:
+        params['artist'] = artist
+    if title is not None:
+        params['release_title'] = title
+    with access(store):
+        return (_get('database/search', params, tok, timeout=timeout) or {}).get('results') or []
+
+
+def master_details(identity, *, store=None, tok=None, timeout=TIMEOUT_S):
+    with access(store):
+        return _get(f'masters/{identity}', {}, tok, timeout=timeout)
+
+
+def release_details(identity, *, store=None, tok=None, timeout=TIMEOUT_S):
+    with access(store):
+        return _get(f'releases/{identity}', {}, tok, timeout=timeout)
 
 
 def _search(query, tok):
-    params = {"q": query, "type": "release", "per_page": "5"}
-    return (_get("database/search", params, tok) or {}).get("results") or []
+    return search_releases(query, tok=tok)
 
 
-def _get(path, params, tok):
-    if tok:
-        params["token"] = tok
-    url = f"{_API}/{path}?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, "Accept": "application/json"})
-    return transport.request_json(req, timeout=_HTTP_TIMEOUT_S, pace=lambda: _pace(tok), breaker=_breaker)
+def _get(path, params, tok, *, timeout=TIMEOUT_S):
+    return _iao.get(path, params, tok, timeout=timeout)
+
+
+def _record_failure(exc):
+    if not isinstance(exc, IntegrationUnavailable):
+        net.record_probe_failure(exc)
 
 
 def _artist_key(artist):
@@ -98,8 +119,11 @@ def _matches_release(result, title, artist, tok):
     if not release_id or not (same_artist or _artist_key(result_artist) == "various"):
         return False
     try:
-        release = _get(f"releases/{int(release_id)}", {}, tok) or {}
+        release = release_details(int(release_id), tok=tok) or {}
+    except (WorkClosing, WorkBudgetExceeded):
+        raise
     except Exception as e:  # noqa: BLE001
+        _record_failure(e)
         logger.debug("Discogs release lookup failed for %s: %s", release_id, e)
         return False
     return _has_track(release.get("tracklist") or [], release.get("artists") or [],
@@ -117,15 +141,25 @@ def _has_track(tracklist, artists, wanted_title, wanted_artist):
     return False
 
 
-def enrich(title, artist, tok=None):
+def enrich(title, artist, tok=None, *, observations=None):
     """Return (genre, year) from Discogs, or (None, None). Either may be None."""
     query = " ".join(x for x in (artist, title) if x).strip()
     try:
         results = [r for r in _search(query, tok) if _matches_release(r, title, artist, tok)]
+    except (WorkClosing, WorkBudgetExceeded):
+        raise
     except Exception as e:  # noqa: BLE001
+        _record_failure(e)
         logger.warning("Discogs search failed for %r / %r: %s", title, artist, e)
         return (None, None)
     genre = None
+    for result in results:
+        tags = [{'name': value, 'kind': field} for field in ('style', 'genre')
+                for value in result.get(field) or []]
+        descriptive_tags.retain(observations, scope='release', entity_id=result.get('id'), tags=tags,
+            source_path='database/search:style+genre',
+            match_evidence={'method': 'matched_release_or_tracklist',
+                            'input_title': title, 'input_artist': artist, 'release_title': result.get('title')})
     for r in results:                          # first match whose style/genre is a known genre
         genre = genres.pick_genre((r.get("style") or []) + (r.get("genre") or []))
         if genre:

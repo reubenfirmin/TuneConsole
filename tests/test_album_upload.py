@@ -2,6 +2,8 @@
 ytmusicapi's get_album() rejects any non-MPRE browse id before it ever hits the network, so these
 albums have to go through the uploads endpoint instead."""
 import re
+import pytest
+from copy import deepcopy
 
 from fastapi.testclient import TestClient
 
@@ -51,6 +53,33 @@ def test_fetch_album_routes_catalog_album_to_get_album():
     c = _RecordingClient()
     assert fetch_album(c, "MPREb_x") == {"title": "Catalog"}
     assert c.calls == [("get_album", "MPREb_x")]
+
+
+@pytest.mark.parametrize("uploaded", [False, True])
+def test_album_playlist_creation_routes_and_preserves_complete_order(store, uploaded):
+    from yt_playlist.library.playlist_creation import create_playlist_from_album
+    album = deepcopy(_UPLOAD_ALBUM)
+    browse = UPLOAD_ID if uploaded else "MPRE1"
+    fc = _StrictClient(uploads={browse: album} if uploaded else {}, albums={browse: album} if not uploaded else {})
+    fc._catalog.update({t["videoId"]: t for t in album["tracks"]})
+    iid = store.identities.upsert_identity("Main", "cred", None, True)
+    result = create_playlist_from_album(store, browse, "", fc, 1, iid)
+    assert result["added"] == 2
+    assert fc.added == [(result["new_ytm"], ["u1", "u2"])]
+
+
+@pytest.mark.parametrize("change", [
+    {"trackCount": 3}, {"continuation": "more"}, {"tracks": [{"title": "Unavailable"}]},
+    {"tracks": []}, {"tracks": [None]},
+])
+def test_album_playlist_creation_rejects_incomplete_response_before_writes(store, change):
+    from yt_playlist.library.playlist_creation import create_playlist_from_album
+    fc = _StrictClient(uploads={UPLOAD_ID: {**deepcopy(_UPLOAD_ALBUM), **change}})
+    iid = store.identities.upsert_identity("Main", "cred", None, True)
+    with pytest.raises(ValueError):
+        create_playlist_from_album(store, UPLOAD_ID, "", fc, 1, iid)
+    assert not fc.created and not fc.added
+    assert not store.actions.get_actions()
 
 
 _UPLOAD_ALBUM = {
@@ -196,15 +225,21 @@ def test_album_with_real_cover_keeps_the_single_cover(store):
     assert "pl-art-mosaic" not in html
 
 
-def test_song_titles_are_plain_text_and_play_buttons_still_play(store):
-    """The play overlay is the row's playback affordance; titles remain plain text."""
+def test_song_titles_open_track_details_and_play_buttons_still_play(store):
+    """Track navigation and the existing playback overlay remain separate actions."""
     c, _fc = _upload_client(store)
     html = c.get(f"/album?browse={UPLOAD_ID}").text
     # Match the whole <a ...> tag: these anchors wrap across lines, so a line-wise check would miss
     # an attribute that landed on the second line.
-    assert not re.search(r'<a[^>]*class="ptitle"[^>]*>', html)
-    assert '<span class="ptitle">' in html
+    assert re.search(r'<a[^>]*class="ptitle"[^>]*href="/track/u1\?', html)
     assert "data-yt-info" not in _anchor(html, "pl-play")
+
+
+def test_upload_play_keeps_existing_browser_handoff_without_an_album_queue(store):
+    c, _fc = _upload_client(store)
+    html = c.get(f'/album?browse={UPLOAD_ID}').text
+    assert f'https://music.youtube.com/browse/{UPLOAD_ID}' in html
+    assert f'albumPlayback("{UPLOAD_ID}", "", "https://music.youtube.com/browse/{UPLOAD_ID}")' in html
 
 
 def test_catalog_album_still_shows_save_button(store):

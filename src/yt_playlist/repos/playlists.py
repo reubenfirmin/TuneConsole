@@ -92,21 +92,27 @@ class PlaylistRepo(Repo):
     def upsert_playlist(self, identity_id, ytm_playlist_id, title, track_count, content_hash, now,
                         thumbnail=None, *, created_at=None) -> int:
         """Sync metadata, preserving the actual creation date when one is known."""
+        with self.conn:
+            return self._upsert_playlist(identity_id, ytm_playlist_id, title, track_count,
+                                         content_hash, now, thumbnail, created_at=created_at)
+
+    def _upsert_playlist(self, identity_id, ytm_playlist_id, title, track_count, content_hash, now,
+                         thumbnail=None, *, created_at=None):
+        """Caller owns the transaction; never commit a partial snapshot."""
         ref = ensure(self.conn,ytm_playlist_id,identity_id)
         row = self.conn.execute(
             "SELECT id, first_seen, content_hash, last_changed FROM playlists "
             "WHERE identity_id=? AND ytm_playlist_id=?", (identity_id, ytm_playlist_id)).fetchone()
         if row is None:
-            with self.conn:
-                membership_id = self.conn.execute(
-                    'INSERT INTO playlist_membership_refs(scope_ref,identity_id) VALUES (?,?)',
-                    (ref,identity_id)).lastrowid
-                self.conn.execute(
-                    "INSERT INTO playlists(id,identity_id,ytm_playlist_id,title,track_count,"
-                    "content_hash,first_seen,last_seen,last_changed,thumbnail,created_at,created_at_source,scope_ref) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (membership_id,identity_id, ytm_playlist_id, title, track_count, content_hash, now, now, now, thumbnail,
-                     created_at, "local" if created_at is not None else None,ref))
+            membership_id = self.conn.execute(
+                'INSERT INTO playlist_membership_refs(scope_ref,identity_id) VALUES (?,?)',
+                (ref,identity_id)).lastrowid
+            self.conn.execute(
+                "INSERT INTO playlists(id,identity_id,ytm_playlist_id,title,track_count,"
+                "content_hash,first_seen,last_seen,last_changed,thumbnail,created_at,created_at_source,scope_ref) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (membership_id,identity_id, ytm_playlist_id, title, track_count, content_hash, now, now, now, thumbnail,
+                 created_at, "local" if created_at is not None else None,ref))
             return membership_id
         last_changed = now if row["content_hash"] != content_hash else row["last_changed"]
         self.conn.execute(
@@ -115,25 +121,69 @@ class PlaylistRepo(Repo):
             "created_at_source=COALESCE(created_at_source, ?) WHERE id=?",
             (title, track_count, content_hash, now, last_changed, thumbnail, created_at,
              "local" if created_at is not None else None, row["id"]))
-        self.conn.commit()
         return row["id"]
 
     @synchronized
     def set_playlist_tracks(self, playlist_id, track_ids) -> None:
+        with self.conn:
+            self._set_playlist_tracks(playlist_id, track_ids)
+
+    def _set_playlist_tracks(self, playlist_id, track_ids):
         from yt_playlist.core.catalog import resolve_entry
         # de-dupe by track id, keeping first position: YouTube's get_playlist can return the same
         # video many times (pagination duplication), which would otherwise inflate the playlist.
         seen = set()
         resolved = [resolve_entry(self.conn,t) for t in track_ids]
         unique = [t for t in resolved if not (t in seen or seen.add(t))]
-        with self.conn:
-            self.conn.execute("DELETE FROM playlist_tracks WHERE playlist_id=?", (playlist_id,))
-            self.conn.executemany(
-                "INSERT INTO playlist_tracks(playlist_id,track_id,position) VALUES (?,?,?)",
-                [(playlist_id, tid, pos) for pos, tid in enumerate(unique)])
+        self.conn.execute("DELETE FROM playlist_tracks WHERE playlist_id=?", (playlist_id,))
+        self.conn.executemany(
+            "INSERT INTO playlist_tracks(playlist_id,track_id,position) VALUES (?,?,?)",
+            [(playlist_id, tid, pos) for pos, tid in enumerate(unique)])
 
     @synchronized
-    def publish_confirmed_tracks(self, playlist_id, title, tracks, now, *, expected_prefix=None):
+    def playlist_revision(self, identity_id, ytm_playlist_id):
+        """Capture before remote work; retained tokens also detect delete/recreate."""
+        ref = resolve(self.conn, ytm_playlist_id, identity_id)
+        row = self.conn.execute('SELECT revision FROM playlist_library_revisions '
+                                'WHERE scope_ref=? AND identity_id=?', (ref, identity_id)).fetchone()
+        return row[0] if row else 0
+
+    @synchronized
+    def playlist_revisions(self, identity_id):
+        """Include tombstones before a library listing supplies remote titles/absence."""
+        return {r['scope_ref']: r['revision'] for r in self.conn.execute(
+            'SELECT scope_ref,revision FROM playlist_library_revisions WHERE identity_id=?', (identity_id,))}
+
+    @synchronized
+    def publish_playlist_snapshot(self, identity_id, ytm_playlist_id, title, track_ids, now, *,
+                                  expected_revision, thumbnail=None, created_at=None):
+        """Publish complete remote metadata/membership iff its pre-fetch owner survives.
+
+        Catalog observations may be retained before this call, but acquire library
+        membership only on acceptance. Network I/O must remain outside this transaction.
+        A rejected read returns None and cannot advance freshness or placement work.
+        """
+        from yt_playlist.core.catalog import resolve_entry
+        from yt_playlist.library.playlist_metadata import content_hash
+
+        if self.conn.in_transaction:
+            raise RuntimeError('Cannot publish a playlist inside another transaction')
+        with self.conn:
+            self.conn.execute('BEGIN IMMEDIATE')
+            if self.playlist_revision(identity_id, ytm_playlist_id) != expected_revision:
+                return None
+            ids = list(dict.fromkeys(resolve_entry(self.conn, t) for t in track_ids))
+            keys = [self.conn.execute('SELECT identity_key FROM catalog_tracks WHERE id=?',
+                                     (tid,)).fetchone()[0] for tid in ids]
+            pid = self._upsert_playlist(identity_id, ytm_playlist_id, title, len(ids), content_hash(keys),
+                                        now, thumbnail, created_at=created_at)
+            self._set_playlist_tracks(pid, ids)
+            self.conn.executemany("INSERT OR IGNORE INTO library_memberships VALUES (?,'observed',?)",
+                                  [(tid, now) for tid in ids])
+            return pid
+
+    @synchronized
+    def publish_confirmed_tracks(self, playlist_id, title, tracks, now, *, expected_prefix=None, destination=None):
         """Atomically mirror a confirmed remote sequence and its catalog metadata.
 
         A caller may supply an unchanged confirmed prefix. Use incremental writes
@@ -152,6 +202,15 @@ class PlaylistRepo(Repo):
             raise RuntimeError("Cannot publish a playlist inside another transaction")
         with self.conn:
             self.conn.execute("BEGIN IMMEDIATE")
+            if playlist_id is None:
+                if destination is None:
+                    raise ValueError("A destination account and playlist are required")
+                identity_id, remote_id = destination
+                row = self.conn.execute(
+                    'SELECT id FROM playlists WHERE identity_id=? AND ytm_playlist_id=?',
+                    (identity_id, remote_id)).fetchone()
+                playlist_id = row[0] if row else self._upsert_playlist(
+                    identity_id, remote_id, title, 0, content_hash([]), now)
             if not self.conn.execute("SELECT 1 FROM playlists WHERE id=?", (playlist_id,)).fetchone():
                 raise ValueError("Unknown playlist")
             saved = self.conn.execute(
@@ -185,6 +244,10 @@ class PlaylistRepo(Repo):
                 "UPDATE playlists SET title=?,track_count=?,content_hash=?,last_seen=?,"
                 "last_changed=CASE WHEN content_hash<>? THEN ? ELSE last_changed END WHERE id=?",
                 (title, len(tracks), digest, now, digest, now, playlist_id))
+            self.conn.execute(
+                f"UPDATE playlists AS p SET thumbnail={_FIRST_TRACK_THUMBNAIL} "
+                "WHERE p.id=? AND NULLIF(p.thumbnail, '') IS NULL", (playlist_id,))
+        return playlist_id
 
     @synchronized
     def set_song_liked(self, identity_id, video_id, on) -> None:
@@ -238,9 +301,15 @@ class PlaylistRepo(Repo):
                               (count, now, now, playlist_id))
 
     @synchronized
-    def remove_playlist(self, playlist_id, *, require_empty=False) -> None:
+    def remove_playlist(self, playlist_id, *, require_empty=False, expected_revision=None):
         """Remove this account membership. Durable scope and curation survive reappearance."""
         with self.conn:
+            if expected_revision is not None:
+                self.conn.execute('BEGIN IMMEDIATE')
+                owner = self.conn.execute('SELECT identity_id,ytm_playlist_id FROM playlists WHERE id=?',
+                                          (playlist_id,)).fetchone()
+                if owner is None or self.playlist_revision(*owner) != expected_revision:
+                    return False
             if require_empty:
                 playlist = self.conn.execute(
                     "SELECT track_count FROM playlists WHERE id=?", (playlist_id,)).fetchone()
@@ -252,6 +321,7 @@ class PlaylistRepo(Repo):
                     raise ValueError("This playlist has cached tracks. Re-sync before removing it.")
             self.conn.execute("DELETE FROM playlist_tracks WHERE playlist_id=?", (playlist_id,))
             self.conn.execute("DELETE FROM playlists WHERE id=?", (playlist_id,))
+            return True
 
     @synchronized
     def get_playlists(self) -> list[Playlist]:
@@ -284,14 +354,14 @@ class PlaylistRepo(Repo):
 
     @synchronized
     def home_preview(self, playlist_id):
-        """Current metadata and five current members for a prepared Home tile."""
+        """Current metadata and all current members in playlist order for Home."""
         row = self.conn.execute('SELECT * FROM playlists WHERE id=?', (playlist_id,)).fetchone()
         if (not row or not row['track_count'] or self.is_quarantined_playlist(row['scope_ref'])):
             return None
         tracks = [dict(r) for r in self.conn.execute(
-            'SELECT t.identity_key key,t.title,t.artist,t.video_id,t.thumbnail FROM playlist_items p '
-            'JOIN catalog_tracks t ON t.video_id=p.video_id WHERE p.playlist_id=? '
-            'ORDER BY p.video_id LIMIT 5', (playlist_id,))]
+            'SELECT t.identity_key key,t.title,t.artist,t.video_id,t.thumbnail FROM playlist_tracks p '
+            'JOIN catalog_tracks t ON t.id=p.track_id WHERE p.playlist_id=? '
+            'ORDER BY p.position', (playlist_id,))]
         if not tracks:
             return None
         return {'id': row['id'], 'ytm': row['ytm_playlist_id'], 'title': row['title'],
@@ -304,6 +374,14 @@ class PlaylistRepo(Repo):
             row["id"], row["identity_id"], row["ytm_playlist_id"], row["title"],
             row["track_count"], row["content_hash"], row["first_seen"],
             row["last_seen"], row["last_changed"], row["thumbnail"], row["created_at"], row["created_at_source"])
+
+    @synchronized
+    def get_playlist_for_account(self, identity_id, ytm_playlist_id) -> Playlist | None:
+        """Resolve a remote target afresh after sync may have replaced its local row."""
+        row = self.conn.execute(
+            "SELECT id FROM playlists WHERE identity_id=? AND ytm_playlist_id=?",
+            (identity_id, ytm_playlist_id)).fetchone()
+        return self.get_playlist(row[0]) if row else None
 
     @synchronized
     def get_playlist_track_keys(self, playlist_id) -> set[str]:
