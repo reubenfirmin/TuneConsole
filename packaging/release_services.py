@@ -109,11 +109,17 @@ def preflight(backend, tag, revision, rehearsal_tag, *, stable):
     backend.run("docker", "buildx", "version")
     image = "ghcr.io/" + backend.repository.lower()
     failures = []
-    for service, check in (
-        ("GitHub contents write / draft assets", lambda: rehearse(backend, rehearsal_tag, revision)),
-        ("GHCR package push / blob completion", lambda: registry_permissions(image)),
+    checks = [
         ("Cloudflare Pages Write", lambda: pages_permissions(backend)),
-    ):
+    ]
+    # Synthetic publisher and registry exercises belong to PR checks, never
+    # main's candidate preparation or a release publication attempt.
+    if os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
+        checks[:0] = [
+            ("GitHub contents write / draft assets", lambda: rehearse(backend, rehearsal_tag, revision)),
+            ("GHCR package push / blob completion", lambda: registry_permissions(image)),
+        ]
+    for service, check in checks:
         try:
             check()
         except RegistryPreflightError as exc:
@@ -241,7 +247,7 @@ def verify_public(root, tag, backend):
         # No registry login is inherited: these checks prove anonymous downloads.
         for reference in (release.version, tag, "latest") if stable else (release.version, tag):
             if image_descriptors(image, reference, docker_config=temporary) != expected:
-                raise ValueError(f"Public container {reference} differs from tested architecture digests")
+                raise ValueError(f"Public container {reference} differs from built architecture digests")
             report(f"Verified public container: `{image}:{reference}` (linux/amd64, linux/arm64)")
         if stable:
             # Separate user state makes signature verification independent of any

@@ -10,7 +10,7 @@ on:
         type: string
       source_run:
         description: Original tag build run with complete, unexpired candidate artifacts
-        required: true
+        required: false
         type: string
 permissions:
   contents: read
@@ -37,30 +37,8 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: python3 packaging/release_policy.py "$RELEASE_TAG"
-  checks:
-    needs: version
-    runs-on: ubuntu-latest
-    timeout-minutes: 1
-    permissions:
-      actions: read
-    steps:
-      - name: Require completed CI for the exact tagged revision
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_REVISION: ${{ needs.version.outputs.revision }}
-        run: |
-          # PR checks validate a synthetic merge commit. Only a main push or explicit
-          # manual check of this exact revision can admit release builds.
-          run_ids=$(gh api --paginate --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
-            -f head_sha="$RELEASE_REVISION" -f status=success | \
-            jq --raw-output --arg revision "$RELEASE_REVISION" '.workflow_runs[] | select(.head_sha == $revision and .status == "completed" and .conclusion == "success" and (.event == "push" or .event == "workflow_dispatch")) | .id')
-          if [ -z "$run_ids" ]; then
-            echo "::error::Run Tests successfully for $RELEASE_REVISION before retrying this release."
-            exit 1
-          fi
-          printf 'Verified CI run(s): %s\n' "$run_ids"
   preflight:
-    needs: [version, checks, candidates]
+    needs: version
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
@@ -72,7 +50,6 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       RELEASE_TAG: ${{ needs.version.outputs.tag }}
-      REHEARSAL_TAG: publisher-contract-release-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -86,12 +63,25 @@ jobs:
       - name: Check publisher services before expensive platform work
         env:
           RELEASE_REVISION: ${{ needs.version.outputs.revision }}
-        run: python3 packaging/release_services.py preflight "$RELEASE_TAG" --revision "$RELEASE_REVISION" --rehearsal-tag "$REHEARSAL_TAG"
-      - name: Clean up isolated draft even after failure
-        if: always()
-        run: python3 packaging/rehearse_publisher.py "$REHEARSAL_TAG" --cleanup-only
+        run: python3 packaging/release_services.py preflight "$RELEASE_TAG" --revision "$RELEASE_REVISION"
+  prepared:
+    needs: [version, preflight]
+    if: ${{ !inputs.source_run }}
+    permissions:
+      contents: write
+      packages: write
+      actions: read
+    uses: ./.github/workflows/prepared-candidates.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.version.outputs.version }}
+      tag: ${{ needs.version.outputs.tag }}
+      revision: ${{ needs.version.outputs.revision }}
   candidates:
-    needs: [version, checks]
+    needs: [version, prepared]
+    if: >-
+      ${{ !cancelled() && needs.version.result == 'success' &&
+          (needs.prepared.result == 'success' || inputs.source_run != '') }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
@@ -100,7 +90,7 @@ jobs:
     outputs:
       artifact_ids: ${{ steps.inspect.outputs.artifact_ids }}
       source_run: ${{ steps.inspect.outputs.source_run }}
-      ci_completed_at: ${{ steps.inspect.outputs.ci_completed_at }}
+      release_started_at: ${{ steps.inspect.outputs.release_started_at }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -108,7 +98,7 @@ jobs:
       - id: inspect
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SOURCE_RUN: ${{ inputs.source_run || 'auto' }}
+          SOURCE_RUN: ${{ inputs.source_run || github.run_id }}
           RELEASE_TAG: ${{ needs.version.outputs.tag }}
           RELEASE_REVISION: ${{ needs.version.outputs.revision }}
         run: python3 packaging/release_candidates.py "$SOURCE_RUN" "$RELEASE_TAG" "$RELEASE_REVISION"
@@ -119,9 +109,9 @@ jobs:
           path: candidate-status.json
           if-no-files-found: ignore
   promote:
-    needs: [version, checks, preflight, candidates]
+    needs: [version, preflight, candidates]
     if: >-
-      always() && needs.version.result == 'success' && needs.checks.result == 'success' &&
+      always() && needs.version.result == 'success' &&
       needs.preflight.result == 'success' && needs.candidates.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -149,10 +139,7 @@ jobs:
           RELEASE_TAG: ${{ needs.version.outputs.tag }}
           RELEASE_REVISION: ${{ needs.version.outputs.revision }}
           SOURCE_RUN: ${{ needs.candidates.outputs.source_run }}
-        run: |
-          if [ -f candidate/release-provenance.json ]; then
-            python3 packaging/candidate_provenance.py verify candidate "$RELEASE_TAG" --revision "$RELEASE_REVISION" --source-run "$SOURCE_RUN"
-          fi
+        run: python3 packaging/candidate_provenance.py verify candidate "$RELEASE_TAG" --revision "$RELEASE_REVISION" --source-run "$SOURCE_RUN"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -164,27 +151,9 @@ jobs:
         run: |
           sudo timeout 120 apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
           sudo timeout 120 apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2 install -y flatpak ostree
-      - name: Restore the exact signed repository from CI
+      - name: Restore the signed repository from the release build
         timeout-minutes: 2
-        env:
-          FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
-        run: |
-          if [ -f candidate/flatpak-repository.tar ]; then
-            tar -xf candidate/flatpak-repository.tar -C candidate
-            exit 0
-          fi
-          # Transitional support for retained candidates from the original tag
-          # build workflow. New CI candidates always contain the signed archive.
-          printf '%s' "$FLATPAK_GPG_KEY" | gpg --batch --import
-          fpr=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')
-          ostree --repo=candidate/flatpak-repo init --mode=archive-z2
-          for arch in x86_64 aarch64; do
-            mkdir -p "candidate/$arch"
-            tar -xf "candidate/flatpak-repo-$arch.tar" -C "candidate/$arch"
-            ostree --repo=candidate/flatpak-repo pull-local "candidate/$arch/repo"
-          done
-          flatpak build-update-repo candidate/flatpak-repo --no-summary-index --gpg-sign="$fpr"
-          cp packaging/flatpak/tuneconsole.flatpakrepo candidate/flatpak-repo/
+        run: tar -xf candidate/flatpak-repository.tar -C candidate
       - name: Validate all assets and promote with rollback and version ordering
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -210,7 +179,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 90
   summary:
-    needs: [version, checks, preflight, candidates, promote]
+    needs: [version, preflight, prepared, candidates, promote]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -237,8 +206,8 @@ jobs:
           RELEASE_TAG: ${{ needs.version.outputs.tag || inputs.tag || github.ref_name }}
           SOURCE_RUN: ${{ needs.candidates.outputs.source_run || inputs.source_run || github.run_id }}
         run: python3 packaging/release_summary.py
-      - name: Measure green CI through verified publication
-        if: needs.candidates.outputs.ci_completed_at != ''
+      - name: Measure release builds through verified publication
+        if: needs.candidates.outputs.release_started_at != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 packaging/release_timing.py

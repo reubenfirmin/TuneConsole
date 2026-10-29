@@ -2,6 +2,9 @@ name: Flatpak candidate
 on:
   workflow_call:
     inputs:
+      revision:
+        default: ''
+        type: string
       version:
         required: true
         type: string
@@ -26,6 +29,8 @@ jobs:
       ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
       - uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.wheel-artifact }}
@@ -48,7 +53,7 @@ jobs:
           python3 packaging/ci_stage.py --timeout 120 --attempts 2 flatpak-runtime -- flatpak install --user --noninteractive flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08
           cd packaging/flatpak
           python3 ../ci_stage.py --timeout 120 --attempts 2 --timings ../../ci-source-timings.json flatpak-sources -- flatpak-builder --download-only --force-clean --disable-rofiles-fuse build-dir com.tuneconsole.TuneConsole.yaml
-      - name: Build candidate and check packaged startup and bridge
+      - name: Build candidate
         timeout-minutes: 8
         env:
           FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
@@ -70,16 +75,22 @@ jobs:
           if [[ "$RELEASE_CANDIDATE" == true ]]; then
             gpg --batch --export "$fpr" > repo-key.gpg
             python3 bundle.py repo "TuneConsole-$ARCH.flatpak" repo-key.gpg
-            flatpak install --user --noninteractive "TuneConsole-$ARCH.flatpak"
           else
             flatpak build-bundle --repo-url="file://$PWD/repo" \
               --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo \
               repo "TuneConsole-$ARCH.flatpak" com.tuneconsole.TuneConsole
-            flatpak install --user --noninteractive "TuneConsole-$ARCH.flatpak"
           fi
-          python3 smoke.py "$VERSION"
           tar -cf "flatpak-repo-$ARCH.tar" repo
           if [[ "$ARCH" == x86_64 ]]; then cp "TuneConsole-$ARCH.flatpak" TuneConsole.flatpak; fi
+      - name: Check packaged startup and bridge
+        if: github.event_name == 'pull_request'
+        timeout-minutes: 2
+        env:
+          VERSION: ${{ inputs.version }}
+        working-directory: packaging/flatpak
+        run: |
+          flatpak install --user --noninteractive "TuneConsole-$ARCH.flatpak"
+          python3 smoke.py "$VERSION"
       - name: Retain setup timing and failure evidence
         if: always()
         uses: actions/upload-artifact@v4

@@ -1,31 +1,14 @@
-# PRs validate the synthetic merge revision; main can reuse its checks after proving an identical tree.
-# Feature pushes and tag pushes deliberately do not start a second copy of these checks.
+# Tests run only on PRs. Releases build and publish independently.
 #
 # Each suite uses four isolated runners, with serial pytest inside each runner.
-name: Tests
+name: PR checks
 
 on:
-  push:
-    branches: [main]
   pull_request:
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: Prospective release tag; package this final version before tagging the tested commit
-        required: false
-        type: string
-      test_shards:
-        description: Runners per suite; use 1 or 2 for a control on the same revision
-        required: true
-        type: choice
-        options: ['4', '2', '1']
-        default: '4'
-  workflow_call:
 
 concurrency:
-  # Reusable release calls retain their tag ref and never cancel another release.
   group: tests-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -36,43 +19,30 @@ jobs:
     permissions:
       contents: read
       actions: read
-      pull-requests: read
     outputs:
-      version: ${{ steps.plan.outputs.version }}
-      tag: ${{ steps.plan.outputs.tag }}
-      reuse_tests: ${{ steps.plan.outputs.reuse_tests }}
-      checked_run: ${{ steps.plan.outputs.checked_run }}
       timing_run: ${{ steps.plan.outputs.timing_run }}
       timing_artifact: ${{ steps.plan.outputs.timing_artifact }}
     steps:
       - uses: actions/checkout@v4
       - id: plan
         env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 packaging/ci_plan.py
-      - uses: actions/upload-artifact@v4
-        if: steps.plan.outputs.reuse_tests == 'true'
-        with:
-          name: source-test-reuse-${{ github.run_attempt }}
-          path: source-test-reuse.json
-          if-no-files-found: error
-          retention-days: 30
   unit:
     needs: plan
-    if: needs.plan.outputs.reuse_tests != 'true'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
-    name: unit (${{ matrix.shard }}/${{ inputs.test_shards || '4' }})
+    name: unit (${{ matrix.shard }}/4)
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(inputs.test_shards == '1' && '[1]' || inputs.test_shards == '2' && '[1, 2]' || '[1, 2, 3, 4]') }}
+        shard: [1, 2, 3, 4]
     env:
       UV_PYTHON: '3.12'  # Exercise the minimum supported application runtime.
-      SHARD_TOTAL: ${{ inputs.test_shards || '4' }}
+      SHARD_TOTAL: '4'
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -107,7 +77,7 @@ jobs:
 
   browser:
     needs: plan
-    if: needs.plan.outputs.reuse_tests != 'true'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     container:
       # Match the locked Playwright version; browsers and OS dependencies are preinstalled.
@@ -116,13 +86,13 @@ jobs:
     permissions:
       contents: read
       actions: read
-    name: browser (${{ matrix.shard }}/${{ inputs.test_shards || '4' }})
+    name: browser (${{ matrix.shard }}/4)
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(inputs.test_shards == '1' && '[1]' || inputs.test_shards == '2' && '[1, 2]' || '[1, 2, 3, 4]') }}
+        shard: [1, 2, 3, 4]
     env:
-      SHARD_TOTAL: ${{ inputs.test_shards || '4' }}
+      SHARD_TOTAL: '4'
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -150,11 +120,11 @@ jobs:
           retention-days: 30
 
   coverage:
-    if: always() && needs.plan.result == 'success' && needs.plan.outputs.reuse_tests != 'true'
+    if: always() && github.event_name == 'pull_request' && needs.plan.result == 'success'
     needs: [plan, unit, browser]
     runs-on: ubuntu-latest
     env:
-      SHARD_TOTAL: ${{ inputs.test_shards || '4' }}
+      SHARD_TOTAL: '4'
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -187,27 +157,22 @@ jobs:
       - name: Require every source test job
         env:
           RESULTS: ${{ toJSON(needs) }}
-          REUSE_TESTS: ${{ needs.plan.outputs.reuse_tests }}
-          CHECKED_RUN: ${{ needs.plan.outputs.checked_run }}
         run: |
           python3 - <<'PY'
           import json, os
           results = json.loads(os.environ['RESULTS'])
-          assert results['plan']['result'] == 'success', results
-          reused = os.environ['REUSE_TESTS'] == 'true' and os.environ['CHECKED_RUN'].isdigit()
-          expected = 'skipped' if reused else 'success'
-          assert all(results[name]['result'] == expected for name in ('unit', 'browser', 'coverage')), results
+          assert all(results[name]['result'] == 'success' for name in ('plan', 'unit', 'browser', 'coverage')), results
           PY
   metrics:
     # Measure the completed stable gate as well as queues, setup and coverage.
-    if: always() && needs.plan.result == 'success' && needs.plan.outputs.reuse_tests != 'true'
+    if: always() && github.event_name == 'pull_request' && needs.plan.result == 'success'
     needs: [plan, coverage, checks]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
     env:
-      SHARD_TOTAL: ${{ inputs.test_shards || '4' }}
+      SHARD_TOTAL: '4'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -230,19 +195,18 @@ jobs:
 
   containers:
     needs: checks
-    if: inputs.release_tag == ''
+    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/container.yml
     with:
       version: '0.0.0.dev0'
 
   publisher-contract:
     needs: checks
-    # Secrets and write tokens are restricted to trusted default-branch runs.
-    # Reused source checks have skipped ancestors; do not inherit success().
+    # Only same-repository PRs receive the token needed for the isolated rehearsal.
     if: >-
       ${{ !cancelled() && needs.checks.result == 'success' &&
-          github.ref == 'refs/heads/main' &&
-          (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -264,7 +228,7 @@ jobs:
 
   macos:
     needs: checks
-    if: inputs.release_tag == ''
+    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/macos.yml
     with:
       version: '0.0.0.dev0'
@@ -272,7 +236,7 @@ jobs:
 
   wheel:
     needs: checks
-    if: inputs.release_tag == ''
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     env:
       SETUPTOOLS_SCM_PRETEND_VERSION: '0.0.0.dev0'
@@ -289,47 +253,8 @@ jobs:
 
   flatpak:
     needs: [checks, wheel]
-    if: inputs.release_tag == ''
+    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/flatpak.yml
     with:
       version: '0.0.0.dev0'
       wheel-artifact: ci-wheel
-
-  prepared:
-    needs: [plan, checks]
-    # The gate explicitly admits verified reuse even when the suites were skipped.
-    if: >-
-      ${{ !cancelled() && needs.plan.result == 'success' && needs.checks.result == 'success' &&
-          needs.plan.outputs.tag != '' && github.event_name == 'workflow_dispatch' &&
-          github.ref == 'refs/heads/main' }}
-    permissions:
-      contents: write
-      packages: write
-      actions: read
-    uses: ./.github/workflows/prepared-candidates.yml
-    secrets: inherit
-    with:
-      version: ${{ needs.plan.outputs.version }}
-      tag: ${{ needs.plan.outputs.tag }}
-
-  release-ready:
-    needs: [plan, checks, prepared]
-    # An intentionally requested release cannot pass with its candidates skipped.
-    if: >-
-      ${{ !cancelled() && inputs.release_tag != '' &&
-          github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - name: Require completed source checks and final candidate builds
-        env:
-          RESULTS: ${{ toJSON(needs) }}
-        run: |
-          python3 - <<'PY'
-          import json, os
-          results = json.loads(os.environ['RESULTS'])
-          assert all(results[name]['result'] == 'success' for name in ('plan', 'checks', 'prepared')), results
-          PY

@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1] / "packaging"))
 timing = importlib.import_module("release_timing")
 
-CI_COMPLETED = "2026-10-23T12:00:00Z"
+RELEASE_STARTED = "2026-10-23T12:00:00Z"
 
 
 def promotion():
@@ -25,15 +25,15 @@ def promotion():
 
 def candidate():
     return {"tag": "v1.2.3", "revision": "a" * 40, "source_run": "123", "repository": "owner/repo",
-            "ci_run": "123", "ci_run_attempt": "1", "ci_completed_at": CI_COMPLETED,
+            "release_started_at": RELEASE_STARTED,
             "assets": [{"name": name, "state": "complete", "bytes": 100}
-                       for name in (*timing.EXPECTED, "release-provenance", "release-flatpak-repository")]}
+                       for name in timing.EXPECTED]}
 
 
-def test_pending_production_owner_reports_queue_and_elapsed_since_green_ci():
+def test_pending_production_owner_reports_queue_and_elapsed_since_release_request():
     job = promotion()
     job.update(status="queued", conclusion=None, started_at=None, steps=[])
-    report = timing.measure([job], CI_COMPLETED, now=datetime(2026, 10, 23, 12, 12, tzinfo=timezone.utc))
+    report = timing.measure([job], RELEASE_STARTED, now=datetime(2026, 10, 23, 12, 12, tzinfo=timezone.utc))
     assert report["blocking_stage"] == "promote runner queue"
     assert report["observed_elapsed_seconds"] == 720
     assert report["stages"][0]["elapsed_seconds"] == 60
@@ -42,7 +42,7 @@ def test_pending_production_owner_reports_queue_and_elapsed_since_green_ci():
 
 
 def test_failure_before_any_step_still_identifies_the_blocking_job():
-    report = timing.measure([{"name": "candidates", "conclusion": "failure", "steps": []}], CI_COMPLETED)
+    report = timing.measure([{"name": "candidates", "conclusion": "failure", "steps": []}], RELEASE_STARTED)
     assert report["blocking_stage"] == "candidates"
     assert "candidates" in timing.render(report)
 
@@ -50,7 +50,7 @@ def test_failure_before_any_step_still_identifies_the_blocking_job():
 def test_running_step_reports_time_spent_and_summary_cannot_replace_the_blocker():
     job = promotion()
     job["steps"] = [dict(job["steps"][0], status="in_progress", conclusion=None, completed_at=None)]
-    report = timing.measure([job, {"name": "summary", "conclusion": "failure"}], CI_COMPLETED,
+    report = timing.measure([job, {"name": "summary", "conclusion": "failure"}], RELEASE_STARTED,
                             now=datetime(2026, 10, 23, 12, 3, tzinfo=timezone.utc))
     assert report["blocking_stage"] == "promote / Install publication tools within a separate setup budget"
     assert report["stages"][-1]["elapsed_seconds"] == 90
@@ -58,15 +58,15 @@ def test_running_step_reports_time_spent_and_summary_cannot_replace_the_blocker(
 
 def test_only_one_promotion_attempt_can_prove_public_verification():
     job = promotion()
-    assert not timing.measure([job, job], CI_COMPLETED)["within_budget"]
+    assert not timing.measure([job, job], RELEASE_STARTED)["within_budget"]
     job["name"] = "preflight"
-    assert not timing.measure([job], CI_COMPLETED)["within_budget"]
+    assert not timing.measure([job], RELEASE_STARTED)["within_budget"]
 
 
 def test_invalid_verification_clock_cannot_claim_success():
     job = promotion()
     job["steps"][-1]["completed_at"] = "2026-10-23T12:08:00Z"
-    assert not timing.measure([job], CI_COMPLETED)["within_budget"]
+    assert not timing.measure([job], RELEASE_STARTED)["within_budget"]
 
 
 class Hosted:
@@ -82,13 +82,13 @@ class Hosted:
         return {"jobs": [{"name": "summary"}] * 100 if path.endswith("page=1") else [promotion()]}
 
 
-def test_hosted_collection_pins_attempt_paginates_and_preserves_ci_and_sizes():
+def test_hosted_collection_pins_attempt_paginates_and_preserves_source_and_sizes():
     backend = Hosted()
     report = timing.collect(backend, "456", "2", candidate())
     assert len(backend.paths) == 2
     assert report["within_budget"] and report["elapsed_seconds"] == 600
     assert report["artifact_bytes"] == 900
-    assert report["candidate"]["ci_run"] == "123"
+    assert report["candidate"]["source_run"] == "123"
     assert report["url"].endswith("/456/attempts/2")
 
 
@@ -100,7 +100,7 @@ def test_three_hosted_records_keep_source_links_sizes_and_reviewed_cold_setup():
     result = timing.compare(records(), cold_run="456")
     assert len(result["runs"]) == 3
     assert all(row["elapsed_seconds"] == 600 and row["artifact_bytes"] == 900 for row in result["runs"])
-    assert result["runs"][0]["ci"].endswith("/123/attempts/1")
+    assert result["runs"][0]["source"].endswith("/123")
     assert result["cold_setup_run"].endswith("/456/attempts/2")
 
 
@@ -120,7 +120,7 @@ def test_rehearsal_evidence_rejects_late_failed_or_incomplete_publication(failur
     elif failure == "failed":
         broken.update(verified_at=None, elapsed_seconds=None)
     elif failure == "clock":
-        broken["candidate"]["ci_completed_at"] = "2026-10-23T12:01:00Z"
+        broken["candidate"]["release_started_at"] = "2026-10-23T12:01:00Z"
     elif failure == "sizes":
         broken["artifact_bytes"] += 1
     elif failure == "missing_architecture":

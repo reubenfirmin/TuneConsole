@@ -19,13 +19,22 @@ class Runs:
     repository = "owner/repo"
 
     def __init__(self):
-        self.run = {"head_sha": "a" * 40, "path": ".github/workflows/release.yml", "event": "push",
-                    "head_branch": "v1.2.3", "status": "completed", "conclusion": "failure"}
+        self.run_info = {"head_sha": "a" * 40, "path": ".github/workflows/release.yml", "event": "push",
+                         "head_branch": "v1.2.3", "status": "completed", "conclusion": "failure"}
         self.artifacts = [{"name": name, "id": n + 1, "size_in_bytes": 100, "expired": False}
                           for n, name in enumerate(candidates.EXPECTED)]
 
     def api(self, path):
-        return {"artifacts": self.artifacts} if "/artifacts?" in path else self.run
+        return {"artifacts": self.artifacts} if "/artifacts?" in path else self.run_info
+
+    def run(self, *args):
+        directory = Path(args[args.index("--dir") + 1])
+        (directory / "release-provenance.json").write_text(json.dumps({
+            "schema": 1, "tag": "v1.2.3", "version": "1.2.3", "revision": "a" * 40,
+            "source_run": "123", "repository": self.repository,
+            "architectures": {"macos": ["arm64", "x86_64"], "flatpak": ["aarch64", "x86_64"],
+                              "container": ["amd64", "arm64"]},
+        }))
 
 
 def inspect(backend, tmp_path, **kwargs):
@@ -34,8 +43,8 @@ def inspect(backend, tmp_path, **kwargs):
 
 def test_complete_candidates_survive_failed_promotion_and_repeated_inspection(tmp_path):
     backend = Runs()
-    assert inspect(backend, tmp_path) == "1,2,3,4,5,6,7"
-    assert inspect(backend, tmp_path) == "1,2,3,4,5,6,7"
+    assert inspect(backend, tmp_path) == "1,2,3,4,5,6,7,8,9"
+    assert inspect(backend, tmp_path) == "1,2,3,4,5,6,7,8,9"
     assert all(row["state"] == "complete" for row in json.loads((tmp_path / "status.json").read_text())["assets"])
 
 
@@ -43,7 +52,7 @@ def test_complete_candidates_survive_failed_promotion_and_repeated_inspection(tm
                                          ("path", ".github/workflows/other.yml"), ("event", "pull_request")])
 def test_source_revision_tag_and_workflow_must_all_match(tmp_path, field, value):
     backend = Runs()
-    backend.run[field] = value
+    backend.run_info[field] = value
     with pytest.raises(ValueError, match="exact tag and commit"):
         inspect(backend, tmp_path)
 
@@ -62,13 +71,13 @@ def test_incomplete_or_expired_candidates_report_exact_platform(tmp_path, state)
     with pytest.raises(ValueError, match="incomplete"):
         inspect(backend, tmp_path)
     rows = json.loads((tmp_path / "status.json").read_text())["assets"]
-    assert rows[-1]["name"] == "release-container-arm64" and rows[-1]["state"] == state
+    assert rows[-1]["name"] == "release-flatpak-repository" and rows[-1]["state"] == state
     assert all(row["state"] == "complete" for row in rows[:-1])
 
 
 def test_current_build_can_inspect_after_all_builds_but_other_active_source_cannot(tmp_path):
     backend = Runs()
-    backend.run["status"] = "in_progress"
+    backend.run_info["status"] = "in_progress"
     with pytest.raises(ValueError, match="complete"):
         inspect(backend, tmp_path)
     assert inspect(backend, tmp_path, allow_active=True)
