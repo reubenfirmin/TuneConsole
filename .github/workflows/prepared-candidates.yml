@@ -8,30 +8,11 @@ on:
       tag:
         required: true
         type: string
+      revision:
+        required: true
+        type: string
 jobs:
-  preflight:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      RELEASE_TAG: ${{ inputs.tag }}
-      REHEARSAL_TAG: publisher-contract-candidates-${{ github.run_id }}-${{ github.run_attempt }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - run: python3 packaging/release_services.py preflight "$RELEASE_TAG" --rehearsal-tag "$REHEARSAL_TAG"
-      - if: always()
-        run: python3 packaging/rehearse_publisher.py "$REHEARSAL_TAG" --cleanup-only
   wheel:
-    needs: preflight
     runs-on: ubuntu-latest
     env:
       SETUPTOOLS_SCM_PRETEND_VERSION: ${{ inputs.version }}
@@ -39,6 +20,8 @@ jobs:
       UV_HTTP_RETRIES: '2'
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
@@ -62,31 +45,34 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
   containers:
-    needs: preflight
     uses: ./.github/workflows/container.yml
     with:
       version: ${{ inputs.version }}
       stage: true
+      revision: ${{ inputs.revision }}
   macos:
-    needs: preflight
     uses: ./.github/workflows/macos.yml
     secrets: inherit
     with:
       version: ${{ inputs.version }}
       tag: ${{ inputs.tag }}
+      revision: ${{ inputs.revision }}
   flatpak:
-    needs: [preflight, wheel]
+    needs: wheel
     uses: ./.github/workflows/flatpak.yml
     secrets: inherit
     with:
       version: ${{ inputs.version }}
       wheel-artifact: release-wheel
       release-candidate: true
+      revision: ${{ inputs.revision }}
   provenance:
     needs: [wheel, containers, macos, flatpak]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
@@ -97,11 +83,10 @@ jobs:
         run: |
           sudo timeout 120 apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
           sudo timeout 120 apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2 install -y flatpak ostree
-      - name: Assemble and verify the final signed repository once in CI
+      - name: Assemble the final signed repository
         timeout-minutes: 2
         env:
           FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
-          VERSION: ${{ inputs.version }}
         run: |
           printf '%s' "$FLATPAK_GPG_KEY" | gpg --batch --import
           fpr=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')
@@ -111,22 +96,15 @@ jobs:
             tar -xf "candidate/flatpak-repo-$arch.tar" -C "candidate/$arch"
             ostree --repo=candidate/flatpak-repo pull-local "candidate/$arch/repo"
           done
-          # A single signed summary lets fresh clients verify both architectures' AppStream refs.
+          # One signed summary contains both architectures' AppStream refs.
           flatpak build-update-repo candidate/flatpak-repo --no-summary-index --gpg-sign="$fpr"
           cp packaging/flatpak/tuneconsole.flatpakrepo candidate/flatpak-repo/
-          gpg --batch --export "$fpr" > repo-key.gpg
-          flatpak remote-add --user --gpg-import=repo-key.gpg ci-candidate "file://$PWD/candidate/flatpak-repo"
-          for arch in x86_64 aarch64; do
-            flatpak update --user --appstream --arch="$arch" ci-candidate
-            flatpak remote-ls --user --app --arch="$arch" --columns=application ci-candidate |
-              python3 -c 'import sys; assert "com.tuneconsole.TuneConsole" in sys.stdin.read().split()'
-            python3 packaging/flatpak/verify_metadata.py "${XDG_DATA_HOME:-$HOME/.local/share}" ci-candidate "$arch" "$VERSION"
-          done
           tar -cf candidate/flatpak-repository.tar -C candidate flatpak-repo
-      - name: Bind final-version smoke-tested payloads to the exact CI commit
+      - name: Record final-version payload hashes and release commit
         env:
           RELEASE_TAG: ${{ inputs.tag }}
-        run: python3 packaging/candidate_provenance.py create candidate "$RELEASE_TAG"
+          RELEASE_REVISION: ${{ inputs.revision }}
+        run: python3 packaging/candidate_provenance.py create candidate "$RELEASE_TAG" --revision "$RELEASE_REVISION"
       - uses: actions/upload-artifact@v4
         with:
           name: release-provenance

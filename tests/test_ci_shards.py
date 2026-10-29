@@ -156,8 +156,11 @@ def test_all_shards_pin_one_trusted_unexpired_baseline_artifact():
                 return {"artifacts": [{"name": "source-test-timings-2", "id": 55,
                                        "expired": False, "size_in_bytes": 100}]}
             return {"workflow_runs": [
-                {"head_branch": "main", "status": "completed", "conclusion": "success", "event": "pull_request"},
-                {"head_branch": "main", "status": "completed", "conclusion": "success", "event": "push",
+                {"status": "completed", "conclusion": "success", "event": "push"},
+                {"status": "completed", "conclusion": "success", "event": "pull_request",
+                 "head_repository": {"full_name": "untrusted/fork"}},
+                {"status": "completed", "conclusion": "success", "event": "pull_request",
+                 "head_repository": {"full_name": "owner/repo"},
                  "id": 123, "run_attempt": 2, 'run_started_at': '2026-10-26T12:00:00Z'},
             ]}
     assert timing_source(Source()) == {"timing_run": "123", "timing_artifact": "55"}
@@ -169,7 +172,7 @@ def test_all_shards_pin_one_trusted_unexpired_baseline_artifact():
     (None, False),
     ('2026-10-25T12:33:41Z', True),
 ])
-def test_newer_committed_weight_refresh_is_not_overridden_by_stale_main(started, expected):
+def test_newer_committed_weight_refresh_is_not_overridden_by_stale_pr(started, expected):
     class Source:
         repository = 'owner/repo'
 
@@ -178,8 +181,9 @@ def test_newer_committed_weight_refresh_is_not_overridden_by_stale_main(started,
                 return {'artifacts': [{'name': 'source-test-timings-1', 'id': 99,
                                        'expired': False, 'size_in_bytes': 100}]}
             return {'workflow_runs': [
-                {'head_branch': 'main', 'status': 'completed', 'conclusion': 'success',
-                 'event': 'push', 'id': 123, 'run_attempt': 1, 'run_started_at': started},
+                {'status': 'completed', 'conclusion': 'success', 'event': 'pull_request',
+                 'head_repository': {'full_name': 'owner/repo'},
+                 'id': 123, 'run_attempt': 1, 'run_started_at': started},
             ]}
 
     assert timing_source(Source(), {'refreshed_at': '2026-10-25T12:33:40Z'}) == (

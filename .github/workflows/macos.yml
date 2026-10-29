@@ -9,6 +9,9 @@ on:
       tag:
         required: true
         type: string
+      revision:
+        default: ''
+        type: string
 permissions:
   contents: read
 jobs:
@@ -26,6 +29,8 @@ jobs:
       RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -46,6 +51,7 @@ jobs:
           test "$(uname -m)" = "${{ matrix.arch }}"
           packaging/macos/build.sh --build-only
       - name: Smoke-test frozen app and DMG
+        if: github.event_name == 'pull_request'
         timeout-minutes: 2
         run: packaging/macos/smoke.sh
       - name: Stage architecture-specific downloads

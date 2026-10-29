@@ -9,13 +9,16 @@ on:
       stage:
         default: false
         type: boolean
+      revision:
+        default: ''
+        type: string
 # Permissions come from the caller: ordinary CI grants read access; only the release
 # coordinator grants packages: write. Fork PR builds never need registry credentials.
 concurrency:
   group: containers-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
 jobs:
-  smoke:
+  build:
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +31,8 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
       - uses: docker/setup-buildx-action@v3
         timeout-minutes: 2
       - uses: docker/build-push-action@v6
@@ -36,30 +41,31 @@ jobs:
           context: .
           load: true
           platforms: linux/${{ matrix.arch }}
-          tags: tuneconsole:smoke
+          tags: tuneconsole:candidate
           build-args: VERSION=${{ env.VERSION }}
           labels: |
             org.opencontainers.image.version=${{ env.VERSION }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ inputs.revision || github.sha }}
           cache-from: type=gha,scope=container-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=container-${{ matrix.arch }}
       - name: Test the exact image that will be staged
+        if: github.event_name == 'pull_request'
         timeout-minutes: 2
-        run: python3 packaging/container/smoke.py --engine docker --image tuneconsole:smoke --version "$VERSION"
+        run: python3 packaging/container/smoke.py --engine docker --image tuneconsole:candidate --version "$VERSION"
       - uses: docker/login-action@v3
         if: inputs.stage
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Stage the tested digest without rebuilding
+      - name: Stage the candidate digest without rebuilding
         if: inputs.stage
         env:
           ARCH: ${{ matrix.arch }}
         run: |
           image="${IMAGE,,}"
           candidate="$image:candidate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$ARCH"
-          docker tag tuneconsole:smoke "$candidate"
+          docker tag tuneconsole:candidate "$candidate"
           docker push "$candidate"
           digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$candidate")
           python3 -c 'import json,os,sys; json.dump(dict(arch=os.environ["ARCH"],version=os.environ["VERSION"],digest=sys.argv[1]),open("container-"+os.environ["ARCH"]+".json","w"))' "$digest"

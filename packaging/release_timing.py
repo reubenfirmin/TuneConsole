@@ -1,4 +1,4 @@
-"""Measure green CI through verified publication, including queues and provider stages."""
+"""Measure release builds through verified publication, including runner queues."""
 import argparse
 from datetime import datetime, timezone
 import json
@@ -24,8 +24,8 @@ def duration(start, end):
     return elapsed if elapsed >= 0 else None
 
 
-def measure(jobs, ci_completed_at, *, now=None):
-    started = instant(ci_completed_at)
+def measure(jobs, release_started_at, *, now=None):
+    started = instant(release_started_at)
     now = now or datetime.now(timezone.utc)
     stages = []
     verification = []
@@ -33,7 +33,7 @@ def measure(jobs, ci_completed_at, *, now=None):
     release_jobs = [job for job in jobs if job["name"].rsplit(" / ", 1)[-1] != "summary"]
     dispatches = [instant(job["created_at"]) for job in release_jobs if job.get("created_at")]
     if dispatches:
-        stages.append({"stage": "Completed CI to first release job", "elapsed_seconds": max(0, (min(dispatches) - started).total_seconds()),
+        stages.append({"stage": "Release requested to first job", "elapsed_seconds": max(0, (min(dispatches) - started).total_seconds()),
                        "result": "complete"})
     for job in release_jobs:
         queued = duration(job.get("created_at"), job.get("started_at"))
@@ -62,7 +62,7 @@ def measure(jobs, ci_completed_at, *, now=None):
     if len(verification) > 1:
         blocking = "Ambiguous public verification; select one release attempt"
     elapsed = (verified - started).total_seconds() if verified else None
-    return {"ci_completed_at": ci_completed_at, "verified_at": verified.isoformat() if verified else None,
+    return {"release_started_at": release_started_at, "verified_at": verified.isoformat() if verified else None,
             "elapsed_seconds": elapsed, "budget_seconds": BUDGET_SECONDS, "target_seconds": TARGET_SECONDS,
             "observed_elapsed_seconds": (now - started).total_seconds(),
             "within_budget": elapsed is not None and 0 <= elapsed <= BUDGET_SECONDS,
@@ -72,12 +72,12 @@ def measure(jobs, ci_completed_at, *, now=None):
 def render(metrics):
     elapsed = metrics["elapsed_seconds"]
     status = f"Verified publication in {elapsed:.1f}s" if elapsed is not None else "Public verification incomplete"
-    lines = [status + "; target 600s, limit 900s (clock starts at completed CI).", "",
+    lines = [status + "; target 600s, limit 900s (clock starts when the release is requested).", "",
              f"Current blocking stage: {metrics['blocking_stage'] or 'none; inspect failed stages below if incomplete'}.", ""]
     if candidate := metrics.get("candidate"):
-        ci = f"https://github.com/{metrics['repository']}/actions/runs/{candidate['ci_run']}/attempts/{candidate['ci_run_attempt']}"
+        source = f"https://github.com/{metrics['repository']}/actions/runs/{candidate['source_run']}"
         lines.extend([f"[{candidate['tag']}]({metrics['url']}) at `{candidate['revision']}`; "
-                      f"[source CI]({ci}); {metrics['artifact_bytes']:,} retained candidate bytes.", ""])
+                      f"[release build]({source}); {metrics['artifact_bytes']:,} retained candidate bytes.", ""])
     lines.extend(["| Stage (includes runner queues) | Seconds | Result |", "| --- | --- | --- |"])
     for row in metrics["stages"]:
         seconds = f"{row['elapsed_seconds']:.1f}" if row["elapsed_seconds"] is not None else "pending"
@@ -97,7 +97,7 @@ def collect(backend, run_id, attempt, candidate):
         if len(data["jobs"]) < 100:
             break
         page += 1
-    metrics = measure(jobs, candidate["ci_completed_at"])
+    metrics = measure(jobs, candidate["release_started_at"])
     metrics.update(repository=backend.repository, run_id=str(run_id), run_attempt=str(attempt),
                    url=f"https://github.com/{backend.repository}/actions/runs/{run_id}/attempts/{attempt}",
                    candidate=candidate,
@@ -117,18 +117,18 @@ def compare(measurements, *, cold_run):
     rows = []
     for metrics in measurements:
         candidate = metrics["candidate"]
-        elapsed = duration(metrics["ci_completed_at"], metrics["verified_at"])
+        elapsed = duration(metrics["release_started_at"], metrics["verified_at"])
         if (elapsed is None or elapsed > BUDGET_SECONDS or metrics["elapsed_seconds"] != elapsed
-                or metrics["ci_completed_at"] != candidate["ci_completed_at"]
+                or metrics["release_started_at"] != candidate["release_started_at"]
                 or metrics["repository"] != candidate["repository"]
-                or not candidate.get("ci_run") or not candidate.get("ci_run_attempt")
+                or not candidate.get("source_run")
                 or not candidate.get("revision") or not candidate.get("tag")
-                or {row["name"] for row in candidate["assets"]} != {*EXPECTED, "release-provenance", "release-flatpak-repository"}
+                or {row["name"] for row in candidate["assets"]} != set(EXPECTED)
                 or any(row["state"] != "complete" or row["bytes"] <= 0 for row in candidate["assets"])
                 or metrics["artifact_bytes"] != sum(row["bytes"] for row in candidate["assets"])):
-            raise ValueError("Each release needs complete candidates, exact-source CI and verified publication within 900 seconds")
+            raise ValueError("Each release needs complete candidates and verified publication within 900 seconds of its request")
         rows.append({"release": metrics["url"], "tag": candidate["tag"], "revision": candidate["revision"],
-                     "ci": f"https://github.com/{metrics['repository']}/actions/runs/{candidate['ci_run']}/attempts/{candidate['ci_run_attempt']}",
+                     "source": f"https://github.com/{metrics['repository']}/actions/runs/{candidate['source_run']}",
                      "elapsed_seconds": elapsed, "artifact_bytes": metrics["artifact_bytes"]})
     return {"budget_seconds": BUDGET_SECONDS, "runs": rows, "cold_setup_run": cold["url"],
             "cold_setup_review": "Cold setup identified by the reviewer from runner logs; successful tool installation recorded."}

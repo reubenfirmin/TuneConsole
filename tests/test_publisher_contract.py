@@ -284,6 +284,7 @@ def test_uploaded_asset_metadata_must_match(monkeypatch, tmp_path, field, value)
 
 
 def test_preflight_reports_exact_failing_service_without_exposing_response(monkeypatch, capsys):
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
     backend = Backend("owner/repo")
     checked = []
     monkeypatch.setattr(release_services.shutil, "which", lambda tool: "/bin/" + tool)
@@ -385,6 +386,7 @@ def test_registry_transfers_blob_and_completes_the_updated_session(monkeypatch, 
 def test_registry_failure_identifies_the_operation_and_status_without_remote_details(monkeypatch, capsys, stage, operation, status):
     import traceback
 
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
     registry = Registry(monkeypatch)
     registry.failure = stage
     registry.failure_status = status
@@ -430,6 +432,7 @@ def test_registry_only_targets_the_returned_https_upload(monkeypatch, location, 
 
 
 def test_preflight_reports_all_service_failures_and_checks_stable_baseline(monkeypatch, capsys):
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
     backend = Backend("owner/repo")
     checked = []
     monkeypatch.setattr(release_services.shutil, "which", lambda tool: "/bin/" + tool)
@@ -452,6 +455,22 @@ def test_preflight_reports_all_service_failures_and_checks_stable_baseline(monke
         assert service in str(failure.value)
     output = capsys.readouterr().out
     assert "HTTP 403" in output and "secret" not in output
+
+
+@pytest.mark.parametrize("event", ["push", "workflow_dispatch", "workflow_call", "release"])
+def test_non_pr_preflight_never_runs_publisher_or_registry_rehearsals(monkeypatch, event):
+    monkeypatch.setenv("GITHUB_EVENT_NAME", event)
+    backend = Backend("owner/repo")
+    checked = []
+    monkeypatch.setattr(release_services.shutil, "which", lambda tool: "/bin/" + tool)
+    monkeypatch.setattr(backend, "run", lambda *args: None)
+    monkeypatch.setattr(release_services, "rehearse", lambda *args: pytest.fail("Publisher tests run only on PRs"))
+    monkeypatch.setattr(release_services, "registry_permissions", lambda *args: pytest.fail("Registry tests run only on PRs"))
+    monkeypatch.setattr(release_services, "pages_permissions", lambda *args: checked.append("pages"))
+    monkeypatch.setattr(backend, "require_reconciled_channels", lambda *args: checked.append("recovery"))
+    monkeypatch.setattr(backend, "snapshot", lambda *args: checked.append("baseline"))
+    release_services.preflight(backend, "v1.2.3", "a" * 40, None, stable=True)
+    assert checked == ["pages", "recovery", "baseline"]
 
 
 @pytest.mark.parametrize("streamed", [False, True])

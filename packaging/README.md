@@ -120,47 +120,41 @@ shutdown. It removes only its own test resources afterward.
 
 ### Release publishing
 
-Ordinary CI runs once for each PR update (including fork PRs), validating GitHub's synthetic
-merge revision, and once for each push to `main`, validating the landed revision. Feature-branch
-pushes do not duplicate PR checks. Manual and reusable runs remain available. Superseded PR
-and main checks are cancelled within their event/ref; tag release calls cannot cancel releases.
-Tag pushes start only the release coordinator, which requires an already successful `Tests`
-run for the exact tagged commit (a main push or explicit manual run). A missing, running,
-failed or cancelled CI result blocks promotion; rerun the release after CI succeeds.
-Releases never run the source suite again.
-
-Main CI also reuses a passing PR run when its tested merge tree exactly matches the landed
-tree. A retry of a platform job can retain the original source-test report: the planner
-verifies that every source shard, planning, coverage and checks execution has the same
-successful job and test-step timestamps in both attempts. GitHub assigns cloned job IDs
-on retries, so those IDs do not identify new test executions. A rerun source job or gate
-invalidates the earlier proof. The reuse artifact and summary retain the source attempt
-as well as both commit identities.
+Tests run only on pull requests, validating GitHub's synthetic merge revision.
+The CI workflow has only a pull-request trigger: no main pushes, manual dispatch or
+reusable test entry point.
+Unit/browser suites, coverage, metrics, package smoke tests and synthetic publisher
+rehearsals have explicit PR-only guards. Main and releases cannot start those tests.
+Releases build and publish from main independently of PR results and test history.
+There is no requirement to find a matching PR or a successful CI run.
 
 After both source suites and packaged-resolution checks pass, `ci.yml` calls the container,
 macOS and Flatpak build workflows. Both supported architectures build the actual locked
 packages and run their packaged startup checks, including the Flatpak extension bridge.
-Ordinary/fork CI needs no signing or publication secrets. Flatpak CI installs an unsigned
-local candidate. Final release preparation uses the same build/smoke owners with the
-prospective release version, signed bundles and architecture-specific update feeds.
+Fork CI needs no signing or publication secrets. Flatpak PR checks install an unsigned
+local candidate. Final release preparation uses the same builders with the prospective
+release version, signed bundles and architecture-specific update feeds. Package smoke
+tests run only on PRs. Main builds and signs final-version candidates without executing
+application tests; provenance records those exact bytes without claiming a smoke test
+of the final-version payload.
 
-Prepare final candidates **before** creating the release tag:
+To release, tag the chosen main commit and push that tag:
 
 ```sh
-gh workflow run ci.yml --ref main -f release_tag=vX.Y.Z
+git fetch origin main
+git tag vX.Y.Z origin/main
+git push origin vX.Y.Z
 ```
 
-This trusted manual run normalizes the final version and bakes it into every package
-before packaged startup checks. If ordinary source CI already passed for this exact
-commit, it reuses that result and runs only the later packaging stage; otherwise the
-source checks run first. A different revision or PR merge result cannot admit reuse.
-CI exports immutable candidate artifacts, exact hashes, commit/tag/version/run identity,
-both architectures for every platform, and the final merged signed Flatpak repository.
-After this CI completes, tag its **exact tested commit** with the requested tag. No
-application payload or signed repository bytes change during release promotion.
+That starts one release workflow. It normalizes the version, builds and signs the
+wheel, both container architectures, both macOS DMGs/feeds and both Flatpak bundles,
+then publishes them. Every builder checks out the same pinned release commit.
+The workflow retains the package hashes and merged signed Flatpak repository so a
+publication retry can use the completed builds without rebuilding. No separate
+preparation run is needed, and the release does not run application tests.
 
 `.github/workflows/container.yml` is reusable and also supports intentional manual runs.
-CI stages the exact tested image digests, and the release coordinator publishes their
+Preparation stages the exact candidate image digests, and the release coordinator publishes their
 multi-platform manifest after validating candidate provenance. Publishing uses the repository's
 `GITHUB_TOKEN` with `packages: write`; no registry password or additional secret is needed.
 The image carries source, revision, version, and license labels.
@@ -177,12 +171,12 @@ unsupported tags fail before publication. Prereleases and development builds are
 GitHub prereleases, never become GitHub/container `latest`, and never deploy the stable
 Flatpak repository. There is currently no opt-in Flatpak prerelease update channel.
 
-`release.yml` owns tag publication. It retrieves the successful CI run's wheel, signed
-Flatpak bundles/repository, macOS DMGs/feeds and container digests for the exact revision
-and requested version. It has no platform build or source test jobs. CI build jobs
-upload Actions candidates and never change stable channels. One serialized
+`release.yml` owns release builds and publication. Its `prepared` job calls the existing
+package builders for the tagged commit and final version. An optional manual dispatch
+on main with `tag=vX.Y.Z` starts the same build and publication flow. Build jobs upload
+Actions candidates and never change stable channels. One serialized
 promotion job validates versions, feeds, digests and the complete artifact set, uploads a
-draft GitHub release with a SHA256 manifest, and promotes the tested container digests.
+draft GitHub release with a SHA256 manifest, and promotes the built container digests.
 It snapshots the existing Flatpak deployment and container `latest`, deploys the candidate
 repository, moves container `latest`, then publishes GitHub latest last. Older completed
 runs publish their immutable version downloads without moving any stable channel.
@@ -205,25 +199,25 @@ do not provide a shared atomic transaction, so a forced runner termination can r
 reconciliation. Do not delete a checkpoint or publish candidates manually outside the shared
 `release-production` lock. A published tag accepts only an identical manifest.
 
-After source checks on trusted `main` runs, CI rehearses the real GitHub draft and
+After source checks on same-repository PRs, CI rehearses the real GitHub draft and
 asset API with a unique `publisher-contract-ci-*` draft. The fixture uploads are
 small, include a partial upload followed by complete staging and an idempotent
 repeat, and are removed in both a `finally` block and an `always()` workflow step.
-PRs do not receive this write token. No rehearsal publishes a release, creates a
+Fork PRs do not receive this write token. No rehearsal publishes a release, creates a
 Git tag, or touches an update channel. Focused local contract tests also cover
 published tag lookup, authenticated paginated draft lookup, upload metadata,
 interrupted uploads, HTTP errors and unreachable services.
 
-Release preflight repeats this isolated lifecycle before platform builds, proves
-GHCR push permission with a cancelled empty blob upload (no image tags), requests
-a Cloudflare Pages upload token (requires Pages Write), and checks the recoverable
-stable baseline. Failures identify the service without dumping authenticated
-responses. An outage can prevent draft cleanup; retry the cleanup step using the
-exact `REHEARSAL_TAG` shown in that run before abandoning it.
+Publisher and GHCR blob rehearsals run only on PRs. Main/release preflight checks
+the required tools, requests a Cloudflare Pages upload token (requires Pages Write),
+and checks the recoverable stable baseline. It creates no synthetic draft or registry
+blob. Failures identify the service without dumping authenticated responses. An outage
+can prevent PR draft cleanup; retry the cleanup step using the exact `REHEARSAL_TAG`
+shown in that run before abandoning it.
 
 After publication, focused anonymous checks download every asset and verify its
 SHA256 against the candidate, check both versioned container architectures and
-stable `latest` against the tested digests, and fetch the Flatpak summary/signature
+stable `latest` against the built digests, and fetch the Flatpak summary/signature
 from `https://repo.tuneconsole.com/`. Flatpak then verifies the signed remote in
 isolated user state and confirms both architectures and the release version.
 Repository assembly uses one signed summary rather than architecture-filtered summary
@@ -249,8 +243,8 @@ through the coordinator instead of deleting or replacing public assets.
 
 Publication recovery does not rebuild successful candidates. The release coordinator
 has a `workflow_dispatch` form with `tag` and `source_run`: choose the original tag
-build run, not a later publication-only retry. New releases use the successful final-candidate
-CI run; retained original tag-build runs remain supported during the transition. Before dispatch, inspect availability
+build run, not a later publication-only retry. Omit `source_run` for a new build and
+publication. Before retrying publication, inspect availability
 with an authenticated token in `GITHUB_TOKEN`:
 
 ```sh
@@ -258,17 +252,17 @@ python3 packaging/release_candidates.py RUN_ID vX.Y.Z EXACT_TAG_COMMIT --reposit
 gh workflow run release.yml --ref main -f tag=vX.Y.Z -f source_run=RUN_ID
 ```
 
-The inspection requires the exact tag and SHA from trusted CI (nine artifact groups,
-including provenance and the assembled signed repository), or the original release
-workflow (seven platform groups), and lists byte sizes and expiry state. A failed
-legacy publisher run is an acceptable source when every candidate was uploaded successfully.
+The inspection requires the exact tag and SHA from the original release build (nine
+artifact groups, including provenance and the assembled signed repository), and lists
+byte sizes and expiry state. A failed publisher run is an acceptable source when
+every candidate was uploaded successfully.
 An active unrelated run, wrong revision/tag, failed/skipped platform with missing
 artifacts, ambiguous duplicates or expired artifacts blocks promotion. Rerun only
 failed source jobs to complete missing candidates; expired candidates require rebuilding
 the affected platform. Artifact IDs, not mutable names alone, select the downloads.
 Candidates remain available for 30 days. Publication retries skip every build job
 and use the same production lock, immutable manifest and channel reconciliation.
-CI retains the exact assembled signed repository, so new retries never regenerate
+The release build retains the exact assembled signed repository, so retries never regenerate
 its timestamped summary. For a legacy confirmed draft, recovery validates the saved
 checkpoint against the remote draft manifest and restores the original stable
 baseline before validating or staging newly assembled bytes. Public releases always
@@ -278,7 +272,7 @@ Setup has independent budgets: apt operations use 15-second network timeouts and
 two transient retries within bounded tool-install steps; Flatpak runtime/source
 downloads each allow two 120-second attempts; macOS dependency preparation allows
 two 240-second attempts, with bounded Sparkle downloads and uv requests. Application
-builds have separate step limits and keep architecture-specific startup checks.
+builds have separate step limits. Architecture-specific startup checks run only on PRs.
 Trusted uv, Sparkle archive and Flatpak runtime/source caches reduce repeated setup;
 lockfiles, Sparkle SHA256 and signed runtime metadata remain authoritative.
 Setup timing JSON is uploaded even after failure, and the final run summary preserves
@@ -286,29 +280,28 @@ candidate availability, completed stages and a publication-only recovery command
 Publication commands have a 180-second bound. A timed-out channel command keeps
 its saved baseline for reconciliation instead of assuming it did not commit.
 
-The release target is 10 minutes, with a 15-minute limit measured from completion
-of the selected CI run through successful **public** endpoint verification. The
-durable `release-timing.json` includes runner queue delays, retrieval, tools, channel
-promotion and verification, the exact release attempt, source CI link and candidate
-sizes. `candidate-status.json` binds those sizes to the tag, revision and CI clock.
-Publication retries keep that source clock. For legacy builds, the clock comes from
-the latest successful exact-revision CI that finished before the original release
-started; a failed release's completion cannot restart it. The final
+The release target is 10 minutes, with a 15-minute limit measured from the original
+release request through successful **public** endpoint verification. The durable
+`release-timing.json` includes builds, runner queue delays, retrieval, tools, channel
+promotion and verification, the exact release attempt, build-run link and candidate
+sizes. `candidate-status.json` binds those sizes to the tag, revision and original
+release start. Publication retries keep that clock without consulting CI. The final
 summary fails the timing check if publication is incomplete or exceeds 900 seconds.
 It does not roll back an already public release to make a timing result pass.
 
 | Critical path stage | Normal target | Bound / recovery |
 | --- | --- | --- |
-| Version/source checks and candidate selection | 60s | Each read job has a 1–2 minute limit; retry reads |
+| Version and candidate selection | 60s | Each read job has a 1–2 minute limit; retry reads |
 | Service preflight | 30s | 2 minutes; service and permission reported |
-| Candidate retrieval and publication tools | 90s | Bounded download/setup steps; retain CI artifacts |
-| Restore CI's signed repository | 15s | 2 minutes; exact archive retained |
+| Package builds | Parallel platform jobs | Retain completed architectures for recovery |
+| Candidate retrieval and publication tools | 90s | Bounded download/setup steps; retain build artifacts |
+| Restore the signed repository | 15s | 2 minutes; exact archive retained |
 | Draft upload and channel promotion | 120s | 180s shared command/API budget; retain checkpoint on ambiguity |
 | Anonymous downloads, feeds and registry verification | 90s | 2 minutes; published assets remain immutable |
 | Runner queues and variance | 195s | Included in measured elapsed time |
 
 Before accepting the duration target, collect three hosted runs of this handoff,
-including a cold setup, with source CI/run links, artifact sizes and `release-timing.json`.
+including a cold setup, with release/build-run links, artifact sizes and `release-timing.json`.
 Those rehearsals are **pending**; local fixture tests do not establish hosted duration.
 Retain each run's `release-status-<attempt>` artifact, including `release-timing.json`.
 After checking the cold runner's setup logs, validate the three records together:
@@ -338,18 +331,18 @@ observations, not successful rehearsals of the new 15-minute path.
 
 Ordinary CI uses four unit runners and four browser runners. Each owns one serial
 pytest process and the usual machine lock. The `checks` job remains the admission
-gate for every packaging workflow; failed, cancelled or unexpectedly skipped matrix
+gate for PR packaging workflows; failed, cancelled or unexpectedly skipped matrix
 jobs or the coverage check fail admission. Python 3.12 and Node remain on the unit
 runners, with the separate packaged-resolution check on unit shard 1 only.
 
-The planner pins one immutable timing artifact from successful main-branch CI for
+The planner pins one immutable timing artifact from a successful same-repository PR for
 all eight runners. Whole files are assigned deterministically by measured duration;
 new files use measured median per-case estimates and join the partition automatically.
 The committed `.github/test-durations.json` is also a measured fallback. Its PR #351
 weights have a partial refresh from PR #425's complete raw reports: new files and
 files whose scaled estimate missed by more than eight seconds use the newer observed
-cost. The source revisions and refresh date are recorded. A main artifact older than
-that refresh cannot override it; a newer passing main run supplies timings again.
+cost. The source revisions and refresh date are recorded. A timing artifact older than
+that refresh cannot override it; a newer passing PR supplies timings again.
 These failed runs supply diagnostic timing weights only; they cannot admit packaging
 or stand in for a passing performance comparison.
 Every shard records normal collection before partitioning, including parametrized
@@ -406,13 +399,11 @@ ninety seconds of unrelated animation frames in each viewport. Real wall-clock
 record/ring motion, polling continuity and elapsed-time integration remain separately
 covered.
 
-For the hosted comparison, manually run **Tests** at the same fixed revision at
-least twice with `test_shards=2` and twice with `test_shards=4`, waiting for each run
-to finish before starting the next. Leave `release_tag` empty so prior checks are
-not reused. The default is four shards for pushes,
-pull requests and reusable calls. The optional `test_shards=1` control runs the whole suite
-serially and proves coverage using the same reports and gate. Test runners restore
-no uv cache; dependency installation and browser-container pulling remain in the measurement.
+Hosted source measurements come only from PR runs. The workflow uses four shards
+per suite; there is no manual source-test dispatch on main or another branch.
+Historical one/two/four-shard control reports remain available for offline comparison.
+Test runners restore no uv cache; dependency installation and browser-container pulling
+remain in the measurement.
 Download each run's `source-test-run-metrics-<attempt>` artifact into a separate
 directory, then compare the retained JSON without executing tests:
 
@@ -484,8 +475,9 @@ the new running commit, the same tab reconnecting, and preserved library, config
 browser pairing. It covers an automatic restart on 25.08/Python 3.13 and the safe fresh-launch
 fallback when migrating from 24.08/Python 3.12. No application repository or runtime is installed into your user account.
 It builds a wheel and the offline Flatpak inputs in temporary directories, then checks the
-supported runtime, startup, extension WebSocket origins, logs, and persisted state. The release
-workflow also installs each architecture's signed bundle and runs `flatpak/smoke.py` against it.
+supported runtime, startup, extension WebSocket origins, logs, and persisted state. The
+PR workflow installs each architecture's candidate and runs `flatpak/smoke.py` against it.
+Release builds sign and publish the final bundles without running that check.
 The build stamps AppStream's newest release from the wheel's own metadata before
 exporting it. The packaged smoke check verifies that exported version too, so signed
 repository version checks track the actual candidate rather than the checked-in release history.

@@ -1,4 +1,4 @@
-"""Bind CI's final-version, packaged smoke-tested bytes to a release tag and commit."""
+"""Bind final-version candidate hashes to a release tag and commit."""
 import argparse
 import hashlib
 import json
@@ -42,10 +42,10 @@ def check_identity(provenance, tag, revision, run_id, repository):
     if (provenance.get("schema"), provenance.get("tag"), provenance.get("version"),
             provenance.get("revision"), provenance.get("source_run"), provenance.get("repository")) != (
             1, tag, classify(tag).version, revision, str(run_id), repository):
-        raise ValueError("CI candidate provenance must match the exact version, tag, commit, source run and repository")
+        raise ValueError("Candidate provenance must match the exact version, tag, commit, source run and repository")
     if provenance.get("architectures") != {"macos": ["arm64", "x86_64"], "flatpak": ["aarch64", "x86_64"],
                                           "container": ["amd64", "arm64"]}:
-        raise ValueError("CI candidate provenance is missing a supported architecture")
+        raise ValueError("Candidate provenance is missing a supported architecture")
 
 
 def verify(root, tag, revision, run_id, repository):
@@ -53,10 +53,10 @@ def verify(root, tag, revision, run_id, repository):
     provenance = json.loads((root / "release-provenance.json").read_text())
     check_identity(provenance, tag, revision, run_id, repository)
     if not provenance.get("sha256"):
-        raise ValueError("CI candidate provenance contains no payload hashes")
+        raise ValueError("Candidate provenance contains no payload hashes")
     for name, expected in provenance["sha256"].items():
         if Path(name).name != name or digest(root / name) != expected:
-            raise ValueError(f"Candidate differs from CI's smoke-tested bytes: {name}")
+            raise ValueError(f"Candidate differs from the release build's recorded bytes: {name}")
     return provenance
 
 

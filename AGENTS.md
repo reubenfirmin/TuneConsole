@@ -18,6 +18,10 @@
 
 # Test coordination
 
+- CI tests run only on pull requests. Main pushes, manual main runs and releases
+  must never run unit/browser suites, packaged smoke tests or synthetic publisher
+  rehearsals. Releases build and publish from main without requiring PR or CI test
+  history. Do not add a test-history gate to releases.
 - One agent owns test execution at a time. During delegated work, the coordinator
   owns testing unless it explicitly hands that role to one worker. Other workers
   report the exact test commands their changes need and continue with edits or
