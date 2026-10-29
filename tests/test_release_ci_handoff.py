@@ -1,5 +1,6 @@
 """Exact-revision test reuse, final-version provenance and honest release timings."""
 import importlib
+from copy import deepcopy
 import json
 from pathlib import Path
 import sys
@@ -64,12 +65,32 @@ class MergedSource:
                         self.tested: {'sha': self.tested, 'tree': {'sha': self.tree},
                                       'parents': [{'sha': self.base}, {'sha': self.head}]}}
         self.downloads = 0
+        # A platform-only retry clones the source jobs under new IDs and a new
+        # run_attempt, while retaining the actual execution and step timestamps.
+        roles = ['plan', 'coverage', 'checks'] + [
+            f'{suite} ({index}/4)' for suite in ('unit', 'browser') for index in range(1, 5)]
+        jobs = [{'name': role, 'status': 'completed', 'conclusion': 'success',
+                 'started_at': '2026-10-24T12:00:00Z', 'completed_at': '2026-10-24T12:05:00Z',
+                 'steps': ([{'name': 'Run the unit / route suite' if role.startswith('unit')
+                                    else 'Run the live-browser suite',
+                            'status': 'completed', 'conclusion': 'success',
+                            'started_at': '2026-10-24T12:01:00Z',
+                            'completed_at': '2026-10-24T12:04:00Z'}]
+                           if role.startswith(('unit', 'browser')) else [])}
+                for role in roles]
+        self.job_history = {attempt: [dict(deepcopy(job), id=attempt * 100 + index, run_attempt=attempt)
+                                     for index, job in enumerate(jobs)] for attempt in (1, 2)}
+        self.job_queries = []
 
     def api(self, path):
         if '/pulls?' in path:
             return [self.pr]
         if '/artifacts?' in path:
             return {'artifacts': [self.artifact]}
+        if '/attempts/' in path and '/jobs?' in path:
+            attempt = int(path.split('/attempts/')[1].split('/')[0])
+            self.job_queries.append(attempt)
+            return {'jobs': self.job_history[attempt]}
         if '/git/commits/' in path:
             return self.commits[path.rsplit('/', 1)[1]]
         assert '/actions/workflows/ci.yml/runs?' in path
@@ -77,7 +98,7 @@ class MergedSource:
 
     def run(self, *args):
         assert args[:3] == ('gh', 'run', 'download')
-        assert args[args.index('--name') + 1] == 'source-test-run-metrics-2'
+        assert args[args.index('--name') + 1] == self.artifact['name']
         self.downloads += 1
         (Path(args[args.index('--dir') + 1]) / 'ci-test-metrics.json').write_text(json.dumps(self.report))
 
@@ -88,10 +109,54 @@ def test_main_reuses_verified_pr_merge_tree_but_retains_both_commit_identities(t
     result = ci_plan.plan(source, tag, source.landed, event, 'refs/heads/main')
     assert result['reuse_tests'] == 'true'
     assert result['checked_run'] == '456'
+    assert result['checked_attempt'] == '2'
     assert result['checked_revision'] == source.tested
     assert result['checked_tree'] == source.tree
     assert result['checked_pr'] == '351'
     assert source.downloads == 1
+    assert source.job_queries == []
+
+
+@pytest.mark.parametrize('tag,event', [('', 'push'), ('v1.2.3', 'workflow_dispatch')])
+def test_platform_retry_reuses_original_source_attempt_for_the_identical_merged_tree(tag, event):
+    source = MergedSource()
+    source.artifact['name'] = 'source-test-run-metrics-1'
+    source.report['run_attempt'] = '1'
+    result = ci_plan.plan(source, tag, source.landed, event, 'refs/heads/main')
+    assert result['reuse_tests'] == 'true'
+    assert result['checked_attempt'] == '1'
+    assert result['checked_revision'] == source.tested
+    assert result['checked_tree'] == source.tree
+    assert sorted(source.job_queries) == [1, 2]
+
+
+@pytest.mark.parametrize('role', ['unit (1/4)', 'browser (4/4)', 'coverage', 'checks', 'plan'])
+def test_source_or_gate_retry_cannot_reuse_an_earlier_attempt_report(role):
+    source = MergedSource()
+    source.artifact['name'] = 'source-test-run-metrics-1'
+    source.report['run_attempt'] = '1'
+    job = next(job for job in source.job_history[2] if job['name'] == role)
+    job['completed_at'] = '2026-10-24T12:06:00Z'
+    assert ci_plan.plan(source, '', source.landed, 'push', 'refs/heads/main')['reuse_tests'] == 'false'
+
+
+@pytest.mark.parametrize('attempt', [1, 2])
+@pytest.mark.parametrize('invalid', ['missing_job', 'duplicate_job', 'failed_job', 'missing_timestamp',
+                                   'missing_test_step', 'changed_test_step', 'failed_test_step'])
+def test_retained_source_proof_requires_complete_unchanged_execution_history(attempt, invalid):
+    source = MergedSource()
+    source.artifact['name'] = 'source-test-run-metrics-1'
+    source.report['run_attempt'] = '1'
+    jobs = source.job_history[attempt]
+    job = next(job for job in jobs if job['name'] == 'browser (1/4)')
+    if invalid == 'missing_job': jobs.remove(job)
+    if invalid == 'duplicate_job': jobs.append(deepcopy(job))
+    if invalid == 'failed_job': job['conclusion'] = 'failure'
+    if invalid == 'missing_timestamp': job['completed_at'] = None
+    if invalid == 'missing_test_step': job['steps'] = []
+    if invalid == 'changed_test_step': job['steps'][0]['completed_at'] = '2026-10-24T12:04:30Z'
+    if invalid == 'failed_test_step': job['steps'][0]['conclusion'] = 'failure'
+    assert ci_plan.plan(source, '', source.landed, 'push', 'refs/heads/main')['reuse_tests'] == 'false'
 
 
 @pytest.mark.parametrize('invalid', [
