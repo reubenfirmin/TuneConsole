@@ -41,21 +41,51 @@ def _sha(value):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) is not None
 
 
-def _metrics(backend, run):
-    """Read complete, attempt-specific suite proof from the authenticated Actions artifact."""
-    attempt = run.get('run_attempt')
-    if type(attempt) is not int or attempt < 1:
+def _execution_times(item):
+    try:
+        start, end = (datetime.fromisoformat(item[key].replace('Z', '+00:00'))
+                      for key in ('started_at', 'completed_at'))
+    except (KeyError, AttributeError, TypeError, ValueError):
         return None
-    name = f"source-test-run-metrics-{attempt}"
-    artifacts = [row for row in _pages(backend,
-        f"repos/{backend.repository}/actions/runs/{run['id']}/artifacts?", 'artifacts')
-        if row.get('name') == name]
-    if (len(artifacts) != 1 or artifacts[0].get('expired') is not False
-            or artifacts[0].get('size_in_bytes', 0) <= 0):
+    return (start, end) if start.tzinfo and end.tzinfo and start <= end else None
+
+
+def _source_executions(backend, run_id, attempt, shards):
+    """Ignore GitHub's cloned job IDs; retained executions keep their timestamps."""
+    expected = {'plan', 'coverage', 'checks'} | {
+        f'{suite} ({index}/{shards})' for suite in ('unit', 'browser')
+        for index in range(1, shards + 1)}
+    executions = {}
+    for job in _pages(backend,
+            f'repos/{backend.repository}/actions/runs/{run_id}/attempts/{attempt}/jobs?', 'jobs'):
+        role = job['name'].rsplit(' / ', 1)[-1]
+        if role not in {'plan', 'coverage', 'checks'} and not re.fullmatch(
+                r'(?:unit|browser) \([1-9][0-9]*/[1-9][0-9]*\)', role):
+            continue
+        span = _execution_times(job)
+        if (role in executions or job.get('status') != 'completed'
+                or job.get('conclusion') != 'success' or span is None):
+            return None
+        tests = [step for step in job.get('steps', []) if step['name'].startswith('Run the ')]
+        if role.startswith(('unit (', 'browser (')) and len(tests) != 1:
+            return None
+        steps = []
+        for step in tests:
+            times = _execution_times(step)
+            if (step.get('status') != 'completed' or step.get('conclusion') != 'success'
+                    or times is None or not span[0] <= times[0] <= times[1] <= span[1]):
+                return None
+            steps.append((step['name'], times))
+        executions[role] = (span, tuple(steps))
+    return executions if executions.keys() == expected else None
+
+
+def _read_metrics(backend, run, artifact, attempt):
+    if artifact.get('expired') is not False or artifact.get('size_in_bytes', 0) <= 0:
         return None
     with tempfile.TemporaryDirectory(prefix='source-test-proof-') as directory:
         backend.run('gh', 'run', 'download', str(run['id']), '--repo', backend.repository,
-                    '--name', name, '--dir', directory)
+                    '--name', artifact['name'], '--dir', directory)
         try:
             report = json.loads((Path(directory) / 'ci-test-metrics.json').read_text())
         except (OSError, ValueError):
@@ -78,6 +108,32 @@ def _metrics(backend, run):
                 or re.fullmatch(r'[0-9a-f]{64}', suite['case_digest']) is None):
             return None
     return report
+
+
+def _metrics(backend, run):
+    """Retain source proof across platform retries only when its executions are unchanged."""
+    latest = run.get('run_attempt')
+    if type(latest) is not int or latest < 1:
+        return None
+    artifacts = {}
+    for row in _pages(backend,
+            f"repos/{backend.repository}/actions/runs/{run['id']}/artifacts?", 'artifacts'):
+        match = re.fullmatch(r'source-test-run-metrics-([1-9][0-9]*)', row.get('name', ''))
+        if match and (attempt := int(match[1])) <= latest:
+            artifacts.setdefault(attempt, []).append(row)
+    for attempt in sorted(artifacts, reverse=True):
+        if len(artifacts[attempt]) != 1:
+            return None
+        report = _read_metrics(backend, run, artifacts[attempt][0], attempt)
+        if report is None:
+            continue
+        if attempt != latest:
+            original = _source_executions(backend, run['id'], attempt, report['shards'])
+            current = _source_executions(backend, run['id'], latest, report['shards'])
+            if original is None or current != original:
+                continue
+        return report
+    return None
 
 
 def merged_pr_checks(backend, revision):
@@ -112,14 +168,15 @@ def merged_pr_checks(backend, revision):
             if (tested.get('sha') == report['revision'] and landed.get('sha') == revision
                     and _sha(tree) and (landed.get('tree') or {}).get('sha') == tree
                     and [parent.get('sha') for parent in tested.get('parents', [])] == [base['sha'], head['sha']]):
-                return {'checked_run': str(run['id']), 'checked_revision': report['revision'],
+                return {'checked_run': str(run['id']), 'checked_attempt': str(report['run_attempt']),
+                        'checked_revision': report['revision'],
                         'checked_tree': tree, 'checked_pr': str(pr['number'])}
     return None
 
 
 def plan(backend, tag, revision, event, ref):
     result = {"version": "0.0.0.dev0", "tag": "", "reuse_tests": "false", "checked_run": "",
-              "checked_revision": "", "checked_tree": "", "checked_pr": ""}
+              "checked_attempt": "", "checked_revision": "", "checked_tree": "", "checked_pr": ""}
     if tag:
         if event != "workflow_dispatch" or ref != "refs/heads/main":
             raise ValueError("Release candidates require a trusted manual CI run on main")
@@ -127,7 +184,8 @@ def plan(backend, tag, revision, event, ref):
     if ref == 'refs/heads/main' and (event == 'push' or (event == 'workflow_dispatch' and tag)):
         previous = next(successful_runs(backend, revision), None)
         if previous:
-            result.update(reuse_tests="true", checked_run=str(previous["id"]), checked_revision=revision)
+            result.update(reuse_tests="true", checked_run=str(previous["id"]), checked_revision=revision,
+                          checked_attempt=str(previous.get('run_attempt', '')))
         else:
             proof = merged_pr_checks(backend, revision)
             if proof:
@@ -174,7 +232,8 @@ if __name__ == "__main__":
         Path('source-test-reuse.json').write_text(json.dumps(proof, indent=2) + '\n')
         if summary := os.environ.get('GITHUB_STEP_SUMMARY'):
             with open(summary, 'a') as stream:
-                stream.write(f"Source checks reused from https://github.com/{backend.repository}/actions/runs/{result['checked_run']}\n\n"
+                stream.write(f"Source checks reused from https://github.com/{backend.repository}/actions/runs/{result['checked_run']}"
+                             + (f"/attempts/{result['checked_attempt']}" if result['checked_attempt'] else '') + "\n\n"
                              f"Tested revision: `{result['checked_revision']}`. Landed revision: `{proof['revision']}`. "
                              + (f"Identical full tree: `{result['checked_tree']}` (merged PR #{result['checked_pr']}).\n"
                                 if result['checked_tree'] else 'Exact revision match.\n'))

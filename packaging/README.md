@@ -129,6 +129,14 @@ run for the exact tagged commit (a main push or explicit manual run). A missing,
 failed or cancelled CI result blocks promotion; rerun the release after CI succeeds.
 Releases never run the source suite again.
 
+Main CI also reuses a passing PR run when its tested merge tree exactly matches the landed
+tree. A retry of a platform job can retain the original source-test report: the planner
+verifies that every source shard, planning, coverage and checks execution has the same
+successful job and test-step timestamps in both attempts. GitHub assigns cloned job IDs
+on retries, so those IDs do not identify new test executions. A rerun source job or gate
+invalidates the earlier proof. The reuse artifact and summary retain the source attempt
+as well as both commit identities.
+
 After both source suites and packaged-resolution checks pass, `ci.yml` calls the container,
 macOS and Flatpak build workflows. Both supported architectures build the actual locked
 packages and run their packaged startup checks, including the Flatpak extension bridge.
