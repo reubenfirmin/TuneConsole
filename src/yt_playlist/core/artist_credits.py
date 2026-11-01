@@ -145,15 +145,32 @@ def capture(conn, entry_id, credit_id, source, now, *, delivery_key=None, kind='
     if metadata_delivery_id is not None:
         if type(metadata_delivery_id) is not int or kind != 'capture':
             raise ValueError('Invalid artist credit metadata delivery')
-        delivery = conn.execute('SELECT input_entry_id,provider FROM metadata_deliveries WHERE id=?',
-                                (metadata_delivery_id,)).fetchone()
         key = f'metadata-delivery:{metadata_delivery_id}'
-        if delivery is None or tuple(delivery) != (entry_id, source) or delivery_key not in (None, key):
+        if delivery_key not in (None, key):
             raise ValueError('Artist credit metadata delivery has a different input or provider')
         delivery_key = key
     if not isinstance(source, str) or not source or (delivery_key is not None and
             (not isinstance(delivery_key, str) or not delivery_key or len(delivery_key.encode()) > 4096)):
         raise ValueError('Invalid artist credit source delivery')
+    from . import credit_retention
+    receipts = credit_retention.available(conn)
+    if delivery_key is not None and receipts:
+        replay = conn.execute('SELECT observation_id,credit_id,metadata_bound FROM artist_credit_replays '
+            'WHERE entry_id=? AND source=? AND delivery_key=?', (entry_id, source, delivery_key)).fetchone()
+        if replay:
+            if metadata_delivery_id is not None and not replay['metadata_bound']:
+                raise sqlite3.IntegrityError('Artist replay has no verified metadata delivery binding')
+            if replay['credit_id'] != credit_id and not _same_delivered_credit(conn, replay['credit_id'], credit_id):
+                raise sqlite3.IntegrityError('A provider delivery cannot change its artist credit')
+            if not conn.execute('SELECT 1 FROM artist_credit_observations WHERE id=?', (replay['observation_id'],)).fetchone():
+                # A compact receipt outlives the disposable capture/delivery
+                # graph. It never creates another capture or changes a head.
+                return replay['observation_id'], False
+    if metadata_delivery_id is not None:
+        delivery = conn.execute('SELECT input_entry_id,provider FROM metadata_deliveries WHERE id=?',
+                                (metadata_delivery_id,)).fetchone()
+        if delivery is None or tuple(delivery) != (entry_id, source):
+            raise ValueError('Artist credit metadata delivery has a different input or provider')
     head = conn.execute('SELECT o.id,o.credit_id FROM artist_credit_capture_heads h '
         'JOIN artist_credit_observations o ON o.id=h.observation_id WHERE h.entry_id=? AND h.source=?',
         (entry_id, source)).fetchone()
@@ -168,6 +185,10 @@ def capture(conn, entry_id, credit_id, source, now, *, delivery_key=None, kind='
     else:
         old = head if head and head['credit_id'] == credit_id else None
     if old:
+        if delivery_key is not None and receipts:
+            bound = conn.execute('SELECT metadata_delivery_id IS NOT NULL FROM artist_credit_observations WHERE id=?',
+                                 (old['id'],)).fetchone()[0]
+            credit_retention.receipt(conn, entry_id, source, delivery_key, old['id'], old['credit_id'], metadata_bound=bool(bound))
         conn.execute('UPDATE artist_credit_observations SET '
             'first_seen=CASE WHEN first_seen IS NULL THEN ? ELSE min(first_seen,?) END,'
             'last_seen=CASE WHEN last_seen IS NULL THEN ? ELSE max(last_seen,?) END,'
@@ -187,6 +208,9 @@ def capture(conn, entry_id, credit_id, source, now, *, delivery_key=None, kind='
     conn.execute('INSERT INTO artist_credit_capture_heads(entry_id,source,observation_id) VALUES (?,?,?) '
         'ON CONFLICT(entry_id,source) DO UPDATE SET observation_id=excluded.observation_id',
         (entry_id, source, observation))
+    if delivery_key is not None and receipts:
+        credit_retention.receipt(conn, entry_id, source, delivery_key, observation, credit_id,
+                                 metadata_bound=metadata_delivery_id is not None)
     return observation, True
 
 
@@ -194,6 +218,11 @@ def select(conn, entry_id, observation_id):
     row = conn.execute('SELECT credit_id,source FROM artist_credit_observations WHERE id=? AND entry_id=?',
                        (observation_id, entry_id)).fetchone()
     if row is None:
+        from . import credit_retention
+        if credit_retention.available(conn) and conn.execute(
+                'SELECT 1 FROM artist_credit_replays WHERE observation_id=? AND entry_id=?',
+                (observation_id, entry_id)).fetchone():
+            raise ValueError('Artist credit capture expired; refresh the selection')
         raise ValueError('Selected artist evidence belongs to another entry')
     credit = read(conn, row['credit_id'])
     if any(m.artist_id is None for m in credit.members):

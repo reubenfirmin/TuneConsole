@@ -30,6 +30,7 @@ def test_only_visible_discovery_tiles_count_once_per_visit(live_app, store, page
     assert all(a["offered_count"] == 0 for a in store.discovery.get_discovered_albums())
 
     page.get_by_role("tab", name="Discover", exact=True).click()
+    page.clock.run_for(50)  # Deliver Alpine's deferred panel reveal under the paused clock.
     expect(tiles).to_have_count(15)
     tiles.first.scroll_into_view_if_needed()
     discovery_dwell(page, tiles.first)
@@ -105,6 +106,7 @@ def test_prepared_songs_are_ready_when_discover_opens(live_app, store, page, wid
     assert store.conn.execute("SELECT COUNT(*) FROM discovery_impressions WHERE recording_id IS NOT NULL").fetchone()[0] == 0
 
     page.get_by_role("tab", name="Discover", exact=True).click()
+    page.clock.run_for(50)
     expect(page.get_by_role("heading", name="Songs to discover")).to_be_visible()
     expect(tiles.first).to_be_visible()
     expect(page.get_by_text("Finding new music for you…", exact=True)).to_have_count(0)

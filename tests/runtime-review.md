@@ -15,7 +15,7 @@ acceptance or a claim that the current test suite passes.
 | P4. Prepared Home fixtures | `home_fixture_support.publish_menu` publishes four valid cards with sixteen real catalog subjects through the production cache writer. Regeneration failures, tuning geometry, discovery/story exposure and Home markup consumers use this instead of ranking/preparing a library. Analytics retains its real 84-day facts but no longer prepares unrelated Home recommendations. Baseline/tuned eligibility uses two disjoint sixteen-subject publications. Real ranking, publication races, readiness, first-user progression and vibe persistence tests retain their actual pipeline. Post-unlock control tests explicitly isolate the growth gate; growth tests do not use that override. No mutable Store is shared. |
 | P5. Similar dialog | Merge 24 journeys into 12, preserving both parents, three widths and artwork states. Bounds, image recovery, checkbox selection, action reachability, scrolling, overflow and Escape remain. Reachability scrolls the actual last rendered action rather than assuming seed order equals display order. |
 | P6. Regeneration failure matrix | Run all six failures once with a compact published menu, reading the actual button endpoint rather than rewriting `hx-post`. Two short HTTP/template cases render both actual variants and verify endpoints, targets, swap/trigger attributes, shared handler and held opportunity. Preserve network failure, HTTP error with valid content, 422, missing/invalid fragments and empty success; each still checks deduplication, retry, original rows and animation cleanup. The real held-opportunity/animated-swap integration remains separate. |
-| P7. Deterministic waits | Replace slow playlist deletion sleeps with entered/release Events and release in cleanup. Discovery/story clocks wait for actual native observer registration or a qualified dwell timer before advancing; real requests and persisted counts still establish hidden, visible and fragment-poll behavior. The response barrier matches the requested tile's subject/kind/ID so another visible tile's concurrent POST cannot release it early. Analytics likewise waits for its actual Alpine observer/timer. The retained audio-card test runs every normal page tick under a clock, records request times in that clock and preserves retry-spacing/no-retry assertions; recovery waits for the real server response. This replaces 24.4 seconds of exposure waits and eleven seconds of audio retry waits, not a measured wall-clock speedup. The story test also waits for real lazy-fragment completion. Actual extension/media timing remains where page clocks do not control the isolated world or native capture. |
+| P7. Deterministic waits | Replace slow playlist deletion sleeps with entered/release Events and release in cleanup. Discovery/story clocks pause during the initial hidden interval; explicit frame steps deliver Alpine's deferred panel reveal and native IntersectionObserver updates before advancing dwell time. Real requests and persisted counts still establish hidden, visible and fragment-poll behavior. The response barrier matches the requested tile's subject/kind/ID so another visible tile's concurrent POST cannot release it early. Analytics likewise waits for its actual Alpine observer/timer. The retained audio-card test runs every normal page tick under a clock, records request times in that clock and preserves retry-spacing/no-retry assertions; recovery waits for the real server response. This replaces 24.4 seconds of exposure waits and eleven seconds of audio retry waits, not a measured wall-clock speedup. The story test also waits for real lazy-fragment completion. Actual extension/media timing remains where page clocks do not control the isolated world or native capture. |
 | P8. Fair queue | Keep one compact full drain with unique small-lane survival, blocked exclusions and exhaustion. Preserve partial-consumption, ties, muting, suppression and trace tests. Move the repeated 8,000/32,000 print-only timing comparison to `experiments/investigations/bench_fair_queue.py`. |
 | P9. Policy retention | Ordinary preparation retention uses eight generations, four variants and 256-byte evidence while crossing a patched grace period; actual typed publication, bounded owner cleanup and exact latest configuration remain. `bench_policy_retention.py` retains the original 80-generation, 1,000-variant production-default budget on a real file database. All variants are installed through preparation, with one representative candidate pool: policy storage scale is the contract, not a thousand artificial pool publications per generation. The first generation verifies every variant was installed. The original 7 MiB default bound passes. The 1,008-variant sharing check includes canonical file wrappers in its explicit 512 KB ceiling, versus roughly 48 MB unshared. Both legacy byte-limited/resumable cleanup cases use genuine v69 SQL owners, not retired table names on the current schema, and pass with small fixtures. Other untouched legacy policy tests still need reconciliation. |
 | P10. Source parsing | Cache immutable source ASTs for architecture traversal and ownership checks; synthetic per-source AST cases remain fresh. Cache parsed release-workflow YAML by file name; all thirty-nine workflow checks pass. No architecture assertion was removed. Three architecture guards failed in the recorded baseline and still failed after caching. |
@@ -56,12 +56,12 @@ acceptance or a claim that the current test suite passes.
 
 | Recommendation | Disposition |
 | --- | --- |
-| Provider validator fixtures | Retain provider transport fixtures using Store: they also exercise durable credentials/cache/observation behavior. Pure validators should remain Store-free; splitting the mixed transport integrations further needs a separate fixture boundary rather than removing their persistence assertions. |
+| Provider validator fixtures | A second pass splits the Spotify, Deezer and GitHub fixture boundaries: transport-only cases no longer construct a Store. Every durable admission, cooldown, credential, concurrency and restart case keeps its actual database and transport lock checks. DeepSeek's paid admission fixture remains coupled to durable credentials; its current album-identity failures need fixture reconciliation before further consolidation. |
 | Spotify eviction | Patch cache capacity to eight and retain eviction/order assertions. |
 | Sync truncation | Twenty-six playlists, one with 101 songs, retain both greater-than-25 and greater-than-100 boundaries without building thirty large playlists. |
 | Repeated statistical samples | Reuse each sampled result for mode-bandit and transient-recipe assertions. Statistical sample counts are unchanged. |
 | Experiment ledger | Retain mature-cohort integration and its negative assignment/probability matrix. These cases prove the report stays powered with 99 controlled and one uncontrolled episode and then rejects promotion. A pure admission stub would lose that connection. Cloning needs a baseline that includes the current policy/ledger owners; the independent-sample requirement was not lowered. |
-| Feature assets | Retain the current browser matrix: it verifies loaded execution order, initialized Alpine factories, page errors, responsive overflow and distinct player dock parents. HTTP asset-list checks alone would not establish these contracts. Moving only width-independent inclusion checks remains optional future work. |
+| Feature assets | Retain the current browser matrix: it verifies loaded execution order, initialized Alpine factories, page errors, responsive overflow and distinct player dock parents. The second pass exposed six baseline failures expecting `genOpenYT` to be undefined outside Home/Road Trip although the shared launcher defines it globally. No assertion was removed or browser case consolidated while that contract is unresolved. |
 | Diagnostic screenshots | Home, discovery, stories, analytics, genre badges, adaptive groups and Radio use `tests.visual_support.capture`, enabled by `TUNECONSOLE_VISUAL_REVIEW=1`. Actual pixel assertions and browser failure artifacts retain capture. |
 | Node process startup | Retain fresh VM/process cases and per-case failure reports. No process-startup bottleneck was measured, so ownership/mute/deadline permutations were not batched away. |
 | Musical preparation | Normal regression uses five recordings for fanout/index behavior. `bench_musical_preparation.py` retains all 96 recordings, the 15-second throughput budget and indexed query contract. |
@@ -105,6 +105,68 @@ in `tests/`; the new print-only fair-queue study lives with investigations.
 `experiments/run.py investigate <file> ...` explicitly loads shared pytest
 fixtures, validates the investigation path and does not acquire the global-suite
 lock. Documentation and frozen runtime source/digest lists follow moved modules.
+
+## Second redundancy pass, 2026-11-01
+
+The static pass found no identical test bodies of at least nine lines after
+ignoring docstrings. That does not establish absence of semantic overlap.
+
+Spotify, Deezer and GitHub transport fixtures implicitly requested a freshly
+initialized Store even for URL validation, decoding, bounded response reads,
+cache/expiry and response-close checks. Their installers now accept an explicit
+Store only when the test actually uses durable admission. This removes 54
+unnecessary database initializations from transport-only cases and three more
+from restart tests that already own a file-backed database: 57 in total. Every
+test name, parameter case and assertion expression remains. The restart tests
+now check transport outside the actual reopened Store's lock/transaction,
+replacing checks against an unrelated in-memory fixture.
+
+For the 23 passing Spotify cases common to the before/after reports, summed
+pytest case time was 109.210s before and 0.028s after. The first run's final
+offline-parsing case hit an externally removed default temporary directory;
+the subsequent run uses a unique explicit basetemp and passes all 49 cases in
+123.40s, including every durable integration. These observations measure focused
+case time on an active shared checkout, not a controlled whole-suite speedup.
+
+The browser asset baseline passed all six connected-player checks and failed
+six shared-helper visibility assertions (74.29s). Those tests are unchanged.
+An attempted DeepSeek fixture split also stopped before transport because album
+identity was unresolved; that split was reverted in full. Its focused baseline
+reproduces the same two failures in the unchanged file: exact public POST and
+rejected-credential restart (2 failed, 24 deselected in 15.84s). Remaining album
+owner-fixture work is not reported as successful transport coverage.
+
+All 49 Spotify cases pass (123.40s); all 90 Deezer/GitHub cases pass (283.30s).
+Together these establish the changed fixture boundaries across 139 retained
+provider cases. Assertions were compared structurally with the pre-edit files;
+all test names, parameter cases and assertion expressions are unchanged.
+
+#701 exposed two stale cross-test fixture imports missed during integration.
+Both populated checks now import only neutral copy support, copy all owned files
+through the existing read-only helper, and explicitly run the historical upgrade
+on a disposable copy before ordinary startup/restart. All preservation assertions
+remain; neither test stamps a current schema as historical or restores bulk work
+to ordinary admission. Both modules collect and skip correctly without a donor.
+Three adjacent genuine historical-format checks pass in 32.17s. A static audit
+of 1,485 direct imports from test modules found no other unresolved top-level
+names. Actual populated schema-95 execution and a fresh PR shard/coverage run
+remain #701 review requirements; no suitable retained donor was found locally.
+
+Reports for this pass are `/tmp/tuneconsole-534-provider-before.xml`,
+`provider-after.xml`, `provider-other.xml`, `assets-before.xml`,
+`paid-provider.xml` and `paid-provider-baseline.xml` with the same prefix, plus
+`/tmp/tuneconsole-701-focused.xml`. Reports are outside disposable fixture trees.
+
+Exact final focused commands:
+
+```sh
+uv run pytest tests/providers/test_spotify.py --basetemp=/tmp/tuneconsole-534-provider-after --junitxml=/tmp/tuneconsole-534-provider-after.xml --durations=8 --tb=short
+uv run pytest tests/providers/test_deezer_iao.py tests/providers/test_github_iao.py --basetemp=/tmp/tuneconsole-534-provider-other --junitxml=/tmp/tuneconsole-534-provider-other.xml --durations=5 --tb=short
+uv run pytest -m browser tests/browser/test_feature_assets_browser.py -k 'setup or charts or playlists' --basetemp=/tmp/tuneconsole-534-assets-before --junitxml=/tmp/tuneconsole-534-assets-before.xml --durations=5 --tb=short
+uv run pytest tests/providers/test_deepseek_iao.py -k 'exact_post or rejected_credential' --basetemp=/tmp/tuneconsole-534-paid-provider-baseline --junitxml=/tmp/tuneconsole-534-paid-provider-baseline.xml --durations=3 --tb=short
+uv run pytest tests/schema/test_populated_action_work.py tests/schema/test_populated_collection_documents.py --collect-only -q --basetemp=/tmp/tuneconsole-701-collection
+uv run pytest tests/schema/test_populated_action_work.py tests/schema/test_populated_collection_documents.py tests/core/test_action_work_migration.py::test_upgrade_preserves_action_links_plain_draft_and_unavailable_historical_backup tests/core/test_action_work_migration.py::test_workflow_settings_upgrade_keeps_unknown_accounts_and_ordered_transfer_slots tests/core/test_collection_documents_migration.py::test_upgrade_retains_import_unknown_account_and_verbatim_canvas --basetemp=/tmp/tuneconsole-701-focused --junitxml=/tmp/tuneconsole-701-focused.xml --tb=short --durations=5
+```
 
 ## Targeted validation and limits
 
@@ -156,6 +218,8 @@ Each row is a separate run; counts must not be added as independent coverage.
 | `final-relationships-v2` | All 10 retained tests passed in 69.46s, including all fourteen rejected writes within one rollback-isolated historical constraint matrix. The first draft replayed unrelated later metadata conversions and hit retired-view/row-ID mismatches; this passing run supersedes it and the earlier `fixture-recheck` admission failures. |
 | `final-browser` | 9 passed, 1 failed in 90.62s. All six regeneration failures, both discovery widths and retained audio retry passed. Story dwell exposed an imprecise response barrier: an adjacent subject's POST could release it before the target write. The barrier now matches the actual requested subject or discovery kind/ID. |
 | `final-guards` | 66 passed, 3 failed in 28.08s. All 13 Node scenarios and 39 workflow checks passed. The same three architecture guards fail in `/tmp/tuneconsole-534-baseline.xml`: import-cycle detection, repository-owner callers, and frozen-numbered-migration runtime imports. Their assertions remain intact. |
+| `final-relationships-merged` | All 10 passed in 72.03s after a concurrent merge restored older test files and the finishing changes were reapplied. This establishes the actual remaining working-tree implementation, including all fourteen historical rejection checks. |
+| `final-exposure-reveal` | All 5 passed in 49.29s: story hidden/visible/poll behavior and both widths of discovery exposure and real prepared-song readiness. The clock is now actually paused, deferred panel reveal receives explicit frame time, and response matching identifies the target tile. Supersedes the intermediate runs that exposed a naturally advancing clock, a frozen panel reveal, and an app-signature mismatch during concurrent merging. |
 
 Additional focused checks: generated-playlist promotion integration passed
 (2 cases, 8.17s); `./experiments/run.py check --syntax-only` parsed 194 files;
@@ -176,6 +240,9 @@ uv run pytest -m browser tests/browser/test_into_recently_browser.py -k story_co
 uv run pytest tests/rec/test_policy_storage.py -k 'legacy_cleanup or orphan_body or repeated_advancing' --tb=short
 uv run pytest tests/bench_policy_retention.py --tb=short
 uv run pytest tests/test_release_workflows.py --tb=short
+uv run pytest tests/repos/test_relationship_constraints.py --tb=short --maxfail=2 --durations=5
+uv run pytest tests/test_sync_outcomes_js.py tests/test_release_workflows.py tests/test_architecture.py --tb=short --maxfail=4 --durations=5
+uv run pytest -m browser tests/browser/test_into_recently_browser.py::test_story_cooldown_only_counts_visible_headings_and_ignores_fragment_polls tests/browser/test_discovery_browser.py::test_only_visible_discovery_tiles_count_once_per_visit tests/browser/test_discovery_browser.py::test_prepared_songs_are_ready_when_discover_opens --tb=short --maxfail=1 --durations=5
 ./experiments/run.py check --syntax-only
 ./experiments/run.py investigate bench_taste_groups.py --collect-only -q
 ./experiments/run.py investigate bench_musical_provider_pilot.py --collect-only -q
@@ -197,3 +264,11 @@ predecessor matrix still needs integration verification after storage changes.
 Run taste-group production acceptance with its frozen input. The policy budget
 is verified against its actual owner. The three baseline architecture failures
 remain visible. No current whole-suite status is established.
+
+Implementation handoff: all seventeen priorities, twenty consolidations, other
+recommendations and twenty-five original benchmark modules have a recorded
+disposition. The finishing fixture and clock changes have passing focused
+evidence. Independent acceptance, controlled end-to-end runtime comparison and
+the broader shared-checkout integration gaps above belong to review. No full
+suite was run for this handoff, and no implementation assertion was removed to
+hide a baseline failure.

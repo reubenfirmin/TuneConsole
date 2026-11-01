@@ -1,18 +1,27 @@
 """ModesRepo: persistence for taste modes (issue #60, Part A).
 
-One row per discovered taste mode. `mode_id` is stable across recomputes (matched by centroid cosine
-in rec/taste_modes.reconcile). active=0 rows are retired modes kept for history, hidden from the
-default listing. We store the content-space centroid (float32 blob) plus denormalized metadata
-(label, family histogram, representative tracks); membership is derived on demand elsewhere, not
-stored here. Also exposes the two small track lookups the modes feature needs (genre for labeling,
-title/artist for the /taste view)."""
+One stable identity per discovered mode. Active rows carry content-space centroids
+and display summaries; retired rows keep identity/labels for historical references.
+Explicit preparation removes obsolete payloads. Use list_summaries for history;
+list_modes returns None payloads for retired tombstones. Membership is derived.
+"""
 import json
 
 import numpy as np
 
 from yt_playlist.library.listen_derive import classify_exit
-from yt_playlist.core import entity_names
+from yt_playlist.core import entity_names, mode_retention
 from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
+
+
+def _centroid_bytes(value, *, encoded=False):
+    try:
+        vector = np.frombuffer(value, dtype=np.float32) if encoded else np.asarray(value, dtype=np.float32)
+    except (TypeError, ValueError) as error:
+        raise ValueError('Mode centroid must be a nonempty finite vector') from error
+    if vector.ndim != 1 or vector.size == 0 or not np.isfinite(vector).all():
+        raise ValueError('Mode centroid must be a nonempty finite vector')
+    return vector.tobytes()
 
 
 class ModesRepo(Repo):
@@ -21,6 +30,8 @@ class ModesRepo(Repo):
         """Apply prepared stable mode identities within the model publication transaction."""
         if not self.conn.in_transaction:
             raise RuntimeError('Mode publication requires an outer transaction')
+        rows = [(mid, label, families, _centroid_bytes(blob, encoded=True), *rest)
+                for mid, label, families, blob, *rest in rows]
         self.conn.executemany(
             'INSERT INTO taste_modes(mode_id,label,families,centroid,size,rep_keys,first_seen,last_seen,space,active) '
             'VALUES (?,?,?,?,?,?,?,?,?,1) ON CONFLICT(mode_id) DO UPDATE SET '
@@ -30,19 +41,22 @@ class ModesRepo(Repo):
 
     @snapshot_read
     def list_modes(self, active_only=True) -> list[dict]:
-        sql = "SELECT * FROM taste_modes"
+        retired = mode_retention.available(self.conn)
+        sql = ("SELECT m.*,r.mode_id IS NOT NULL AS payload_retired FROM taste_modes m "
+               "LEFT JOIN taste_mode_retired_payloads r ON r.mode_id=m.mode_id" if retired else
+               "SELECT *,0 AS payload_retired FROM taste_modes")
         if active_only:
             sql += " WHERE active=1"
-        sql += " ORDER BY size DESC, mode_id ASC"
+        sql += " ORDER BY size DESC, " + ("m.mode_id" if retired else "mode_id") + " ASC"
         out = []
         for r in self.conn.execute(sql).fetchall():
             out.append({
                 "mode_id": r["mode_id"],
                 "label": r["label"],
-                "families": json.loads(r["families"]),
-                "centroid": np.frombuffer(r["centroid"], dtype=np.float32).copy(),
+                "families": None if r['payload_retired'] else json.loads(r["families"]),
+                "centroid": None if r['payload_retired'] else np.frombuffer(r["centroid"], dtype=np.float32).copy(),
                 "size": r["size"],
-                "rep_keys": json.loads(r["rep_keys"]),
+                "rep_keys": None if r['payload_retired'] else json.loads(r["rep_keys"]),
                 "active": r["active"],
                 "first_seen": r["first_seen"],
                 "last_seen": r["last_seen"],
@@ -50,10 +64,20 @@ class ModesRepo(Repo):
             })
         return out
 
+    @snapshot_read
+    def list_summaries(self, active_only=False) -> list[dict]:
+        """Historical identity/labels without loading centroid or track payloads."""
+        sql = 'SELECT mode_id,label,size,active,first_seen,last_seen,space FROM taste_modes'
+        if active_only:
+            sql += ' WHERE active=1'
+        return [dict(row) for row in self.conn.execute(sql + ' ORDER BY size DESC,mode_id')]
+
     @synchronized
     def next_mode_id(self) -> int:
         row = self.conn.execute("SELECT MAX(mode_id) m FROM taste_modes").fetchone()
-        return (row["m"] or 0) + 1
+        high_water = (self.conn.execute('SELECT high_water FROM taste_mode_retention WHERE id=1').fetchone()[0]
+                      if mode_retention.available(self.conn) else 0)
+        return max(row["m"] or 0, high_water) + 1
 
     @synchronized
     def replace_modes(self, upserts, retired_ids, now) -> None:
@@ -61,8 +85,8 @@ class ModesRepo(Repo):
         if any(type(row['size']) is not int or row['size']<0 for row in upserts):
             raise ValueError('Mode size must be a nonnegative integer')
         now = float(now)
-        for u in upserts:
-            blob = np.asarray(u["centroid"], dtype=np.float32).tobytes()
+        blobs = [_centroid_bytes(u['centroid']) for u in upserts]
+        for u, blob in zip(upserts, blobs):
             fam = json.dumps([list(f) for f in u["families"]])
             reps = json.dumps(list(u["rep_keys"]))
             existing = self.conn.execute(

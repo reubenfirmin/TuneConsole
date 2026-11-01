@@ -48,10 +48,13 @@ def settings_fences():
                "BEGIN SELECT RAISE(ABORT,'Collection state requires its domain owner'); END;")
 
 
-def apply(conn,context):
-    original = {key:value for key,value in conn.execute('SELECT key,value FROM settings')
-                if key in KEYS or key.startswith(PREFIXES)}
-    drafts = list(conn.execute('SELECT recipe_id,state,updated_at FROM road_trip_drafts'))
+def copy_settings(conn, original, context):
+    """Import captured settings into existing destination owners without commit.
+
+    The direct database rebuild uses this conversion too. It supplies a stable
+    source snapshot and owns batching, DDL and the transaction; this function
+    only implements the collection owners' legacy value contract.
+    """
     try:
         # Decode all supported JSON before replacing an owner. A failed
         # conversion rolls back schema, references and migration history.
@@ -60,10 +63,6 @@ def apply(conn,context):
                    and key not in radio_provenance.KEYS and key!='rec_mode_fit_inputs'
                    and key not in model_selection_heads.KEYS and key not in ranking_checkpoints.KEYS
                    and not key.startswith(discovery_checkpoints.PREFIX)}
-        decoded_drafts = [(recipe,recommendation_outputs.decode_json(raw),at) for recipe,raw,at in drafts]
-        conn.execute('DROP TABLE road_trip_drafts')
-        for sql in statements():
-            conn.execute(sql)
         if 'album_feedback' in decoded:
             album_feedback_storage.import_legacy(conn,decoded['album_feedback'])
         if account_auth_state.KEY in decoded:
@@ -74,10 +73,6 @@ def apply(conn,context):
                 if value!='1':
                     raise ValueError('Unsupported discovery fetch marker')
                 discovery_checkpoints.remember(conn,key[len(discovery_checkpoints.PREFIX):])
-        for recipe,state,at in decoded_drafts:
-            if not isinstance(state,dict):
-                raise ValueError('Legacy draft must be an object')
-            road_trip_draft_storage.save(conn,recipe,state,at,legacy=True)
         for key,value in decoded.items():
             if key.startswith(PREFIXES[0]):
                 if (not isinstance(value,dict) or set(value)-{'cursor','cutoff','fingerprint','revision'}
@@ -112,6 +107,21 @@ def apply(conn,context):
         model_selection_heads.put(conn,{key:value for key,value in original.items() if key in model_selection_heads.KEYS})
         ranking_checkpoints.put(conn,{key:value for key,value in original.items() if key in ranking_checkpoints.KEYS})
         album_tuning_state.put(conn,{key:value for key,value in original.items() if key in album_tuning_state.KEYS})
-        conn.executemany('DELETE FROM settings WHERE key=?',[(key,) for key in original])
     except (ValueError,TypeError,KeyError,sqlite3.IntegrityError) as exc:
         raise MigrationError(f'Collection state conversion failed; original retained: {exc}') from exc
+
+
+def apply(conn,context):
+    original = {key:value for key,value in conn.execute('SELECT key,value FROM settings')
+                if key in KEYS or key.startswith(PREFIXES)}
+    drafts = [(recipe,recommendation_outputs.decode_json(raw),at) for recipe,raw,at in
+              conn.execute('SELECT recipe_id,state,updated_at FROM road_trip_drafts')]
+    conn.execute('DROP TABLE road_trip_drafts')
+    for sql in statements():
+        conn.execute(sql)
+    copy_settings(conn, original, context)
+    for recipe,state,at in drafts:
+        if not isinstance(state,dict):
+            raise MigrationError('Legacy draft must be an object')
+        road_trip_draft_storage.save(conn,recipe,state,at,legacy=True)
+    conn.executemany('DELETE FROM settings WHERE key=?',[(key,) for key in original])

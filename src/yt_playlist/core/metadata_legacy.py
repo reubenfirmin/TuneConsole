@@ -214,25 +214,30 @@ def backfill_observations(conn):
     for owner in OBSERVATION_OWNERS:
         count = 0
         for rows in _batches(conn, owner):
-            for captured in capture_batch(conn, owner, rows):
-                observation = _observe(conn, owner, captured)
-                if owner == 'entry_field_choices':
-                    if observation is None:
-                        raise ValueError('Unsupported active legacy metadata choice: ' + str(captured[1]['_legacy_id']))
-                    kind = conn.execute('SELECT value_kind FROM metadata_observations WHERE id=?',
-                                        (observation,)).fetchone()[0]
-                    if kind == 'unresolved':
-                        # An active malformed choice cannot silently disappear
-                        # beneath the typed projection. The outer migration
-                        # rolls back, retaining its installed current value.
-                        raise ValueError('Unsupported active legacy metadata choice: ' + str(captured[1]['_legacy_id']))
-                    conn.execute('INSERT INTO metadata_choice_heads(entry_id,field,observation_id) VALUES (?,?,?) '
-                                 'ON CONFLICT(entry_id,field) DO NOTHING', (captured[2], captured[5], observation))
-                if owner == 'metadata_findings':
-                    _native_observe(conn, captured)
-                count += 1
+            copy_observations(conn,owner,rows)
+            count += len(rows)
         counts[owner] = count
     return counts
+
+
+def copy_observations(conn, owner, rows):
+    """Import a captured source batch into existing metadata owners.
+
+    Shared by historical conversion and fresh-database rebuild. The caller
+    supplies original row IDs and owns the transaction and progress bookmark.
+    """
+    if owner not in OBSERVATION_OWNERS:
+        raise ValueError('Unknown legacy metadata observation owner: '+owner)
+    for captured in capture_batch(conn, owner, rows):
+        observation = _observe(conn, owner, captured)
+        if owner == 'entry_field_choices':
+            if observation is None or conn.execute('SELECT value_kind FROM metadata_observations WHERE id=?',
+                                                   (observation,)).fetchone()[0] == 'unresolved':
+                raise ValueError('Unsupported active legacy metadata choice: '+str(captured[1]['_legacy_id']))
+            conn.execute('INSERT INTO metadata_choice_heads(entry_id,field,observation_id) VALUES (?,?,?) '
+                         'ON CONFLICT(entry_id,field) DO NOTHING',(captured[2],captured[5],observation))
+        if owner == 'metadata_findings':
+            _native_observe(conn,captured)
 
 
 def backfill_selections(conn):

@@ -5,30 +5,23 @@ import time
 
 import pytest
 
-from tests.core.test_action_work_migration import prospective_actions
-from yt_playlist.core import action_backup_files, collection_recovery, policy_documents
-from yt_playlist.core.migrations import current
+from tests.schema.actual_library import copy_readonly_library
+from yt_playlist.core import action_backup_files, collection_recovery
+from yt_playlist.core.migrations import current, migrate, registry
 from yt_playlist.core.store import Store
 
 
-def test_actual_action_history_and_unknown_deletions_survive_upgrade(request,tmp_path,prospective_actions):
+def test_actual_action_history_and_unknown_deletions_survive_upgrade(request,tmp_path,monkeypatch):
     option = request.config.getoption('--schema-recovery-db')
     if not option:
         pytest.skip('Supply a retained isolated actual-library copy at schema 95')
     source = Path(option).resolve(strict=True)
-    assert source.is_relative_to(Path(request.config.rootpath).resolve()/'.pytest_cache')
     target = tmp_path/'action-work.db'
-    with sqlite3.connect(source.as_uri()+'?mode=ro',uri=True) as donor:
-        assert donor.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]==95
-        with policy_documents.retained_reader(collection_recovery.directory(donor)):
-            donor.execute('BEGIN')
-            with sqlite3.connect(target) as copied:
-                donor.backup(copied)
-            manifest = collection_recovery.export(donor,tmp_path/'collection-backup')
-            donor.rollback()
+    custody = {}
+    copy_readonly_library(source,target,monkeypatch,custody)
+    assert custody['source_version']==95, 'Supply a genuine schema-95 historical donor'
     store = Store(target)
     try:
-        collection_recovery.restore(store.conn,manifest)
         store._bind_repositories()
         original = {row['id']:dict(row) for row in store.conn.execute('SELECT * FROM actions')}
         assert len(original)>=742
@@ -40,6 +33,9 @@ def test_actual_action_history_and_unknown_deletions_survive_upgrade(request,tmp
             return {name:store.conn.execute(f'SELECT count(*) FROM {name}').fetchone()[0] for name in protected}
         before = counts()
         started = time.monotonic()
+        # Populated historical conversion is an explicit test operation. Normal
+        # admission must keep legacy owners usable without replaying bulk work.
+        migrate(store.conn,registry=registry.MIGRATIONS)
         store.init_schema()
         elapsed = time.monotonic()-started
         assert counts()==before

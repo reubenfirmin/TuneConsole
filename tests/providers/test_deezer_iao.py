@@ -44,20 +44,22 @@ def http(code, headers=None):
 
 
 @pytest.fixture
-def boundary(monkeypatch, store):
+def boundary(monkeypatch):
     candidates._FACTS_CACHE.clear()
 
-    def install(fetch=catalog):
+    def install(fetch=catalog, *, store=None):
         clock, calls, responses, events = [1000.0], [], [], []
 
         def pace():
-            assert not store._lock.held_by_current_thread
-            assert not store.conn.in_transaction
+            if store is not None:
+                assert not store._lock.held_by_current_thread
+                assert not store.conn.in_transaction
             events.append('pace')
 
         def open_request(request, *, timeout):
-            assert not store._lock.held_by_current_thread
-            assert not store.conn.in_transaction
+            if store is not None:
+                assert not store._lock.held_by_current_thread
+                assert not store.conn.in_transaction
             events.append('request')
             calls.append((request, timeout))
             body = fetch(request)
@@ -85,7 +87,7 @@ def subject(store, title='Song'):
 
 
 def test_enrichment_and_road_trip_share_raw_responses_and_close_transport(boundary, store):
-    b = boundary()
+    b = boundary(store=store)
     result = deezer.probe({'title': 'Song', 'artist': 'Artist', 'duration_s': 200}, store)
     assert result.fields['bpm'] == 120 and result.fields['genre'] == 'Rock'
     facts = candidates.track_facts(store, 'Song', 'Artist')
@@ -103,7 +105,7 @@ def test_candidate_acquisition_and_ranking_persist_access_waits(boundary, store,
     def failed(request):
         raise TimeoutError('controlled outage')
 
-    b = boundary(failed)
+    b = boundary(failed, store=store)
     monkeypatch.setattr(candidates, 'artist_genre', lambda store, artist: None)
     rows = [{'video_id': 'video', 'title': 'Song', 'artist': 'Artist', 'album': '',
              'thumbnail': None, 'duration': 200, 'genre': ''}]
@@ -131,7 +133,7 @@ def test_host_retry_after_is_shared_with_candidates_and_new_instances(boundary, 
     def failed(request):
         raise http(503, {'Retry-After': header} if header is not None else {})
 
-    b = boundary(failed)
+    b = boundary(failed, store=store)
     with net.probe_errors() as first:
         assert not deezer.probe({'title': 'Song', 'artist': 'Artist'}, store).fields
     with net.probe_errors() as second:
@@ -154,7 +156,7 @@ def test_host_retry_after_is_shared_with_candidates_and_new_instances(boundary, 
 @pytest.mark.parametrize('code', [4, 700])
 def test_http_200_host_errors_defer_every_endpoint(boundary, store, code):
     b = boundary(lambda request: ({'error': {'code': code, 'message': 'query must not persist'}},
-                                  {'Retry-After': '90'}))
+                                  {'Retry-After': '90'}), store=store)
     with deezer.access(store), net.probe_errors() as errors:
         for url in ('/search/track?q=Song', '/track/42', '/album/99'):
             with pytest.raises(IntegrationUnavailable):
@@ -172,7 +174,7 @@ def test_invalid_searches_retry_without_poisoning_other_queries(boundary, store,
     def fetch(request):
         return body if 'bad' in request.full_url else {'data': []}
 
-    b = boundary(fetch)
+    b = boundary(fetch, store=store)
     with deezer.access(store), net.probe_errors() as errors:
         for _ in range(2):
             with pytest.raises(IntegrationUnavailable) as caught:
@@ -237,7 +239,7 @@ def test_http_error_response_bodies_are_closed(boundary, code):
     ('/album/99', {'id': 99, 'genres': {'data': ['bad']}}),
 ])
 def test_invalid_detail_responses_remain_retryable(boundary, store, path, body):
-    b = boundary(lambda request: body)
+    b = boundary(lambda request: body, store=store)
     with deezer.access(store), net.probe_errors() as errors:
         for _ in range(2):
             with pytest.raises(IntegrationUnavailable) as caught:
@@ -269,7 +271,7 @@ def test_malformed_refresh_retains_last_good_evidence_with_retry(boundary, path)
 
 @pytest.mark.parametrize('body', [{}, {'error': 'temporary backend failure'}])
 def test_invalid_search_remains_pending_in_waterfall(boundary, store, body):
-    b = boundary(lambda request: body)
+    b = boundary(lambda request: body, store=store)
     item = subject(store)
     completed = run_waterfall(store, [item], [{'name': 'deezer', 'enabled': True}],
         lambda event: None, registry={'deezer': deezer}, now_fn=lambda: b.clock[0])
@@ -319,7 +321,7 @@ def test_expired_good_evidence_survives_failed_refresh_with_retry_signal(boundar
             raise TimeoutError('controlled outage')
         return catalog(request)
 
-    b = boundary(fetch)
+    b = boundary(fetch, store=store)
     expected = candidates.track_facts(store, 'Song', 'Artist')
     failing[0] = True
     b.clock[0] += access.POSITIVE_TTL
@@ -345,7 +347,7 @@ def test_album_outage_keeps_track_fields_pending_and_other_provider_progress(bou
             raise http(503, {'Retry-After': '120'})
         return catalog(request)
 
-    b = boundary(fetch)
+    b = boundary(fetch, store=store)
     tracks = [subject(store), subject(store, 'Other')]
     healthy_calls = []
     healthy = SimpleNamespace(name='acousticbrainz', available=lambda store: True,
@@ -369,7 +371,7 @@ def test_concurrent_distinct_callers_share_the_first_outage(boundary, store):
     def failed(request):
         raise TimeoutError('controlled outage')
 
-    b = boundary(failed)
+    b = boundary(failed, store=store)
 
     def read(index):
         with net.probe_errors() as errors:
@@ -394,7 +396,7 @@ def test_foreground_write_proceeds_during_vendor_io(boundary, store):
         assert release.wait(5), 'Serving connection was held during vendor access'
         return {'data': []}
 
-    b = boundary(fetch)
+    b = boundary(fetch, store=store)
     with ThreadPoolExecutor(max_workers=2) as pool:
         work = pool.submit(candidates.track_facts, store, 'Song', 'Artist')
         try:
@@ -408,7 +410,6 @@ def test_foreground_write_proceeds_during_vendor_io(boundary, store):
 
 
 def test_cooldown_survives_database_reopen_and_recovery_clears_only_observed_wait(boundary, tmp_path):
-    b = boundary(lambda request: {'data': []})
     path = tmp_path / 'deezer.db'
     db = Store(path)
     db.init_schema()
@@ -419,6 +420,7 @@ def test_cooldown_survives_database_reopen_and_recovery_clears_only_observed_wai
     db = Store(path)
     db.init_schema()
     try:
+        b = boundary(lambda request: {'data': []}, store=db)
         with deezer.access(db):
             with pytest.raises(IntegrationUnavailable):
                 b.iao.get(access.API + '/search/track?q=Song')
@@ -440,7 +442,7 @@ def test_recovery_response_cannot_clear_an_outage_persisted_during_io(boundary, 
         store.enrichment_state.defer_integration('deezer', now=1101, retry_after=1200, error='new outage')
         return {'data': []}
 
-    b = boundary(fetch)
+    b = boundary(fetch, store=store)
     store.enrichment_state.defer_integration('deezer', now=1000, retry_after=1100, error='old outage')
     b.clock[0] = 1100
     with deezer.access(store):
@@ -453,7 +455,7 @@ def test_recovery_response_cannot_clear_an_outage_persisted_during_io(boundary, 
 
 
 def test_scoped_repository_does_not_remain_bound_to_standalone_calls(boundary, store):
-    b = boundary(lambda request: {'data': []})
+    b = boundary(lambda request: {'data': []}, store=store)
     store.enrichment_state.defer_integration('deezer', now=1000, retry_after=1100, error='saved outage')
     with deezer.access(store):
         with deezer.access(), pytest.raises(IntegrationUnavailable):
@@ -472,7 +474,7 @@ def test_cancellation_never_becomes_a_completed_miss(boundary, store, error_type
             raise error_type('controlled cancellation')
         return catalog(request)
 
-    b = boundary(fetch)
+    b = boundary(fetch, store=store)
     item = subject(store)
     with net.probe_errors() as errors, pytest.raises(error_type):
         run_waterfall(store, [item], [{'name': 'deezer', 'enabled': True}], lambda event: None,

@@ -158,6 +158,26 @@ def _validate_mix_choices(conn):
     mix_choices.validate(conn)
 
 
+def _install_credit_retention(conn, context):
+    from .. import credit_retention
+    credit_retention.install(conn, context)
+
+
+def _validate_credit_retention(conn):
+    from .. import credit_retention
+    credit_retention.validate(conn)
+
+
+def _install_mode_retention(conn, context):
+    from .. import mode_retention
+    mode_retention.install(conn, context)
+
+
+def _validate_mode_retention(conn):
+    from .. import mode_retention
+    mode_retention.validate(conn)
+
+
 def after_owner_upgrade(conn):
     """Keep adopted bounded guards when an explicit upgrade creates an owner."""
     if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='schema_changes'").fetchone():
@@ -179,6 +199,8 @@ CHANGES = (
     Change(9, 'runtime_metadata_file_storage', _install_runtime_metadata, _validate_runtime_metadata),
     Change(10, 'compact_served_facts', _install_served_facts, _validate_served_facts),
     Change(11, 'displayed_mix_choice_descriptors', _install_mix_choices, _validate_mix_choices),
+    Change(12, 'compact_artist_delivery_replays', _install_credit_retention, _validate_credit_retention),
+    Change(13, 'retired_taste_mode_payloads', _install_mode_retention, _validate_mode_retention),
 )
 
 

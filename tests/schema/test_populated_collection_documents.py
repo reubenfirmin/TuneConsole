@@ -6,30 +6,23 @@ import time
 
 import pytest
 
-from tests.core.test_collection_documents_migration import prospective_documents
-from yt_playlist.core import collection_recovery, genre_identity, policy_documents, taste_control_state
-from yt_playlist.core.migrations import current
+from tests.schema.actual_library import copy_readonly_library
+from yt_playlist.core import collection_recovery, genre_identity, taste_control_state
+from yt_playlist.core.migrations import current, migrate, registry
 from yt_playlist.core.store import Store
 
 
-def test_actual_collection_documents_upgrade_and_restart(request,tmp_path,prospective_documents):
+def test_actual_collection_documents_upgrade_and_restart(request,tmp_path,monkeypatch):
     option = request.config.getoption('--schema-recovery-db')
     if not option:
         pytest.skip('Supply a retained isolated actual-library copy at schema 95')
     source = Path(option).resolve(strict=True)
-    assert source.is_relative_to(Path(request.config.rootpath).resolve()/'.pytest_cache')
     target = tmp_path/'collection-documents.db'
-    with sqlite3.connect(source.as_uri()+'?mode=ro',uri=True) as donor:
-        assert donor.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]==95
-        with policy_documents.retained_reader(collection_recovery.directory(donor)):
-            donor.execute('BEGIN')
-            with sqlite3.connect(target) as copied:
-                donor.backup(copied)
-            manifest = collection_recovery.export(donor,tmp_path/'collection-backup')
-            donor.rollback()
+    custody = {}
+    copy_readonly_library(source,target,monkeypatch,custody)
+    assert custody['source_version']==95, 'Supply a genuine schema-95 historical donor'
     store = Store(target)
     try:
-        collection_recovery.restore(store.conn,manifest)
         store._bind_repositories()
         recipes = {row[0]:(json.loads(row[1]),row[2]) for row in store.conn.execute('SELECT * FROM rec_recipes')}
         canvases = dict(store.conn.execute('SELECT playlist_ytm,state FROM cluster_canvas'))
@@ -53,6 +46,8 @@ def test_actual_collection_documents_upgrade_and_restart(request,tmp_path,prospe
             return {table:store.conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] for table in protected}
         before = counts()
         started = time.monotonic()
+        # Exercise the frozen upgrade route only on this disposable copy.
+        migrate(store.conn,registry=registry.MIGRATIONS)
         store.init_schema()
         elapsed = time.monotonic()-started
         assert counts()==before
@@ -72,7 +67,7 @@ def test_actual_collection_documents_upgrade_and_restart(request,tmp_path,prospe
             assert not restarted.conn.execute('PRAGMA foreign_key_check').fetchall()
         finally:
             restarted.conn.close()
-        print({'source_schema':95,'target_schema':97,'recipes':len(recipes),'canvases':len(canvases),
+        print({'source_schema':95,'target_schema':current.VERSION,'recipes':len(recipes),'canvases':len(canvases),
                'checkpoint_weights':len(checkpoint['weights']),'protected':before,'upgrade_seconds':elapsed,
                'sqlite':sqlite3.sqlite_version})
     finally:

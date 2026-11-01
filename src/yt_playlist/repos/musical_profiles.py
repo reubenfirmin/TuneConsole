@@ -43,6 +43,8 @@ class MusicalProfilesRepo(Repo):
         """Bound a source publication to its current immutable metadata references."""
         dependencies = {(table, 'key:' + key) for table in (
             'rec_musical_pending', 'rec_musical_sources', 'rec_musical_links', 'rec_musical_source_profiles')}
+        # A format cutover changes which immutable source references are read.
+        dependencies.add(('metadata_runtime_state', 'group:format'))
         if metadata_runtime.active(self.conn):
             row = self.conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?', (key,)).fetchone()
             return dependencies, ('runtime', row[0] if row else None)

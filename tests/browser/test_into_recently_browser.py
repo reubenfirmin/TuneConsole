@@ -154,6 +154,7 @@ def test_story_cooldown_only_counts_visible_headings_and_ignores_fragment_polls(
     discovery_interval(page, headings.first)
     assert store.rec_ledger.story_views() == {}
     page.get_by_role('tab', name='Into recently', exact=True).click()
+    page.clock.run_for(50)
     headings.first.scroll_into_view_if_needed()
     discovery_dwell(page, headings.first, '/home/into-recently/impressions')
     views = store.rec_ledger.story_views()

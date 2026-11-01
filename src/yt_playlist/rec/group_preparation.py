@@ -96,15 +96,16 @@ class Preparation:
             fingerprint = group_versions.fingerprint([self.policy.manifest(), [
                 [r.key, r.genre, r.family, r.year, r.values, r.support, r.profile_version] for r in recordings]])
             previous = reader.taste_groups.head(members=True)
-            legacy_modes = reader.modes.list_modes(active_only=False)
-            legacy_versions = reader.taste_groups.legacy_versions()
+            # Legacy offers carry their own captured evidence. Reimporting
+            # mutable retired modes on every build recreates collected history
+            # and pins obsolete centroids. Existing legacy versions stay readable.
+            legacy_modes, legacy_versions = [], ()
             reader.settings.get_setting(CHECKPOINT)
             parent = previous['generation'] if previous else None
             resumable = reader.taste_groups.resumable_build(fingerprint, serial,
                 musical_profiles.canonical(self.policy.manifest()), parent)
             if (previous and previous['fingerprint'] == fingerprint and not self.rebuild_requested and
-                    resumable is None and
-                    all(group_versions.legacy_definition(mode)[0] in legacy_versions for mode in legacy_modes)):
+                    resumable is None):
                 # Operational stamps and unchanged legacy rewrites are not new musical input.
                 checkpoint = json.dumps({'generation': previous['generation'], 'serial': serial, 'at': now})
                 if snapshot.publish(lambda: self.store.settings.publish_values({CHECKPOINT: checkpoint})):

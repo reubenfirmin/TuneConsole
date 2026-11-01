@@ -53,6 +53,19 @@ def test_background_shadow_is_coalesced_and_does_not_replace_live_modes(store):
     assert store.taste_groups.head()['generation'] == head['generation']
 
 
+def test_group_preparation_never_loads_or_reimports_retired_mode_definitions(store, monkeypatch):
+    seed(store, recordings([('House', 12, .2)]))
+    def forbidden(*args, **kwargs):
+        pytest.fail('Grouping tried to import legacy mode history')
+    monkeypatch.setattr(type(store.modes), 'list_modes', forbidden)
+    monkeypatch.setattr(type(store.taste_groups), 'legacy_versions', forbidden)
+    worker = group_preparation.Preparation(store)
+    assert worker.step(1000)
+    assert all(not group.get('legacy') for group in store.taste_groups.head()['groups'])
+    worker.request_rebuild()
+    assert worker.step(1100)
+
+
 def test_stale_and_budget_deferred_work_preserve_complete_last_good_generation(store, monkeypatch):
     tracks = recordings([('Pop', 12, .2)])
     seed(store, tracks)

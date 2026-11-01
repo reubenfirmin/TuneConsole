@@ -539,12 +539,15 @@ class RecWorker:
                     self.ctx.logger.warning('Listening evidence maintenance failed', exc_info=True)
             if Job.RETENTION in batch:
                 from yt_playlist.rec import group_roots
+                from yt_playlist.core.preparation import runtime_history
                 state = self.jobs.retry[Job.RETENTION]
                 state.retry_at = time.monotonic() + 300
                 try:
+                    history = self._stage('runtime history retirement', runtime_history.maintain,
+                                          self.ctx.store, self.ctx.now_fn())
                     result = self._stage('derived history retirement', group_roots.maintain_retention,
                                          self.ctx.store)
-                    if result and result['pending']:
+                    if (result and result['pending']) or (history and any(history.values())):
                         state.retry_at = time.monotonic() + 5
                     self.ctx.logger.debug('Derived history retirement: %s', result)
                 except WorkClosing:
