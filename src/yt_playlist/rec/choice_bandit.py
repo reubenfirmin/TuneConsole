@@ -114,6 +114,7 @@ def observations(store, offers, responses, now, excluded):
             negative = params['choice'] * (chosen in seen and not selected and not same_area) + params['early_exit'] * early
             yield {'opportunity': oid, 'option': option, 'context': {'at': offer['at']},
                    'context_id': signature(option), 'positive': positive, 'negative': negative,
+                   'selected': selected,
                    'day': int(at // 86400), 'offer_at': offer['at'],
                    'expires_at': offer['at'] + params['window_d'] * 86400}
 

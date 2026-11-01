@@ -32,8 +32,6 @@ def compile(store, offers, responses, now, head):
                 'legacy_ambiguous': 0}
     menus = {}
     visible, picked = {}, {}
-    choices = {(event['opportunity_id'], event['option_id']) for event in responses
-               if event['kind'] == 'choice' and event['at'] <= now and event['observed_at'] <= now}
     expiry = []
     for observation in choice_bandit.observations(store, offers, responses, now, excluded):
         option = observation['option']
@@ -46,7 +44,7 @@ def compile(store, offers, responses, now, head):
         offer = (observation['opportunity'], option['id'])
         if gid is not None:
             visible.setdefault(gid, set()).add(offer)
-            if offer in choices:
+            if observation['selected']:
                 picked.setdefault(gid, set()).add(offer)
         expiry.append(observation['expires_at'])
         if observation['positive'] + observation['negative'] == 0:

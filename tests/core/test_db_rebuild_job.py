@@ -5,6 +5,7 @@ not the production-schema importer or optimized destination acceptance.
 """
 from pathlib import Path
 import sqlite3
+import threading
 
 import pytest
 
@@ -12,6 +13,7 @@ from tests.core.test_predecessor_writes import installed
 from yt_playlist.core import db_handles
 from yt_playlist.core.db_rebuild import build, install, job
 from yt_playlist.core.migrations import current, registry
+from yt_playlist.core.storage_maintenance import StorageCompacting, StorageMaintenance
 
 
 class ProcessDied(BaseException):
@@ -110,3 +112,69 @@ def test_direct_destination_uses_verified_snapshot_and_shared_install(installed,
     assert not store.activity_paused
     store.settings.set_setting('after rebuild', 'accepted')
     assert store.settings.get_setting('after rebuild') == 'accepted'
+
+
+@pytest.mark.parametrize('installed', [107], indirect=True)
+@pytest.mark.parametrize('interrupt', [False, True])
+def test_background_destination_keeps_serving_and_can_resume_committed_copy(installed, interrupt):
+    store, _ = installed
+    store.settings.set_setting('personal', 'Mixed case')
+    history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
+    held, release = threading.Event(), threading.Event()
+    copied, resumed_values = [], []
+    maintenance = StorageMaintenance(store, on_resume=lambda: resumed_values.append(
+        store.settings.get_setting('personal')))
+
+    def initialize(target):
+        current.bootstrap(target, registry.MIGRATIONS, 1000)
+        target.execute('DELETE FROM schema_migrations')
+        target.executemany('INSERT INTO schema_migrations VALUES(?,?,?)', history)
+
+    def copy(source, target, cursor, limit):
+        held.set()
+        assert release.wait(30)
+        value = source.execute("SELECT value FROM settings WHERE key='personal'").fetchone()[0]
+        target.execute('INSERT INTO settings VALUES(?,?)', ('personal', value.upper()))
+        copied.append(value)
+        return build.Batch(rows=1, done=True)
+
+    def verify(source, target):
+        assert target.execute("SELECT value FROM settings WHERE key='personal'").fetchone() == ('MIXED CASE',)
+
+    destination = build.Destination('controlled-background-v1', initialize, (build.Stage('personal', copy),), verify)
+    maintenance.start_rebuild(destination)
+    try:
+        assert held.wait(20)
+        assert not maintenance.ready.is_set()
+        status = maintenance.status()
+        assert status['active'] and not status['recording']
+        assert status['message'].startswith('Updating library storage.')
+        assert status['capturing_feedback']
+        assert store.settings.get_setting('personal') == 'Mixed case'
+        with pytest.raises(StorageCompacting):
+            maintenance.start_compaction()
+        if interrupt:
+            maintenance.stop()
+    finally:
+        release.set()
+        maintenance.join(30)
+    if interrupt:
+        assert maintenance.phase == 'deferred'
+        assert not store.activity_paused
+        assert store.conn.execute('PRAGMA query_only').fetchone()[0] == 0
+        assert store.settings.get_setting('personal') == 'Mixed case'
+        attempt = db_handles.state(store._db_path)['id']
+        maintenance.start_rebuild(destination, resume=True)
+        maintenance.join(30)
+        assert maintenance.report['id'] == attempt
+        assert maintenance.report['resumed']
+        assert resumed_values == ['Mixed case', 'MIXED CASE']
+    else:
+        assert resumed_values == ['MIXED CASE']
+    assert maintenance.phase == 'done', maintenance.error
+    assert maintenance.ready.is_set()
+    assert not store.activity_paused and maintenance.status()['recording']
+    assert copied == ['Mixed case']
+    assert store.settings.get_setting('personal') == 'MIXED CASE'
+    assert [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')] == history
+    store.settings.set_setting('after rebuild', 'accepted')

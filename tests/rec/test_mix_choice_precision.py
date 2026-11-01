@@ -122,6 +122,7 @@ def test_unseen_missing_delayed_out_of_order_withdrawn_and_correlated_evidence(s
     for i in range(3):
         choices.respond(store,f'm{i}','withdraw',105,details={'action_id':f'm{i}:choice:a'})
     assert compile_groups(store)[1]['house']['positive'] == 0
+    assert compile_groups(store)[1]['house']['picked'] == 0
     assert compile_groups(store, now=104)[1]['house']['positive'] == .25
 
 
@@ -230,9 +231,10 @@ def test_unpublished_sql_is_collected_and_live_learning_keeps_its_descriptor(sto
     assert mix_choices.read_descriptor(store.conn, descriptor)['genres'] == ['Deep House']
 
 
-def test_choice_backup_restores_descriptors_and_files_and_fences_retirement(store, tmp_path):
+def test_choice_backup_restores_descriptors_and_files_and_fences_retirement(store, tmp_path, monkeypatch):
     from yt_playlist.core import choice_evidence_files, policy_documents
     from yt_playlist.core.store import Store
+    monkeypatch.setattr(choice_evidence_files, 'PAGE_ROWS', 2)
     menu(store)
     choices.respond(store, 'menu', 'visible', 101, visible=['a','b'])
     choices.respond(store, 'menu', 'choice', 102, option_id='a')
@@ -256,5 +258,26 @@ def test_choice_backup_restores_descriptors_and_files_and_fences_retirement(stor
         with pytest.raises(ValueError, match='verification'):
             choice_evidence_files.restore(restored.conn, manifest)
         assert not restored.conn.execute('PRAGMA foreign_key_check').fetchone()
+    finally:
+        restored.conn.close()
+
+
+def test_backup_snapshot_excludes_a_menu_with_future_sql_ownership(store, tmp_path):
+    from yt_playlist.core import policy_recovery
+    from yt_playlist.core.store import Store
+    menu(store, 'before')
+    restored = Store(tmp_path / 'snapshot.db')
+    try:
+        with store.read_view() as reader:
+            assert reader.conn.execute('SELECT count(*) FROM mix_choice_menus').fetchone()[0] == 1
+            menu(store, 'future')
+            choices.respond(store,'future','choice',102,option_id='a')
+            manifests = policy_recovery._export_files(reader.conn, tmp_path / 'full.db')
+            assert 'choice_evidence' in manifests
+            reader.conn.backup(restored.conn)
+        restored._bind_repositories()
+        policy_recovery._restore_files(restored.conn,manifests)
+        assert [o['id'] for o in restored.rec_ledger.evidence().records('opportunity')] == ['before']
+        assert restored.rec_ledger.evidence().records('response') == []
     finally:
         restored.conn.close()

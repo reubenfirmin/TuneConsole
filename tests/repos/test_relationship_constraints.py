@@ -12,7 +12,8 @@ from yt_playlist.core import legacy_evidence
 
 
 def upgrade_relationship_fixture(store):
-    # Genuine historical predecessors use explicit replay, then regular admission.
+    # These tests exercise a genuine v24 predecessor. Ordinary admission only
+    # accepts supported installed layouts; historical replay stays explicit.
     migrate(store.conn, registry=registry.MIGRATIONS)
     store.init_schema()
 
@@ -101,8 +102,8 @@ def test_non_numeric_legacy_positions_are_preserved_and_reconciled(installed_v24
 def test_invalid_direct_writes_are_rejected(installed_v24):
     store = installed_v24
     # Test the constraints on their genuine v25 owners. Later migrations retire
-    # some write interfaces; replaying those unrelated conversions would test
-    # read-only views rather than these foreign-key constraints.
+    # some of these write interfaces; replaying those unrelated conversions
+    # would turn a foreign-key assertion into a read-only-view error.
     migrate(store.conn, registry=registry.MIGRATIONS[:25])
     accepted = []
     for sql in (
@@ -128,7 +129,8 @@ def test_invalid_direct_writes_are_rejected(installed_v24):
         else:
             accepted.append(sql)
         finally:
-            # An unexpectedly accepted write must not contaminate later cases.
+            # Roll back even an unexpectedly accepted write so every case starts
+            # from the same pristine state and all fourteen checks still run.
             store.conn.rollback()
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall(), sql
     assert not accepted, f'Invalid writes unexpectedly succeeded: {accepted}'

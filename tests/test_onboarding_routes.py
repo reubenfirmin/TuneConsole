@@ -545,7 +545,7 @@ def test_empty_or_invalid_historical_offers_do_not_complete_setup(tmp_path, surf
     store = Store(tmp_path / 'historical-offers.db')
     try:
         migrate(store.conn, registry=registry.MIGRATIONS[:82])
-        store._bind_repositories()
+        store.init_schema(defer_metadata=True)
         _synced_thin(store)
         store.rec_proposals.put_proposals(surface, payload, 999)
         assert onboarding.initial_setup_pending(store, 1000)

@@ -8,7 +8,8 @@ import sqlite3
 import tempfile
 import time
 
-from yt_playlist.core import group_documents
+from yt_playlist.core import group_documents, mix_choices
+from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core.preparation import mix_choices as preparation
 from yt_playlist.core.store import Store
 from yt_playlist.rec import choice_evidence
@@ -53,6 +54,7 @@ def run(source, report):
                 return dict(store.conn.execute('SELECT name,sum(pgsize) FROM dbstat WHERE '
                     "name LIKE '%group%' OR name LIKE '%mix_choice%' OR name LIKE '%choice_context_projection%' GROUP BY name"))
             result['before_sql'] = sizes()
+            original_head = hashlib.sha256(canonical(store.taste_groups.head(members=True))).hexdigest()
             ledger = store.rec_ledger.evidence()
             offers = ledger.records('opportunity')
             responses = ledger.records('response')
@@ -111,6 +113,8 @@ def run(source, report):
             result['versions'] = store.conn.execute('SELECT count(*) FROM group_versions').fetchone()[0]
             result['current_groups'] = len(store.taste_groups.head()['groups'])
             result['current_members'] = sum(len(g['members']) for g in store.taste_groups.head(members=True)['groups'])
+            assert hashlib.sha256(canonical(store.taste_groups.head(members=True))).hexdigest() == original_head
+            result['current_head_unchanged'] = True
             save()
             # Export/restore repacks the retained ranges without copying dead
             # ranges sharing an old immutable pack. All paths belong to temp.
@@ -124,6 +128,36 @@ def run(source, report):
             files = list(group_documents.directory(store.conn).glob('*/*.json'))
             result['group_files'] = {'count': len(files), 'bytes': sum(p.stat().st_size for p in files),
                                     'allocated_bytes': sum(p.stat().st_blocks * 512 for p in files)}
+            durations = []
+            for _ in range(20):
+                started = time.monotonic()
+                assert len(store.taste_groups.head()['groups']) == result['current_groups']
+                durations.append(time.monotonic() - started)
+            result['head_read_seconds'] = {'min': min(durations), 'p95': sorted(durations)[18], 'max': max(durations)}
+            cohort = next(o for o in ledger.records('opportunity') if o['format'] == 'mixes'
+                          and all(option['genres_complete'] for option in o['options']))
+            options = [mix_choices.expand(store.conn, option) for option in cohort['options']]
+            descriptor_count = result['descriptors']
+            for index in range(20):
+                identity = 'continued-' + str(index)
+                assert choice_evidence.issue(store, 'mixes', options, now + index,
+                    context={'at': now}, opportunity_id=identity) == identity
+                assert choice_evidence.respond(store, identity, 'choice', now + index + 1, option_id=options[0]['id'])
+            assert store.conn.execute('SELECT count(*) FROM mix_choice_descriptors').fetchone()[0] == descriptor_count
+            # New metadata changes create distinct raw labels, with equal sets
+            # still shared. These are controlled writes over the actual cohort.
+            for index in range(20):
+                option = {'id':'corrected', 'label':'Explore' if index % 2 else 'Stay close',
+                          'genres':['House', 'Corrected raw genre ' + str(index % 7)]}
+                choice_evidence.issue(store,'mixes',[option],now+index,
+                    context={'at':now},opportunity_id='changed-'+str(index))
+            assert choice_evidence.respond(store,cohort['id'],'choice',now+30,
+                option_id=options[0]['id'],action_id='late-original-cohort')
+            result['continued_writes'] = {'repeated_menus':20, 'changed_menus':20,
+                'descriptors_before':descriptor_count,
+                'descriptors_after':store.conn.execute('SELECT count(*) FROM mix_choice_descriptors').fetchone()[0],
+                'sql_bytes_after':sum(sizes().values()), 'late_response':True}
+            assert not store.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind IN ('offer','response','checkpoint')").fetchone()
             result['report'] = choice_evidence.compile_report(store, now)
             assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
             result['foreign_keys'] = True

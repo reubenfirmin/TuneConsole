@@ -11,11 +11,13 @@ from yt_playlist.core.db_diagnostics import DiagnosticConnection
 from yt_playlist.repos import policy_storage
 
 log = logging.getLogger(__name__)
-MESSAGE = ('Compacting storage. Browsing, playback, likes and Next are available. '
-           'Playback feedback is saved locally; history and recommendation updates are delayed. '
-           'Playlist changes, syncing, imports and settings changes are paused. '
-           'New recommendation impressions are not recorded. '
-           'Completed audio uploads retry; sampling may miss points.')
+LISTENING_MESSAGE = ('Browsing, playback, likes and Next are available. '
+                     'Playback feedback is saved locally; history and recommendation updates are delayed. '
+                     'Playlist changes, syncing, imports and settings changes are paused. '
+                     'New recommendation impressions are not recorded. '
+                     'Completed audio uploads retry; sampling may miss points.')
+MESSAGE = 'Compacting storage. ' + LISTENING_MESSAGE
+REBUILD_MESSAGE = 'Updating library storage. ' + LISTENING_MESSAGE
 EVIDENCE_MESSAGE = ('Preparing listening-history storage. Browsing, playback, likes and Next are available. '
                     'Playback feedback is saved locally for replay; history and recommendation updates '
                     'are delayed. Playlist changes, syncing, imports and settings changes are paused. '
@@ -34,10 +36,10 @@ LOW_SPACE_MESSAGE = ('Storage compaction blocked: not enough free disk space. '
                      'Compaction will retry on the next launch.')
 SCHEMA_RETRY_MESSAGE = ('A storage update needs another attempt. Your library remains available. '
                         'Retry the schema update from the maintenance command.')
-COPY_DEFERRED_MESSAGE = ('Storage compaction did not finish. Activity recording has resumed. '
-                         'Resolve the reported problem and request compaction again.')
-COPY_LOW_SPACE_MESSAGE = ('Storage compaction needs more disk space. Activity recording has resumed. '
-                          'Free space or choose another scratch directory before requesting compaction again.')
+COPY_DEFERRED_MESSAGE = ('The storage update did not finish. Activity recording has resumed. '
+                         'Resolve the reported problem before requesting another attempt.')
+COPY_LOW_SPACE_MESSAGE = ('The storage update needs more disk space. Activity recording has resumed. '
+                          'Free space or choose another scratch directory before requesting another attempt.')
 
 
 class StorageMaintenance:
@@ -56,9 +58,21 @@ class StorageMaintenance:
         self._conn = None
         self._conn_lock = threading.Lock()
         self.report = None
+        self._rebuilding = False
 
     def start_compaction(self, *, scratch=None):
         """Explicit retained-copy operation, independent of schema preparation."""
+        self._start_copy(destination=None, resume=False, scratch=scratch)
+
+    def start_rebuild(self, destination, *, resume=False, scratch=None):
+        """Run a schema owner's direct destination through the shared worker."""
+        if destination is None:
+            raise ValueError('A rebuild requires a destination contract')
+        if resume and scratch is not None:
+            raise ValueError('Resume reuses the recorded scratch directory')
+        self._start_copy(destination=destination, resume=resume, scratch=scratch)
+
+    def _start_copy(self, *, destination, resume, scratch):
         with self.store._lock:
             if self.active or self._thread is not None and self._thread.is_alive():
                 raise StorageCompacting()
@@ -68,10 +82,12 @@ class StorageMaintenance:
             self.detail = {}
             self.error = ''
             self.report = None
+            self._rebuilding = destination is not None
             self.message = ''
             self.ready.clear()
-            self._thread = threading.Thread(target=self._run_compaction, kwargs={'scratch':scratch},
-                                            name='copy-compaction', daemon=True)
+            self._thread = threading.Thread(target=self._run_copy,
+                kwargs={'destination':destination, 'resume':resume, 'scratch':scratch},
+                name='database-rebuild' if self._rebuilding else 'copy-compaction', daemon=True)
             try:
                 self._thread.start()
             except BaseException:
@@ -80,13 +96,13 @@ class StorageMaintenance:
                 self._thread = None
                 raise
 
-    def _run_compaction(self, *, scratch):
+    def _run_copy(self, *, destination, resume, scratch):
         from . import playback_feedback
         from .db_rebuild import job
         from .activity import cancellable_work
         try:
             with cancellable_work(self._stop.is_set):
-                self.report = job.run(self.store,scratch=scratch,
+                self.report = job.run(self.store,destination=destination,resume=resume,scratch=scratch,
                     progress=self._progress,cancelled=self._stop.is_set)
             self.phase = 'done'
         except Exception as error:
@@ -94,7 +110,7 @@ class StorageMaintenance:
             self.error = repr(error)
             self._deferred(error)
             self.message = COPY_LOW_SPACE_MESSAGE if self.message==LOW_SPACE_MESSAGE else COPY_DEFERRED_MESSAGE
-            log.warning('Retained-copy compaction stopped; inspect durable recovery state',
+            log.warning('Database copy stopped; inspect durable recovery state',
                         exc_info=not self._stop.is_set())
         finally:
             self.active = self.store.activity_paused
@@ -106,7 +122,7 @@ class StorageMaintenance:
                     self.on_resume()
                     playback_feedback.try_drain(self.store)
             except Exception:
-                log.warning('Playback feedback or provenance awaits retry after compaction',exc_info=True)
+                log.warning('Playback feedback or provenance awaits retry after database copy',exc_info=True)
             self.ready.set()
 
     def status(self):
@@ -118,7 +134,8 @@ class StorageMaintenance:
         retrying = evidence and getattr(self.store, '_evidence_recovery_failed', False)
         phase = (self.phase if self.active else getattr(self.store, '_evidence_phase', 'listening_history')
                  if evidence else 'playback_feedback' if pending else self.phase)
-        message = (self.message if self.active and self.phase=='recovery_required' else MESSAGE if self.active else EVIDENCE_RETRY_MESSAGE if retrying else EVIDENCE_MESSAGE
+        message = (self.message if self.active and self.phase=='recovery_required' else
+                   (REBUILD_MESSAGE if self._rebuilding else MESSAGE) if self.active else EVIDENCE_RETRY_MESSAGE if retrying else EVIDENCE_MESSAGE
                    if evidence else 'Applying saved playback feedback. Playback, likes and Next are available; '
                    'history and recommendation updates are delayed. '
                    'Playlist changes, syncing, imports and settings changes are paused.' if pending
