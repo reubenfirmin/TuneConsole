@@ -1,4 +1,4 @@
-"""Background startup repair with read availability and explicit recording pause."""
+"""Bounded schema installation and explicitly separate legacy storage repair."""
 import errno
 import json
 import logging
@@ -8,14 +8,36 @@ import threading
 from yt_playlist.core import db_space, policy_upgrade
 from yt_playlist.core.db_space import StorageCompacting
 from yt_playlist.core.db_diagnostics import DiagnosticConnection
+from yt_playlist.repos import policy_storage
 
 log = logging.getLogger(__name__)
-MESSAGE = "Compacting storage - won't record activity until done"
+MESSAGE = ('Compacting storage. Browsing, playback, likes and Next are available. '
+           'Playback feedback is saved locally; history and recommendation updates are delayed. '
+           'Playlist changes, syncing, imports and settings changes are paused. '
+           'New recommendation impressions are not recorded. '
+           'Completed audio uploads retry; sampling may miss points.')
+EVIDENCE_MESSAGE = ('Preparing listening-history storage. Browsing, playback, likes and Next are available. '
+                    'Playback feedback is saved locally for replay; history and recommendation updates '
+                    'are delayed. Playlist changes, syncing, imports and settings changes are paused. '
+                    'New recommendation impressions are not recorded. '
+                    'Completed audio uploads retry; sampling may miss points.')
+EVIDENCE_RETRY_MESSAGE = ('Listening-history storage preparation needs another attempt. Browsing, playback, '
+                          'likes and Next are available. Playback feedback is saved locally for replay; '
+                          'history and recommendation updates are delayed. '
+                          'Playlist changes, syncing, imports and settings changes are paused. '
+                          'New recommendation impressions are not recorded. '
+                          'Completed audio uploads retry; sampling may miss points.')
 DEFERRED_MESSAGE = ('Storage compaction did not finish. Activity recording has resumed. '
                     'Compaction will retry on the next launch.')
 LOW_SPACE_MESSAGE = ('Storage compaction blocked: not enough free disk space. '
                      'Storage cleanup is incomplete. Activity recording has resumed. '
                      'Compaction will retry on the next launch.')
+SCHEMA_RETRY_MESSAGE = ('A storage update needs another attempt. Your library remains available. '
+                        'Retry the schema update from the maintenance command.')
+COPY_DEFERRED_MESSAGE = ('Storage compaction did not finish. Activity recording has resumed. '
+                         'Resolve the reported problem and request compaction again.')
+COPY_LOW_SPACE_MESSAGE = ('Storage compaction needs more disk space. Activity recording has resumed. '
+                          'Free space or choose another scratch directory before requesting compaction again.')
 
 
 class StorageMaintenance:
@@ -24,6 +46,8 @@ class StorageMaintenance:
         self.on_resume = on_resume
         self.active = False
         self.phase = 'idle'
+        self.detail = {}
+        self.error = ''
         self.message = ''
         self.ready = threading.Event()
         self.ready.set()
@@ -31,15 +55,129 @@ class StorageMaintenance:
         self._thread = None
         self._conn = None
         self._conn_lock = threading.Lock()
+        self.report = None
+
+    def start_compaction(self, *, scratch=None):
+        """Explicit retained-copy operation, independent of schema preparation."""
+        with self.store._lock:
+            if self.active or self._thread is not None and self._thread.is_alive():
+                raise StorageCompacting()
+            self._stop.clear()
+            self.active = True
+            self.phase = 'checking'
+            self.detail = {}
+            self.error = ''
+            self.report = None
+            self.message = ''
+            self.ready.clear()
+            self._thread = threading.Thread(target=self._run_compaction, kwargs={'scratch':scratch},
+                                            name='copy-compaction', daemon=True)
+            try:
+                self._thread.start()
+            except BaseException:
+                self.active = False
+                self.ready.set()
+                self._thread = None
+                raise
+
+    def _run_compaction(self, *, scratch):
+        from . import playback_feedback
+        from .db_rebuild import job
+        from .activity import cancellable_work
+        try:
+            with cancellable_work(self._stop.is_set):
+                self.report = job.run(self.store,scratch=scratch,
+                    progress=self._progress,cancelled=self._stop.is_set)
+            self.phase = 'done'
+        except Exception as error:
+            self.phase = 'deferred'
+            self.error = repr(error)
+            self._deferred(error)
+            self.message = COPY_LOW_SPACE_MESSAGE if self.message==LOW_SPACE_MESSAGE else COPY_DEFERRED_MESSAGE
+            log.warning('Retained-copy compaction stopped; inspect durable recovery state',
+                        exc_info=not self._stop.is_set())
+        finally:
+            self.active = self.store.activity_paused
+            if self.active:
+                self.phase = 'recovery_required'
+                self.message = 'Storage recovery is required before recording can resume. Preserve the recovery files and restart.'
+            try:
+                if not self.store.activity_paused:
+                    self.on_resume()
+                    playback_feedback.try_drain(self.store)
+            except Exception:
+                log.warning('Playback feedback or provenance awaits retry after compaction',exc_info=True)
+            self.ready.set()
 
     def status(self):
-        return dict(active=self.active, phase=self.phase, message=MESSAGE if self.active else self.message,
-                    recording=not self.active, warning=not self.active and self.phase == 'deferred')
+        from yt_playlist.core import playback_feedback
+        evidence = (bool(getattr(self.store, '_evidence_maintenance', 0))
+                    or getattr(self.store, '_evidence_recovery_pending', False))
+        pending = playback_feedback.inbox(self.store).pending()
+        active = self.active or evidence or bool(pending)
+        retrying = evidence and getattr(self.store, '_evidence_recovery_failed', False)
+        phase = (self.phase if self.active else getattr(self.store, '_evidence_phase', 'listening_history')
+                 if evidence else 'playback_feedback' if pending else self.phase)
+        message = (self.message if self.active and self.phase=='recovery_required' else MESSAGE if self.active else EVIDENCE_RETRY_MESSAGE if retrying else EVIDENCE_MESSAGE
+                   if evidence else 'Applying saved playback feedback. Playback, likes and Next are available; '
+                   'history and recommendation updates are delayed. '
+                   'Playlist changes, syncing, imports and settings changes are paused.' if pending
+                   else SCHEMA_RETRY_MESSAGE if phase == 'schema_retry' else self.message)
+        detail = {'inventory': 'Checking saved recommendation contexts.',
+                  'checkpoint': 'Checkpointing retained listening evidence.',
+                  'retention': 'Reclaiming acknowledged diagnostic storage.'}.get(phase)
+        if evidence and detail:
+            message += ' ' + detail
+        if pending:
+            message += f' {pending} saved playback observations await replay.'
+        warning = bool(retrying or phase == 'schema_retry'
+                       or not active and self.phase == 'deferred')
+        # Keep the UI to one short sentence; message retains diagnostic detail
+        # for API callers and rejected writes.
+        banner_message = ''
+        if active:
+            banner_message = ('Library recovery is needed.' if phase=='recovery_required' else
+                              'Library updates need attention.' if retrying else
+                              'Catching up on your listening.' if not self.active and not evidence else
+                              'Library updates are paused.')
+        elif warning:
+            banner_message = ('Library update needs a retry.' if phase == 'schema_retry' else
+                              'Free disk space to finish.' if self.message in {LOW_SPACE_MESSAGE,COPY_LOW_SPACE_MESSAGE} else
+                              'Library cleanup needs a retry.' if self.message == COPY_DEFERRED_MESSAGE else
+                              'Library update will retry.')
+        return dict(active=active, phase=phase, message=message, pending_feedback=pending,
+                    recording=not active, capturing_feedback=True,
+                    warning=warning, banner_message=banner_message,
+                    progress=dict(self.detail), error=self.error)
 
     def start(self):
         if self.store._db_path is None or self._thread is not None:
             return
         with self.store._lock:
+            from .migrations import regular
+            if regular.validate(self.store.conn) < len(regular.CHANGES):
+                # Only additive bounded DDL runs here. The job's connection never
+                # borrows the serving lock, pauses writes or converts old data.
+                self.phase = 'schema'
+                self.ready.clear()
+                self._thread = threading.Thread(target=self._run_schema, name='schema-maintenance', daemon=True)
+                try:
+                    self._thread.start()
+                except BaseException:
+                    self._thread = None
+                    self.ready.set()
+                    raise
+                return
+            if getattr(self.store, '_schema_compatibility', False):
+                # The old policy sharing/conversion job also belongs to explicit
+                # preparation. Its installed owners remain in ordinary use.
+                self.phase = 'done'
+                return
+            # File-backed policy migration has retired the SQLite sharing job.
+            # It must not pause recording or revisit a superseded repair cursor.
+            if policy_storage.typed(self.store.conn):
+                self.phase = 'done'
+                return
             row = self.store.conn.execute('SELECT value FROM settings WHERE key=?', (policy_upgrade.KEY,)).fetchone()
             if row and json.loads(row[0]).get('phase') == 'done':
                 self.phase = 'done'
@@ -58,6 +196,33 @@ class StorageMaintenance:
             self._resume()
             raise
 
+    def _run_schema(self):
+        """Apply regular DDL once; bulk preparation has an explicit lifecycle."""
+        from yt_playlist.core.activity import cancellable_work, interrupt_query
+        from yt_playlist.core.migrations import regular
+        try:
+            conn = sqlite3.connect(self.store._db_path, timeout=.1, factory=DiagnosticConnection)
+            try:
+                with self._conn_lock:
+                    self._conn = conn
+                conn.row_factory = sqlite3.Row
+                conn.execute('PRAGMA foreign_keys=ON')
+                conn.set_progress_handler(interrupt_query, 1000)
+                with cancellable_work(self._stop.is_set):
+                    regular.migrate(conn)
+                self.phase = 'done'
+            finally:
+                with self._conn_lock:
+                    self._conn = None
+                conn.set_progress_handler(None, 0)
+                conn.close()
+        except Exception:
+            if not self._stop.is_set():
+                self.phase = 'schema_retry'
+                log.warning('Bounded schema update deferred; installed owners remain writable', exc_info=True)
+        finally:
+            self.ready.set()
+
     def _resume(self):
         try:
             with self.store._lock:
@@ -67,14 +232,16 @@ class StorageMaintenance:
                 self.store.activity_paused = False
                 self.active = False
                 try:
-                    self.on_resume()
+                    if not getattr(self.store, '_schema_recovery_pending', False):
+                        self.on_resume()
                 except Exception:
                     log.warning('Could not retain current playback provenance after storage repair', exc_info=True)
         finally:
             self.ready.set()
 
-    def _progress(self, phase):
+    def _progress(self, phase, detail=None):
         self.phase = phase
+        self.detail = detail or {}
 
     def _deferred(self, error):
         low_space = (isinstance(error, db_space.LowDiskSpace)

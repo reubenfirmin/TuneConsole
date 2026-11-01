@@ -91,9 +91,12 @@ def test_feedback_suppression_and_mutes(store):
 def test_vectors_roundtrip(store):
     dao = store.rec_model
     assert dao.rec_vectors_count() == 0
-    dao.replace_rec_vectors([("a", b"\x00\x01"), ("b", b"\x02\x03")])
+    with store.conn:
+        store.conn.executemany('INSERT INTO recordings(identity_key) VALUES (?)', [('a',), ('b',)])
+    rows = [("a", b"\x00\x00\x80\x3f"), ("b", b"\x00\x00\x00\x40")]
+    dao.replace_rec_vectors(rows)
     assert dao.rec_vectors_count() == 2
-    assert dict(dao.get_rec_vectors()) == {"a": b"\x00\x01", "b": b"\x02\x03"}
+    assert dict(dao.get_rec_vectors()) == dict(rows)
     dao.replace_rec_vectors([])                          # wholesale replace
     assert dao.rec_vectors_count() == 0
 
@@ -107,7 +110,7 @@ def test_model_state_is_separate_from_library_queries(store):
 
 
 def test_track_decades_and_artists_and_era_distribution(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.tracks.upsert_track("v1", "A", "Alpha", None, None)   # key "a|alpha"
     b = store.tracks.upsert_track("v2", "B", "Beta", None, None)    # key "b|beta"
     store.tracks.set_track_year(a, "1991")                          # -> decade "1990"

@@ -26,6 +26,7 @@ def test_shared_policy_upgrade_preserves_legacy_payload_without_backup_or_rewrit
     assert not (tmp_path / 'backups').exists()
     conn.close()
     store = Store(path)
+    migrate(store.conn, registry=MIGRATIONS)
     store.init_schema()
     try:
         assert store.rec_ledger.policy_configuration('legacy-policy')['ranker'] == 'legacy'
@@ -36,8 +37,8 @@ def test_shared_policy_upgrade_preserves_legacy_payload_without_backup_or_rewrit
 def test_current_schema_rejects_missing_shared_policy_structures(tmp_path):
     store = Store(tmp_path / 'state.db')
     store.init_schema()
-    store.conn.execute('DROP INDEX ix_rec_policy_base')
-    with pytest.raises(MigrationError, match='ix_rec_policy_base'):
+    store.conn.execute('DROP INDEX ix_recommendation_policy_base')
+    with pytest.raises(MigrationError, match='ix_recommendation_policy_base'):
         store.init_schema()
 
 

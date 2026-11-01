@@ -20,8 +20,8 @@ def stamp(local,zone):
 def listening_store():
     store = Store(':memory:')
     store.init_schema()
-    store.identities.upsert_identity('main','bridge',None,True)
-    store.identities.upsert_identity('other','bridge','other',False)
+    store.accounts.upsert_account('main','bridge',None,True)
+    store.accounts.upsert_account('other','bridge','other',False)
     yield store
     store.conn.close()
 
@@ -78,8 +78,8 @@ def test_installed_layout_retains_raw_evidence_and_unknown_precision():
         assert list(map(tuple,conn.execute(f'SELECT * FROM {name}')))==rows
     legacy = conn.execute('SELECT precision,timezone FROM legacy_listening_observations').fetchall()
     assert all(tuple(r)==('legacy_unknown',None) for r in legacy)
-    assert conn.execute('SELECT COUNT(*) FROM listening_days WHERE identity_id=1').fetchone()[0]==1
-    assert conn.execute('SELECT COUNT(*) FROM listening_days WHERE identity_id=2').fetchone()[0]==0
+    assert conn.execute('SELECT COUNT(*) FROM listening_days WHERE account_id=1').fetchone()[0]==1
+    assert conn.execute('SELECT COUNT(*) FROM listening_days WHERE account_id=2').fetchone()[0]==0
     assert not conn.execute('SELECT * FROM trend_first_play').fetchall()
     assert not conn.execute('SELECT * FROM settings').fetchall()
     assert not conn.execute('PRAGMA foreign_key_check').fetchall()
@@ -136,7 +136,7 @@ def test_removing_one_source_preserves_overlaps_and_unknown_legacy(listening_sto
     assert s.history.event_play_counts()=={'both':1}
     assert s.history.listening_day_counts()=={'both':1,'independent':1,'unknown':1}
     assert list(map(tuple,s.conn.execute("SELECT * FROM listening_observations WHERE precision='legacy_unknown'")))==raw
-    assert s.conn.execute('SELECT source FROM play_events').fetchone()[0]=='takeout'
+    assert [r[0] for r in s.conn.execute('SELECT source FROM play_event_sources')]==['takeout']
     with pytest.raises(ValueError,match='Unknown legacy'):
         s.history.remove_listening_source('unknown')
 
@@ -172,7 +172,7 @@ def test_generated_sync_shadow_is_account_scoped_and_independent_evidence_surviv
 def test_failed_draft_upgrade_rolls_back_and_backup_is_installed_v25(tmp_path):
     s = Store(tmp_path/'installed.db')
     migrate(s.conn,registry=registry.MIGRATIONS[:25])
-    s.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','bridge',1)")
+    s.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'main','bridge',1)")
     s.conn.execute('INSERT INTO history_snapshots VALUES (1,1,100)')
     s.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (1,'original')")
     s.conn.commit()
@@ -251,7 +251,7 @@ def test_reassociation_preserves_coarse_sources_and_first_play_atomically(listen
     assert s.settings.get_setting('trend_first_play_watermark') is None
     assert not s.trends.first_play_map('track')
     assert s.history.listening_day_counts()=={key:2}
-    evidence = s.conn.execute('SELECT raw_identity_key,identity_key FROM listening_observations').fetchall()
+    evidence = s.conn.execute('SELECT raw_identity_key,identity_key FROM listening_observation_subjects').fetchall()
     assert {r[0] for r in evidence}=={old,key} and {r[1] for r in evidence}=={key}
     s.trends.refresh_first_play()
     assert s.trends.first_play_map('track')=={key:10}
@@ -262,7 +262,7 @@ def test_successful_draft_upgrade_reopens_without_rewriting_data(tmp_path):
     path = tmp_path/'installed.db'
     s = Store(path)
     migrate(s.conn,registry=registry.MIGRATIONS[:25])
-    s.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','bridge',1)")
+    s.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'main','bridge',1)")
     s.conn.execute('INSERT INTO history_snapshots VALUES (1,1,100)')
     s.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (1,'original')")
     s.conn.commit()

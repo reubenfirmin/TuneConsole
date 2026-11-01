@@ -28,7 +28,7 @@ def live_merge_app(monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     s = Store(":memory:")
     s.init_schema()
-    iid = s.identities.upsert_identity("Main", "c1", None, True)
+    iid = s.accounts.upsert_account("Main", "c1", None, True)
     a = s.playlists.upsert_playlist(iid, "PLA", "Mix A", 2, "h", 1.0)
     b = s.playlists.upsert_playlist(iid, "PLB", "Mix B", 1, "h", 1.0)
     t1 = s.tracks.upsert_track("v1", "Alpha Song", "X", None, None, 1)
@@ -41,24 +41,17 @@ def live_merge_app(monkeypatch, tmp_path):
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
-    while not server.started:
-        time.sleep(0.02)
-    yield {"base": f"http://127.0.0.1:{port}", "ids": f"{a},{b}", "store": s, "client": client}
-    server.should_exit = True
-    thread.join(timeout=5)
-
-
-def test_merge_toggle_updates_count(live_merge_app, page):
-    page.goto(f"{live_merge_app['base']}/merge?ids={live_merge_app['ids']}")
-    expect(page.get_by_text("2 / 2")).to_be_visible()
-    page.locator('input[type=checkbox]').first.uncheck()       # exclude one song
-    expect(page.get_by_text("1 / 2")).to_be_visible()          # server re-rendered the count
-
-
-def test_merge_apply_redirects(live_merge_app, page):
-    page.goto(f"{live_merge_app['base']}/merge?ids={live_merge_app['ids']}")
-    page.get_by_role("button", name="Apply").click()
-    page.wait_for_url("**/cleanup**", timeout=5000)            # HX-Redirect after the merge runs
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started:
+            assert thread.is_alive() and time.monotonic() < deadline, 'Merge server did not start'
+            time.sleep(0.02)
+        yield {"base": f"http://127.0.0.1:{port}", "ids": f"{a},{b}", "store": s, "client": client}
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+        assert not thread.is_alive(), 'Merge server did not stop'
+        s.conn.close()
 
 
 def test_failed_delivery_keeps_editor_and_source(live_merge_app, page, monkeypatch):
@@ -84,6 +77,7 @@ def test_merge_returns_to_the_cleanup_list_before_and_after_applying(live_merge_
     back = page.get_by_role("link", name="Back to cleanup")
     expect(back).to_be_visible()
     expect(back).to_have_attribute("href", "/cleanup#overlaps")
+    expect(page.get_by_text("2 / 2")).to_be_visible()
     page.locator('input[type=checkbox]').first.uncheck()
     expect(page.get_by_text("1 / 2")).to_be_visible()
     back.click()

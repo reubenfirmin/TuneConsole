@@ -33,7 +33,7 @@ def _seed_bundles(store):
 
 
 def _client(store, now=1000.0):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                       base_url="http://127.0.0.1")
 

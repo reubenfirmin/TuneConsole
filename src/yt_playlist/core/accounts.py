@@ -1,24 +1,24 @@
 """Select remote accounts explicitly; provider iteration order is never a write policy."""
 
 
-def client_for(store, clients, *, identity_id=None, playlist_id=None):
+def client_for(store, clients, *, account_id=None, playlist_id=None):
     if playlist_id is not None:
         playlist = store.playlists.get_playlist(playlist_id)
         if playlist is None:
             raise ValueError('Playlist no longer exists')
-        if identity_id is not None and identity_id!=playlist.identity_id:
+        if account_id is not None and account_id!=playlist.account_id:
             raise ValueError('Playlist belongs to another account')
-        identity_id = playlist.identity_id
-    if identity_id is None:
+        account_id = playlist.account_id
+    if account_id is None:
         try:
-            identity_id = store.identities.get_master_identity().id
+            account_id = store.accounts.get_master_account().id
         except ValueError as exc:
             raise ValueError('Choose a main account in Setup before continuing.') from exc
-    active = {i.id for i in store.identities.get_identities()}
-    client = (clients or {}).get(identity_id)
-    if identity_id not in active or client is None:
+    active = {i.id for i in store.accounts.get_accounts()}
+    client = (clients or {}).get(account_id)
+    if account_id not in active or client is None:
         raise ValueError('The required account is not connected')
-    return identity_id,client
+    return account_id,client
 
 
 def main_client(store, clients):

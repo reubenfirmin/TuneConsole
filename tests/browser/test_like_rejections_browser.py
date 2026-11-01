@@ -10,7 +10,7 @@ from yt_playlist.library.ops import PlaylistOps
 def test_heart_completion_preserves_server_outcome(live_app, store, page, monkeypatch, liked, failure):
     page_errors = []
     page.on("pageerror", lambda error: page_errors.append(str(error)))
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     pid = store.playlists.get_playlists()[0].id
     store.playlists.upsert_playlist(iid, "LM", "Liked Music", 0, "", 0)
     entry = store.tracks.upsert_track("rating", "Rating song", "Artist", None, 200)

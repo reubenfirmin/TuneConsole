@@ -22,7 +22,7 @@ def test_later_album_and_artist_enrichment_cannot_change_historical_baskets(stor
 
 @pytest.mark.parametrize('dated', [False, True])
 def test_playlist_existence_proof_does_not_bypass_recording_eligibility(store, dated):
-    identity = store.identities.upsert_identity('Main', 'credential', None, True)
+    identity = store.accounts.upsert_account('Main', 'credential', None, True)
     rows = []
     for video, duration, video_type in (
             ('valid-a', 180, None), ('valid-b', None, None),

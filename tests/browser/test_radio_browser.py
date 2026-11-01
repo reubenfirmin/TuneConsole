@@ -33,6 +33,7 @@ def test_seed_grid_fills_available_space_without_javascript_sizing(page, radio_u
           const page = main.getBoundingClientRect();
           const styles = getComputedStyle(grid);
           return {height: bounds.height, bottom: bounds.bottom,
+            healthHeight: grid.closest('.home-growth').querySelector('.account-health').getBoundingClientRect().height,
             expectedBottom: page.bottom - parseFloat(getComputedStyle(main).paddingBottom),
             pageBottom: page.bottom, viewport: innerHeight,
             columns: styles.gridTemplateColumns.split(' ').length,
@@ -40,7 +41,9 @@ def test_seed_grid_fills_available_space_without_javascript_sizing(page, radio_u
             overflow: document.documentElement.scrollWidth > innerWidth};
         }''')
         assert abs(geometry['bottom'] - geometry['expectedBottom']) < 2, geometry
-        assert geometry['height'] > height / 2, geometry
+        # Account health now occupies space above the dashboard. The launcher
+        # must fill the remaining viewport without sizing itself in JavaScript.
+        assert geometry['height'] > (height - geometry['healthHeight']) / 2, geometry
         assert geometry['pageBottom'] <= height + 12, geometry  # main's entrance animation may translate 10px
         assert geometry['columns'] == (2 if width < 500 else 4), geometry
         assert geometry['rows'] == (8 if width < 500 else 4), geometry
@@ -343,17 +346,91 @@ def test_playlist_fetch_failure_keeps_transition_until_retry_succeeds(page, radi
     expect(page.locator(".radio-home").get_by_role("alert")).to_be_hidden()
 
 
-@pytest.mark.parametrize("failure", ["network", "server"])
-def test_launch_connection_failure_never_exposes_fetch_error(page, radio_ui, failure):
+@pytest.mark.parametrize("failure", ["network", "http", "server", "disconnected"])
+@pytest.mark.parametrize('width', [1440, 390])
+def test_launch_connection_failure_never_exposes_fetch_error(page, radio_ui, failure, width):
+    page.set_viewport_size({'width': width, 'height': 1000 if width == 1440 else 820})
+    if failure in ('network', 'http'):
+        page.clock.install()
     page.locator(".radio-seed").first.click()
     route = radio_ui.starts.pop()
     if failure == "network":
         route.abort()
+    elif failure == 'http':
+        route.fulfill(status=503)
+    elif failure == 'disconnected':
+        route.fulfill(json={'ok': False, 'reason': 'Connect the YouTube Music extension first.'})
     else:
         route.fulfill(json={"ok": False, "reason": "TypeError: Failed to fetch"})
     expect(page.locator(".radio-home").get_by_role("alert")).to_have_count(0)
-    expect(page.locator(".radio-seeds")).to_be_visible()
-    expect(page.locator(".radio-seed").first).to_be_enabled()
+    message = page.locator('.radio-launch-recovery')
+    expect(message).to_be_visible()
+    expect(message.get_by_role('heading')).to_have_text('Night frequency 1')
+    expect(message).to_contain_text('Artist 1')
+    expect(message).not_to_contain_text('Failed to fetch')
+    expect(message.get_by_role('link')).to_have_attribute('href', 'https://music.youtube.com/watch?v=radio0')
+    if failure in ('network', 'http'):
+        expect(message).to_contain_text('up to 30 seconds')
+        # Inactive status may predate a still-running POST. It cannot authorize
+        # another provider create, even after the bounded check has ended.
+        page.evaluate("Alpine.$data(document.querySelector('.radio-home')).refresh()")
+        page.clock.fast_forward(30001)
+        expect(message).to_contain_text('We couldn’t confirm playback')
+        page.evaluate("Alpine.$data(document.querySelector('.radio-home')).start({video_id:'radio0'})")
+        message.get_by_role('button', name='Check playback').click()
+        assert not radio_ui.starts
+        expect(page.locator('.radio-seed-start').first).to_be_disabled()
+    else:
+        expect(page.locator(".radio-seeds")).to_be_visible()
+        expect(page.locator(".radio-seed-start").first).to_be_enabled()
+        if failure == 'disconnected':
+            expect(message).to_contain_text('connect its extension')
+        message.get_by_role('button', name='Try this selection again').click()
+        expect(message).to_be_hidden()
+        assert len(radio_ui.starts) == 1
+        radio_ui.starts.pop().fulfill(json={'ok': False})
+    page.screenshot(path=f'/tmp/tuneconsole-633-radio-retry-{width}-{failure}.png', full_page=True)
+    if failure in ('network', 'http'):
+        # Later confirmed output still settles the same launch without a POST.
+        radio_ui.state = radio_ui.ready
+        page.evaluate("Alpine.$data(document.querySelector('.radio-home')).refresh()")
+        expect(page.locator('.radio-session table')).to_be_visible(timeout=6000)
+        expect(message).to_be_hidden()
+        assert not radio_ui.starts
+
+
+def test_unknown_launch_cannot_be_settled_by_the_previous_active_session(page, radio_ui):
+    radio_ui.state = radio_ui.ready
+    page.evaluate("Alpine.$data(document.querySelector('.radio-home')).refresh()")
+    expect(page.locator('.radio-session table')).to_be_visible(timeout=6000)
+    page.clock.install()
+    page.evaluate("() => { Alpine.$data(document.querySelector('.radio-home')).start({video_id:'radio0',title:'Selected song',artist:'Selected artist'}); }")
+    expect(page.locator('.radio-launch')).to_be_visible()
+    radio_ui.starts.pop().abort()
+    message = page.locator('.radio-launch-recovery')
+    expect(message).to_contain_text('up to 30 seconds')
+    page.clock.fast_forward(30001)
+    expect(message.get_by_role('heading')).to_have_text('Selected song')
+    expect(message).to_contain_text('We couldn’t confirm playback')
+    expect(message.get_by_role('button', name='Try this selection again')).to_be_hidden()
+    message.get_by_role('button', name='Check playback').click()
+    assert not radio_ui.starts
+
+
+def test_rejected_playlist_launch_keeps_its_title_and_retry_target(page, radio_ui):
+    selected = {'id': 41, 'title': 'Evening records', 'tracks': radio_ui.tracks[:4]}
+    page.evaluate("song => { Alpine.$data(document.querySelector('.radio-home')).start(song,true); }", selected)
+    expect(page.locator('.radio-launch')).to_be_visible()
+    radio_ui.starts.pop().fulfill(json={'ok': False, 'reason': 'No playable songs'})
+    message = page.locator('.radio-launch-recovery')
+    expect(message.get_by_role('heading')).to_have_text('Evening records')
+    expect(message.get_by_role('link', name='Back to this playlist')).to_have_attribute('href', '/playlist/41')
+    message.get_by_role('button', name='Try this selection again').click()
+    assert len(radio_ui.starts) == 1
+    retry = radio_ui.starts.pop()
+    assert retry.request.post_data_json['playlist_id'] == 41
+    assert 'video_id' not in retry.request.post_data_json
+    retry.fulfill(json={'ok': False})
 
 
 def test_new_radio_connection_failure_preserves_session_quietly(page, radio_ui):

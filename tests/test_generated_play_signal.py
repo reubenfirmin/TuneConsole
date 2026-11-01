@@ -27,7 +27,7 @@ def _song(store, playlist_db_id, vid, title, artist, genre):
 
 
 def _library(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     mine = store.playlists.upsert_playlist(iid, "PLMINE", "My Mix", 1, "h", 1.0)
     gen = store.playlists.upsert_playlist(iid, "PLGEN", "Road Trip: Beach Run", 1, "h", 1.0)
     store.playlists.set_playlist_group("PLGEN", GENERATED_GROUP)

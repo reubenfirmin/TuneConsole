@@ -151,9 +151,14 @@ def legacy(path):
     store = Store(path)
     migrate(store.conn, registry=MIGRATIONS[:60])
     with store.conn:
-        tid = catalog.upsert(store.conn, 'known', 'Known', 'Artist', created_at=1)
-        rid = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (tid,)).fetchone()[0]
-        key = store.conn.execute('SELECT identity_key FROM recordings WHERE id=?', (rid,)).fetchone()[0]
+        # Populate the frozen predecessor directly; current catalog writers
+        # require the current mood and identity relations.
+        key = 'known|artist'
+        rid = store.conn.execute('INSERT INTO recordings(identity_key,title,artist,created_at) '
+                                 "VALUES (?,'Known','Artist',1)", (key,)).lastrowid
+        store.conn.execute("INSERT INTO youtube_items(video_id,recording_id,title,artist) "
+                           "VALUES ('known',?,'Known','Artist')", (rid,))
+        store.conn.execute("INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,'known')", (rid,))
         value = sample()
         value['video_id'] = 'known'
         store.conn.execute('INSERT INTO audio_vibe_samples VALUES (?,?,?,?,?)',
@@ -169,10 +174,14 @@ def legacy(path):
 
 def test_populated_upgrade_preserves_samples_scores_labels_and_reopens(tmp_path):
     store, value = legacy(tmp_path / 'legacy.db')
-    labels = list(map(tuple, store.conn.execute('SELECT * FROM audio_session_labels')))
+    labels = store.conn.execute('SELECT * FROM audio_session_labels').fetchone()
+    labels = {key: labels[key] for key in labels.keys()}
     store.init_schema()
     assert store.audio_vibes.samples(value['run_id']) == [value]
-    assert labels == list(map(tuple, store.conn.execute('SELECT * FROM audio_session_labels')))
+    retained = store.audio_vibes.earlier_feedback(value['run_id'])[0]
+    assert retained == {'taxonomy_version': labels['taxonomy_version'], 'vibes': json.loads(labels['vibes']),
+                        'sample_ids': json.loads(labels['sample_ids']), 'prediction': json.loads(labels['prediction']),
+                        'updated_at': labels['updated_at']}
     score = store.conn.execute('SELECT * FROM measurements').fetchone()
     assert (score['score'], score['model_version'], score['measured_at']) == (.8, 'old-model', None)
     assert store.conn.execute('SELECT measurement_id FROM recording_vibes').fetchone()[0] == score['id']

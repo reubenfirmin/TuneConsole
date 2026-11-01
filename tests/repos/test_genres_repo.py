@@ -7,18 +7,14 @@ def test_whitelist_add_remove_set(store):
     store.genres.remove_genre("Jazz")
     assert store.genres.get_genre_whitelist() == ["Rock"]
     store.genres.set_genres(["Pop", "ambient"])
-    assert store.genres.get_genre_whitelist() == ["ambient", "Pop"]   # case-insensitive sort
+    # Current preferences retain genre identity and display its catalog name.
+    assert store.genres.get_genre_whitelist() == ["Ambient", "Pop"]
 
 
 def test_add_is_case_insensitively_idempotent(store):
-    store.genres.add_genre("Jazz"); store.genres.add_genre("jazz")    # COLLATE NOCASE primary key
+    store.genres.add_genre("Jazz"); store.genres.add_genre("jazz")    # one resolved identity
     assert store.genres.get_genre_whitelist() == ["Jazz"]
 
 
 def test_all_genres_empty_without_track_genres(store):
     assert store.genres.all_genres() == []
-
-
-def test_store_binding(store):
-    store.genres.add_genre("Jazz")
-    assert store.genres.get_genre_whitelist() == ["Jazz"]

@@ -19,9 +19,16 @@ def _pack(encoded):
     return base64.b64encode(zlib.compress(encoded.encode(), level=1)).decode('ascii')
 
 
-def unpack(encoded):
+def unpack(encoded, *, max_bytes=None):
     try:
-        return zlib.decompress(base64.b64decode(encoded, validate=True)).decode()
+        packed = base64.b64decode(encoded, validate=True)
+        if max_bytes is None:
+            return zlib.decompress(packed).decode()
+        stream = zlib.decompressobj()
+        raw = stream.decompress(packed, max_bytes + 1)
+        if len(raw) > max_bytes or not stream.eof or stream.unused_data:
+            raise ValueError('Compressed recommendation cache exceeds its byte budget or is incomplete')
+        return raw.decode()
     except (ValueError, TypeError, binascii.Error, zlib.error, UnicodeError) as exc:
         raise ValueError('Invalid compressed recommendation cache') from exc
 
@@ -47,27 +54,91 @@ def _share_profiles(value, profiles, positions):
     return result
 
 
-def _restore_profiles(value, profiles):
+def _restore_profiles(value, profiles, fields=None, original_profiles=None, preserve=None):
+    if isinstance(value, (list, dict)):
+        check_cancellable_work()
+    def restore(item):
+        return (_restore_profiles(item, profiles) if fields is None else
+                _restore_profiles(item, profiles, fields, original_profiles, preserve))
     if isinstance(value, list):
-        return [_restore_profiles(item, profiles) for item in value]
+        result = []
+        for position, item in enumerate(value):
+            if position % 128 == 0:
+                check_cancellable_work()
+            result.append(restore(item))
+        return result
     if not isinstance(value, dict):
         return value
     result = {}
     for key, item in value.items():
         if key == 'musical' and isinstance(item, dict):
+            complete = preserve is not None and preserve(value)
+            if profiles is None:
+                result[key] = item if complete else {field: item[field] for field in fields if field in item}
+                continue
             position = item.get('profile')
             if (set(item) != {'profile'} or type(position) is not int
                     or not 0 <= position < len(profiles)):
                 raise ValueError('Invalid compressed recommendation cache profile')
             # Callers prune and annotate candidates independently. Shared storage
             # must not introduce shared mutable dictionaries after decoding.
-            profile = json.loads(profiles[position])
+            profile = json.loads((original_profiles if complete else profiles)[position])
             if not isinstance(profile, dict):
                 raise ValueError('Invalid compressed recommendation cache profile')
             result[key] = profile
         else:
-            result[key] = _restore_profiles(item, profiles)
+            result[key] = restore(item)
     return result
+
+
+def _check_profile_expansion(value, profiles, limit, original_profiles=None, preserve=None):
+    """Charge every logical copy before reconstructing any shared profile.
+
+    The inflate budget separately bounds the stored body and profile dictionary.
+    A small dictionary can be referenced thousands of times; its stored size is
+    not the size of the independently mutable result.
+    """
+    if limit is None or profiles is None:
+        return
+    remaining, sizes, visited = limit, {}, 0
+
+    def charge(size):
+        nonlocal remaining
+        remaining -= size
+        if remaining < 0:
+            raise ValueError('Restored recommendation cache exceeds its logical byte budget')
+
+    def visit(item):
+        nonlocal visited
+        visited += 1
+        if visited % 128 == 0:
+            check_cancellable_work()
+        if isinstance(item, (dict, list)):
+            check_cancellable_work()
+            charge(2 + max(0, len(item) - 1))
+            if isinstance(item, list):
+                for child in item:
+                    visit(child)
+                return
+            for key, child in item.items():
+                charge(len(json.dumps(key).encode()) + 1)
+                if key == 'musical' and isinstance(child, dict):
+                    position = child.get('profile')
+                    if (set(child) != {'profile'} or type(position) is not int
+                            or not 0 <= position < len(profiles)):
+                        raise ValueError('Invalid compressed recommendation cache profile')
+                    complete = preserve is not None and bool(preserve(item))
+                    identity = position, complete
+                    if identity not in sizes:
+                        raw = (original_profiles if complete else profiles)[position]
+                        sizes[identity] = len(raw.encode())
+                    charge(sizes[identity])
+                else:
+                    visit(child)
+        else:
+            charge(len(json.dumps(item, separators=(',', ':')).encode()))
+
+    visit(value)
 
 
 def _profiles(encoded):
@@ -103,33 +174,46 @@ def _select(value, keys):
         keys is not None and isinstance(value, dict)) else value
 
 
-def _read(encoded, keys):
+def _read(encoded, keys, *, max_bytes=None):
     """Keep compressed-profile references until the caller selects its rows."""
+    remaining = max_bytes
+    if max_bytes is not None and len(encoded.encode()) > max_bytes:
+        raise ValueError('Recommendation cache exceeds its byte budget')
+    def expand(value):
+        nonlocal remaining
+        raw = unpack(value) if remaining is None else unpack(value, max_bytes=remaining)
+        if remaining is not None:
+            remaining -= len(raw.encode())
+        return raw
     envelope_keys = {MARKER, 'json', 'groups', 'profiles'}
     value = bounded_json.loads(encoded, keys=keys | envelope_keys if keys is not None else None)
     if isinstance(value, dict) and value.get(MARKER) == LEGACY_FORMAT:
-        return bounded_json.loads(unpack(value.get('json')), keys=keys), None
+        return bounded_json.loads(expand(value.get('json')), keys=keys), None
     if isinstance(value, dict) and value.get(MARKER) == FORMAT:
-        body = bounded_json.loads(unpack(value.get('json')), keys=keys)
+        body = bounded_json.loads(expand(value.get('json')), keys=keys)
         if 'groups' in value and (keys is None or keys & {'all', '_meta'}):
-            groups = bounded_json.loads(unpack(value['groups']), keys=keys)
+            groups = bounded_json.loads(expand(value['groups']), keys=keys)
             if not isinstance(body, dict) or not isinstance(groups, dict):
                 raise ValueError('Invalid compressed recommendation cache groups')
             body.update(groups)
-        return body, _profiles(value.get('profiles'))
+        profiles = bounded_json.loads(expand(value.get('profiles')))
+        if not isinstance(profiles, list) or any(not isinstance(item, str) for item in profiles):
+            raise ValueError('Invalid compressed recommendation cache profiles')
+        return body, profiles
     return value, None
 
 
-def _finish(value, profiles, keys, project, *, detach=False):
+def _finish(value, profiles, keys, project, *, detach=False, max_bytes=None):
     value = _select(value, keys)
     if project is not None:
         value = project(value)
     if profiles is not None:
+        _check_profile_expansion(value, profiles, max_bytes)
         return _restore_profiles(value, profiles)
     return deepcopy(value) if detach else value
 
 
-def decode(encoded, *, keys=None, project=None):
+def decode(encoded, *, keys=None, project=None, profile_fields=None, preserve_profiles=None, max_bytes=None):
     """Reconstruct complete values, or selected top-level fields before restoring profiles.
 
     A consumer of Radio pools does not need to allocate every Home preset's
@@ -138,8 +222,25 @@ def decode(encoded, *, keys=None, project=None):
     dictionaries still contain opaque references until the projection returns.
     """
     keys = frozenset(keys) if keys is not None else None
-    value, profiles = _read(encoded, keys)
-    return _finish(value, profiles, keys, project)
+    value, profiles = _read(encoded, keys) if max_bytes is None else _read(encoded, keys, max_bytes=max_bytes)
+    if profile_fields is not None:
+        # Migration needs the captured input digest, without expanding every
+        # historical measurement/profile into every repeated candidate copy.
+        originals = profiles
+        if profiles is not None:
+            selected = []
+            for raw in profiles:
+                profile = json.loads(raw)
+                if not isinstance(profile, dict):
+                    raise ValueError('Invalid compressed recommendation cache profile')
+                selected.append(json.dumps({field: profile[field] for field in profile_fields if field in profile}))
+            profiles = selected
+        if project is not None:
+            value = project(value)
+        value = _select(value, keys)
+        _check_profile_expansion(value, profiles, max_bytes, originals, preserve_profiles)
+        return _restore_profiles(value, profiles, profile_fields, originals, preserve_profiles)
+    return _finish(value, profiles, keys, project, max_bytes=max_bytes)
 
 
 class DecodeCache:

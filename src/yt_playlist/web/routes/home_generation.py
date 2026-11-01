@@ -33,17 +33,17 @@ def build(ctx):
             recipe = None
         account_error = None
         try:
-            identity_id,client = client_for(store,ctx.client_provider())
+            account_id,client = client_for(store,ctx.client_provider())
         except ValueError as exc:
-            identity_id,client,account_error = None,None,str(exc)
-        result = {"name": name}
+            account_id,client,account_error = None,None,str(exc)
+        result = {"name": name, "launch_id": form.get('launch_id') or ''}
         if client is None or not tracks:
             result["error"] = account_error or "Keep at least one track to create a playlist."
         else:
             try:
                 res = activity_for(ctx).wrap(
                     "create generated playlist", playlist_generated.create_generated_playlist,
-                    store, name, tracks, client, now_fn(), identity_id, recipe=recipe)()
+                    store, name, tracks, client, now_fn(), account_id, recipe=recipe)()
                 if (res.get("pid") and isinstance(recipe, dict)
                         and (recipe.get("model") == "fresh" or recipe.get("lane") == "fresh")):
                     start_playlist_enrichment(ctx, res["pid"])
@@ -64,7 +64,7 @@ def build(ctx):
                         for kind in ("choice", "save"):
                             choice_evidence.safe_respond(store, recipe["opportunity_id"], kind, now_fn(),
                                 option_id=recipe["option_id"], action_id=f"generate:{res['new_ytm']}:{kind}",
-                                details={"playlist_id": res["pid"], "tracks": tracks})
+                                details={"playlist_id": res["pid"]})
                         if ctx.rec_worker:
                             ctx.rec_worker.trigger_home_refresh()
                 if isinstance(recipe, dict) and recipe.get("mode_id") is not None and res.get("pid"):
@@ -75,10 +75,16 @@ def build(ctx):
                         pass
             except PlaylistAddUncertain as exc:
                 result.update(error=str(exc), partial_ytm=exc.playlist_id)
+            except playlist_generated.TrackLengthLimitError as exc:
+                result.update(error=str(exc), track_length_limited=True)
             except Exception:  # noqa: BLE001 - surface a friendly card, log the detail
                 ctx.logger.exception("generate playlist %r failed", name)
-                result["error"] = "YouTube returned an unexpected response."
-        return templates.TemplateResponse(request, "_partials/generated_result.html", result)
+                result.update(save_uncertain=True, error="We couldn’t confirm playback.",
+                              selected_tracks=[track for track in tracks if isinstance(track, dict)]
+                              if isinstance(tracks, list) else [])
+        template = ('_partials/artist_playback.html' if form.get('artist_start') == '1'
+                    else '_partials/generated_result.html')
+        return templates.TemplateResponse(request, template, result)
 
     return router
 

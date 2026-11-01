@@ -96,9 +96,9 @@ def mode_scoreboard(store, since=None) -> list[dict]:
     picks = store.modes.pick_rows(since)
     stats = store.modes.playlist_engagement(since)
     picked_count, totals, last_play = {}, {}, {}
-    for playlist_id, mode_id in picks:
+    for membership_ref_id, mode_id in picks:
         picked_count[mode_id] = picked_count.get(mode_id, 0) + 1
-        engagement = stats.get(playlist_id, {})
+        engagement = stats.get(membership_ref_id, {})
         total = totals.setdefault(mode_id, {"plays": 0, "skips": 0, "completions": 0})
         for field in total:
             total[field] += engagement.get(field, 0)

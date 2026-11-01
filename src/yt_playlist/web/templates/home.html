@@ -1,6 +1,6 @@
 {% extends "base.html" %}{% from "_macros.html" import banner %}
 {% block title %}Home - TuneConsole{% endblock %}
-{% block page_class %}page-home{% if onboarding or not sync.last_synced_ago %} page-setup{% endif %}{% endblock %}
+{% block page_class %}page-home{% if onboarding %} page-setup{% endif %}{% endblock %}
 {% block page_styles %}
 <link rel="stylesheet" href="/static/generating.css?v={{ asset_v }}">
 <link rel="stylesheet" href="/static/radio.css?v={{ asset_v }}">
@@ -11,6 +11,10 @@
 <script src="/static/radio-artwork.js?v={{ asset_v }}"></script>
 <script src="/static/radio.js?v={{ asset_v }}"></script>
 <script src="/static/album-choices.js?v={{ asset_v }}"></script>
+<link rel="stylesheet" href="/static/account-growth.css?v={{ asset_v }}">
+<script src="/static/account-growth.js?v={{ asset_v }}"></script>
+<link rel="stylesheet" href="/static/artist-start.css?v={{ asset_v }}">
+<script src="/static/artist-start.js?v={{ asset_v }}"></script>
 {% endblock %}
 {# Transient success toast (e.g. re-authed with auto-sync on, nothing for them to do). Mirrors the
    OOB error toast: Alpine auto-dismisses after 5s. Renders into base.html's #toasts container. #}
@@ -32,11 +36,14 @@
 </div>
 {% endif %}
 <div id="home" x-data="homeStatus()" @bridge-status.window="applyBridgeStatus($event.detail)">
+<div class="home-growth" x-data='accountGrowth({{ growth|tojson }})' @hashchange.window="growthPanel = location.hash.slice(1)">
+  {% if not onboarding %}{% include '_partials/account_health.html' %}{% endif %}
+  {% include '_partials/growth_destination.html' %}
   {# Extension state from the shared document poller (~3s): a first-run hero until the extension connects,
      then a compact live strip with what's playing and library freshness. #}
   <div>
     {# Not connected: left-aligned card with the live equalizer, sits above the user's feed (if any). #}
-    {% if sync.last_synced_ago and not onboarding %}
+    {% if not onboarding %}
     <section class="onboard-card" x-show="!connected" x-cloak>
       <svg class="presync-art onb-art" viewBox="0 0 132 72" aria-hidden="true">
         <defs><linearGradient id="onb-g" x1="0" y1="1" x2="0" y2="0">
@@ -71,49 +78,55 @@
 
   </div>
 
-  {% if sync.last_synced_ago and not onboarding %}
+  {% if not onboarding %}
   {% set spotify_result_waiting = spotify_library_job and spotify_library_job.status in ('done', 'error', 'preview') %}
   {% set dash_default = 'notices' if spotify_result_waiting else ('start' if onboarding else home_default_panel|default('directions')) %}
   {% set has_notices = show_takeout_nag or actions or show_intro or show_lastfm_nudge or
       show_identities_nudge or show_backend_update or recap or spotify_library_job %}
   <div class="home-dashboard"
-       :class="{'is-radio': panel === 'radio'}"
-       x-data="{ panel: location.hash.slice(1) || '{{ dash_default }}', albumTuningReady: false,
-                 go(p) { this.panel = p; history.replaceState(null, '', '#' + p); window.dispatchEvent(new Event('hashchange')); fetch('/home/format', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: new URLSearchParams({panel:p})}).catch(() => {}); } }"
-       @hashchange.window="panel = location.hash.slice(1) || '{{ dash_default }}'"
+       :class="{'is-radio': panel === 'radio', 'is-unlocks': panel === 'unlocks'}"
+       x-data="{ panel: homePanel(location.hash.slice(1)) || '{{ dash_default }}', albumTuningReady: false,
+                 go(p) { if (!areaAccessible(p)) p = 'unlocks'; this.panel = p; history.replaceState(null, '', '#' + p); window.dispatchEvent(new Event('hashchange')); fetch('/home/format', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: new URLSearchParams({panel:p})}).catch(() => {}); },
+                 moveFocus(event, step) { const tabs = [...event.currentTarget.querySelectorAll('[role=tab]')].filter(tab => tab.getClientRects().length); tabs[(tabs.indexOf(event.target) + step + tabs.length) % tabs.length]?.focus(); } }"
+       @hashchange.window="panel = areaAccessible(homePanel(location.hash.slice(1))) ? homePanel(location.hash.slice(1)) : 'unlocks'"
        @album-tuning-ready.window="albumTuningReady = true"
-       x-init='$nextTick(() => { if (!$el.querySelector(`[data-dash="${panel}"]`)) go({{ dash_default|tojson }}) })'>
+       x-init='$nextTick(() => { if (!areaAccessible(panel) || !$el.querySelector(`[data-dash="${panel}"]`)) go("unlocks") })'>
     <div class="dash-navigation">
     <nav class="dash-nav" aria-label="Home areas" role="tablist"
-         @keydown.right.prevent="$event.target.nextElementSibling?.focus()"
-         @keydown.left.prevent="$event.target.previousElementSibling?.focus()">
+         @keydown.right.prevent="moveFocus($event, 1)"
+         @keydown.left.prevent="moveFocus($event, -1)">
+      <button type="button" role="tab" class="growth-tab" aria-label="Your unlocks" title="Your unlocks"
+              :class="{on: panel === 'unlocks', 'has-new': newNodes.length, 'is-twinkling': twinkling}" :aria-selected="panel === 'unlocks'"
+              :aria-description="newNodes.length ? 'New unlocks to see' : null" @click="go('unlocks')">
+        {% include '_partials/growth_star.html' %}
+      </button>
       {% if onboarding %}
       <button type="button" role="tab" :class="{ on: panel === 'start' }" :aria-selected="panel === 'start'"
               @click="go('start')">Start here</button>
       {% else %}
-      <button type="button" role="tab" :class="{ on: panel === 'directions' }" :aria-selected="panel === 'directions'"
+      <button type="button" role="tab" x-show="areaAccessible('directions')" :class="{ on: panel === 'directions' }" :aria-selected="panel === 'directions'"
               @click="go('directions')">Mix tapes</button>
       {% endif %}
-      <button type="button" role="tab" :class="{ on: panel === 'radio' }" :aria-selected="panel === 'radio'"
+      <button type="button" role="tab" x-show="areaAccessible('radio')" :class="{ on: panel === 'radio' }" :aria-selected="panel === 'radio'"
               :aria-description="radioPlaybackState ? 'Radio ' + radioPlaybackState : null"
               @click="go('radio')">On air <span class="dash-on-air-dot" x-show="radioPlaybackState" x-cloak
                 :class="{'is-paused': radioPlaybackState === 'paused'}"
                 aria-hidden="true"></span></button>
-      <button type="button" role="tab" :class="{ on: panel === 'album-choices' }" :aria-selected="panel === 'album-choices'"
+      <button type="button" role="tab" x-show="areaAccessible('album-choices')" :class="{ on: panel === 'album-choices' }" :aria-selected="panel === 'album-choices'"
               @click="go('album-choices')">Long play</button>
-      <button type="button" role="tab" :class="{ on: panel === 'tv' }" :aria-selected="panel === 'tv'"
+      <button type="button" role="tab" x-show="areaAccessible('tv')" :class="{ on: panel === 'tv' }" :aria-selected="panel === 'tv'"
               :aria-description="tvPlaying && panel !== 'tv' ? 'TV is playing' : null"
               @click="go('tv')">TV<span class="dash-tv-dot" x-show="tvPlaying && panel !== 'tv'" x-cloak aria-hidden="true"></span></button>
       {% if not onboarding %}
-      <button type="button" role="tab" :class="{ on: panel === 'discover' }" :aria-selected="panel === 'discover'"
+      <button type="button" role="tab" x-show="areaAccessible('discover')" :class="{ on: panel === 'discover' }" :aria-selected="panel === 'discover'"
               @click="go('discover')">Discover</button>
       {% endif %}
-      {% if not onboarding and (rediscover_albums or rediscover) %}
-      <button type="button" role="tab" :class="{ on: panel === 'rediscover' }" :aria-selected="panel === 'rediscover'"
+      {% if not onboarding %}
+      <button type="button" role="tab" x-show="areaAccessible('rediscover')" :class="{ on: panel === 'rediscover' }" :aria-selected="panel === 'rediscover'"
               @click="go('rediscover')">Revisit</button>
       {% endif %}
       {% if not onboarding %}
-      <button type="button" role="tab" :class="{ on: panel === 'recent' }" :aria-selected="panel === 'recent'"
+      <button type="button" role="tab" x-show="areaAccessible('recent')" :class="{ on: panel === 'recent' }" :aria-selected="panel === 'recent'"
               @click="go('recent')">Into recently</button>
       {% endif %}
       {% if has_notices %}
@@ -133,11 +146,17 @@
     </button>
     </div>
 
+    <section class="dash-panel" data-dash="unlocks" role="tabpanel" x-show="panel === 'unlocks'" x-cloak>
+      {% include '_partials/account_growth.html' %}
+    </section>
+
     <section class="dash-panel dash-radio" data-dash="radio" role="tabpanel" x-show="panel === 'radio'" x-cloak>
       {% include "_partials/radio.html" %}
     </section>
     <section class="dash-panel" data-dash="album-choices" role="tabpanel" x-show="panel === 'album-choices'" x-cloak>
-      <div hx-get="/home/album-choices" hx-trigger="load" hx-swap="innerHTML"></div>
+      <div hx-get="/home/album-choices" hx-trigger="home-area-open" hx-swap="innerHTML"
+           x-effect="if (panel === 'album-choices' && areaAccessible('album-choices') && !$el.dataset.loaded) $nextTick(() => htmx.trigger($el, 'home-area-open'))"
+           @htmx:after-request.camel="$el.dataset.loaded = $event.detail.successful ? '1' : ''"></div>
     </section>
     <section class="dash-panel dash-tv" data-dash="tv" role="tabpanel" x-show="panel === 'tv'" x-cloak>
       <div class="tv-slot"></div>
@@ -151,16 +170,28 @@
     <section class="dash-panel dash-directions" data-dash="directions" role="tabpanel" x-show="panel === 'directions'" x-cloak>
       {% include "_partials/home_feed.html" %}
     </section>
-    {% if rediscover_albums or rediscover %}
     <section class="dash-panel" data-dash="rediscover" role="tabpanel" x-show="panel === 'rediscover'" x-cloak>
+      {% if growth.ready_areas.rediscover %}
       {% include "_partials/rediscover.html" %}
+      {% else %}
+      <div hx-get="/home/revisit" hx-trigger="home-area-open" hx-swap="innerHTML"
+           x-effect="if (panel === 'rediscover' && areaAccessible('rediscover') && !$el.dataset.loaded) $nextTick(() => htmx.trigger($el, 'home-area-open'))"
+           @htmx:after-request.camel="$el.dataset.loaded = $event.detail.successful ? '1' : ''"></div>
+      {% endif %}
     </section>
-    {% endif %}
     <section class="dash-panel dash-async" data-dash="recent" role="tabpanel" x-show="panel === 'recent'" x-cloak>
-      <div hx-get="/home/into-recently" hx-trigger="load" hx-swap="innerHTML"></div>
+      <div hx-get="/home/into-recently" hx-trigger="home-area-open" hx-swap="innerHTML"
+           x-effect="if (panel === 'recent' && areaAccessible('recent') && !$el.dataset.loaded) $nextTick(() => htmx.trigger($el, 'home-area-open'))"
+           @htmx:after-request.camel="$el.dataset.loaded = $event.detail.successful ? '1' : ''"></div>
     </section>
     <section class="dash-panel dash-async" data-dash="discover" role="tabpanel" x-show="panel === 'discover'" x-cloak>
+      {% if growth.ready_areas.discover %}
       {% include "_partials/home_discovery.html" %}
+      {% else %}
+      <div hx-get="/home/discovery" hx-trigger="home-area-open" hx-swap="innerHTML"
+           x-effect="if (panel === 'discover' && areaAccessible('discover') && !$el.dataset.loaded) $nextTick(() => htmx.trigger($el, 'home-area-open'))"
+           @htmx:after-request.camel="$el.dataset.loaded = $event.detail.successful ? '1' : ''"></div>
+      {% endif %}
     </section>
     {% if muted_count %}
     <p class="section-note muted-note" x-show="panel === 'directions'" x-cloak>
@@ -185,6 +216,7 @@
   </div>
   {% endif %}
 
+</div>
 </div>
 {# hx-vals js: runs in global scope, so the "Save & play" button reaches its card's surviving rows
    by id - pruned (feedback-dismissed) rows are gone from the DOM, so they're naturally excluded. #}

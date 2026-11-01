@@ -144,6 +144,8 @@ def _with_choices(store, taste, matrix, index, *, content=False, now=None):
     saved_albums = {preferred[browse] for browse in saved_albums}
     feedback = album_feedback_state.state(store, album_ids)
     for interest in interests:
+        if interest['format'] == 'mixes':
+            continue  # A displayed theme/genre choice cannot define a track-vector centroid.
         # Saved releases already supply a deliberate collecting context. Do not count that
         # same album again merely because the listener launched it from our surface.
         if interest["format"] == "albums" and (preferred[interest["option_id"]] in saved_albums
@@ -341,8 +343,8 @@ def _axis_weights_for(store, keys, now=None, with_details=False, *, metadata=Non
 
     mult, details, present = {}, {}, {}
     for k in keys:
-        fam = genre_map.family(genres[k]) if k in genres else None
-        sub = genre_map.subgenre(genres[k]) if k in genres else None
+        fam = genre_map.family(genres[k],conn=store.conn) if k in genres else None
+        sub = genre_map.subgenre(genres[k],conn=store.conn) if k in genres else None
         breadth = bfac.get(fam, 1.0)
         gm = _axis_mult(gw, "genre", fam, standing, leans, fparams) * breadth
         if sub and sub != fam:

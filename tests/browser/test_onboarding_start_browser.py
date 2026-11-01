@@ -9,6 +9,85 @@ from tests.conftest import FakeClient, _track
 from yt_playlist.library.sync import sync_identity
 
 
+@pytest.mark.parametrize('width', [1440, 390])
+def test_partial_sync_opens_ready_mixes_without_reloading_or_waiting_for_enrichment(live_app, store, page, width):
+    from tests.onboarding_support import finish_partial_import, publish_personal_mix
+
+    finish_partial_import(store, now=1)
+    page.route('**/bridge/status', lambda route: route.fulfill(json={
+        'connected': True, 'now_playing': {'video_id': 'still-playing', 'title': 'Still playing',
+                                          'artist': 'Artist', 'paused': False}}))
+    page.route('https://i.ytimg.com/**', lambda route: route.abort())
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.goto(live_app)
+    expect(page.locator('#onboarding-feed')).to_be_visible()
+    expect(page.locator('.global-now-playing')).to_contain_text('Still playing')
+    page.evaluate('window.arrivalDocument = document; window.arrivalPlayer = document.querySelector(".global-now-playing")')
+    publish_personal_mix(store, now=1)
+    expect(page.locator('#onboarding-feed')).to_have_count(0, timeout=12000)
+    expect(page.get_by_role('tab', name='Mix tapes', exact=True)).to_be_visible()
+    expect(page.locator('#home-mode-cards .gen-card')).to_have_count(4)
+    expect(page.locator('.setup-banner')).to_be_hidden()
+    expect(page.locator('.global-now-playing')).to_contain_text('Still playing')
+    assert page.evaluate('arrivalDocument === document && arrivalPlayer === document.querySelector(".global-now-playing")')
+    assert store.settings.get_setting('last_sync_at') is None
+    assert store.settings.get_setting('last_sync_outcome') == 'partial'
+    assert store.enrichment_reports.coverage_stats()['processed'] == 0
+    page.reload()
+    expect(page.get_by_role('tab', name='Mix tapes', exact=True)).to_be_visible()
+    expect(page.locator('#onboarding-feed')).to_have_count(0)
+    assert page.locator('body').evaluate('body => body.scrollWidth <= innerWidth')
+    page.screenshot(path=f'/tmp/tuneconsole-559-ready-partial-{width}.png', full_page=True)
+    assert not errors
+
+
+@pytest.mark.parametrize('width', [390, 1440])
+def test_completion_fragment_recovers_after_one_failed_fetch(live_app, store, page, width):
+    from tests.onboarding_support import finish_partial_import, publish_personal_album
+
+    finish_partial_import(store, now=1)
+    page.route('**/bridge/status', lambda route: route.fulfill(json={
+        'connected': True, 'now_playing': {'video_id': 'playing', 'title': 'Still playing',
+                                         'artist': 'Artist', 'paused': False}}))
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.goto(live_app)
+    expect(page.locator('#onboarding-feed')).to_be_visible()
+    page.evaluate('window.recoveryDocument = document; window.recoveryPlayer = document.querySelector(".global-now-playing")')
+    attempts = []
+
+    def completion(route):
+        attempts.append(route.request.method)
+        if len(attempts) == 1:
+            route.fulfill(status=503, body='Temporarily unavailable')
+        else:
+            route.continue_()
+
+    page.route(live_app + '/', completion)
+    publish_personal_album(store, now=1)
+    try:
+        expect(page.locator('#onboarding-feed')).to_have_count(0, timeout=15000)
+    except AssertionError:
+        state = page.evaluate('''() => {
+            const root = document.querySelector('#onboarding-feed');
+            const state = root && Alpine.$data(root);
+            return {snapshot: window.setupStatus?.snapshot, opening: state?._openingHome,
+                disposed: state?._disposed, retry: state?._homeRetry, delay: state?._homeRetryDelay};
+        }''')
+        pytest.fail(f'Home completion did not recover: {attempts=}, {state=}, {errors=}')
+    expect(page.get_by_role('tab', name='Long play', exact=True)).to_be_visible()
+    assert attempts == ['GET', 'GET']
+    assert page.evaluate('recoveryDocument === document && recoveryPlayer === document.querySelector(".global-now-playing")')
+    expect(page.locator('.global-now-playing')).to_contain_text('Still playing')
+    assert store.settings.get_setting('last_sync_at') is None
+    assert store.settings.get_setting('last_sync_outcome') == 'partial'
+    assert store.enrichment_reports.coverage_stats()['processed'] == 0
+    assert not errors
+
+
 def test_returning_home_recovers_a_late_mix_without_restarting_setup(live_app, store, page, tmp_path):
     from tests.conftest import seed_catalog_track
     from tests.onboarding_support import publish_personal_mix
@@ -32,7 +111,8 @@ def test_returning_home_recovers_a_late_mix_without_restarting_setup(live_app, s
     expect(page.locator('#onboarding-feed')).to_have_count(0)
     expect(page.locator('.setup-banner')).to_have_count(0)
     expect(page.locator('.global-now-playing')).to_contain_text('Still playing')
-    expect(page.locator('.mix-preparation-note')).to_be_visible()
+    expect(page.get_by_role('tab', name='Your unlocks')).to_have_attribute('aria-selected', 'true')
+    expect(page.get_by_role('tab', name='Mix tapes', exact=True)).to_be_hidden()
     page.evaluate('window.startupDocument = document; window.startupPlayer = document.querySelector(".global-now-playing")')
     page.clock.run_for(2000)
 
@@ -44,11 +124,12 @@ def test_returning_home_recovers_a_late_mix_without_restarting_setup(live_app, s
     # them before the next poll so its replacement element owns the timer.
     page.clock.run_for(2000)
     expect(board).to_have_attribute('hx-trigger', 'every 30s')
-    comfort_tracks = publish_personal_mix(store, now=1)
+    comfort_tracks = publish_personal_mix(store, now=1, count=1)
     with page.expect_response('**/home/cards?prepare_attempt=10'):
         page.clock.fast_forward(30_000)
     expect(board.locator('.gen-card')).to_have_count(1)
     expect(board.locator('.gen-row')).to_have_count(4)
+    expect(page.get_by_role('tab', name='Mix tapes', exact=True)).to_be_hidden()
     expect(page.locator('.mix-preparation-note')).to_be_hidden()
     # One usable playlist dismisses the preparation note while the incomplete
     # board keeps polling for its remaining lanes.
@@ -88,6 +169,9 @@ def test_returning_home_recovers_a_late_mix_without_restarting_setup(live_app, s
     expect(page.locator('#onboarding-feed')).to_have_count(0)
     expect(page.locator('.global-now-playing')).to_contain_text('Still playing')
     assert page.evaluate('startupDocument === document && startupPlayer === document.querySelector(".global-now-playing")')
+    with page.expect_response('**/home/growth'):
+        page.clock.fast_forward(15_000)
+    page.get_by_role('tab', name='Mix tapes', exact=True).click()
     # Settle HTMX's JavaScript timers, then await the actual CSS timeline. The
     # simulated clock does not establish that browser animations have finished.
     page.clock.run_for(2000)
@@ -128,20 +212,12 @@ def test_album_first_onboarding_preserves_player_and_opens_ready_albums(live_app
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(live_app)
     page.on('framenavigated', lambda frame: navigations.append(frame.url) if frame == page.main_frame else None)
-    expect(page.get_by_role('heading', name='Welcome to TuneConsole.')).to_be_visible()
-    expect(page.locator('.welcome-art img')).to_be_visible()
-    assert page.locator('.welcome-art img').evaluate('el => el.complete && el.naturalWidth > 1000')
+    expect(page.locator('#arrival-title')).to_be_visible()
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.locator('.welcome-copy').evaluate('el => Promise.all(el.getAnimations().map(a => a.finished))')
     page.screenshot(path=f'/tmp/tuneconsole-welcome-{width}.png', full_page=True)
-    page.get_by_role('button', name='Get started').click()
-    expect(page.get_by_role('heading', name='How do you like to listen?')).to_be_visible()
-    expect(page.locator('.listening-format-option')).to_have_count(3)
+    expect(page.get_by_role('heading', name='How do you like to listen?')).to_have_count(0)
     expect(page.locator('.global-now-playing')).to_contain_text('Still playing')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.locator('.listening-format-options').evaluate('''el => Promise.all(
-        el.getAnimations({subtree: true}).map(animation => animation.finished))''')
-    page.screenshot(path=f'/tmp/tuneconsole-format-picker-{width}.png', full_page=True)
     page.evaluate('window.firstDocument = document; window.firstPlayer = document.querySelector(".global-now-playing")')
 
     def finish_import():
@@ -150,16 +226,13 @@ def test_album_first_onboarding_preserves_player_and_opens_ready_albums(live_app
 
     if already_ready:
         finish_import()
-        # A completed shared status poll must not discard an unanswered picker.
+        # Shared status can reveal a playable room without asking for a preference.
         page.evaluate('''async () => {
             const data = await (await fetch('/home/onboard/status')).json();
             window.setupStatus.snapshot = data;
             window.dispatchEvent(new CustomEvent('setup-status', {detail: data}));
         }''')
-        expect(page.locator('#listening-format-title')).to_be_visible()
-    page.get_by_role('button', name='Start with Long play').click()
     if not already_ready:
-        expect(page.locator('.arrival-intro')).to_contain_text('next favorite records')
         expect(page.locator('#listening-format-title')).to_have_count(0)
         finish_import()
     expect(page.get_by_role('tab', name='Long play', exact=True)).to_have_attribute('aria-selected', 'true', timeout=6500)
@@ -168,7 +241,8 @@ def test_album_first_onboarding_preserves_player_and_opens_ready_albums(live_app
     expect(page.locator('#onboarding-feed')).to_have_count(0)
     expect(page.locator('main.page-setup')).to_have_count(0)
     assert page.evaluate('firstDocument === document && firstPlayer === document.querySelector(".global-now-playing")')
-    assert store.settings.get_setting('onboard_listening_format') == 'albums'
+    assert store.settings.get_setting('onboard_listening_format') is None
+    assert store.settings.get_setting('home_format') is None
     assert store.rec_proposals.get_proposals('home_prepared') is None
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.goto(live_app)
@@ -191,8 +265,6 @@ def test_successful_initial_sync_preserves_document_player_and_details(live_init
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.goto(base)
     page.on("framenavigated", lambda frame: navigations.append(frame.url) if frame == page.main_frame else None)
-    page.get_by_role('button', name='Get started').click()
-    page.get_by_role('button', name='Start with Mix tapes').click()
     expect(page.locator('#arrival-title')).to_be_visible()
     expect(page.locator("#onboarding-feed")).to_be_visible()
     player = page.locator(".global-now-playing")
@@ -275,9 +347,7 @@ def test_first_mix_arrives_before_full_sync(live_app, store, page, width, tmp_pa
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.goto(live_app)
-    page.get_by_role('button', name='Get started').click()
-    page.get_by_role('button', name='Start with Mix tapes').click()
-    expect(page.locator("#arrival-title")).to_have_text("Getting to know your music")
+    expect(page.locator("#arrival-title")).to_have_text("Welcome to TuneConsole")
     expect(page.locator("#arrival-title")).to_be_visible()
     expect(page.locator("#takeout-nag")).to_have_count(0)
     expect(page.locator("#onboarding-start")).to_contain_text("Finding something to listen to")
@@ -286,26 +356,46 @@ def test_first_mix_arrives_before_full_sync(live_app, store, page, width, tmp_pa
     page.keyboard.press("Escape")
     assert page.locator("#arrival-title").evaluate("el => getComputedStyle(el).textAlign") == "left"
     assert "Hanken Grotesk" in page.locator("#arrival-title").evaluate("el => getComputedStyle(el).fontFamily")
-    expect(page.locator(".arrival .ui-arrow, .arrival-eyebrow")).to_have_count(0)
-    expect(page.locator(".arrival-illustration")).to_be_visible()
-    assert page.locator(".arrival-illustration").evaluate("el => el.complete && el.naturalWidth > 1000")
+    expect(page.locator('.festival-intro .festival-map')).to_be_visible()
+    starting_tent = page.locator('.festival-destination[aria-label="Go to my first set"]')
+    first_art = page.locator('.festival-intro .landmark-art.is-soundcheck')
+    expect(starting_tent).to_be_visible()
+    expect(starting_tent).to_have_class(re.compile('is-untouched'))
+    assert first_art.locator('.landmark-halo').evaluate('el => getComputedStyle(el).animationName') == 'none'
+    assert first_art.locator('.landmark-halo').evaluate('el => getComputedStyle(el).opacity') == '0'
+    assert starting_tent.locator('.landmark-hit').evaluate('el => el.getBoundingClientRect().bottom < innerHeight')
+    expect(page.locator('.festival-entry-label')).to_have_count(0)
+    expect(page.locator('.festival-destination.is-untouched:not([aria-label="Go to my first set"]) .landmark-hint:visible')).to_have_count(0)
+    expect(page.locator('.account-health')).to_have_count(0)
+    expect(page.locator('.arrival-illustration')).to_have_count(0)
+    if width < 650:
+        hint = page.locator('.festival-swipe-hint')
+        expect(hint).to_be_visible()
+        assert hint.evaluate('el => el.getBoundingClientRect().left >= 0 && el.getBoundingClientRect().right <= innerWidth')
+    page.get_by_role('button', name='Mix tapes, Not started', exact=True).click()
+    preview = page.get_by_role('dialog', name='Mix tapes', exact=True)
+    expect(preview).to_be_visible()
+    expect(preview.get_by_role('button', name='Open Mix tapes', exact=True)).not_to_be_visible()
+    page.keyboard.press('Escape')
+    if width < 650:
+        expect(page.locator('.festival-swipe-hint')).to_be_hidden()
     progress = page.locator(".arrival-progress")
     expect(progress).to_be_visible()
     expect(progress).to_contain_text("Bringing in your music")
-    expect(page.locator(".arrival-learning")).to_have_text("TuneConsole's recommendations will continue improving over the next few days as we learn about your music preferences.")
-    assert page.locator('.arrival-learning').evaluate("el => getComputedStyle(el).maxWidth === 'none'")
-    assert progress.bounding_box()["y"] >= page.locator(".arrival").bounding_box()["y"] + page.locator(".arrival").bounding_box()["height"]
+    assert progress.bounding_box()['y'] >= page.locator('.festival-map').bounding_box()['y']
     assert progress.locator(".arrival-wave > span").first.evaluate("""el =>
         getComputedStyle(el).animationName === 'presync-eq'
         && getComputedStyle(el).animationPlayState === 'running'
         && getComputedStyle(el).animationIterationCount === 'infinite'""")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    page.locator(".arrival-copy").evaluate("el => Promise.all(el.getAnimations().map(animation => animation.finished))")
+    page.locator('main').evaluate('el => Promise.allSettled(el.getAnimations({subtree: true}).filter(a => a.effect.getComputedTiming().iterations !== Infinity).map(a => a.finished))')
     page.screenshot(path=str(tmp_path / f"onboarding-preparing-{width}.png"), full_page=True)
+    page.screenshot(path=f'/tmp/tuneconsole-551-soundcheck-{width}.png', full_page=True)
+    page.evaluate('window.soundcheckDocument = document; window.soundcheckPlayer = document.querySelector(".global-now-playing")')
 
     # An incomplete playlist can supply catalog evidence, but cannot seed this mix.
     store.tracks.observe_track_entry("partial", "Unverified song", "Artist", now=1)
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     fake = FakeClient(playlists=[{"playlistId": "PL1", "title": "Ready", "count": 1}],
                       tracks={"PL1": [_track("ready", "First playable song", "Artist")]})
     sync_identity(store, iid, fake, now=1)
@@ -314,14 +404,23 @@ def test_first_mix_arrives_before_full_sync(live_app, store, page, width, tmp_pa
     card = page.locator("#gen-onboard_library")
     expect(card).to_be_visible(timeout=6500)
     expect(progress).to_be_hidden()
-    expect(page.locator(".arrival-learning")).to_be_visible()
     expect(card.locator(".gen-title")).to_have_text("First playable song")
     expect(card.get_by_role("button", name="Save and play this mix")).to_be_visible()
-    expect(page.locator("#arrival-title")).to_have_text("Getting to know your music")
+    page.locator('.home-growth').evaluate('el => Alpine.$data(el).refresh()')
+    expect(starting_tent).to_have_class(re.compile('is-ready'))
+    assert first_art.locator('.landmark-halo').evaluate('el => getComputedStyle(el).animationName') == 'festival-soundcheck'
+    expect(page.locator('.festival-intro-sub')).to_have_text('Your first set is ready')
+    page.locator('.festival-first-set').click()
+    expect(card.get_by_role('button', name='Save and play this mix')).to_be_focused()
+    starting_tent.click()
+    expect(card.get_by_role('button', name='Save and play this mix')).to_be_focused()
+    page.locator('.topbar nav').get_by_role('link', name='Home', exact=True).click()
+    expect(card.get_by_role('button', name='Save and play this mix')).to_be_focused()
+    assert page.evaluate('soundcheckDocument === document && soundcheckPlayer === document.querySelector(".global-now-playing")')
     expect(card).to_contain_text("Something to listen to")
     expect(card).to_contain_text("while we complete setup for you.")
     expect(page.locator(".arrival-counts, .arrival-features, #library-import-details")).to_have_count(0)
-    expect(page.locator(".arrival")).not_to_contain_text("Welcome")
+    expect(page.locator('#arrival-title')).to_have_text('Welcome to TuneConsole')
     expect(page.locator("#onboarding-start")).not_to_have_attribute("hx-trigger", "every 3s")
     assert "Unverified song" not in card.inner_text()
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
@@ -334,7 +433,145 @@ def test_first_mix_arrives_before_full_sync(live_app, store, page, width, tmp_pa
     page.keyboard.press("Escape")
     page.locator(".starter-mix").evaluate("el => Promise.all(el.getAnimations({subtree: true}).filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).map(animation => animation.finished))")
     page.screenshot(path=f"/tmp/tuneconsole-onboarding-ready-{width}.png", full_page=True)
+    # Hearing the same upload in another playlist still does not mean the
+    # offered first set was started. The First sounds milestone stays explored.
+    store.history.record_play_event(iid, store.tracks.identity_key_for_video('ready'), 'ready', 2,
+                                    playlist_ytm_id='UNRELATED')
+    page.locator('.topbar nav').get_by_role('link', name='Home', exact=True).click()
+    expect(page.locator('.festival-intro-sub')).to_have_text('Your first set is ready')
+    page.reload()
+    expect(page.locator('.festival-intro-sub')).to_have_text('Your first set is ready')
     assert errors == []
+
+
+@pytest.mark.parametrize('width,height', [(320, 600), (390, 820), (1440, 720), (1920, 1080)])
+def test_welcome_starting_tent_is_visible_above_the_fold_and_player(live_app, store, page, width, height):
+    from tests.conftest import seed_catalog_track
+
+    seed_catalog_track(store, 'ready|artist', 'Ready to play', 'Artist', video_id='ready')
+    store.settings.set_setting('last_sync_at', '1')
+    page.route('**/bridge/status', lambda route: route.fulfill(json={
+        'connected': True, 'now_playing': {'video_id': 'ready', 'title': 'Ready to play',
+                                          'artist': 'Artist', 'paused': False}}))
+    page.route('https://i.ytimg.com/**', lambda route: route.abort())
+    page.set_viewport_size({'width': width, 'height': height})
+    page.goto(live_app)
+    expect(page.locator('.festival-intro-sub')).to_be_visible()
+    expect(page.locator('.festival-intro-sub')).to_have_text('Your first set is ready')
+    expect(page.locator('.global-now-playing')).to_contain_text('Ready to play')
+    page.evaluate('''async () => {
+        await document.fonts.ready;
+        await Promise.allSettled(document.getAnimations().filter(a =>
+            a.effect.getComputedTiming().iterations !== Infinity).map(a => a.finished));
+        await new Promise(requestAnimationFrame);
+    }''')
+    for selector in ('.global-now-playing .hs-playpause', '.festival-first-set'):
+        control = page.locator(selector)
+        expect(control).to_be_in_viewport(ratio=1)
+        assert control.evaluate('''el => {
+            const bounds = el.getBoundingClientRect();
+            return el.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2));
+        }''')
+    expect(page.locator('.festival-destination[aria-label="Go to my first set"] .landmark-hit')).to_be_in_viewport(ratio=1)
+    if width >= 1440:
+        assert page.locator('#arrival-title').evaluate('''title =>
+            title.getBoundingClientRect().height <= parseFloat(getComputedStyle(title).lineHeight) + 1''')
+    page.screenshot(path=f'/tmp/tuneconsole-564-welcome-fold-{width}.png')
+    assert page.locator('.festival-destination[aria-label="Go to my first set"] .landmark-hit').evaluate('''tent => {
+        const bounds = tent.getBoundingClientRect();
+        const player = document.querySelector('.global-now-playing').getBoundingClientRect();
+        const overlaps = bounds.left < player.right && bounds.right > player.left
+            && bounds.top < player.bottom && bounds.bottom > player.top;
+        return bounds.top >= 0 && bounds.bottom <= innerHeight && !overlaps;
+    }''')
+    # The scene begins at the top of the intro; welcome copy overlays its lake,
+    # rather than reserving an opaque header above the artwork.
+    assert page.locator('.festival-intro').evaluate('''intro => {
+        const art = intro.querySelector('.festival-map').getBoundingClientRect();
+        const frame = intro.getBoundingClientRect();
+        const copy = intro.querySelector('.festival-intro-copy').getBoundingClientRect();
+        const tent = intro.querySelector('.landmark-hit').getBoundingClientRect();
+        return Math.abs(art.top - frame.top) < 1 && Math.abs(art.left - frame.left) < 1
+            && copy.top >= art.top && copy.bottom < tent.top;
+    }''')
+    expect(page.locator('.festival-routes .growth-route:not(.is-explored):not(.is-preparing):visible')).to_have_count(0)
+    frontier = page.locator('.festival-routes .growth-route.is-preparing')
+    expect(frontier).to_have_count(1)
+    expect(frontier).to_have_attribute('data-destination', 'foundation')
+    expect(frontier).to_be_visible()
+    assert frontier.evaluate('''route => {
+        const style = getComputedStyle(route);
+        return parseFloat(style.strokeWidth) >= 24 && parseFloat(style.opacity) < .6
+            && style.strokeDasharray === 'none';
+    }''')
+
+
+def test_welcome_player_access_survives_home_return_resize_and_disconnect(live_app, store, page):
+    from pathlib import Path
+    from tests.conftest import seed_catalog_track
+
+    seed_catalog_track(store, 'ready|artist', 'Ready to play', 'Artist', video_id='ready')
+    store.settings.set_setting('last_sync_at', '1')
+    bridge = {'connected': True, 'now_playing': {'video_id': 'ready', 'title': 'Ready to play',
+        'artist': 'Artist', 'paused': False,
+        'source': {'kind': 'playlist', 'url': '/playlist/1', 'title': 'My playlist'}}}
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.route('**/bridge/status', lambda route: route.fulfill(json=bridge))
+    page.route('https://i.ytimg.com/**', lambda route: route.abort())
+    page.set_viewport_size({'width': 320, 'height': 600})
+    page.goto(live_app)
+    expect(page.locator('.festival-first-set')).to_be_visible()
+    page.evaluate('window.originalWelcomePlayer = document.querySelector(".global-now-playing")')
+
+    def receives_pointer(selector):
+        control = page.locator(selector)
+        expect(control).to_be_in_viewport(ratio=1)
+        assert control.evaluate('''el => {
+            const rect = el.getBoundingClientRect();
+            return el.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+        }''')
+
+    for width, height in ((320, 600), (390, 820), (1440, 720), (320, 600)):
+        page.set_viewport_size({'width': width, 'height': height})
+        page.evaluate('''async () => {
+            await document.fonts.ready;
+            await Promise.allSettled(document.getAnimations().filter(a =>
+                a.effect.getComputedTiming().iterations !== Infinity).map(a => a.finished));
+            await new Promise(requestAnimationFrame);
+        }''')
+        receives_pointer('.global-now-playing .hs-playpause')
+        receives_pointer('.festival-first-set')
+        expect(page.locator('.festival-intro .landmark-hit').first).to_be_in_viewport(ratio=1)
+        page.screenshot(path=f'/tmp/tuneconsole-612-player-source-{width}.png')
+    page.locator('.festival-first-set').click()
+    expect(page.locator('[data-onboarding-play]')).to_be_focused()
+    receives_pointer('.global-now-playing .hs-playpause')
+    page.locator('.topbar nav').get_by_role('link', name='Home', exact=True).click()
+    expect(page.locator('[data-onboarding-play]')).to_be_focused()
+    receives_pointer('.global-now-playing .hs-playpause')
+    assert page.evaluate('originalWelcomePlayer === document.querySelector(".global-now-playing")')
+
+    bridge['connected'] = False
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(page.locator('.global-now-playing')).to_be_hidden()
+    page.evaluate("scrollTo({top: 0, behavior: 'instant'})")
+    expect(page.locator('.arrival-progress')).to_contain_text('Open YouTube Music')
+    expect(page.locator('.festival-first-set')).to_be_hidden()
+    bridge.update(connected=True, now_playing=None)
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(page.locator('.festival-first-set')).to_be_visible()
+    expect(page.locator('.global-now-playing')).to_be_hidden()
+    page.evaluate("scrollTo({top: 0, behavior: 'instant'})")
+    page.wait_for_function('scrollY === 0')
+    page.evaluate('() => new Promise(requestAnimationFrame)')
+    receives_pointer('.festival-first-set')
+    for asset in ('home.js', 'player-card.js', 'account-growth.css'):
+        response = page.request.get(live_app + '/static/' + asset)
+        assert response.status == 200
+        assert response.body() == (Path(__file__).resolve().parents[2] /
+            'src/yt_playlist/web/static' / asset).read_bytes()
+    assert not errors
 
 
 @pytest.mark.parametrize("width", [390, 1280])
@@ -353,7 +590,8 @@ def test_setup_banner_follows_navigation_and_finishes_when_models_are_ready(live
     banner = page.locator(".setup-banner")
     expect(banner).to_be_visible()
     expect(banner).to_contain_text("Preparing your personal mixes")
-    expect(page.locator("#arrival-title")).to_have_text("Getting to know your music")
+    expect(page.locator("#arrival-title")).to_have_text("Welcome to TuneConsole")
+    expect(page.locator('.festival-intro-sub')).to_have_text('Your first set is ready')
     expect(page.locator(".arrival-features, .arrival-counts, #library-import-details")).to_have_count(0)
     expect(page.locator(".starter-context")).to_have_text("while we complete setup for you.")
     banner.get_by_role("button", name="Details").click()
@@ -362,7 +600,7 @@ def test_setup_banner_follows_navigation_and_finishes_when_models_are_ready(live
     page.keyboard.press("Escape")
     expect(page.get_by_role("dialog")).to_have_count(0)
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    page.locator(".arrival-copy").evaluate("el => Promise.all(el.getAnimations().map(animation => animation.finished))")
+    page.locator('.festival-intro').evaluate('el => Promise.all(el.getAnimations({subtree: true}).filter(a => a.effect.getComputedTiming().iterations !== Infinity).map(a => a.finished))')
     page.locator(".starter-mix").evaluate("el => Promise.all(el.getAnimations({subtree: true}).filter(animation => animation.effect.getComputedTiming().iterations !== Infinity).map(animation => animation.finished))")
     page.screenshot(path=f"/tmp/tuneconsole-onboarding-learning-{width}.png", full_page=True)
 
@@ -416,6 +654,8 @@ def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, 
     page.goto(live_app)
     card = page.locator('.starter-album')
     expect(card).to_be_visible()
+    byline = page.locator('.festival-intro-sub')
+    expect(byline).to_have_text('Your first set is ready')
     expect(card).to_contain_text('The first record')
     expect(card.locator('.starter-context')).to_have_text(
         "Here's an album to listen to while we perform initial customization.")
@@ -438,14 +678,82 @@ def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, 
         source={'kind': 'playlist', 'url': '/playlist/1'})
     page.evaluate('window.playbackStatus.refresh()')
     expect(player).not_to_have_class(re.compile('is-onboarding-cue'))
+    expect(byline).to_have_text('Your first set is ready')
     status['now_playing'].update(playlist_ytm_id='ALBUM_QUEUE', paused=True,
         source={'kind': 'album', 'url': '/album?browse=MPRE_starter', 'title': 'The first record'})
     page.evaluate('window.playbackStatus.refresh()')
     expect(player).not_to_have_class(re.compile('is-onboarding-cue'))
+    expect(byline).to_have_text('Your first set is ready')
     status['now_playing']['paused'] = False
     page.evaluate('window.playbackStatus.refresh()')
     expect(player).to_have_class(re.compile('is-onboarding-cue'))
+    expect(byline).to_have_text('Your first set is ready')
+    page.locator('.topbar nav').get_by_role('link', name='Home', exact=True).click()
+    expect(byline).to_have_text('Enjoy your first set while we prepare your account')
+    page.reload()
+    expect(byline).to_be_visible()
+    expect(byline).to_have_text('Enjoy your first set while we prepare your account')
     assert store.settings.get_setting('last_sync_at') is None
+    assert errors == []
+
+
+@pytest.mark.parametrize('player_field', ['now_playing', 'resumable_player'])
+def test_starter_album_resume_waits_for_confirmed_playback(live_app, store, page, player_field, tmp_path):
+    from urllib.parse import parse_qs, urlparse
+
+    browse = 'MPRE_paused_starter'
+    store.settings.set_setting('onboard_listening_format', 'albums')
+    store.collection.add_saved_album({'browse': browse, 'title': 'The paused first set', 'artist': 'An artist'})
+    song = {'video_id': 'album-song', 'title': 'An album song', 'artist': 'An artist',
+        'paused': True, 'source': {'kind': 'album', 'url': '/album?browse=' + browse}}
+    status = {'connected': True, 'now_playing': None, player_field: song}
+    album_requests, errors = [], []
+    page.set_viewport_size({'width': 390, 'height': 900})
+    page.route('**/bridge/status', lambda route: route.fulfill(json=status))
+    page.route('**/now-playing/toggle*', lambda route: route.fulfill(json={'ok': True}))
+    page.route('**/album/play', lambda route: (album_requests.append(route.request.url),
+        route.fulfill(status=503, body='Resume must use the existing toggle')))
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto(live_app)
+    byline = page.locator('.festival-intro-sub')
+    expect(byline).to_have_text('Your first set is ready')
+    assert page.evaluate("sessionStorage.getItem('tc-onboarding-played')") is None
+    with page.expect_request('**/now-playing/toggle*') as request:
+        page.get_by_role('button', name='Play The paused first set', exact=True).click()
+    assert request.value.method == 'POST'
+    if player_field == 'resumable_player':
+        assert parse_qs(urlparse(request.value.url).query) == {
+            'action': ['toggle'], 'resume': ['true'], 'videoId': ['album-song']}
+    assert page.evaluate("JSON.parse(sessionStorage.getItem('tc-onboarding-playback')).album") == browse
+    expect(byline).to_have_text('Your first set is ready')
+    assert page.evaluate("sessionStorage.getItem('tc-onboarding-played')") is None
+
+    # The accepted resume is only intent. Even the same item in a different
+    # album, a paused matching album, or a disconnected bridge cannot confirm it.
+    status['resumable_player'] = None
+    status['now_playing'] = {**song, 'paused': False,
+        'source': {'kind': 'album', 'url': '/album?browse=MPRE_other'}}
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(byline).to_have_text('Your first set is ready')
+    status['now_playing'].update(paused=True, source=song['source'])
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(byline).to_have_text('Your first set is ready')
+    status['connected'] = False
+    status['now_playing']['paused'] = False
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(byline).to_be_hidden()
+    assert page.evaluate("sessionStorage.getItem('tc-onboarding-played')") is None
+    expect(page.locator('.global-now-playing')).not_to_have_class(re.compile('is-onboarding-cue'))
+    status['connected'] = True
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(page.locator('.global-now-playing')).to_have_class(re.compile('is-onboarding-cue'))
+    expect(byline).to_have_text('Your first set is ready')
+    page.locator('.topbar nav').get_by_role('link', name='Home', exact=True).click()
+    expect(byline).to_have_text('Enjoy your first set while we prepare your account')
+    page.reload()
+    expect(byline).to_have_text('Enjoy your first set while we prepare your account')
+    page.screenshot(path=str(tmp_path / f'onboarding-album-resume-{player_field}-390.png'), full_page=True)
+    assert album_requests == []
     assert errors == []
 
 
@@ -475,11 +783,78 @@ def test_ready_radio_starter_uses_existing_session_controls(live_app, store, pag
     assert request.value.post_data_json['video_id'] == 'radio-seed'
     assert request.value.post_data_json['menu_id'] == 'starter-radio-offer'
     expect(page.get_by_role('button', name='Start radio with First radio song by Artist')).to_be_visible()
+    expect(page.locator('.festival-intro-sub')).to_have_text('Your first set is ready')
+    assert page.evaluate("sessionStorage.getItem('tc-onboarding-played')") is None
     assert seed_requests == []
     assert errors == []
 
 
-def test_extension_setup_and_live_import_details(live_app, page):
+@pytest.mark.parametrize('width', [320, 390])
+def test_radio_first_set_byline_waits_for_its_confirmed_playback(live_app, store, page, width):
+    from tests.conftest import seed_catalog_track
+
+    store.settings.set_setting('onboard_listening_format', 'radio')
+    seed_catalog_track(store, 'radio seed|artist', 'First radio song', 'Artist', video_id='radio-seed')
+    store.settings.set_setting('radio_seed_offer', json.dumps({'menu_id': 'starter-radio-offer',
+        'tracks': [{'key': 'radio seed|artist', 'video_id': 'radio-seed',
+                    'title': 'First radio song', 'artist': 'Artist'}]}))
+    bridge = {'connected': True, 'now_playing': {'video_id': 'other', 'title': 'Other music',
+        'artist': 'Other artist', 'paused': False, 'playlist_ytm_id': 'OTHER',
+        'source': {'kind': 'playlist', 'url': '/playlist/1'}}}
+    state = {'active': False, 'connected': True}
+    page.set_viewport_size({'width': width, 'height': 900})
+    page.route('**/bridge/status', lambda route: route.fulfill(json=bridge))
+    page.route('**/radio/status', lambda route: route.fulfill(json=state))
+    page.route('**/radio/start', lambda route: route.fulfill(json={**state, 'ok': True}))
+    page.route('**/radio/playlist*', lambda route: route.fulfill(body='<div>First radio song</div>'))
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto(live_app)
+    play = page.get_by_role('button', name='Start radio with First radio song by Artist')
+    expect(play).to_be_visible()
+    byline = page.locator('.festival-intro-sub')
+    expect(byline).to_have_text('Your first set is ready')
+    # Use the mounted component's real bootstrap shape; only the launch result
+    # and bridge reports are controlled. A successful start is still not sound.
+    initial = page.locator('.onboarding-radio .radio-home').evaluate('el => JSON.parse(JSON.stringify(Alpine.$data(el).state))')
+    state.update({**initial, 'active': True, 'starting': True, 'playlist_id': 'FIRST_RADIO'})
+    play.click()
+    expect(page.locator('.onboarding-radio .radio-launch')).to_be_visible()
+    page.wait_for_function("JSON.parse(sessionStorage.getItem('tc-onboarding-playback'))?.playlist === 'FIRST_RADIO'")
+    assert page.evaluate("JSON.parse(sessionStorage.getItem('tc-onboarding-playback')).playlist") == 'FIRST_RADIO'
+    expect(byline).to_have_text('Your first set is ready')
+    bridge['now_playing'].update(video_id='radio-seed', title='First radio song', artist='Artist',
+        playlist_ytm_id='FIRST_RADIO', paused=True, source={'kind': 'radio', 'url': '/#radio'})
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(byline).to_have_text('Your first set is ready')
+    bridge['now_playing'].update(paused=False, source={'kind': 'playlist', 'url': '/playlist/1'})
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(byline).to_have_text('Your first set is ready')
+    bridge['now_playing']['source'] = {'kind': 'radio', 'url': '/#radio'}
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(page.locator('.global-now-playing')).to_have_class(re.compile('is-onboarding-cue'))
+    expect(byline).to_have_text('Your first set is ready')
+    page.locator('.topbar nav').get_by_role('link', name='Home', exact=True).click()
+    expect(byline).to_have_text('Enjoy your first set while we prepare your account')
+    page.reload()
+    expect(page.locator('.onboarding-radio .radio-home')).to_be_visible()
+    expect(byline).to_have_text('Enjoy your first set while we prepare your account')
+    expect(byline).to_be_visible()
+    page.evaluate('''async () => {
+        await document.fonts.ready;
+        await Promise.allSettled(document.getAnimations().filter(a =>
+            a.effect.getComputedTiming().iterations !== Infinity).map(a => a.finished));
+        await new Promise(requestAnimationFrame);
+    }''')
+    expect(byline).to_be_visible()
+    assert page.locator('.festival-intro-copy').evaluate('''el => el.getBoundingClientRect().bottom
+        < document.querySelector('.festival-intro .landmark-hit').getBoundingClientRect().top''')
+    page.screenshot(path=f'/tmp/tuneconsole-564-byline-radio-{width}.png', full_page=True)
+    assert not errors
+
+
+@pytest.mark.parametrize('width', [320, 390, 1440])
+def test_extension_setup_and_live_import_details(live_app, page, width):
     connected = {"connected": False, "now_playing": None, "radio": False}
     page.route("**/bridge/status", lambda route: route.fulfill(json=connected))
     status = {"songs": 0, "covers": [], "playlists": 0, "albums": 0, "outcome": None,
@@ -488,15 +863,26 @@ def test_extension_setup_and_live_import_details(live_app, page):
     log = {"events": [], "outcome": None}
     page.route("**/home/onboard/status", lambda route: route.fulfill(json=status))
     page.route("**/sync/recent", lambda route: route.fulfill(json=log))
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(live_app)
-    page.get_by_role('button', name='Get started').click()
-    page.get_by_role('button', name='Start with Mix tapes').click()
+    expect(page.locator('#arrival-title')).to_have_text('Welcome to TuneConsole')
+    expect(page.locator('.festival-intro .festival-map')).to_be_visible()
+    expect(page.locator('.festival-destination[aria-label="Go to my first set"]')).to_be_visible()
+    assert page.locator('#arrival-title').evaluate('el => getComputedStyle(el).textAlign') == 'left'
+    first = page.locator('.landmark-art.is-soundcheck')
+    expect(first).to_have_class(re.compile('is-untouched'))
+    assert first.locator('.landmark-halo').evaluate('el => getComputedStyle(el).animationName') == 'none'
+    assert first.locator('.landmark-halo').evaluate('el => getComputedStyle(el).opacity') == '0'
+    expect(page.locator('.festival-routes .growth-route:visible')).to_have_count(0)
+    assert page.locator('body').evaluate('body => body.scrollWidth <= innerWidth')
     install = page.get_by_role("link", name="Get the extension")
     expect(install).to_be_visible()
     expect(page.locator(".arrival-progress")).to_be_hidden()
     expect(page.get_by_role("link", name="YouTube Music", exact=True)).to_be_visible()
     page.locator("main").evaluate("el => Promise.all(el.getAnimations({subtree: true}).filter(a => a.effect.getComputedTiming().iterations !== Infinity).map(a => a.finished))")
-    page.screenshot(path="/tmp/tuneconsole-onboarding-connect.png", full_page=True)
+    page.screenshot(path=f'/tmp/tuneconsole-551-festival-entry-{width}.png', full_page=True)
     page.locator(".setup-banner").get_by_role("button", name="Details").click()
     details = page.get_by_role("dialog")
     expect(details).to_be_visible()
@@ -506,11 +892,13 @@ def test_extension_setup_and_live_import_details(live_app, page):
     status["setup"].update(running=True, activity="playlists", current=2, target=5)
     log["events"].append({"type": "info", "text": "Reading playlist 2 of 5: Confessionals"})
     page.evaluate("window.dispatchEvent(new CustomEvent('bridge-status', {detail: {connected: true}}))")
+    expect(page.locator('#arrival-title')).to_have_text('Welcome to TuneConsole')
     expect(install).to_be_hidden()
     expect(page.locator(".setup-banner-step")).to_have_text("Reading playlist 2 of 5", timeout=6500)
     expect(page.locator(".arrival-progress")).to_be_visible()
     expect(page.locator(".arrival-progress")).to_contain_text("Reading playlist 2 of 5")
     expect(details.get_by_text("Reading playlist 2 of 5: Confessionals")).to_be_visible(timeout=6500)
+    assert first.locator('.landmark-halo').evaluate('el => getComputedStyle(el).animationName') == 'none'
     status["setup"]["running"] = False
     status["outcome"] = "partial"
     log["events"].append({"type": "err", "text": "Library partially updated."})
@@ -523,6 +911,9 @@ def test_extension_setup_and_live_import_details(live_app, page):
     expect(page.locator(".arrival-progress")).to_contain_text("Open YouTube Music to continue setup", timeout=6500)
     expect(page.locator(".arrival-progress")).to_be_visible()
     assert page.locator(".arrival-wave > span").first.evaluate("el => getComputedStyle(el).animationName === 'none'")
+    expect(first).to_have_class(re.compile('is-untouched'))
+    assert first.locator('.landmark-halo').evaluate('el => getComputedStyle(el).opacity') == '0'
+    assert errors == []
 
 
 @pytest.mark.parametrize("width", [320, 1440])

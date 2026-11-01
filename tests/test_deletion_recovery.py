@@ -21,7 +21,7 @@ def deletion(tmp_path, monkeypatch):
     database = tmp_path / "deletion.db"
     store = Store(database)
     store.init_schema()
-    identity = store.identities.upsert_identity("Main", "bridge", None, True)
+    identity = store.accounts.upsert_account("Main", "bridge", None, True)
     source = store.playlists.upsert_playlist(identity, "SOURCE", "Source", 2, "", 1)
     keeper = store.playlists.upsert_playlist(identity, "KEEP", "Keeper", 2, "", 1)
     client = RecoveryClient({"SOURCE": ["a", "b"], "KEEP": ["a", "b"]})
@@ -170,9 +170,12 @@ def test_backup_and_intent_are_committed_before_transport_and_survive_lost_reply
             assert action.status == "delete_pending"
             undo = json.loads(action.undo_json)
             entry, = undo["deletions"]
-            assert entry["phase"] == "pending" and entry["ytm"] == playlist_id
+            assert entry["phase"] == "uncertain" and entry["ytm"] == playlist_id
+            step = reader.conn.execute("SELECT phase,outcome,backup_status,claim_token FROM action_steps "
+                                       "WHERE action_id=? AND operation='delete_playlist'",(action.id,)).fetchone()
+            assert tuple(step[:3])==('uncertain','unknown','verified') and step['claim_token']
             backup = json.loads(Path(entry["backup"]).read_text())
-            assert backup["ytm_playlist_id"] == playlist_id
+            assert backup["provider_playlist_id"] == playlist_id
             assert [t["video_id"] for t in backup["tracks"]] == ([] if operation == "empty" else ["a", "b"])
         finally:
             reader.conn.close()
@@ -218,13 +221,13 @@ def test_restart_after_remote_delete_recovers_local_or_completion_failure(deleti
                 raise OSError("Local database unavailable")
             patch.setattr(store.playlists, "remove_playlist", fail)
         else:
-            update = store.actions.update_action
+            update = store.actions.save_deletion_progress
 
-            def fail(action_id, status, *args, **kwargs):
-                if status == "executed":
+            def fail(action_id, undo, *args, **kwargs):
+                if playlist_deletion.deletion_status(undo) == "executed":
                     raise SystemExit("Process interrupted before completion recording")
-                return update(action_id, status, *args, **kwargs)
-            patch.setattr(store.actions, "update_action", fail)
+                return update(action_id, undo, *args, **kwargs)
+            patch.setattr(store.actions, "save_deletion_progress", fail)
         with pytest.raises((OSError, SystemExit)):
             executor.delete_playlist(store, source, client, 2)
     action, = store.actions.get_actions()

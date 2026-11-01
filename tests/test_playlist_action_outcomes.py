@@ -9,7 +9,7 @@ from yt_playlist.web.app import create_app
 
 @pytest.fixture
 def library(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     first = store.playlists.upsert_playlist(iid, "PLA", "Alpha", 0, "", 0)
     second = store.playlists.upsert_playlist(iid, "PLB", "Beta", 0, "", 0)
     client = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1),

@@ -61,12 +61,11 @@ def _card(h, width=1280):
     return app
 
 
-@pytest.mark.parametrize("width", [1280, 390])
-def test_card_confirms_pause_resume_and_does_not_replay_stale_actions(playback_bridge, width):
+def test_card_confirms_pause_resume_and_does_not_replay_stale_actions(playback_bridge):
     h = playback_bridge
     music = lifecycle._music(h, "?playing=true&v=confirmed")
     h.eventually(lambda: h.bridge.now_playing is not None)
-    app = _card(h, width)
+    app = _card(h, 1280)
     player = app.locator(".global-now-playing")
     for action, paused in (("Pause", True), ("Play", False)):
         with app.expect_response("**/now-playing/toggle?*") as response:

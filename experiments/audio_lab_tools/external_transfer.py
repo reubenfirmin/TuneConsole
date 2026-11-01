@@ -4,6 +4,7 @@ Gold remains human-labeled; the silver prediction set is never promoted to gold.
 This is a small developer diagnostic, not a product-wide acceptance test.
 """
 import json
+import hashlib
 from pathlib import Path
 import time
 
@@ -11,7 +12,8 @@ import numpy as np
 from threadpoolctl import threadpool_limits
 
 from .external_experiment import LAB, OUT, digest, normalize, save, stamp
-from .external_training import ALPHAS, SEED, choose_alpha, fit_path, folds, predict
+from .external_training import ALPHAS, SEED, choose_alpha, fit_path, folds, predict, validation_groups
+from .external_secondary import artist_keys, identity
 
 SNAPSHOT = LAB / 'local/vibe-gold-silver-20261028T010856Z-evaluation.dataset.json'
 VIBES = ('relax', 'concentrate', 'cruise', 'energize', 'uplift', 'release')
@@ -45,18 +47,27 @@ def evaluate_transfer(datasets):
         return _evaluate_transfer(datasets)
 
 
-def external_head_features(datasets, gold):
+def excluded_identities(index, protected):
+    """Use identities only, including reserved rows whose labels stay unopened."""
+    artists = {key for row in protected for key in artist_keys(row.get('artist', ''))}
+    titles = {identity(row['title']) for row in protected if row.get('title')}
+    return [row for row in index if artist_keys(row.get('artist', '')) & artists
+            or (identity(row.get('title', '')) in titles if row.get('title') else False)]
+
+
+def external_head_features(datasets, gold, *, identity_exclusions=()):
     """Freeze native heads, excluding identifiable gold overlaps before fitting."""
     embeddings = np.array([row['embedding_values'] for row in gold])
     if embeddings.shape != (len(gold), 200) or not np.isfinite(embeddings).all():
         raise ValueError('Gold snapshot does not contain compatible 200-dimensional embeddings')
-    gold_artists = {normalize(row['artist']) for row in gold if row['artist']}
-    gold_titles = {normalize(row['title']) for row in gold if row['title']}
     external_features, external_names, overlaps, signatures, frozen_heads = [], [], {}, set(), {}
     for dataset in datasets:
         model_path = OUT / 'models' / f'{dataset}.embedding.json'
         model = json.loads(model_path.read_text())
-        index = json.loads((OUT / f'{dataset}.features.json').read_text())['rows']
+        source_path = OUT / f'{dataset}.features.json'
+        if model.get('source_sha256') != digest(source_path):
+            raise ValueError('Native model is stale for current features: ' + dataset)
+        index = json.loads(source_path.read_text())['rows']
         # Verify upstream representation identity, including actual weight hashes.
         from yt_playlist.core.audio_embedding import signature
         example = json.loads(Path(index[0]['feature_file']).read_text())['prediction']
@@ -65,19 +76,34 @@ def external_head_features(datasets, gold):
         signatures.add(native_signature)
         if any(row['embedding_signature'] != native_signature for row in gold):
             raise ValueError('External and gold embeddings use different model provenance')
-        excluded = [row for row in index if (normalize(row['artist']) in gold_artists
-                    or normalize(row['title']) in gold_titles)]
+        excluded = excluded_identities(index, [*gold, *identity_exclusions])
         overlaps[dataset] = [row['id'] for row in excluded]
         if excluded:
             excluded_ids = {row['id'] for row in excluded}
             retained = [row for row in index if row['id'] not in excluded_ids]
-            x = np.array([json.loads(Path(row['feature_file']).read_text())['prediction']['embedding']['values']
-                          for row in retained])
-            y = np.array([row['targets'] for row in retained])
-            names = model['target_names']
-            selection = [i for i, name in enumerate(names) if name.startswith(('Emotion-', 'Usage-'))]
-            alpha = choose_alpha(x, y, [row['group'] for row in retained], selection or list(range(len(names))))
-            fitted = fit_path(x, y, [alpha])[0]
+            if len({row['group'] for row in retained}) < 3:
+                raise ValueError('Too few disjoint native training groups: ' + dataset)
+            provenance = {'dataset': dataset, 'source_sha256': digest(source_path),
+                'model_sha256': digest(model_path), 'excluded_ids': sorted(excluded_ids),
+                'trainer_sha256': digest(Path(__file__).with_name('external_training.py'))}
+            key = hashlib.sha256(json.dumps(provenance, sort_keys=True).encode()).hexdigest()
+            cache = OUT / 'native-head-cache' / ('ridge-' + key + '.json')
+            if cache.exists():
+                entry = json.loads(cache.read_text())
+                if entry['provenance'] != provenance:
+                    raise ValueError('Native ridge cache provenance mismatch')
+                fitted = {key: np.asarray(value) if isinstance(value, list) else value
+                          for key, value in entry['model'].items()}
+            else:
+                x = np.array([json.loads(Path(row['feature_file']).read_text())['prediction']['embedding']['values']
+                              for row in retained])
+                y = np.array([row['targets'] for row in retained])
+                names = model['target_names']
+                selection = [i for i, name in enumerate(names) if name.startswith(('Emotion-', 'Usage-'))]
+                alpha = choose_alpha(x, y, validation_groups(retained), selection or list(range(len(names))))
+                fitted = fit_path(x, y, [alpha])[0]
+                save(cache, {'provenance': provenance, 'model': {
+                    key: value.tolist() if isinstance(value, np.ndarray) else value for key, value in fitted.items()}})
         else:
             fitted = {key: np.array(model[key]) for key in ['medians', 'mean', 'scale', 'weights', 'intercept']}
         names = model['target_names']
@@ -87,6 +113,7 @@ def external_head_features(datasets, gold):
         external_names.extend(f'{dataset}:{names[i]}' for i in use)
         frozen_heads[dataset] = {'target_names': names, 'selected_columns': use,
                                 'source_model_sha256': digest(model_path),
+                                'source_features_sha256': digest(OUT / f'{dataset}.features.json'),
                                 'excluded_ids': overlaps[dataset],
                                 'model': {key: value.tolist() if isinstance(value, np.ndarray) else value
                                           for key, value in fitted.items()}}

@@ -11,7 +11,8 @@ import json
 import numpy as np
 
 from yt_playlist.library.listen_derive import classify_exit
-from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.core import entity_names
+from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
 
 
 class ModesRepo(Repo):
@@ -27,7 +28,7 @@ class ModesRepo(Repo):
             'rep_keys=excluded.rep_keys,last_seen=excluded.last_seen,space=excluded.space,active=1', rows)
         self.conn.executemany('UPDATE taste_modes SET active=0 WHERE mode_id=?', [(mid,) for mid in retired])
 
-    @synchronized
+    @snapshot_read
     def list_modes(self, active_only=True) -> list[dict]:
         sql = "SELECT * FROM taste_modes"
         if active_only:
@@ -56,6 +57,9 @@ class ModesRepo(Repo):
 
     @synchronized
     def replace_modes(self, upserts, retired_ids, now) -> None:
+        upserts = list(upserts)
+        if any(type(row['size']) is not int or row['size']<0 for row in upserts):
+            raise ValueError('Mode size must be a nonnegative integer')
         now = float(now)
         for u in upserts:
             blob = np.asarray(u["centroid"], dtype=np.float32).tobytes()
@@ -70,7 +74,7 @@ class ModesRepo(Repo):
                 "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?) ON CONFLICT(mode_id) DO UPDATE SET "
                 "label=excluded.label,families=excluded.families,centroid=excluded.centroid,"
                 "size=excluded.size,rep_keys=excluded.rep_keys,active=1,last_seen=excluded.last_seen,space=excluded.space",
-                (u["mode_id"], u["label"], fam, blob, int(u["size"]), reps, first_seen, now,
+                (u["mode_id"], u["label"], fam, blob, u["size"], reps, first_seen, now,
                  u.get("space") or ""))
         for mid in retired_ids:
             self.conn.execute("UPDATE taste_modes SET active=0 WHERE mode_id=?", (mid,))
@@ -129,9 +133,9 @@ class ModesRepo(Repo):
             raise
 
     @synchronized
-    def log_pick(self, playlist_id, mode_id, now, ranker=None) -> None:
+    def log_pick(self, membership_ref_id, mode_id, now, ranker=None) -> None:
         """Record a Save & play of a mode card, with the in-mode ranker it was served under (#57).
-        Idempotent per playlist_id.
+        Idempotent per membership_ref_id.
 
         This is MODE-LEVEL signal, deliberately exempt from the GENERATED_GROUP quarantine (see
         repos/base.py). Each generated playlist is built from one taste mode, so the user choosing to
@@ -145,12 +149,13 @@ class ModesRepo(Repo):
         with self.conn:
             # A historical caller may only retain the local handle. Keep its context
             # unknown; allocating future memberships must never reuse that handle.
-            self.conn.execute('INSERT OR IGNORE INTO playlist_membership_refs(id) VALUES (?)',(int(playlist_id),))
+            self.conn.execute('INSERT OR IGNORE INTO main.playlist_membership_refs(id) VALUES (?)',(int(membership_ref_id),))
+            picks = entity_names.owner(self.conn, 'rec_mode_picks')
             self.conn.execute(
-                "INSERT OR IGNORE INTO rec_mode_picks(playlist_id, mode_id, ranker, created_at) "
-                "VALUES (?, ?, ?, ?)", (int(playlist_id), int(mode_id), ranker, float(now)))
+                f'INSERT OR IGNORE INTO {picks.table}({picks.column("membership_ref_id")}, mode_id, ranker, created_at) '
+                "VALUES (?, ?, ?, ?)", (int(membership_ref_id), int(mode_id), ranker, float(now)))
 
-    @synchronized
+    @lookup_read
     def epoch_started_at(self, epoch):
         """First display of this menu, used to defer its feedback until the next rotation."""
         row = self.conn.execute(
@@ -158,7 +163,7 @@ class ModesRepo(Repo):
             (int(epoch),)).fetchone()
         return row["started"]
 
-    @synchronized
+    @snapshot_read
     def impression_counts(self, since=None, *, before=None) -> dict:
         sql = "SELECT mode_id, COUNT(*) c FROM rec_mode_impressions WHERE mode_id IS NOT NULL"
         args = []
@@ -173,7 +178,7 @@ class ModesRepo(Repo):
 
     @synchronized
     def pick_rows(self, since=None, *, before=None) -> list:
-        sql = "SELECT playlist_id, mode_id FROM rec_mode_picks WHERE mode_id IS NOT NULL"
+        sql = "SELECT membership_ref_id, mode_id FROM rec_mode_picks WHERE mode_id IS NOT NULL"
         args = []
         if since is not None:
             sql += " AND created_at >= ?"
@@ -181,9 +186,9 @@ class ModesRepo(Repo):
         if before is not None:
             sql += " AND created_at < ?"
             args.append(float(before))
-        return [(r["playlist_id"], r["mode_id"]) for r in self.conn.execute(sql, args).fetchall()]
+        return [(r["membership_ref_id"], r["mode_id"]) for r in self.conn.execute(sql, args).fetchall()]
 
-    @synchronized
+    @snapshot_read
     def pick_counts(self, since=None, *, before=None) -> dict:
         """Compact effective choice evidence; playlist handles are needed only for engagement."""
         return {r["mode_id"]: r["n"] for r in self.conn.execute(
@@ -200,20 +205,20 @@ class ModesRepo(Repo):
         Exits remain raw; skips/completions are classified at read time with the shared rules.
         Plays and exits are queried separately so joining them cannot multiply either count.
         """
-        cohort = "FROM rec_mode_picks mp JOIN playlist_membership_refs m ON m.id=mp.playlist_id JOIN playlist_scopes s ON s.ref=m.scope_ref "
+        cohort = "FROM rec_mode_picks mp JOIN playlist_membership_refs m ON m.id=mp.membership_ref_id JOIN playlist_scopes s ON s.id=m.playlist_scope_id "
         bounds = "(:since IS NULL OR mp.created_at>=:since)"
         args = {"since": since}
         rows = self.conn.execute(
-            "SELECT mp.playlist_id id, COUNT(pe.id) plays, MAX(pe.played_at) last_play " + cohort +
-            "LEFT JOIN play_events pe ON pe.playlist_ytm_id=s.provider_id "
-            "AND pe.identity_id=m.identity_id AND pe.played_at>=mp.created_at "
-            f"WHERE {bounds} GROUP BY mp.playlist_id", args).fetchall()
+            "SELECT mp.membership_ref_id id, COUNT(pe.id) plays, MAX(pe.played_at) last_play " + cohort +
+            "LEFT JOIN play_events pe ON pe.playlist_ytm_id=s.provider_playlist_id "
+            "AND pe.account_id=m.account_id AND pe.played_at>=mp.created_at "
+            f"WHERE {bounds} GROUP BY mp.membership_ref_id", args).fetchall()
         stats = {r["id"]: {"plays": r["plays"], "last_play": r["last_play"],
                             "skips": 0, "completions": 0} for r in rows}
         exits = self.conn.execute(
-            "SELECT mp.playlist_id id, pe.position, pe.duration " + cohort +
-            "JOIN player_events pe ON pe.playlist_ytm_id=s.provider_id "
-            "AND pe.identity_id=m.identity_id AND pe.at>=mp.created_at "
+            "SELECT mp.membership_ref_id id, pe.position, pe.duration " + cohort +
+            "JOIN player_events pe ON pe.playlist_ytm_id=s.provider_playlist_id "
+            "AND pe.account_id=m.account_id AND pe.at>=mp.created_at "
             f"WHERE {bounds} AND pe.kind IN ('track_exit', 'bye')", args).fetchall()
         for event in exits:
             verdict = classify_exit(event["position"], event["duration"])

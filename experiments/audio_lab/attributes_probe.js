@@ -2,7 +2,7 @@
 importScripts('runtime_loader.js');
 self.onmessage = async () => {
   try {
-    const model = await self.loadResearchRuntime();
+    const model = await self.loadAudioRuntime();
     await model.verify('meyda.min.js');
     importScripts('vendor/meyda.min.js');
     const {measureAudio} = await import('./audio_attributes.js');

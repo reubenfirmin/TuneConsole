@@ -4,7 +4,10 @@ from urllib.parse import quote
 import pytest
 from playwright.sync_api import expect
 
-from yt_playlist.rec import home_prepared, into_recently
+from tests.browser_clock_support import discovery_dwell, discovery_interval
+from tests.home_fixture_support import publish_menu
+from tests.visual_support import capture
+from yt_playlist.rec import into_recently
 
 
 def _art(index):
@@ -21,7 +24,8 @@ def _art(index):
 
 
 @pytest.mark.parametrize('width', [1440, 1000, 390])
-def test_story_collection_has_clear_reading_links_and_room_to_scroll(live_app, store, page, width):
+def test_story_collection_has_clear_reading_links_and_room_to_scroll(
+        live_app, store, page, width, unlocked_home_controls):
     names = ['Minimal', 'Robert Hood', 'Daniel Bell', 'Dub techno', 'Basic Channel', 'Floating Points',
              'Shoegaze', 'Slowdive', 'My Bloody Valentine']
     extracts = [
@@ -121,11 +125,12 @@ def test_story_collection_has_clear_reading_links_and_room_to_scroll(live_app, s
     expect(first_play.locator('svg')).to_have_css('opacity', '0')
     page.locator('.into-grid img').evaluate_all("imgs => imgs.forEach(img => img.loading = 'eager')")
     page.wait_for_function("[...document.querySelectorAll('.into-grid img')].every(img => img.complete)")
-    page.screenshot(path=f'/tmp/tuneconsole-stories-{width}.png', full_page=True, animations='disabled')
-    page.screenshot(path=f'/tmp/tuneconsole-stories-{width}-top.png', animations='disabled')
+    capture(page, path=f'/tmp/tuneconsole-stories-{width}.png', full_page=True, animations='disabled')
+    capture(page, path=f'/tmp/tuneconsole-stories-{width}-top.png', animations='disabled')
 
 
-def test_story_cooldown_only_counts_visible_headings_and_ignores_fragment_polls(live_app, store, page):
+def test_story_cooldown_only_counts_visible_headings_and_ignores_fragment_polls(
+        live_app, store, page, unlocked_home_controls):
     cards = [{'kind': 'artist', 'subject': f'artist:Band {i}', 'display': f'Band {i}',
               'extract': 'A full paragraph about the band. ' * 30, 'thumbnail': _art(i),
               'url': f'http://wiki/Band_{i}', 'color': 'var(--accent)', 'seed': f'Band {i}',
@@ -134,25 +139,31 @@ def test_story_cooldown_only_counts_visible_headings_and_ignores_fragment_polls(
         {'schema': into_recently.SCHEMA, 'built_at': 1, 'cards': cards, 'pending': False}, 1)
     store.settings.set_setting('last_sync_at', '1')
     store.settings.set_setting('onboard_dismissed', '1')
-    assert home_prepared.prepare(store, 1) is not None
     page.set_viewport_size({'width': 1000, 'height': 650})
+    publish_menu(store, 1)
+    page.clock.install()
     page.goto(live_app + '/')
+    # Home loads this panel on demand. Exercise an already loaded but hidden
+    # fragment before opening the tab, as happens after navigating away from it.
+    fragment = page.locator('[data-dash="recent"] > div')
+    fragment.evaluate("el => htmx.trigger(el, 'home-area-open')")
+    expect(fragment).to_have_attribute('data-loaded', '1')
     headings = page.locator('[data-story-subject]')
     expect(headings).to_have_count(3)
     expect(headings.first).to_be_hidden()
-    page.wait_for_timeout(1100)
+    discovery_interval(page, headings.first)
     assert store.rec_ledger.story_views() == {}
     page.get_by_role('tab', name='Into recently', exact=True).click()
     headings.first.scroll_into_view_if_needed()
-    page.wait_for_timeout(1100)
+    discovery_dwell(page, headings.first, '/home/into-recently/impressions')
     views = store.rec_ledger.story_views()
     assert views['artist:Band 0']['views'] == 1
     assert 'artist:Band 2' not in views
     page.evaluate("""async () => htmx.ajax('GET', '/home/into-recently', {
         target: '[data-dash="recent"] > div', swap: 'innerHTML'})""")
     headings.first.scroll_into_view_if_needed()
-    page.wait_for_timeout(1100)
+    discovery_interval(page, headings.first)
     assert store.rec_ledger.story_views()['artist:Band 0']['views'] == 1
     headings.last.scroll_into_view_if_needed()
-    page.wait_for_timeout(1100)
+    discovery_dwell(page, headings.last, '/home/into-recently/impressions')
     assert store.rec_ledger.story_views()['artist:Band 2']['views'] == 1

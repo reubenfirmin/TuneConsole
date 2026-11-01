@@ -15,7 +15,7 @@ from yt_playlist.util.matching import identity_key
 def _stock(store):
     """A library dominated by Techno (8 tracks) with a rare Jazz tail (2). Returns the two candidate
     keys (one of each family) plus the identity so callers can steer breadth."""
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     kt = kj = None
     for i in range(8):
         t = store.tracks.upsert_track(f"t{i}", f"T{i}", "DJ", None, None)
@@ -67,6 +67,8 @@ def test_factors_are_clamped_to_a_sane_range():
 def test_eclectic_bias_ranks_rare_family_above_dominant(store):
     """End-to-end through the real re-rank hook: eclectic lifts a Jazz track over a Techno track."""
     _iid, kt, kj = _stock(store)
+    # No genre sliders are active: breadth must defeat the neutral early return.
+    assert scoring._axis_weights_for(store, [kt, kj], now=10.0) is None
     rec_params.set_param(store, "breadth_bias", 1.0)
     mult = scoring._axis_weights_for(store, [kt, kj], now=10.0)
     assert mult is not None and mult[kj] > mult[kt]
@@ -78,14 +80,6 @@ def test_focused_bias_ranks_dominant_family_above_rare(store):
     rec_params.set_param(store, "breadth_bias", -1.0)
     mult = scoring._axis_weights_for(store, [kt, kj], now=10.0)
     assert mult is not None and mult[kt] > mult[kj]
-
-
-def test_breadth_bias_keeps_overlay_alive_when_weights_neutral(store):
-    """A set breadth bias must defeat the all-neutral early-return, or the dial would do nothing on a
-    fresh model with no genre sliders touched."""
-    _iid, kt, kj = _stock(store)
-    rec_params.set_param(store, "breadth_bias", 1.0)
-    assert scoring._axis_weights_for(store, [kt, kj], now=10.0) is not None
 
 
 def test_neutral_breadth_bias_changes_nothing(store):

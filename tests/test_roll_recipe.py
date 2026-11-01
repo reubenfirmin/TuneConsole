@@ -6,7 +6,7 @@ from yt_playlist.util.matching import identity_key
 
 
 def _seed_two_genres(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     # lots of techno, a little folk, all played so they have mass in the distributions
     tech = [store.tracks.upsert_track(f"t{i}", f"T{i}", "TB", None, None) for i in range(8)]
     folk = [store.tracks.upsert_track(f"f{i}", f"F{i}", "FB", None, None) for i in range(2)]
@@ -49,7 +49,7 @@ def test_roll_recipe_respects_muted_genre(store):
 
 def test_roll_recipe_transient_suppresses_disfavored_genre(store):
     # two genres equally present in the library
-    iid = store.identities.upsert_identity("main", "cred2", None, True)
+    iid = store.accounts.upsert_account("main", "cred2", None, True)
     for i in range(5):
         h = store.tracks.upsert_track(f"h{i}", f"H{i}", f"DJ{i}", None, None, 1); store.tracks.set_track_genre(h, "deep house")
         j = store.tracks.upsert_track(f"j{i}", f"J{i}", f"Sx{i}", None, None, 1); store.tracks.set_track_genre(j, "jazz")
@@ -61,10 +61,10 @@ def test_roll_recipe_transient_suppresses_disfavored_genre(store):
     for i in range(5):
         store.rec_signals.record_mood([identity_key(f"H{i}", f"DJ{i}")], -2, now=10.0)
     # roll many recipes; house should be picked far less than jazz
-    house = sum(1 for s in range(200)
-                if "house" in str(recipes.roll_recipe(store, "wheelhouse", seed=s, now=10.0)["facets"].get("genres", [])).lower())
-    jazz = sum(1 for s in range(200)
-               if recipes.roll_recipe(store, "wheelhouse", seed=s, now=10.0)["facets"].get("genres", []) == ["jazz"])
+    genres = [recipes.roll_recipe(store, "wheelhouse", seed=s, now=10.0)["facets"].get("genres", [])
+              for s in range(200)]
+    house = sum("house" in str(sample).lower() for sample in genres)
+    jazz = sum(sample == ["jazz"] for sample in genres)
     assert house < jazz                                          # transient "less house" steers generation
 
 
@@ -86,7 +86,7 @@ def test_roll_recipe_owned_lanes_can_roll_other_journeys(store):
 def test_theme_filter_puts_matching_genre_first(store):
     from yt_playlist.util import genre_map
     from yt_playlist.rec import surfaces
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     h = store.tracks.upsert_track("v1", "H", "HArt", None, None); store.tracks.set_track_genre(h, "House")
     f = store.tracks.upsert_track("v2", "F", "FArt", None, None); store.tracks.set_track_genre(f, "Folk")
     items = [surfaces.ForYouItem("F", "FArt", "", "v2", None, 0, "", "folk|fart"),

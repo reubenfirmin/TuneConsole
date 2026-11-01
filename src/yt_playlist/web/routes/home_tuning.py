@@ -6,12 +6,12 @@ from fastapi.responses import JSONResponse
 
 from yt_playlist.rec import home_prepared, home_vibe, mix_tuning, rec_params
 from yt_playlist.rec.home_cards import _epoch
-from yt_playlist.util import genre_map
 from yt_playlist.web.context import form_float, request_form
+from yt_playlist.web.routes.home_access import guard
 
 
 def build(ctx, views):
-    router = APIRouter()
+    router = APIRouter(dependencies=[Depends(guard(ctx, 'directions'))])
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
 
     @router.post("/home/other-genres")
@@ -30,7 +30,7 @@ def build(ctx, views):
             store.rec_ledger.refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
             store.rec_proposals.put_proposals("home_genre_request", {
                 "epoch": _epoch(store, "cards"),
-                "avoid_genres": sorted({genre_map.family(g) for g in genres}),
+                "avoid_genres": sorted({axis[0] for axis in store.genres.feature_axes(genres).values()}),
                 **({'held_by_vibe': True} if store.settings.get_setting(home_vibe.SETTING) else {}),
             }, now)
         return views.cards_safe(request, now)
@@ -51,7 +51,7 @@ def build(ctx, views):
             }, now)
         return views.cards_safe(request, now)
 
-    @router.post("/home/vibe")
+    @router.post("/home/vibe", dependencies=[Depends(guard(ctx, 'vibes'))])
     def home_vibe_change(request: Request, form=Depends(request_form)):
         vibe = form.get("vibe", "")
         if vibe and vibe not in home_vibe.PRESETS:
@@ -151,16 +151,19 @@ def build(ctx, views):
         library-scoped clusters list, this is the whole map, so you can pin a bar for a genre you have
         zero plays of yet. Each option: {name, kind: 'family'|'genre'}; the Alpine picker filters it
         client-side (so reset/close are instant) and posts a pick to /home/fingerprint/add."""
-        fams = genre_map.all_families()
+        taxonomy = store.genres.taxonomy()
+        fams = sorted(taxonomy['families'])
         seen = set(fams)
         options = [{"name": f, "kind": "family"} for f in fams]
-        options += [{"name": g, "kind": "genre"} for g in genre_map.all_genres() if g not in seen]
+        options += [{"name": row['key'], "label": row['name'], "kind": "genre"}
+                    for row in taxonomy['genres'] if row['key'] not in seen]
         prepared = views.prepared(now_fn()) or {}
         plays = {g.lower(): count for g, count in
                  (prepared.get("fingerprint") or {}).get("genre_plays", {}).items()}
         family_plays = {}
+        axes = store.genres.feature_axes(plays)
         for genre, count in plays.items():
-            family = genre_map.family(genre)
+            family = axes[genre][0]
             family_plays[family] = family_plays.get(family, 0) + count
         options.sort(key=lambda o: (-(family_plays.get(o["name"], 0) if o["kind"] == "family"
                                      else plays.get(o["name"], 0)), o["name"]))

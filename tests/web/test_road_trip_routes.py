@@ -18,7 +18,7 @@ from tests.conftest import FakeClient
 
 
 def _app(store, client=None, monkeypatch=None):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     if monkeypatch is not None:
         # Run the "fill in their half" worker inline, so a build is complete when the POST returns.
         # Its own staging is covered by test_build_returns_your_half_immediately below.
@@ -501,7 +501,7 @@ def test_saving_the_draft_creates_the_generated_playlist(store, monkeypatch):
     # what was on screen is exactly what was sent, in order
     assert client.added == [(recipe["last_playlist_id"], picks)]
     assert store.road_trip.get_road_trip_draft(rid)["saved_playlist_id"] == recipe["last_playlist_id"]
-    playlist = next(p for p in store.playlists.get_playlists() if p.ytm_playlist_id == recipe["last_playlist_id"])
+    playlist = next(p for p in store.playlists.get_playlists() if p.provider_playlist_id == recipe["last_playlist_id"])
     assert f'window.location.assign("/playlist/{playlist.id}")' in r.text
     assert "music.youtube.com/watch?list=" + recipe["last_playlist_id"] in r.text
     assert "__ytTab" in r.text

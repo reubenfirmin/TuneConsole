@@ -21,12 +21,12 @@ logger = logging.getLogger(__name__)
 
 def _verified_imports(conn):
     return conn.execute(
-        "SELECT id,identity_id,coverage_start,coverage_end FROM takeout_imports "
+        "SELECT id,account_id,coverage_start,coverage_end FROM takeout_imports "
         "WHERE account_verified=1 AND complete=1 AND unparsed_dates=0 "
         "AND coverage_start IS NOT NULL AND coverage_end > coverage_start ORDER BY id").fetchall()
 
 
-def takeout_windows(conn, identity_id):
+def takeout_windows(conn, account_id):
     """Whole UTC days covered by each verified import; never bridge disjoint uploads.
 
     Both partial boundary days are excluded. Observed first/last event times are deliberately
@@ -34,7 +34,7 @@ def takeout_windows(conn, identity_id):
     """
     windows = []
     for row in _verified_imports(conn):
-        if row['identity_id'] != identity_id:
+        if row['account_id'] != account_id:
             continue
         start, end = row['coverage_start'], row['coverage_end']
         if not math.isfinite(start) or not math.isfinite(end):
@@ -45,22 +45,22 @@ def takeout_windows(conn, identity_id):
     return windows
 
 
-def _phantom_rows(conn, identity_id, lo, hi):
+def _phantom_rows(conn, account_id, lo, hi):
     # Any exact event corroborates, regardless of its source. Unknown and independently observed
     # daily rows cannot be disproved by a YouTube export and must survive even without an event.
     return conn.execute(
-        "SELECT o.*,c.captured_at FROM listening_observations o "
+        "SELECT o.*,c.captured_at FROM listening_observation_subjects o "
         "JOIN listening_capture_receipts c ON c.id=o.capture_id "
-        "WHERE o.identity_id=? AND o.source='ytm_history' AND o.precision='legacy_unknown' "
+        "WHERE o.account_id=? AND o.source='ytm_history' AND o.precision='legacy_unknown' "
         "AND CAST(c.captured_at / 86400 AS INTEGER) BETWEEN ? AND ? "
-        "AND NOT EXISTS (SELECT 1 FROM listening_observations other "
-        "  WHERE other.identity_id=o.identity_id AND other.identity_key=o.identity_key "
+        "AND NOT EXISTS (SELECT 1 FROM listening_observation_subjects other "
+        "  WHERE other.account_id=o.account_id AND other.identity_key=o.identity_key "
         "  AND other.source<>'ytm_history' AND (other.day=o.day OR other.source_day=o.source_day)) "
-        "AND NOT EXISTS (SELECT 1 FROM play_events pe "
-        "  WHERE pe.identity_id=o.identity_id AND pe.identity_key=o.identity_key "
+        "AND NOT EXISTS (SELECT 1 FROM play_event_subjects pe "
+        "  WHERE pe.account_id=o.account_id AND pe.identity_key=o.identity_key "
         "  AND ABS(CAST(pe.played_at / 86400 AS INTEGER) "
         "          - CAST(c.captured_at / 86400 AS INTEGER)) <= ?)",
-        (identity_id, lo, hi, CORROBORATION_TOLERANCE_DAYS)).fetchall()
+        (account_id, lo, hi, CORROBORATION_TOLERANCE_DAYS)).fetchall()
 
 
 def _publish_backup(backup_path, rows):
@@ -93,7 +93,7 @@ def purge_phantom_history(conn, backup_path=None) -> int:
     try:
         conn.execute('BEGIN IMMEDIATE')
         rows = {}
-        for ident in {r['identity_id'] for r in _verified_imports(conn)}:
+        for ident in {r['account_id'] for r in _verified_imports(conn)}:
             for lo, hi in takeout_windows(conn, ident):
                 for row in _phantom_rows(conn, ident, lo, hi):
                     rows[row['id']] = row

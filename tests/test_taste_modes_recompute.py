@@ -8,7 +8,10 @@ from yt_playlist.rec import embedding_vectors as embed, taste_modes as tm
 def store():
     s = Store(":memory:")
     s.init_schema()
-    return s
+    try:
+        yield s
+    finally:
+        s.conn.close()
 
 
 def _vectors(blocks, n_per=50, d=6):
@@ -27,7 +30,7 @@ def _vectors(blocks, n_per=50, d=6):
 def _wire(monkeypatch, store, keys, V, idx):
     monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (keys, V, idx))
     monkeypatch.setattr(store.modes, "genres_for", lambda ks: {k: k.split("|")[0] for k in ks})
-    monkeypatch.setattr(tm.genre_map, "family", lambda g: g)
+    monkeypatch.setattr(tm.genre_map, "family", lambda g, **kwargs: g)
 
 
 def test_recompute_populates(monkeypatch, store):
@@ -89,6 +92,7 @@ def test_recompute_survives_a_content_space_rebuild(monkeypatch, store):
     keys, V, idx = _vectors([[1, 0, 0, 0, 0, 0], [0, 1, 0, 0, 0, 0], [0, 0, 1, 0, 0, 0]])
     _wire(monkeypatch, store, keys, V, idx)
     assert tm.recompute(store, now=1000.0, k=3, min_members=20) == 3
+    old_ids = sorted(m["mode_id"] for m in store.modes.list_modes(active_only=True))
 
     # enrichment adds a token: the space is rebuilt one column wider, exactly as in the crash
     _set_model(store, [f"g{i}" for i in range(7)])
@@ -101,22 +105,6 @@ def test_recompute_survives_a_content_space_rebuild(monkeypatch, store):
     assert len(live) == 3
     assert all(m["centroid"].shape == (7,) for m in live)       # centroids are in the NEW space
     assert all(m["space"] for m in live)                        # and stamped with it
-
-
-def test_recompute_carries_mode_ids_across_a_space_rebuild(monkeypatch, store):
-    """The same taste regions, re-expressed in a wider space, must keep their ids: every pick,
-    impression and Thompson posterior is keyed to mode_id (see rec/mode_eval.mode_bandit_stats)."""
-    _set_model(store, [f"g{i}" for i in range(6)])
-    keys, V, idx = _vectors([[1, 0, 0, 0, 0, 0], [0, 1, 0, 0, 0, 0], [0, 0, 1, 0, 0, 0]])
-    _wire(monkeypatch, store, keys, V, idx)
-    tm.recompute(store, now=1000.0, k=3, min_members=20)
-    old_ids = sorted(m["mode_id"] for m in store.modes.list_modes(active_only=True))
-
-    _set_model(store, [f"g{i}" for i in range(7)])              # same tracks, wider space
-    keys7, V7, idx7 = _vectors([[1, 0, 0, 0, 0, 0, 0], [0, 1, 0, 0, 0, 0, 0], [0, 0, 1, 0, 0, 0, 0]], d=7)
-    _wire(monkeypatch, store, keys7, V7, idx7)
-    tm.recompute(store, now=2000.0, k=3, min_members=20)
-
     assert sorted(m["mode_id"] for m in store.modes.list_modes(active_only=True)) == old_ids
     assert not [m for m in store.modes.list_modes(active_only=False) if not m["active"]]
 

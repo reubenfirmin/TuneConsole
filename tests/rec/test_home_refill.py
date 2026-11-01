@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from tests.rec.test_home_prepared import prepared, seed, service
+from tests.home_fixture_support import publish_menu
 from tests.test_group_home import library as group_library
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.rec import choice_evidence, home_cards, home_prepared, home_vibe, mix_tuning, transient
@@ -124,19 +125,17 @@ def test_vibe_fresh_reuses_prepared_recipe_inputs(store, monkeypatch):
     (1, 2, 'tuned', 3), (4, 4, 'tuned', 0),
 ])
 def test_eligibility_chooses_usable_cache_before_recording(
-        store, prepared, monkeypatch, blocked_tuned, blocked_baseline, source, count):
-    bundles = store.rec_proposals.get_proposals('mode_bundles')
+        store, monkeypatch, unlocked_home_controls, blocked_tuned, blocked_baseline, source, count):
     caches = {}
-    for name, offset in (('baseline', 0), ('tuned', 12)):
-        payload = deepcopy(prepared)
+    for name in ('baseline', 'tuned'):
+        payload = publish_menu(store, prefix=name, modeled=True)
         menu = payload['menus'][0]
         payload['menus'] = [menu]
         menu['epoch'] = 0
         payload['generation'] = name
         payload['choice_context'] = {'capture_status': name}
         for proto in menu['protos']:
-            proto['tracks'] = deepcopy(bundles['all'][proto['lane']][offset:offset + 12])
-            assert len(proto['tracks']) == 12
+            assert len(proto['tracks']) == 4
             if name == 'tuned':
                 proto['recipe']['vibe'] = 'energize'
             proto['experiment_id'] = home_cards.experiment_id(proto)

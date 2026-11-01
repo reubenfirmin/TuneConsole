@@ -48,8 +48,8 @@ def no_request_retries(monkeypatch):
 
 
 def test_two_accounts_retry_only_four_incomplete_playlists_and_failed_listing(store, caplog):
-    first = store.identities.upsert_identity("First", "bridge", None, True)
-    second = store.identities.upsert_identity("Second", "bridge", "brand", False)
+    first = store.accounts.upsert_account("First", "bridge", None, True)
+    second = store.accounts.upsert_account("Second", "bridge", "brand", False)
     good, bad = CountedClient(133), CountedClient()
     good.partial = {f"PL{i}" for i in range(129, 133)}
     bad.library_failed = True
@@ -96,7 +96,7 @@ def test_two_accounts_retry_only_four_incomplete_playlists_and_failed_listing(st
 
 @pytest.mark.parametrize("manual", [True, False], ids=["explicit-retry", "reconnected"])
 def test_explicit_sync_and_reconnection_bypass_backoff(store, manual):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = CountedClient(2)
     client.partial = {"PL1"}
     sync.sync_all(store, {iid: client}, 100, automatic=True)
@@ -111,7 +111,7 @@ def test_explicit_sync_and_reconnection_bypass_backoff(store, manual):
 
 
 def test_retry_deadlines_survive_new_schedule_and_keep_success_timestamps(store):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = CountedClient()
     sync.sync_all(store, {iid: client}, 100)
     client.partial = {"PL0"}
@@ -131,7 +131,7 @@ def test_retry_deadlines_survive_new_schedule_and_keep_success_timestamps(store)
 
 
 def test_retaining_a_failed_listing_keeps_child_deadlines_and_blocks_ineffective_jobs(store):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = CountedClient(2)
     client.partial = {"PL1"}
     sync.sync_all(store, {iid: client}, 100)
@@ -156,7 +156,7 @@ def test_reconnect_retry_survives_a_busy_manual_sync_lock(store, monkeypatch):
     from yt_playlist.core.activity import Activity
     from yt_playlist.web.jobs import SyncJobs
 
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = CountedClient(2)
     client.partial = {"PL1"}
     sync.sync_all(store, {iid: client}, 100)
@@ -195,7 +195,7 @@ def test_first_sync_starts_without_waiting_for_periodic_poll(store, monkeypatch,
     from yt_playlist.core.activity import Activity
     from yt_playlist.web import jobs
 
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = CountedClient()
     stop, wake, observed, finished = (threading.Event() for _ in range(4))
 
@@ -251,7 +251,7 @@ def test_slow_update_check_cannot_delay_an_extension_connection(store, monkeypat
     from yt_playlist.web import app as web_app
     from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = CountedClient()
     checking, finish_update, synced = (threading.Event() for _ in range(3))
     original_updates = web_app._background_update_loop

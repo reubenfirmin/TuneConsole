@@ -12,6 +12,7 @@ import sys
 import uuid
 
 from yt_playlist.core.activity import check_stopping, work_budget, WorkBudgetExceeded
+from yt_playlist.core import embeddings
 from yt_playlist.rec import content_model, group_assignment, group_preparation, musical_preparation, rec_params, taste_modes
 from yt_playlist.rec import vibe_preparation
 from yt_playlist.repos.rec_model import VectorChanges
@@ -27,8 +28,8 @@ MODE_PARAMS = ('modes_k', 'modes_min_members', 'modes_match_threshold')
 # Repair reads only these whole-table anti-joins. Capture their counters rather
 # than copying every per-record revision in the application for each small slice.
 REPAIR_INPUTS = frozenset((table, '') for table in (
-    'recordings', 'rec_content_vectors', 'rec_discovered_content_vectors',
-    'rec_prepared_content', 'rec_content_pending'))
+    'recordings', 'recording_redirects', 'recording_embeddings',
+    'prepared_recording_inputs', 'unresolved_preparation_inputs', 'rec_content_pending'))
 
 
 @dataclass(frozen=True)
@@ -114,17 +115,22 @@ def _delta(reader, rows, raw_model):
     """Serialize bounded changes against one already published, fixed basis."""
     if not raw_model:
         return {}
+    if not reader.rec_model.content_generation(keys=[])['coherent']:
+        return {}
     model = json.loads(raw_model)
     keys = [r[0] for r in rows]
     pools = reader.rec_model.content_vector_pools(keys)
+    decoded = [(key,json.loads(raw)) for key,_revision,raw,_digest,_different in rows]
+    axes = reader.genres.feature_axes(features['genre'] for _key,payload in decoded
+                                      for features in payload.values() if isinstance(features,dict) and 'genre' in features)
     changes = {}
     for scope, table in (('library', 'rec_content_vectors'), ('discovered', 'rec_discovered_content_vectors')):
         previous = pools[scope]
         upserts, removed = [], []
-        for key, _revision, raw, _digest, _different in rows:
+        for key, payload in decoded:
             check_stopping()
-            features = json.loads(raw)[scope]
-            vector = (content_model.encode_content(model, features['genre'], features['year'], features['audio'])
+            features = payload[scope]
+            vector = (content_model.encode_content(model, features['genre'], features['year'], features['audio'],genre_axes=axes)
                       if features else None)
             blob = vector.tobytes() if vector is not None else None
             if blob is not None and previous.get(key) != blob:
@@ -132,7 +138,8 @@ def _delta(reader, rows, raw_model):
             elif blob is None and key in previous:
                 removed.append(key)
         if upserts or removed:
-            changes[table] = VectorChanges(tuple(upserts), tuple(removed))
+            changes[table] = VectorChanges(tuple(upserts), tuple(removed),
+                model_version=embeddings.version(table, {'rec_content_model': raw_model}))
     return changes
 
 
@@ -200,6 +207,8 @@ class Preparation:
         changed = self.store.prepared_content.changed_since(previous.get('serial', 0))
         if not self.store.settings.get_setting('rec_content_model'):
             return 'initial-evidence' if self.store.prepared_content.changed_since(-1) else None
+        if not self.store.rec_model.content_generation(keys=[])['coherent']:
+            return 'encoder-repair'
         if self.store.settings.get_setting('rec_content_genre_revision') != genre_catalog.REVISION:
             return 'genre-revision'
         if previous and previous.get('modes') != [rec_params.get_param(self.store, key) for key in MODE_PARAMS]:
@@ -291,7 +300,7 @@ class Preparation:
                 if raw_model and reader.prepared_content.missing_previous_inputs():
                     self._defer(now, 'previous-generation-inputs', outcome='waiting')
                     return False
-                corpus = reader.prepared_content.corpus(self.budget.max_rows)
+                corpus = reader.prepared_content.corpus(self.budget.max_rows, max_bytes=self.budget.memory_bytes)
                 if corpus is None:
                     self._defer(now, 'corpus-memory-budget', max_rows=self.budget.max_rows)
                     return False
@@ -310,7 +319,9 @@ class Preparation:
                 if not content and not audio:
                     self._defer(now, 'empty-corpus', outcome='waiting')
                     return False
-                model = content_model.build_content_model(content, audio)
+                axes = reader.genres.feature_axes([*(value[0] for value in content.values()),
+                                                  *(row.get('genre') for row in discoveries)])
+                model = content_model.build_content_model(content, audio,genre_axes=axes)
                 dim = model['ncat'] + len(model['cont'])
                 inputs = content_model.ContentInputs(keys, content, audio)
                 genres = {key: value[0] for key, value in content.items()}
@@ -321,12 +332,12 @@ class Preparation:
                     self._defer(now, 'matrix-memory-budget', rows=rows, dimensions=dim,
                                 estimated_bytes=estimated, phase_bytes=phases)
                     return False
-                fingerprint = content_model.input_fingerprint(inputs)
-                encoded_keys, matrix, model = content_model.build_library_content(inputs)
+                fingerprint = content_model.input_fingerprint(inputs,genre_axes=axes)
+                encoded_keys, matrix, model = content_model.build_library_content(inputs,genre_axes=axes)
                 generation = {'model': json.dumps(model), 'generation': uuid.uuid4().hex,
                     'revision': genre_catalog.REVISION, 'inputs': fingerprint,
                     'library': [(key, matrix[i].tobytes()) for i, key in enumerate(encoded_keys)],
-                    'discovered': content_model.encode_discovered(discoveries, model)}
+                    'discovered': content_model.encode_discovered(discoveries, model,genre_axes=axes)}
                 # Clustering retains the encoded matrix and genre labels, not
                 # the decoded corpus or audio/input dictionaries.
                 del corpus, inputs, content, audio, keys, discoveries
@@ -336,7 +347,8 @@ class Preparation:
                 del matrix, genres
                 changes = reader.rec_model.prepare_training_changes({
                     'rec_content_vectors': generation['library'],
-                    'rec_discovered_content_vectors': generation['discovered']})
+                    'rec_discovered_content_vectors': generation['discovered']},
+                    {'rec_content_model': generation['model']})
                 serial = reader.prepared_content.serial()
                 state = {'serial': serial, 'rows': rows, 'at': now, 'reason': reason,
                          'modes': [rec_params.get_param(reader, key) for key in MODE_PARAMS],

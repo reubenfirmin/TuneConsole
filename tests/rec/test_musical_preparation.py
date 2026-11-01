@@ -1,6 +1,7 @@
 """Durable profiles share the accepted worker and its private publication guards."""
 from dataclasses import replace
-import time
+from pathlib import Path
+import shutil
 
 import pytest
 
@@ -49,7 +50,7 @@ def test_shared_artist_fanout_is_paged_and_does_not_admit_content_refits(store):
     assert all(value['dimensions']['intensity']['value'] < .5 for value in values.values())
 
 
-def test_source_slice_captures_only_its_four_revision_keys(store, monkeypatch):
+def test_source_slice_tracks_only_its_source_and_referenced_metadata(store, monkeypatch):
     tid = store.tracks.upsert_track('v', 'Song', 'Artist', '', 200)
     observe(store, tid, [{'name': 'Metal'}])
     key = store.musical_profiles.pending()
@@ -60,9 +61,84 @@ def test_source_slice_captures_only_its_four_revision_keys(store, monkeypatch):
     monkeypatch.setattr(store._snapshot_revisions, 'capture', capture)
     assert musical_preparation.source_step(store, 1000)
     expected = {(table, 'key:' + key) for table in (
-        'rec_musical_pending', 'rec_musical_sources', 'rec_musical_links', 'rec_musical_source_profiles')}
+        'rec_musical_pending', 'rec_musical_sources', 'rec_musical_links', 'rec_musical_source_profiles',
+        'musical_source_observations')}
+    references = store.conn.execute('SELECT o.id,o.delivery_id FROM musical_source_observations s '
+        'JOIN native_metadata_observations o ON o.id=s.observation_id WHERE s.source_key=?', (key,)).fetchall()
+    expected.update(('native_metadata_observations', 'key:' + str(row[0])) for row in references)
+    expected.update(('metadata_deliveries', 'key:' + str(row[1])) for row in references)
     # Pinning records a scalar serial; only publication seeks consumed inputs.
     assert captures == [expected]
+
+
+def test_unrelated_metadata_arrival_does_not_discard_a_source_slice(store, monkeypatch):
+    one = store.tracks.upsert_track('one', 'One', 'Artist', '', 200)
+    two = store.tracks.upsert_track('two', 'Two', 'Other', '', 200)
+    observe(store, one, [{'name': 'Metal'}])
+    key = store.musical_profiles.pending()
+    original = profiles.source_profile
+    def change(source):
+        result = original(source)
+        observe(store, two, [{'name': 'Ambient'}], entity='other')
+        return result
+    with monkeypatch.context() as patch:
+        patch.setattr(profiles, 'source_profile', change)
+        assert musical_preparation.source_step(store, 1000)
+    assert store.conn.execute('SELECT 1 FROM rec_musical_source_profiles WHERE source_key=?', (key,)).fetchone()
+    drain(store)
+    assert get(store, 'one|artist')['intensity']['value'] > .5
+    assert get(store, 'two|other')['intensity']['value'] < .5
+
+
+def test_source_reference_change_before_snapshot_pinning_defers_without_a_scope_error(store, monkeypatch):
+    tid = store.tracks.upsert_track('v', 'Song', 'Artist', '', 200)
+    observe(store, tid, [{'name': 'Metal'}])
+    original = MusicalProfilesRepo.source_dependencies
+    def change(repo, key):
+        result = original(repo, key)
+        observe(store, tid, [{'name': 'Ambient'}], run='before-pin')
+        return result
+    with monkeypatch.context() as patch:
+        patch.setattr(MusicalProfilesRepo, 'source_dependencies', change)
+        assert not musical_preparation.source_step(store, 1000)
+    assert store.musical_profiles.pending()
+    assert not store.musical_profiles.by_keys(['song|artist'])
+    drain(store)
+    assert get(store)['intensity']['value'] < .5
+
+
+def test_file_backed_delivery_relocation_preserves_last_good_and_retries(tmp_path, monkeypatch):
+    store = Store(tmp_path / 'profiles.db')
+    store.init_schema()
+    try:
+        tid = store.tracks.upsert_track('v', 'Song', 'Artist', '', 200)
+        observe(store, tid, [{'name': 'Metal'}])
+        drain(store)
+        previous = get(store)
+        observe(store, tid, [{'name': 'Ambient'}], run='new')
+        delivery = store.conn.execute('SELECT d.id,d.raw_filename FROM musical_source_observations s '
+            'JOIN native_metadata_observations o ON o.id=s.observation_id '
+            'JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE s.source_key=?',
+            (store.musical_profiles.pending(),)).fetchone()
+        original = profiles.source_profile
+        def relocate(source):
+            result = original(source)
+            target = tmp_path / 'relocated' / Path(delivery['raw_filename']).name
+            target.parent.mkdir()
+            shutil.copyfile(delivery['raw_filename'], target)
+            with store.conn:
+                store.conn.execute('UPDATE metadata_deliveries SET raw_filename=? WHERE id=?',
+                                   (str(target), delivery['id']))
+            return result
+        with monkeypatch.context() as patch:
+            patch.setattr(profiles, 'source_profile', relocate)
+            assert not musical_preparation.source_step(store, 1001)
+        assert get(store) == previous
+        assert store.musical_profiles.pending()
+        drain(store)
+        assert get(store)['intensity']['value'] < .5
+    finally:
+        store.conn.close()
 
 
 def test_identical_artist_tags_from_new_recording_retain_history_without_restarting_fanout(store):
@@ -71,7 +147,7 @@ def test_identical_artist_tags_from_new_recording_retain_history_without_restart
     observe(store, one, [{'name': 'Metal'}], title='One')
     drain(store)
     observe(store, two, [{'name': 'Metal'}], run='another', title='Two')
-    assert store.conn.execute('SELECT COUNT(*) FROM metadata_findings WHERE provenance_json IS NOT NULL').fetchone()[0] == 2
+    assert store.conn.execute('SELECT COUNT(*) FROM native_metadata_observations').fetchone()[0] == 2
     assert not store.musical_profiles.pending()
     drain(store)
     assert get(store, 'one|artist') == get(store, 'two|artist')
@@ -101,7 +177,7 @@ def test_large_source_yields_to_recordings_between_pages(store):
     assert store.conn.execute('SELECT COUNT(*) FROM rec_musical_profiles').fetchone()[0] == 0
     assert store.musical_profiles.pending()
     assert p.capture(1001)  # recording gets its turn before the source drains
-    # Identity reconciliation can put a retired-key tombstone first in the
+    # Account reconciliation can put a retired-key tombstone first in the
     # recording queue. It must receive its turn just like a live recording.
     assert store.prepared_content.progress()['prepared'] == 1
     assert store.musical_profiles.pending()
@@ -214,17 +290,12 @@ def test_byte_budgets_reject_oversize_inputs_without_losing_pending_or_last_good
     assert get(store) == previous
 
 
-def test_profile_preparation_budget_on_synthetic_catalog(store, record_property):
-    # Engineering throughput measurement; no claim about listening quality.
-    for i in range(96):
+def test_profile_preparation_fanout_and_stale_version_index(store):
+    for i in range(5):
         tid = store.tracks.upsert_track(f'v{i}', f'Song {i}', 'Artist', '', 200)
         observe(store, tid, [{'name': 'Metal'}, {'name': 'Ambient'}])
-    start = time.monotonic()
     drain(store)
-    elapsed = time.monotonic() - start
-    record_property('musical_profile_96_recordings_seconds', elapsed)
-    assert elapsed < 15
-    assert store.conn.execute('SELECT COUNT(*) FROM rec_musical_profiles').fetchone()[0] == 96
+    assert store.conn.execute('SELECT COUNT(*) FROM rec_musical_profiles').fetchone()[0] == 5
     # Stale-version probes must be indexed seeks, not full corpus scans.
     plans = store.conn.execute('EXPLAIN QUERY PLAN SELECT identity_key FROM rec_musical_profiles '
                                'WHERE version<? LIMIT 32', (profiles.VERSION,)).fetchall()

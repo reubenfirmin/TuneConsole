@@ -55,6 +55,10 @@ class RecWorker:
         from yt_playlist.rec.model_refresh import FitCache
         self._fit_cache = FitCache()
         if self.enabled:
+            from yt_playlist.rec import choice_evidence
+            with ctx.store._lock:
+                pending = ctx.store.settings.get_setting(choice_evidence.STORAGE_PENDING) == '1'
+                ctx.store._evidence_recovery_pending = bool(pending)
             ctx.store.background_measurement = self.enqueue_measurement
             from yt_playlist.rec.choice_capture import CaptureQueue
             ctx.store.choice_capture = CaptureQueue(self.enqueue_measurement)
@@ -77,12 +81,16 @@ class RecWorker:
         while not self._stop.wait(0.5):
             try:
                 self.ctx.store.maintenance_diagnostics.flush()
+                self._poll_evidence_storage()
+                self._poll_retention()
+                from yt_playlist.core import playback_feedback
+                if playback_feedback.try_drain(self.ctx.store):
+                    self.trigger_rating_update()
                 self._retry_home()
                 self._retry_bundles()
                 self.projections.poll()
                 self._poll_refresh()
                 self._poll_choices()
-                self._poll_evidence_storage()
                 self._retry_measurements()
                 self._poll_tv()
             except Exception:
@@ -144,9 +152,15 @@ class RecWorker:
         if not self.jobs.has(Job.EVIDENCE_STORAGE) and time.monotonic() >= state.retry_at:
             self._schedule(full=False, evidence_storage=True)
 
+    def _poll_retention(self):
+        state = self.jobs.retry[Job.RETENTION]
+        if not self.jobs.has(Job.RETENTION) and time.monotonic() >= state.retry_at:
+            self._schedule(full=False, retention=True)
+
     def _retry_measurements(self):
         with self._lock:
-            if (not self._accepting() or self._running or not self.jobs.measurements
+            if (not self.enabled or self._stop.is_set() or not self.work.accepting
+                    or self._running or not self.jobs.measurements
                     or time.monotonic() < self.jobs.retry[Job.MEASUREMENT].retry_at):
                 return
             self._running = True
@@ -166,6 +180,8 @@ class RecWorker:
         if any(thread.is_alive() for thread in self._threads):
             raise RuntimeError("Recommendation worker did not stop")
         self._threads.clear()
+        from yt_playlist.rec import group_roots
+        group_roots.close_retention(self.ctx.store)
         self._ticker_started = False
         self.ctx.store.maintenance_diagnostics.flush(force=True)
 
@@ -220,6 +236,13 @@ class RecWorker:
             except Exception:  # noqa: BLE001 - a GC failure must never crash the daemon
                 self.ctx.logger.warning("generated-playlist GC tick failed", exc_info=True)
             if full_sweep:
+                try:
+                    from yt_playlist.core import collection_recovery
+                    self.work.wrap('collection recovery cleanup',collection_recovery.maintain,self.ctx.store)()
+                except WorkClosing:
+                    return
+                except Exception:
+                    self.ctx.logger.warning('Collection recovery cleanup deferred',exc_info=True)
                 next_sweep = time.monotonic() + self.gc_tick_s
             if time.monotonic() >= next_discovery:
                 discovery_delay = self.gc_tick_s
@@ -317,7 +340,9 @@ class RecWorker:
                     self.ctx.logger.warning('Listening capture failed: surface=%s', offer.surface, exc_info=True)
         finally:
             with self._lock:
-                retained = deferred if self._accepting() else []
+                # A recovery pause prevents new admissions. Captures already
+                # accepted still own their FIFO position and lifetime pins.
+                retained = deferred if self.enabled and not self._stop.is_set() and self.work.accepting else []
                 self.jobs.finish_measurements(offers, retry=retained)
                 if retained:
                     state.failed(time.monotonic(), base=5, cap=300, exponent_cap=6)
@@ -423,15 +448,17 @@ class RecWorker:
 
     def _schedule(self, *, full, modes=False, keys=(), ratings=False, trends=False, cleanup=False, bundles=False, home=False,
                   stories=False, artist_images=(), prepare=False, choices=False, analytics=False, groups=False, tv=False,
-                  model_health=False, evidence_storage=False):
+                  model_health=False, evidence_storage=False, retention=False):
         with self._lock:
-            if not self._accepting():
+            recovery = (evidence_storage and self.enabled and not self._stop.is_set()
+                        and self.work.accepting and not getattr(self.ctx.store, '_activity_paused', False))
+            if not self._accepting() and not recovery:
                 return False
             requested = {Job.FULL: full, Job.MODES: modes, Job.RATINGS: ratings, Job.PREPARE: prepare, Job.TRENDS: trends,
                          Job.CLEANUP: cleanup, Job.BUNDLES: bundles, Job.HOME: home, Job.STORIES: stories,
                          Job.ARTWORK: artist_images, Job.CONTENT: keys, Job.CHOICES: choices, Job.ANALYTICS: analytics,
                          Job.GROUPS: groups, Job.TV: tv, Job.MODEL_HEALTH: model_health,
-                         Job.EVIDENCE_STORAGE: evidence_storage}
+                         Job.EVIDENCE_STORAGE: evidence_storage, Job.RETENTION: retention}
             for job, payload in requested.items():
                 if payload:
                     self.jobs.merge(job, payload)
@@ -494,19 +521,40 @@ class RecWorker:
                     # backlog must not keep this worker spinning between retries.
                     self._running = False
                     return
-                self._model_active = any(job not in {Job.MEASUREMENT, Job.EVIDENCE_STORAGE, Job.CHOICES, Job.ANALYTICS, Job.GROUPS, Job.TV, Job.MODEL_HEALTH} for job in batch)
+                self._model_active = any(job not in {Job.MEASUREMENT, Job.EVIDENCE_STORAGE, Job.RETENTION, Job.CHOICES, Job.ANALYTICS, Job.GROUPS, Job.TV, Job.MODEL_HEALTH} for job in batch)
             full, modes = Job.FULL in batch, Job.MODES in batch
             if Job.EVIDENCE_STORAGE in batch:
                 from yt_playlist.rec import choice_evidence
                 state = self.jobs.retry[Job.EVIDENCE_STORAGE]
                 state.retry_at = time.monotonic() + 300
                 try:
-                    self._stage('listening evidence storage', choice_evidence.maintain_storage,
-                                self.ctx.store, self.ctx.now_fn())
+                    result = self._stage('listening evidence storage', choice_evidence.maintain_storage,
+                                         self.ctx.store, self.ctx.now_fn())
+                    if result and result.get('deferred'):
+                        state.retry_at = time.monotonic() + 5
                 except WorkClosing:
                     raise
                 except Exception:
+                    state.retry_at = time.monotonic() + 5
                     self.ctx.logger.warning('Listening evidence maintenance failed', exc_info=True)
+            if Job.RETENTION in batch:
+                from yt_playlist.rec import group_roots
+                state = self.jobs.retry[Job.RETENTION]
+                state.retry_at = time.monotonic() + 300
+                try:
+                    result = self._stage('derived history retirement', group_roots.maintain_retention,
+                                         self.ctx.store)
+                    if result and result['pending']:
+                        state.retry_at = time.monotonic() + 5
+                    self.ctx.logger.debug('Derived history retirement: %s', result)
+                except WorkClosing:
+                    raise
+                except Exception:
+                    state.retry_at = time.monotonic() + 5
+                    self.ctx.logger.warning('Derived history retirement failed', exc_info=True)
+            from yt_playlist.core import playback_feedback
+            if playback_feedback.try_drain(self.ctx.store):
+                self.trigger_rating_update()
             if full and time.monotonic() < self.jobs.retry[Job.FULL].retry_at:
                 # Keep the intent for the ticker without delaying ratings/serving jobs.
                 self.jobs.retry[Job.FULL].dirty = True

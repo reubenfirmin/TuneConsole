@@ -1,7 +1,7 @@
 """Cached sleeve notes; the existing Home worker resolves one release per pass.
 
-Raw public provider evidence lives in immutable JSON artifacts. SQLite retains a
-bounded display projection and a coalesced queue, with no schema changes.
+Raw public provider evidence lives in immutable JSON artifacts. Release-owned
+files contain the bounded display projection; typed rows hold coalesced demand.
 """
 import logging
 
@@ -118,17 +118,21 @@ def _catalog_metadata(client, album, store):
 
 def prepare(store, now, albums=(), *, client=None, now_fn=None):
     """Keep menu publication ahead of optional network work, with bounded retries."""
+    if getattr(store, 'activity_paused', False) or getattr(store, '_read_only', False):
+        return False
     # A refresh can leave the previous set queued. Reconcile against the
     # worker's current menu, preserving explicit album-page/held-menu demand.
     store.rec_proposals.request_album_notes(albums, now, current_only=True)
     queued = store.rec_proposals.get_proposals('album_note_requests') or {}
     if not queued:
         return False
-    album = next(iter(queued.values()))
+    album, expected_request = store.rec_proposals.next_album_note_request()
+    if album is None:
+        return False
     browse = album['browse_id']
     cached = _release_only((store.rec_proposals.get_proposals('album_notes') or {}).get(browse, {}))
     if cached.get('editorial_version') == 7 and cached.get('retry_at', 0) > now:
-        store.rec_proposals.publish_album_note(browse, cached, now)
+        store.rec_proposals.publish_album_note(browse, cached, now, expected_request=expected_request)
         return len(queued) > 1
     result = release_notes.fetch(album, store)
     description, generation = album_descriptions.get(store, album, now, now_fn=now_fn)
@@ -212,5 +216,5 @@ def prepare(store, now, albums=(), *, client=None, now_fn=None):
         except (OSError, ValueError):
             note['evidence'] = cached.get('evidence')
             _LOG.warning('Album editorial evidence unavailable', exc_info=True)
-    store.rec_proposals.publish_album_note(browse, note, now)
+    store.rec_proposals.publish_album_note(browse, note, now, expected_request=expected_request)
     return len(queued) > 1

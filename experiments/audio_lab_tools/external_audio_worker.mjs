@@ -8,7 +8,8 @@ import {fileURLToPath, pathToFileURL} from 'node:url';
 import {webcrypto} from 'node:crypto';
 import {createRequire} from 'node:module';
 
-const lab = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../audio_lab');
+const lab = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../extension/audio_model');
+const research = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../audio_lab');
 globalThis.self = globalThis;
 globalThis.location = pathToFileURL(path.join(lab, 'model_worker.js'));
 globalThis.crypto ??= webcrypto;
@@ -19,7 +20,7 @@ globalThis.importScripts = (...names) => {
     const filename = path.resolve(lab, name);
     if (!filename.startsWith(lab + path.sep)) throw Error('Research script outside lab');
     if (name === 'vendor/tf.min.js' && process.env.EXTERNAL_TFJS_NATIVE === '1') {
-      const native = require(path.join(lab, 'local/node/node_modules/@tensorflow/tfjs-node'));
+      const native = require(path.join(research, 'local/node/node_modules/@tensorflow/tfjs-node'));
       // Keep the production extractor unchanged. This research process substitutes
       // the equivalent native kernels for its explicitly requested CPU backend.
       globalThis.tf = {...native, setBackend: backend =>

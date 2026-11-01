@@ -10,6 +10,7 @@ from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing, check_can
 from yt_playlist.core.db_checkpoint import checkpoint_wal, deferred_autocheckpoint
 from yt_playlist.core.db_diagnostics import PublicationTimings
 from yt_playlist.core.db_revisions import Reads
+from yt_playlist.core.db_writes import reserved_write
 from yt_playlist.core.read_memo import ReadMemo
 
 log = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ class ReadSnapshot:
         self._schema = schema
         self._revision_scope = revision_scope
         self._reader_released = False
+        self._database_generation = getattr(source, '_database_generation', 0)
 
     def release_reader(self):
         """Retain the publication guard without retaining a connection or pinned WAL view."""
@@ -48,7 +50,7 @@ class ReadSnapshot:
         if not self._reader_released:
             self.store.conn.rollback()  # release the read snapshot before reserving the writer
         try:
-            with timings.locked(self.source._lock):
+            with reserved_write(self.source, timings=timings):
                 check_cancellable_work()
                 changes = self.source.conn.total_changes
                 with deferred_autocheckpoint(self.source.conn,
@@ -59,6 +61,9 @@ class ReadSnapshot:
             return published
         except (WorkClosing, WorkBudgetExceeded):
             outcome = 'cancelled'
+            raise
+        except Exception:
+            self.source.maintenance_diagnostics.record('failed')
             raise
         finally:
             try:
@@ -75,11 +80,9 @@ class ReadSnapshot:
         writers remain conservative. The writer reservation closes the check/write race.
         ``target`` must only write prepared results, without doing further calculation or I/O.
         """
+        if getattr(self.source, '_database_generation', 0) != self._database_generation:
+            return False
         conn = self.source.conn
-        if conn.in_transaction:
-            raise RuntimeError("Cannot publish maintenance inside another transaction")
-        with timings.measure('reserve_writer'):
-            conn.execute("BEGIN IMMEDIATE")
         try:
             version = conn.execute("PRAGMA data_version").fetchone()[0]
             schema = conn.execute("PRAGMA schema_version").fetchone()[0]
@@ -98,15 +101,17 @@ class ReadSnapshot:
                        - self.source._snapshot_revisions.views)
             changed = sorted(key for key in guarded
                              if current.get(key, 0) > self._changes)
-            if (schema != self._schema or version != self._version or changed
+            schema_changed = (schema != self._schema
+                              or self.source._snapshot_revisions.schema_version != self._schema)
+            if (schema_changed or version != self._version or changed
                     or (unknown and conn.total_changes != self._changes)):
                 conn.rollback()
                 log.debug('Maintenance publication deferred: changed=%s external_writer=%s schema=%s unknown=%s',
-                         changed[:12], version != self._version, schema != self._schema, sorted(unknown)[:8])
+                         changed[:12], version != self._version, schema_changed, sorted(unknown)[:8])
                 reasons = {'source:' + table for table, _key in changed}
                 if version != self._version:
                     reasons.add('external_writer')
-                if schema != self._schema:
+                if schema_changed:
                     reasons.add('schema')
                 if unknown and conn.total_changes != self._changes:
                     reasons.add('untracked_source')
@@ -119,10 +124,8 @@ class ReadSnapshot:
                 conn.commit()
             self.source.maintenance_diagnostics.record('published')
             return True
-        except BaseException as exc:
+        except BaseException:
             conn.rollback()
-            if isinstance(exc, Exception) and not isinstance(exc, (WorkClosing, WorkBudgetExceeded)):
-                self.source.maintenance_diagnostics.record('failed')
             raise
 
 
@@ -139,18 +142,22 @@ def read_snapshot(source, make_reader, *, dependencies=None):
             check_cancellable_work()
             if source.conn.in_transaction:
                 raise RuntimeError("Cannot snapshot uncommitted changes")
+            source._snapshot_revisions.refresh()
             changes = source.conn.total_changes
             schema = source.conn.execute("PRAGMA schema_version").fetchone()[0]
             version = source.conn.execute("PRAGMA data_version").fetchone()[0]
             if source._db_path is None:
                 source.conn.backup(reader.conn, pages=128,
                                    progress=lambda *_: check_cancellable_work())
+                reader._bind_repositories()
             else:
-                reader.conn.execute("BEGIN")
+                if not reader.conn.in_transaction:
+                    reader.conn.execute("BEGIN")
                 reader.conn.execute("SELECT 1 FROM settings LIMIT 1").fetchone()
             # External commits can race reader pinning. Only reuse results when
             # the external-writer epoch stayed stable across that boundary.
-            stable = source.conn.execute("PRAGMA data_version").fetchone()[0] == version
+            stable = (source.conn.execute("PRAGMA data_version").fetchone()[0] == version
+                      and source._snapshot_revisions.schema_version == schema)
             if not hasattr(source, "_read_memo"):
                 source._read_memo = ReadMemo()
             memo = source._read_memo

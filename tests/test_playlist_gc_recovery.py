@@ -46,7 +46,7 @@ def case(tmp_path, monkeypatch):
     monkeypatch.setattr(playlist_backups, "with_retry", lambda fn, **kwargs: fn())
     store = Store(tmp_path / "gc.db")
     store.init_schema()
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     pid = store.playlists.upsert_playlist(iid, "SOURCE", "Generated", 2, "", 1)
     tids = [store.tracks.upsert_track(v, v, "Artist", None, None, 1) for v in ("a", "b")]
     store.playlists.set_playlist_tracks(pid, tids)
@@ -90,7 +90,9 @@ def test_saved_failure_confirmed_absent_completes_original_without_another_delet
 
     result = collect(case)
 
-    assert [row["backup"] for row in result] == [str(backup)]
+    assert len(result)==1 and Path(result[0]['backup']).read_bytes()==original
+    retained = case.store.conn.execute('SELECT retained_filename FROM action_backups WHERE action_id=?',(aid,)).fetchone()[0]
+    assert result[0]['backup']==retained
     assert case.store.actions.get_action(aid).status == "executed"
     assert case.store.playlists.get_playlist(case.pid) is None
     assert len(case.store.actions.get_actions()) == 1
@@ -352,17 +354,17 @@ def test_listening_completed_during_admission_prevents_automatic_delete(case, mo
     admitted = []
 
     @contextmanager
-    def claim_after_listening(store, identity_id, remote_id):
-        with original_claim(store, identity_id, remote_id):
+    def claim_after_listening(store, account_id, remote_id):
+        with original_claim(store, account_id, remote_id):
             keys = store.playlists.get_playlist_track_keys(case.pid)
             if source == "sync":
                 store.history.record_history_plays(
-                    identity_id, NOW + 1, list(keys), source_timezone="UTC")
+                    account_id, NOW + 1, list(keys), source_timezone="UTC")
             else:
                 for key, video_id in zip(sorted(keys), ("a", "b")):
-                    store.history.record_play_event(identity_id, key, video_id, NOW + 1,
+                    store.history.record_play_event(account_id, key, video_id, NOW + 1,
                                                     playlist_ytm_id=remote_id)
-            admitted.append((identity_id, remote_id))
+            admitted.append((account_id, remote_id))
             yield
 
     monkeypatch.setattr(playlist_generated, "claim_deletion_target", claim_after_listening)
@@ -423,9 +425,9 @@ def test_failed_target_does_not_block_healthy_playlist_and_retry_only_leaves_new
     case.client.read_failure = TimeoutError("Unavailable")
     collect(case)
     healthy = Client()
-    other = case.store.identities.upsert_identity("Other", "bridge", "brand", False)
+    other = case.store.accounts.upsert_account("Other", "bridge", "brand", False)
     pid = case.store.playlists.upsert_playlist(other, "SOURCE", "Other generated", 2, "", 1)
-    case.store.playlists.set_playlist_provenance("SOURCE", identity_id=other,
+    case.store.playlists.set_playlist_provenance("SOURCE", account_id=other,
                                                 origin="tuneconsole", adopted=False)
     clients = {case.iid: case.client, other: healthy}
 

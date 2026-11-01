@@ -1,65 +1,22 @@
 """Capture and restore immutable listening context without depending on its consumers."""
-import hashlib
-
 from yt_playlist.core.evidence_ledger import canonical
-
-CORRECTION_CONTRACT = 'choice-correction-v1'
-MAX_CORRECTION_BYTES = 256 * 1024
+from yt_playlist.core.choice_checkpoints import CORRECTION_CONTRACT, MAX_CORRECTION_BYTES, checkpoint
 
 
 def correction_context(context):
-    """Sufficient frozen inputs for both learners, independent of today's model.
-
-    Opportunities retain their actual options, scores, predictions and assignments;
-    responses retain source IDs, observation times and withdrawal targets. Neither
-    learner uses the saved taste matrices, full policy or Radio candidate snapshot.
-    Keep historical definitions so corrections and future group drift can be replayed.
-    """
-    result = {key: context[key] for key in ('at', 'group_generation') if key in context}
-    for field, keys in (
-        ('groups', ('mode_id', 'space', 'centroid', 'rep_keys')),
-        ('musical_groups', ('group_id', 'version', 'parent_version')),
-        ('musical_definitions', ('group_id', 'version', 'generation', 'created_at', 'parent_version')),
-    ):
-        if field in context:
-            result[field] = [{key: group[key] for key in keys if key in group}
-                             for group in context[field]]
+    """Correction timing; offered descriptors and decision receipts live in menus."""
+    result = {key: context[key] for key in ('at', 'precision') if key in context}
     if len(canonical(result)) > MAX_CORRECTION_BYTES:
-        raise ValueError('Historical group definitions exceed the correction context budget')
+        raise ValueError('Choice timing exceeds the correction context budget')
     return result
 
 
-def checkpoint(ledger, identity):
-    """Validate an acknowledged, self-contained correction capture before using it."""
-    value = ledger.get('checkpoint', identity)
-    if (not value or value.get('schema') != 1 or value.get('contract') != CORRECTION_CONTRACT
-            or value.get('source_context') != identity or not value.get('watermark')
-            or not isinstance(value.get('context'), dict)):
-        return None
-    encoded = canonical(value['context'])
-    if (len(encoded) > MAX_CORRECTION_BYTES
-            or hashlib.sha256(encoded).hexdigest() != value.get('digest')):
-        return None
-    return value
-
-
-def learning_context(store, identity):
+def learning_context(store, identity, *, ancestry=True):
     saved = checkpoint(store.rec_ledger.evidence(), identity)
     if not saved:
         return resolve_context(store, {'artifact': identity})
-    context = saved['context']
-    definitions = []
-    for frozen in context.get('musical_definitions', []):
-        # Early v1 checkpoints omitted ancestry. Recover only that field from
-        # the exact immutable definition, even after its raw context is released.
-        # A mismatched or unavailable definition remains unknown.
-        if 'parent_version' not in frozen:
-            original = store.taste_groups.definition(frozen['version'])
-            if original and all(original.get(key) == frozen.get(key)
-                                for key in ('group_id', 'version', 'generation', 'created_at')):
-                frozen = {**frozen, 'parent_version': original['parent_version']}
-        definitions.append(frozen)
-    return {**context, 'musical_definitions': definitions} if definitions else context
+    context = correction_context(saved['context'])
+    return context
 
 
 def context_manifest(ledger, context, *, publish=None):

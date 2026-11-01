@@ -10,7 +10,8 @@ import hashlib
 from pathlib import Path
 
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
-from yt_playlist.core import sample_files
+from yt_playlist.core import sample_files, audio_annotations
+from yt_playlist.core.audio_annotation_contract import LEGACY_FEEDBACK_TAXONOMY
 from yt_playlist.repos.base import Repo, synchronized
 
 
@@ -78,6 +79,10 @@ class AudioVibesRepo(Repo):
                 return
         filename = sample_files.publish(sample_files.directory(self.conn, self._store._evidence_key), sample)
         with self.conn:
+            # New captured evidence supplies its actual playback identity.
+            # Historical missing runs remain unresolved during migration.
+            self.conn.execute('INSERT OR IGNORE INTO audio_vibe_runs VALUES (?,?,?,?,?)',
+                              (sample['run_id'], sample['video_id'], sample['title'], sample['artist'], now))
             rid = sample_files.recording(self.conn, sample, now)
             self.conn.execute('INSERT INTO sample_attributes VALUES (?,?,?,?,?,?,?)',
                 (sample['id'], rid, sample['video_id'], sample['run_id'], sample['point'], filename, now))
@@ -85,38 +90,53 @@ class AudioVibesRepo(Repo):
     @synchronized
     def feedback(self, run_id):
         """Read a development annotation for the labeling UI or model evaluation."""
-        row = self.conn.execute('SELECT * FROM audio_session_labels WHERE run_id=? AND taxonomy_version=?',
-                                (run_id, TAXONOMY_VERSION)).fetchone()
-        return ({'taxonomy_version': row['taxonomy_version'], 'vibes': json.loads(row['vibes']),
-                 'sample_ids': json.loads(row['sample_ids']), 'prediction': json.loads(row['prediction']),
-                 'updated_at': row['updated_at']} if row else None)
+        row = audio_annotations.latest(self.conn, run_id, kind='session', taxonomy_version=TAXONOMY_VERSION)
+        return self._feedback(row) if row else None
+
+    def _feedback(self, row):
+        value = audio_annotations.read(self.conn, row)
+        # Earlier UI answers display their original evidence, including IDs
+        # classified as unresolved. These IDs are never relational memberships.
+        samples = (json.loads(value['legacy_sample_ids']) if value['legacy_sample_ids'] is not None
+                   else value['sample_ids'])
+        return {**{key: value[key] for key in ('taxonomy_version', 'vibes', 'prediction', 'updated_at')},
+                'sample_ids': samples}
 
     @synchronized
     def latest_feedback(self, video_id, *, exclude_run_id):
         """Restore this exact video's previous answer in the development form."""
-        row = self.conn.execute('SELECT labels.run_id FROM audio_session_labels labels JOIN ('
+        row = self.conn.execute('SELECT COALESCE(a.run_id,a.legacy_run_key) run_id FROM audio_annotations a JOIN ('
             'SELECT run_id FROM audio_vibe_runs WHERE video_id=? UNION '
-            'SELECT run_id FROM sample_attributes WHERE video_id=?) runs USING(run_id) '
-            'WHERE labels.taxonomy_version=? AND labels.run_id!=? '
-            'ORDER BY labels.updated_at DESC,labels.run_id DESC LIMIT 1',
+            'SELECT run_id FROM sample_attributes WHERE video_id=?) runs '
+            'ON runs.run_id=COALESCE(a.run_id,a.legacy_run_key) '
+            "WHERE a.kind='session' AND a.sealed=1 AND a.taxonomy_version=? "
+            'AND COALESCE(a.run_id,a.legacy_run_key)!=? AND NOT EXISTS('
+            'SELECT 1 FROM audio_annotations successor WHERE successor.supersedes_id=a.id AND successor.sealed=1) '
+            'ORDER BY a.created_at DESC,COALESCE(a.run_id,a.legacy_run_key) DESC LIMIT 1',
             (video_id, video_id, TAXONOMY_VERSION, exclude_run_id)).fetchone()
         return {'run_id': row['run_id'], **self.feedback(row['run_id'])} if row else None
 
     @synchronized
     def legacy_feedback(self, run_id):
-        row = self.conn.execute('SELECT * FROM audio_vibe_feedback WHERE run_id=?', (run_id,)).fetchone()
-        return ({'vibe': row['vibe'], 'sample_ids': json.loads(row['sample_ids']),
-                 'prediction': json.loads(row['prediction']), 'updated_at': row['updated_at']} if row else None)
+        row = audio_annotations.latest(self.conn, run_id, kind='feedback',
+                                       taxonomy_version=LEGACY_FEEDBACK_TAXONOMY)
+        if row is None:
+            return None
+        value = self._feedback(row)
+        return {'vibe': value['vibes'][0] if value['vibes'] else '',
+                **{key: value[key] for key in ('sample_ids', 'prediction', 'updated_at')}}
 
     @synchronized
     def earlier_feedback(self, run_id):
         """Expose historical judgments without translating their target meanings."""
-        rows = self.conn.execute('SELECT * FROM audio_vibe_labels WHERE run_id=?', (run_id,)).fetchall()
-        rows += self.conn.execute('SELECT * FROM audio_session_labels WHERE run_id=? AND taxonomy_version!=?',
-                                  (run_id, TAXONOMY_VERSION)).fetchall()
-        result = [{'taxonomy_version': row['taxonomy_version'], 'vibes': json.loads(row['vibes']),
-                   'sample_ids': json.loads(row['sample_ids']), 'prediction': json.loads(row['prediction']),
-                   'updated_at': row['updated_at']} for row in rows]
+        rows = self.conn.execute('SELECT a.kind,a.taxonomy_version FROM audio_annotations a '
+            'WHERE COALESCE(a.run_id,a.legacy_run_key)=? AND a.sealed=1 '
+            "AND (a.kind='development' OR (a.kind='session' AND a.taxonomy_version!=?)) "
+            'AND NOT EXISTS(SELECT 1 FROM audio_annotations successor '
+            'WHERE successor.supersedes_id=a.id AND successor.sealed=1) '
+            'ORDER BY a.kind,a.created_at,a.taxonomy_version', (run_id, TAXONOMY_VERSION)).fetchall()
+        result = [self._feedback(audio_annotations.latest(self.conn, run_id, kind=row['kind'],
+                  taxonomy_version=row['taxonomy_version'])) for row in rows]
         legacy = self.legacy_feedback(run_id)
         if legacy:
             result.append(legacy)
@@ -126,8 +146,20 @@ class AudioVibesRepo(Repo):
     def save_feedback(self, run_id, sample_ids, vibes, taxonomy_version, prediction, now):
         """Persist a development annotation; do not publish product ranking evidence."""
         with self.conn:
-            self.conn.execute('INSERT INTO audio_session_labels VALUES (?,?,?,?,?,?) '
-                'ON CONFLICT(run_id,taxonomy_version) DO UPDATE SET sample_ids=excluded.sample_ids,'
-                'prediction=excluded.prediction,vibes=excluded.vibes,'
-                'updated_at=excluded.updated_at',
-                (run_id, taxonomy_version, json.dumps(sample_ids), json.dumps(prediction), json.dumps(vibes), now))
+            audio_annotations.resolve_run(self.conn, run_id)
+            # resolve_run reserves the writer before inspecting the predecessor.
+            # Clearing an existing answer withdraws it; an initially empty
+            # answer remains an explicit empty judgment. Retrying a clear must
+            # preserve its meaning without changing the form's JSON contract.
+            previous = audio_annotations.latest(self.conn, run_id, kind='session',
+                                                taxonomy_version=taxonomy_version)
+            state = ('labeled' if vibes else 'withdrawn'
+                     if previous and previous['state'] in ('labeled', 'withdrawn') else 'empty')
+            audio_annotations.save(self.conn, run_id, sample_ids, vibes, taxonomy_version, prediction, now,
+                                   state=state, memory_key=self._store._evidence_key)
+
+    @synchronized
+    def resolve_annotations(self, run_id):
+        """Repair legacy history after explicitly admitting its actual playback."""
+        with self.conn:
+            audio_annotations.resolve_run(self.conn, run_id)

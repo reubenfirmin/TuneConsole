@@ -6,7 +6,7 @@ import numpy as np
 from threadpoolctl import threadpool_limits
 
 from .external_experiment import OUT, digest, normalize, save, stamp
-from .external_training import ALPHAS, SEED, folds, metrics, predict, standardize
+from .external_training import ALPHAS, SEED, folds, metrics, predict, standardize, validation_groups
 from .external_transfer import SNAPSHOT, VIBES, score
 from .external_secondary import artist_keys, identity
 
@@ -26,12 +26,13 @@ def target(dataset):
     selected = selected or list(range(len(names)))
     x = np.array([json.loads(Path(row['feature_file']).read_text())['prediction']['embedding']['values'] for row in rows])
     y = np.array([row['targets'] for row in rows], dtype=float)[:, selected]
-    return rows, x, y, [names[i] for i in selected], [row['group'] for row in rows]
+    return rows, x, y, [names[i] for i in selected], validation_groups(rows)
 
 
-def projection_pool(dataset, targets, sources):
-    artists = {key for row in targets for key in artist_keys(row.get('artist', '').split('+')[0])}
-    titles = {identity(row['title']) for row in targets if row.get('title')}
+def projection_pool(dataset, targets, sources, *, identity_exclusions=()):
+    protected = [*targets, *identity_exclusions]
+    artists = {key for row in protected for key in artist_keys(row.get('artist', ''))}
+    titles = {identity(row['title']) for row in protected if row.get('title')}
     hashes = {row['audio_sha256'] for row in targets if row.get('audio_sha256')}
     eligible, excluded = {}, []
     source_hashes = {}
@@ -43,7 +44,7 @@ def projection_pool(dataset, targets, sources):
         path = OUT / f'{source}.features.json'
         source_hashes[source] = digest(path)
         for row in json.loads(path.read_text())['rows']:
-            artist = artist_keys(row.get('artist', '').split('+')[0])
+            artist = artist_keys(row.get('artist', ''))
             title = identity(row.get('title', ''))
             if artist & artists or (title and title in titles) or row['audio_sha256'] in hashes:
                 excluded.append(row['id'])
@@ -142,11 +143,11 @@ def evaluate_ranking(features, y, groups, rows, projection, provenance):
     print(json.dumps({'unlabeled_projection_ranking': report['metrics']}), flush=True)
 
 
-def evaluate(dataset, sources):
+def evaluate(dataset, sources, *, identity_exclusions=()):
     from .external_learners import serializable
     with threadpool_limits(limits=1):
         rows, x, y, names, groups = target(dataset)
-        pool, provenance = projection_pool(dataset, rows, sources)
+        pool, provenance = projection_pool(dataset, rows, sources, identity_exclusions=identity_exclusions)
         projection = fit_projection(pool)
         features = {(dimensions, whitening): transform(projection, x, dimensions, whitening)
                     for dimensions in DIMENSIONS for whitening in WHITENING}

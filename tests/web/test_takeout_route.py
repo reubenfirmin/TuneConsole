@@ -28,7 +28,7 @@ def _entry(title, artist, vid, iso):
 def _client():
     store = Store(":memory:")
     store.init_schema()
-    store.identities.upsert_identity("main", "bridge", None, True)
+    store.accounts.upsert_account("main", "bridge", None, True)
     store.tracks.upsert_track("vidA", "Suave", "Danny Wabbit", "", 200)
     rec_worker = _FakeRecWorker()
     templates = Jinja2Templates(directory=_TEMPLATES_DIR)

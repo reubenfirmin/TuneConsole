@@ -61,14 +61,18 @@ def live_app(store):
     from yt_playlist.web.app import create_app
     from tests.conftest import FakeClient
 
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.playlists.upsert_playlist(iid, "PLZ", "Old Mix", 3, "h", 0.0)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
+    deadline = time.monotonic() + 30
     while not server.started:        # wait until the socket is bound
+        if not thread.is_alive() or time.monotonic() >= deadline:
+            server.should_exit = True
+            raise RuntimeError('Browser fixture server did not start within 30 seconds')
         time.sleep(0.02)
     yield f"http://127.0.0.1:{port}"
     server.should_exit = True

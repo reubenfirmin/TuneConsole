@@ -6,7 +6,7 @@ from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     return iid, TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0),
                            base_url="http://127.0.0.1")
 
@@ -27,7 +27,7 @@ def test_no_alerts_when_nothing_to_do(store):
 
 
 def test_alert_dismiss_persists(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.playlists.upsert_playlist(iid, "PE", "Empties", 0, "h", 0.0)   # an empty-playlist alert
     actions.refresh_cleanup(store, now=1000.0)               # materialize the cached cleanup summary
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0),

@@ -2,7 +2,8 @@
 taste model is too thin to drive the normal feed, and graduate automatically once it is ready."""
 import random
 
-from yt_playlist.rec import rec_params
+from yt_playlist.rec import mix_tuning, rec_params
+from yt_playlist.util.duration import parse_duration
 
 SETUP_COMPLETE = 'onboard_setup_complete'
 
@@ -28,6 +29,11 @@ def setup_completed(store) -> bool:
             if isinstance(signatures, list) and any(isinstance(value, str) and value for value in signatures):
                 return True
         elif isinstance(shown.get('opportunity_id'), str) and shown['opportunity_id']:
+            if surface == 'choice_window:mixes':
+                from yt_playlist.rec import choice_evidence
+                offer = choice_evidence.opportunity(store, shown['opportunity_id'])
+                if offer is not None and len(offer.get('options', [])) < MIN_MIXES:
+                    continue
             return True
     return False
 
@@ -48,10 +54,10 @@ def library_size(store) -> int:
     return store.rec_query.tracks_total()
 
 
-def _setup_complete(*, imported, has_library, mixes_ready, albums_ready=False) -> bool:
-    # Sparse accounts can receive useful prepared offers before modes can be fit.
-    # An empty imported account has no library preparation left to wait for.
-    return imported and (mixes_ready or albums_ready or not has_library)
+def _setup_complete(*, mixes_ready, albums_ready=False) -> bool:
+    # Verified songs can produce useful offers while unrelated imports still
+    # need retrying. Full-sync freshness and metadata coverage aren't gates.
+    return mixes_ready or albums_ready
 
 
 def arrival_status(store, now=None) -> dict:
@@ -60,28 +66,32 @@ def arrival_status(store, now=None) -> dict:
     Metadata coverage is a count, never a percentage pretending to measure model training.
     Observations from incomplete imports are not ready songs.
     """
-    with store.read_snapshot() as snapshot:
-        reader = snapshot.store
+    from yt_playlist.rec import account_growth, artist_start
+
+    with store.read_view() as reader:
         songs = reader.conn.execute("SELECT COUNT(*) FROM playable_library_tracks").fetchone()[0]
         covers = reader.conn.execute(
             "SELECT video_id, thumbnail FROM playable_library_tracks ORDER BY identity_key LIMIT 6").fetchall()
         coverage = reader.enrichment_reports.coverage_stats()
         modes = reader.conn.execute("SELECT COUNT(*) FROM taste_modes WHERE active=1").fetchone()[0]
         model_tracks = reader.rec_model.rec_content_vectors_count()
-        discoveries = reader.conn.execute("SELECT COUNT(*) FROM rec_discovered_content_vectors").fetchone()[0]
+        discoveries = reader.rec_model.rec_discovered_content_vectors_count()
         imported = reader.settings.get_setting("last_sync_at") is not None
-        mixes_ready = prepared_mixes_ready(reader, now)
-        albums_ready = prepared_albums_ready(reader, now)
-        complete = setup_completed(reader) or _setup_complete(
-            imported=imported, has_library=coverage["total"] > 0,
-            mixes_ready=mixes_ready, albums_ready=albums_ready)
-        phase = "ready" if complete else "import" if not imported else "learn"
+        import time
+        growth = account_growth.view(reader, time.time() if now is None else now)
+        mixes_ready = growth['ready_formats']['mixes']
+        albums_ready = growth['ready_formats']['albums']
+        artists_required = artist_start.required(reader)
+        complete = not artists_required and (setup_completed(reader) or _setup_complete(
+            mixes_ready=mixes_ready, albums_ready=albums_ready))
+        phase = "artists" if artists_required else "ready" if complete else "import" if not imported else "learn"
         result = {"songs": songs, "playlists": len(reader.playlists.get_playlists()),
                 "albums": len(reader.collection.get_saved_albums()),
                 "covers": list(dict.fromkeys(row["thumbnail"] or
                     f"https://i.ytimg.com/vi/{row['video_id']}/hqdefault.jpg" for row in covers)),
                 "outcome": reader.settings.get_setting("last_sync_outcome"),
                 "setup": {"complete": complete, "phase": phase, "imported": imported,
+                          "artists_required": artists_required,
                           "analyzed": coverage["processed"], "total": coverage["total"],
                           "genres": coverage["genre"], "model_tracks": model_tracks,
                           "modes": modes, "mixes_ready": mixes_ready, "albums_ready": albums_ready,
@@ -93,30 +103,27 @@ def arrival_status(store, now=None) -> dict:
 def prepared_albums_ready(store, now=None) -> bool:
     """Album listeners can graduate independently of prepared mixes and fitted modes."""
     import time
-    from yt_playlist.rec import album_choices
-    payload = album_choices.load(store, time.time() if now is None else now)
-    return bool(payload and album_choices.eligible(store, payload['items'], now))
+    from yt_playlist.rec import growth_readiness
+    return growth_readiness.albums(store, time.time() if now is None else now)
+
+
+MIN_MIXES = 4
 
 
 def prepared_mixes_ready(store, now=None) -> bool:
-    """Use complete, currently playable offers; fitted modes alone cannot fill Home."""
+    """Open Mix tapes with four playable offers; the first artist set is a starter."""
     import logging
     import time
     from yt_playlist.rec import home_cards, home_prepared
 
     now = time.time() if now is None else now
     service = home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__))
-    for surface in ("home_tuned", "home_prepared"):
-        try:
-            payload = store.rec_proposals.get_proposals(surface)
-            if not home_prepared._valid(payload):
-                continue
-            if surface == "home_tuned" and payload.get("tuning") != home_prepared.tuning_key(store, now):
-                continue
-            if home_prepared.cards(store, payload, now, service, record=False).protos:
-                return True
-        except (ValueError, TypeError, KeyError):
-            continue
+    try:
+        payload = home_prepared.peek(store, now)
+        return bool(payload and len(home_prepared.cards(
+            store, payload, now, service, record=False).protos) >= MIN_MIXES)
+    except (ValueError, TypeError, KeyError):
+        pass
     return False
 
 
@@ -125,10 +132,11 @@ def initial_setup_pending(store, now=None) -> bool:
     if setup_completed(store):
         _remember_completion(store, True)
         return False
-    complete = _setup_complete(
-        imported=store.settings.get_setting("last_sync_at") is not None,
-        has_library=library_size(store) > 0, mixes_ready=prepared_mixes_ready(store, now),
-        albums_ready=prepared_albums_ready(store, now))
+    import time
+    from yt_playlist.rec import account_growth
+    growth = account_growth.view(store, time.time() if now is None else now)
+    complete = _setup_complete(mixes_ready=growth['ready_formats']['mixes'],
+                               albums_ready=growth['ready_formats']['albums'])
     _remember_completion(store, complete)
     return not complete
 
@@ -155,26 +163,22 @@ def _taste_ready(store) -> bool:
 
 
 def onboarding_active(store, now) -> bool:
-    """True while a synced account is still thin and has not graduated (ready / enough feedback /
-    dismissed). The inverse of the graduation condition."""
+    """Keep a synced account in setup until useful offers arrive or it dismisses setup."""
     if setup_completed(store) or store.settings.get_setting("onboard_dismissed") == "1":
         return False
     if not _has_synced(store):
         return False
-    if _taste_ready(store) or prepared_mixes_ready(store, now) or prepared_albums_ready(store, now):
-        return False
-    if feedback_count(store) >= rec_params.get_param(store, "onboard_feedback_min"):
-        return False
-    return True
+    return initial_setup_pending(store, now)
 
 
 def library_sample(store, n=12) -> list[dict]:
     """A genre-diverse sample of owned tracks: round-robin across genre families, so ratings teach
     breadth. Falls back to any owned tracks when genres are sparse."""
-    with store.read_snapshot() as snapshot:
-        rows = snapshot.store.conn.execute(
-            "SELECT identity_key k, title, artist, album, video_id vid, thumbnail thumb, genre "
-            "FROM playable_library_tracks").fetchall()
+    with store.read_view() as reader:
+        rows = reader.conn.execute(
+            "SELECT identity_key k, title, artist, album, video_id vid, thumbnail thumb, genre, "
+            "duration_s AS duration FROM playable_library_tracks WHERE "
+            + reader.rec_eligibility.track_length_clause()).fetchall()
     if not rows:
         return []
     by_fam = {}
@@ -191,7 +195,8 @@ def library_sample(store, n=12) -> list[dict]:
         if f:
             r = f.pop()
             out.append({"video_id": r["vid"], "title": r["title"], "artist": r["artist"],
-                        "album": r["album"] or "", "thumbnail": r["thumb"], "key": r["k"]})
+                        "album": r["album"] or "", "thumbnail": r["thumb"], "key": r["k"],
+                        "duration": r["duration"]})
         i += 1
         if not any(fams):
             break
@@ -212,8 +217,7 @@ def starter_album(store):
         browse = album.get('browse') or ''
         return (browse.startswith('MPRE') or is_upload_album(browse)) and bool(album.get('title'))
 
-    with store.read_snapshot() as snapshot:
-        reader = snapshot.store
+    with store.read_view() as reader:
         saved = [album for album in reader.collection.get_saved_albums() if usable(album)]
         if saved:
             album = next((album for album in saved if album.get('type') != 'Single'), saved[0])
@@ -233,9 +237,10 @@ def starter_album(store):
     return {**album, 'saved': False, 'upload': is_upload_album(album['browse'])} if album else None
 
 
-def _home_tracks(client, n):
+def _home_tracks(store, client, n):
     """Flatten YouTube home-feed shelves into proto tracks (quick picks / mixes). Best-effort."""
     out = []
+    maximum = rec_params.max_track_duration_s(store)
     try:
         shelves = client.get_home() or []
     except Exception:  # noqa: BLE001
@@ -245,12 +250,39 @@ def _home_tracks(client, n):
             vid = t.get("videoId")
             if not vid:
                 continue
+            duration = t.get('duration_seconds') or parse_duration(t.get('duration'))
+            if duration is None:
+                duration = store.tracks.duration_for_video(vid)
+            if duration is not None and duration > maximum:
+                continue
             arts = t.get("artists") or []
             out.append({"video_id": vid, "title": t.get("title") or "",
                         "artist": (arts[0].get("name") or "" if arts else ""), "album": "",
-                        "thumbnail": None, "key": ""})
+                        "thumbnail": None, "key": "", "duration": duration})
             if len(out) >= n:
                 return out
+    return out
+
+
+def _discovered_sample(store, now, n):
+    """Keep candidate selection and its duration eligibility in one local read view."""
+    from yt_playlist.rec import surfaces
+
+    mix_tuning.expire(store, now)
+    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
+        with store.read_view() as reader:
+            return _discovered_sample(reader, now, n)
+    candidates = surfaces.cold_candidates(store, now, limit=n)
+    metadata = store.rec_eligibility.offer_metadata([it.video_id for it in candidates])
+    maximum = rec_params.max_track_duration_s(store)
+    out = []
+    for it in candidates:
+        duration = metadata.get(it.video_id, {}).get('duration')
+        if duration is not None and duration > maximum:
+            continue
+        out.append({"video_id": it.video_id, "title": it.title, "artist": it.artist,
+                    "album": getattr(it, "album", "") or "", "thumbnail": it.thumbnail,
+                    "key": it.key, "duration": duration})
     return out
 
 
@@ -259,18 +291,13 @@ def radio_sample(store, client, now, n=12) -> list[dict]:
     feed (get_home) when the account is too empty to have seeded any. [] when there is no client."""
     if client is None:
         return []
-    from yt_playlist.rec import surfaces
-    out = []
     try:
-        for it in surfaces.cold_candidates(store, now, limit=n):
-            out.append({"video_id": it.video_id, "title": it.title, "artist": it.artist,
-                        "album": getattr(it, "album", "") or "", "thumbnail": it.thumbnail,
-                        "key": it.key})
+        out = _discovered_sample(store, now, n)
     except Exception:  # noqa: BLE001 - cold pool is best-effort
         out = []
     if len(out) < n:
         seen = {d["video_id"] for d in out}
-        for d in _home_tracks(client, n - len(out)):
+        for d in _home_tracks(store, client, n - len(out)):
             if d["video_id"] not in seen:
                 out.append(d)
     return out[:n]

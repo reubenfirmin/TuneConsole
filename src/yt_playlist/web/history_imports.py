@@ -1,6 +1,7 @@
 """Tracked local history processing, serialized with library history refreshes."""
 import threading
 import json
+import hashlib
 from contextlib import nullcontext
 
 from yt_playlist.core.activity import WorkClosing, activity_for
@@ -51,12 +52,13 @@ class HistoryImports:
                 progress('Adding unmatched artists to Discovery…')
                 min_plays = max(3, round(report['span_days'] / 365))
                 if source == 'spotify':
-                    identity_id = report.get('identity_id')
-                    if identity_id is None:
-                        identity_id = spotify_data.resolve_import_identity(store)
+                    account_id = report.get('account_id')
+                    if account_id is None:
+                        account_id = spotify_data.resolve_import_identity(store)
                     seeded = store.discovery.seed_spotify_artists(
-                        identity_id,
-                        report['unmatched_artists'], self.ctx.now_fn(), min_plays=min_plays)
+                        account_id,
+                        report['unmatched_artists'], self.ctx.now_fn(), min_plays=min_plays,
+                        import_key=hashlib.sha256(raw.encode() if isinstance(raw,str) else raw).hexdigest())
                     # Persist only aggregate reporting, never the uploaded file or its metadata.
                     summary = {k: v for k, v in report.items() if isinstance(v, (int, float))}
                     store.settings.set_setting('spotify_import_report', json.dumps(summary))

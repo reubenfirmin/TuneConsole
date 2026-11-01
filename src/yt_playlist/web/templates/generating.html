@@ -10,12 +10,12 @@
   <link rel="stylesheet" href="/static/components.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/clusters.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/generating.css?v={{ asset_v }}">
-  <script src="/static/theme.js?v={{ asset_v }}"></script>
-  <script src="/static/generating.js?v={{ asset_v }}"></script>
+  <script defer src="/static/theme.js?v={{ asset_v }}"></script>
+  <script defer src="/static/generating.js?v={{ asset_v }}"></script>
 </head>
 <body>
-  <div class="gen-stage" role="status" aria-live="polite" aria-label="Preparing playlist">
-    {% with loader_status='Wiring up your playlist', loader_detail='Keep this tab open. Your playlist opens here when it is ready.' %}
+  <div class="gen-stage" data-generation-terminal role="status" aria-live="polite" aria-label="Preparing playlist">
+    {% with loader_status='Wiring up your playlist', loader_detail='Keep YouTube Music open. Your mix will play in that tab.' %}
     {% include "_partials/launch_loader.html" %}
     {% endwith %}
     <span class="gen-brand brand" aria-label="TuneConsole">
@@ -24,21 +24,54 @@
     </span>
   </div>
   <script>
+  {% include "_partials/mix_launch_view.html" %}
   (() => {
-    let thumbs = [];
-    try { thumbs = JSON.parse(localStorage.getItem('tc_gen_thumbs') || '[]'); } catch (_) {}
-    const loader = createLaunchLoader(document.querySelector('.gen-loader'), {
-      thumbs: Array.isArray(thumbs) ? thumbs : [],
-      statuses: ['Wiring up your playlist', 'Building on YouTube Music'],
-      detail: 'Keep this tab open. Your playlist opens here when it is ready.'
+    let loader, finished = false;
+    let mix = {};
+    const token = new URL(location.href).searchParams.get('launch_id');
+    try {
+      mix = JSON.parse(sessionStorage.getItem('tc-mix-launch:' + token) || '{}');
+      if (!mix.id) mix = window.opener?.generationLaunchContext(token) || mix;
+    } catch (_) {}
+    if (mix.id) { startMixLaunch(mix, token); return; }
+    function failed(detail) {
+      finished = true;
+      loader?.destroy();
+      document.querySelector('.gen-loader').hidden = true;
+      document.querySelector('.gen-stage').hidden = true;
+      renderMixLaunch(document, mix, 'uncertain');
+    }
+    const timer = setTimeout(() => failed('The save could not be confirmed. Check YouTube Music and the Action Log before saving again.'), 90000);
+    window.addEventListener('message', event => {
+      if (event.origin === location.origin && event.source === window.opener &&
+          event.data?.type === 'generation-failed' && event.data.token === token) {
+        clearTimeout(timer);
+        failed(event.data.detail);
+      }
     });
     const destroy = () => {
-      loader.destroy();
+      finished = true;
+      clearTimeout(timer);
+      loader?.destroy();
       window.removeEventListener('pagehide', destroy);
       window.removeEventListener('app-page-leaving', destroy);
     };
     window.addEventListener('pagehide', destroy);
     window.addEventListener('app-page-leaving', destroy);
+    // Recovery must work even when animation assets fail or never finish
+    // loading. Install it before initializing the optional visual effects.
+    document.addEventListener('DOMContentLoaded', () => {
+      if (finished || mix.id) return;
+      let thumbs = [];
+      try { thumbs = JSON.parse(localStorage.getItem('tc_gen_thumbs') || '[]'); } catch (_) {}
+      try {
+        loader = createLaunchLoader(document.querySelector('.gen-loader'), {
+          thumbs: Array.isArray(thumbs) ? thumbs : [],
+          statuses: ['Wiring up your playlist', 'Building on YouTube Music'],
+          detail: 'Keep YouTube Music open. Your mix will play in that tab.'
+        });
+      } catch (_) {}
+    }, {once: true});
   })();
   </script>
 </body>

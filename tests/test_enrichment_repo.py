@@ -82,7 +82,7 @@ def test_resolved_conflict_reopens_on_new_value(store):
 
 
 def test_conflict_count_and_list_scoped_to_playlist(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     tid = _track(store, title="A")
     other = _track(store, title="B")
     plid = store.playlists.upsert_playlist(iid, "PL", "Mix", 1, "h", 1000.0)

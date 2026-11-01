@@ -23,7 +23,7 @@ def test_bounded_windows_identity_discontinuities_and_native_measurements():
     _node(r"""
 import assert from 'node:assert/strict';
 import {Sampler, windows, coverage} from './experiments/audio_lab/sampling.js';
-import {describe} from './experiments/audio_lab/features.js';
+import {describe} from './extension/audio_model/features.js';
 assert.deepEqual(windows(100), [{start:2,end:12},{start:50,end:60},{start:88,end:98}]);
 assert.deepEqual(windows(5), [{start:.5,end:4}]);
 assert.deepEqual(windows(Infinity), []);
@@ -118,10 +118,14 @@ assert(events.some(e=>e.url===root+'reference.html'));
 """)
 
 
-def test_lab_has_no_remote_source_access_and_is_outside_store_package():
-    assert not [path.relative_to(LAB) for path in LAB.rglob('*') if path.name.startswith('_')], 'Chrome reserves filenames starting with underscores'
-    assert not list(LAB.rglob('*.py')), 'Python tooling must stay outside the loadable extension to avoid __pycache__'
-    manifest = json.loads((LAB / 'manifest.json').read_text())
+def test_lab_has_no_remote_source_access_and_is_outside_store_package(tmp_path):
+    lab = tmp_path / 'audio-lab'
+    ignored = shutil.ignore_patterns('local', '__pycache__')
+    shutil.copytree(LAB, lab, ignore=ignored)
+    shutil.copytree(ROOT / 'extension/audio_model', lab, dirs_exist_ok=True, ignore=ignored)
+    assert not [path.relative_to(lab) for path in lab.rglob('*') if path.name.startswith('_')], 'Chrome reserves filenames starting with underscores'
+    assert not list(lab.rglob('*.py')), 'Python tooling must stay outside the loadable extension to avoid __pycache__'
+    manifest = json.loads((lab / 'manifest.json').read_text())
     assert set(manifest['permissions']) == {'activeTab', 'tabCapture', 'offscreen'}
     assert not manifest.get('host_permissions')
     assert not manifest.get('content_scripts')

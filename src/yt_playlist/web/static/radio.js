@@ -1,7 +1,14 @@
 /* Home's saved-playlist Radio Session. Playback and additions continue server-side. */
 function radioHome(initial = {}) {
   let cached = {};
+  let pendingLaunch = null;
+  let coverLoad = null;
   try { cached = JSON.parse(sessionStorage.getItem('radio-view') || '{}'); } catch (_) {}
+  try {
+    const saved = JSON.parse(sessionStorage.getItem('radio-launch'));
+    if (saved?.version === 1 && typeof saved.id === 'string' && saved.song &&
+        (saved.fromPlaylist ? Number.isInteger(saved.song.id) : typeof saved.song.video_id === 'string')) pendingLaunch = saved;
+  } catch (_) {}
   // Cached artwork is useful; a cached session is not evidence of playback.
   const state = initial.state || {active: false};
   const seeds = initial.seeds?.length ? initial.seeds : cached.seeds || [];
@@ -10,10 +17,13 @@ function radioHome(initial = {}) {
     loaded: !!(initial.seeds?.length && initial.seedMenu), seedsLoading: false, timer: null, playlistKey: '', playlistSessionId: null, destroyed: false,
     preparingKey: '',
     busyAction: '', seedMenu: initial.seedMenu || cached.seedMenu, seenMenu: null, currentVideo: null, requestSerial: 0,
-    recordPlayback: null, pendingRecord: null, recordCoverFailed: '',
-    launchSong: initial.launchPlaylist || (state.active && state.starting ? state.tracks?.[0] || {} : null),
-    launchPlaylist: initial.launchPlaylist || null,
-    launchPreviousId: null,
+    recordPlayback: null, pendingRecord: null, recordCoverUrl: '',
+    launchSong: pendingLaunch?.song || initial.launchPlaylist || (state.active && state.starting ? state.tracks?.[0] || {} : null),
+    launchPlaylist: pendingLaunch ? (pendingLaunch.fromPlaylist ? pendingLaunch.song : null) : initial.launchPlaylist || null,
+    launchPreviousId: pendingLaunch?.previousId ?? null,
+    launchAttempt: pendingLaunch?.id || null,
+    launchPhase: pendingLaunch ? 'unknown' : '', recoverySong: pendingLaunch?.song || null,
+    recoveryFromPlaylist: pendingLaunch?.fromPlaylist || false, launchRecoveryTimer: null,
     selectedSlot: null, switchChoice: null, switchSending: false, switchSerial: 0,
     selectionError: '', selectionSlot: null, pendingSong: null,
     hoveredSlot: null, focusedSlot: null,
@@ -45,6 +55,82 @@ function radioHome(initial = {}) {
         return url.href;
       } catch (_) { return ''; }
     },
+    get recordCoverIdentity() {
+      return JSON.stringify([this.state.active ? this.sessionId() : null,
+        this.recordTrack?.video_id, this.recordTrack?.thumbnail, this.recordCover]);
+    },
+    syncRecordCover(element) {
+      const key = this.recordCoverIdentity;
+      if (coverLoad?.key === key) return coverLoad.promise;
+      // A replacement SVG reports its own load, including on a cache hit.
+      if (element) element.removeAttribute('data-loaded');
+      coverLoad?.cancel();
+      this.recordCoverUrl = '';
+      if (!this.state.active || !this.recordCover || this.destroyed) {
+        coverLoad = null;
+        return Promise.resolve();
+      }
+      // An enlarged Google image can fail even when the row's original works.
+      // Keep successful fallback artwork across ordinary status/playlist polls.
+      const original = new URL(this.recordTrack.thumbnail, location.href).href;
+      const candidates = [...new Set([this.recordCover, original])];
+      const load = {key, index: 0, image: null, timer: null, url: ''};
+      coverLoad = load;
+      let resolve;
+      load.promise = new Promise(done => { resolve = done; });
+      const current = () => !this.destroyed && coverLoad === load && this.recordCoverIdentity === key;
+      const cleanup = () => {
+        clearTimeout(load.timer);
+        if (load.image) load.image.onload = load.image.onerror = null;
+      };
+      load.cancel = () => { cleanup(); resolve(); };
+      load.loaded = element => {
+        if (!current() || element.isConnected === false ||
+            element.getAttribute('href') !== load.url || this.recordCoverUrl !== load.url) return;
+        element.setAttribute('data-loaded', load.url);
+        cleanup();
+        resolve();
+      };
+      const next = () => {
+        cleanup();
+        if (!current()) { resolve(); return; }
+        this.recordCoverUrl = '';
+        const url = candidates[load.index++];
+        load.url = url || '';
+        if (!url) { resolve(); return; }
+        const image = new Image();
+        load.image = image;
+        image.referrerPolicy = 'no-referrer';
+        image.onload = () => {
+          if (load.image !== image) return;
+          if (!current()) { load.cancel(); return; }
+          if (!image.naturalWidth) { next(); return; }
+          // Only expose loaded, current-track artwork. The native SVG load
+          // below, rather than this preloader alone, completes preparation.
+          this.recordCoverUrl = url;
+        };
+        const failed = () => { if (load.image === image) next(); };
+        image.onerror = failed;
+        load.timer = setTimeout(() => {
+          if (load.image !== image) return;
+          // The last candidate may still arrive later. Stop delaying the
+          // session, while retaining its guarded load handler for recovery.
+          if (current() && load.index === candidates.length) resolve();
+          else next();
+        }, 8000);
+        image.src = url;
+      };
+      load.failed = element => {
+        if (!current() || element.isConnected === false ||
+            element.getAttribute('href') !== load.url || this.recordCoverUrl !== load.url) return;
+        element.removeAttribute('data-loaded');
+        next();
+      };
+      next();
+      return load.promise;
+    },
+    recordCoverLoaded(element) { coverLoad?.loaded(element); },
+    recordCoverError(element) { coverLoad?.failed(element); },
     previewRecord({url, requestId}) {
       if (!this.state.active) return;
       const target = new URL(url, location.href);
@@ -132,7 +218,20 @@ function radioHome(initial = {}) {
     sessionId(state = this.state) { return state.playlist_id || state.local_id; },
     get preparingSession() { return !!(this.state.active && this.sessionId() && this.playlistSessionId !== this.sessionId()); },
     get restoring() { return (this.resolving || this.preparingSession) && !this.launchSong && !this.state.starting && this.busyAction !== 'start'; },
-    get launching() { return this.resolving || this.busyAction === 'start' || !!this.launchSong || (this.state.active && this.state.starting) || this.preparingSession; },
+    get launching() { return this.launchPhase !== 'unknown' && (this.resolving || this.busyAction === 'start' || !!this.launchSong || (this.state.active && this.state.starting) || this.preparingSession); },
+    get launchUncertain() { return ['checking', 'unknown'].includes(this.launchPhase); },
+    get recoveryTitle() { return this.recoverySong?.title || 'Your Radio Session'; },
+    get recoveryArtist() { return this.recoverySong?.artist || (this.recoveryFromPlaylist ? 'Radio from your playlist' : ''); },
+    get recoveryUrl() {
+      if (this.recoveryFromPlaylist) return '/playlist/' + this.recoverySong.id;
+      return 'https://music.youtube.com/watch?v=' + encodeURIComponent(this.recoverySong?.video_id || '');
+    },
+    get recoveryMessage() {
+      if (this.launchPhase === 'checking') return 'Checking whether your session started. This can take up to 30 seconds.';
+      if (this.launchPhase === 'unknown') return 'We couldn’t confirm playback. Check again, or play your selection directly on YouTube Music.';
+      if (this.launchPhase === 'disconnected') return 'Open YouTube Music and connect its extension, then try this selection again.';
+      return 'This Radio Session didn’t start. Try this selection again, or play it directly.';
+    },
     get showSeeds() { return !this.state.active && !this.launching; },
     get launchTracks() {
       const pending = this.busyAction === 'start' || this.launchSong;
@@ -164,7 +263,7 @@ function radioHome(initial = {}) {
       this.preparingKey = key;
       // Hidden lazy images and the record label must settle before reveal.
       // Failed or stalled artwork uses the existing record placeholders.
-      const elements = Array.from(this.$refs.session.querySelectorAll('img, image'));
+      const elements = Array.from(this.$refs.session.querySelectorAll('img, image:not(.radio-record-cover)'));
       const urls = new Map();
       for (const element of elements) {
         if (element.tagName === 'IMG') element.loading = 'eager';
@@ -173,15 +272,15 @@ function radioHome(initial = {}) {
         if (!urls.has(url)) urls.set(url, []);
         urls.get(url).push(element);
       }
-      await Promise.all(Array.from(urls, ([url, images]) => new Promise(resolve => {
+      const record = this.$refs.session.querySelector('.radio-record-cover');
+      await Promise.all([record ? this.syncRecordCover() : Promise.resolve(),
+        ...Array.from(urls, ([url, images]) => new Promise(resolve => {
         const image = new Image();
         let timer, settled = false;
         const fallback = element => {
           if (this.destroyed || this.preparingKey !== key) return;
           if ((element.getAttribute('src') || element.getAttribute('href')) !== url) return;
-          // The playing cover stays mounted so a later song can replace it.
-          if (element.matches('.radio-record-cover')) this.recordCoverFailed = url;
-          else element.remove();
+          element.remove();
         };
         const finish = ok => {
           if (settled) return;
@@ -197,7 +296,7 @@ function radioHome(initial = {}) {
         image.onerror = () => finish(false);
         timer = setTimeout(() => finish(false), 8000);
         image.src = url;
-      })));
+      }))]);
       if (this.destroyed || this.preparingKey !== key || !this.state.active || this.resolving ||
           this.state.starting || this.sessionId() !== sessionId ||
           JSON.stringify([this.playlistKey, this.state.directions]) !== key) return;
@@ -221,7 +320,6 @@ function radioHome(initial = {}) {
         this.pendingRecord = null;
         this.pendingSong = null;
         this.selectionSlot = null;
-        this.recordCoverFailed = '';
       }
       if (this.pendingSong?.accepted && state.selection_error) this.pendingSong = null;
       if (state.browser_age != null && state.browser_age <= 8) this.settleSongPlayback(state.browser?.player);
@@ -241,19 +339,40 @@ function radioHome(initial = {}) {
       if (state.active && state.starting && !this.launchSong) this.launchSong = state.tracks?.[0] || {};
     },
     publishSessionState() {
-      this.$dispatch('radio-session-state', {active: !!this.state.active, starting: !!this.state.starting});
+      this.$dispatch('radio-session-state', {active: !!this.state.active, starting: !!this.state.starting,
+        playlist: this.state.playlist_id || null});
     },
     finishLaunch() {
       if (!this.launchSong || this.busyAction === 'start') return;
+      // An inactive or previous-session snapshot cannot settle a lost POST.
+      // Keep its identity and block another create until new playback is known.
+      if (this.launchUncertain && (!this.state.active || this.sessionId() === this.launchPreviousId)) return;
       if (!this.state.active) {
         console.debug('[Radio] launch returned to song choices', this.state.error);
+        this.launchPhase = 'rejected';
         this.launchSong = null;
         this.launchPlaylist = null;
+        this.clearLaunch();
       } else if (!this.state.starting && this.playlistSessionId === this.sessionId() &&
                  this.playlistKey === this.tableKey(this.state)) {
+        this.launchPhase = '';
+        clearTimeout(this.launchRecoveryTimer);
         this.launchSong = null;
         this.launchPlaylist = null;
+        this.clearLaunch();
       }
+    },
+    rememberLaunch() {
+      try { sessionStorage.setItem('radio-launch', JSON.stringify({version: 1,
+        id: this.launchAttempt, song: this.recoverySong, fromPlaylist: this.recoveryFromPlaylist,
+        previousId: this.launchPreviousId})); } catch (_) {}
+    },
+    clearLaunch() {
+      try {
+        const saved = JSON.parse(sessionStorage.getItem('radio-launch'));
+        if (saved?.id === this.launchAttempt) sessionStorage.removeItem('radio-launch');
+      } catch (_) {}
+      this.launchAttempt = null;
     },
     init() {
       this.syncRecordPlayback(window.playbackStatus?.snapshot);
@@ -264,7 +383,7 @@ function radioHome(initial = {}) {
         url.searchParams.delete('radio_playlist');
         history.replaceState(null, '', url.pathname + url.search + url.hash);
       }
-      if (this.launchPlaylist) {
+      if (this.launchPlaylist && !this.launchUncertain) {
         this.$nextTick(() => this.start(this.launchPlaylist, true));
         return;
       }
@@ -281,7 +400,8 @@ function radioHome(initial = {}) {
         this.fitSpace();
         this.prepareSession();
       });
-      if (!this.state.active) this.loadSeeds();
+      // The visible Radio panel refreshes its offer in setVisible(). A hidden
+      // panel on the unlock map must not start another preparation request.
     },
     cacheView() {
       try { sessionStorage.setItem('radio-view', JSON.stringify({seeds: this.seeds,
@@ -313,10 +433,13 @@ function radioHome(initial = {}) {
     destroy() {
       this.destroyed = true;
       clearTimeout(this.timer);
+      clearTimeout(this.launchRecoveryTimer);
+      coverLoad?.cancel();
       this.destroyArtwork();
     },
     async json(path, options) {
-      const response = await fetch('/radio/' + path, options);
+      const response = await fetch('/radio/' + path, path === 'status'
+        ? {signal: AbortSignal.timeout(8000), ...options} : options);
       if (!response.ok) throw new Error('Could not reach Radio. Try again.');
       return response.json();
     },
@@ -365,31 +488,46 @@ function radioHome(initial = {}) {
       });
     },
     async start(song, fromPlaylist = false) {
-      if (this.busy) return;
+      if (this.busy || this.launchUncertain) return;
       window.tvPlaybackControls?.release();
       ++this.requestSerial;
       this.launchPreviousId = this.sessionId() ?? null;
       this.launchPlaylist = fromPlaylist ? song : null;
       this.launchSong = song;
+      this.launchPhase = '';
+      this.recoverySong = {...song}; this.recoveryFromPlaylist = fromPlaylist;
+      this.launchAttempt = crypto.randomUUID();
+      // Persist before sending. Reloading an admitted request with a missing
+      // receipt must reconcile it, never silently permit another creation.
+      this.rememberLaunch();
+      clearTimeout(this.launchRecoveryTimer);
       this.busy = true; this.busyAction = 'start';
       this.$nextTick(() => this.fitSpace());
       const now = new Date();
       const localDate = [now.getFullYear(), String(now.getMonth() + 1).padStart(2, '0'),
                          String(now.getDate()).padStart(2, '0')].join('-');
       try {
-        const result = await this.json('start', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        const result = await this.json('start', {method: 'POST', signal: AbortSignal.timeout(45000), headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({...(fromPlaylist ? {playlist_id: song.id} : {video_id: song.video_id, menu_id: this.seedMenu}),
                                 local_date: localDate})});
         if (!result.ok) {
           console.debug('[Radio] launch returned to song choices', result.reason);
+          this.launchPhase = result.reason === 'Connect the YouTube Music extension first.' ? 'disconnected' : 'rejected';
           this.launchSong = null;
           this.launchPlaylist = null;
+          this.clearLaunch();
           if (result.refresh_seeds) { this.loaded = false; this.loadSeeds(); }
           return;
         }
         this.applyState(result);
       } catch (error) {
         console.debug('[Radio] launch request interrupted', error);
+        this.launchPhase = 'checking';
+        this.launchRecoveryTimer = setTimeout(() => {
+          if (this.destroyed || this.launchPhase !== 'checking') return;
+          this.launchPhase = 'unknown';
+          this.$nextTick(() => this.fitSpace());
+        }, 30000);
         // The server may have accepted the launch before the response was
         // lost. Let status polling settle it without issuing another start.
       } finally {
@@ -478,7 +616,7 @@ function radioHome(initial = {}) {
       }
     },
     async newRadio() {
-      if (this.busy) return;
+      if (this.busy || this.launchUncertain) return;
       this.selectionError = '';
       this.selectionSlot = null;
       ++this.requestSerial;
@@ -488,6 +626,7 @@ function radioHome(initial = {}) {
         const state = await this.json('stop', {method: 'POST'});
         this.launchSong = null;
         this.launchPlaylist = null;
+        this.clearLaunch();
         this.applyState(state);
       }
       catch (error) {

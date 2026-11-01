@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from yt_playlist.core import embeddings
 from yt_playlist.rec import embed
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
@@ -16,7 +17,7 @@ from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
@@ -31,9 +32,9 @@ def _modelled(store, vid, title, artist, album, xy):
     k = identity_key(title, artist)
     v = np.asarray(xy, dtype=np.float32)
     v /= np.linalg.norm(v) + 1e-9
-    store.conn.execute("INSERT OR REPLACE INTO rec_vectors(identity_key, vec) VALUES (?,?)",
-                       (k, v.tobytes()))
-    store.conn.commit()
+    with store.conn:
+        store.conn.execute('BEGIN IMMEDIATE')
+        embeddings.publish(store.conn, 'rec_vectors', [(k, v.tobytes())], model_version='album-cap-fixture')
     return k
 
 

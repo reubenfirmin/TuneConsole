@@ -14,11 +14,12 @@ from yt_playlist.library import live_plays, player_events
 from yt_playlist.library import tv_stream
 from yt_playlist.rec import measurement, tv, tv_artwork, tv_visual
 from yt_playlist.web.context import request_form
+from yt_playlist.web.routes.home_access import guard
 
 
 def playlist_items(store, pid, *, artwork=True):
     playlist = store.playlists.get_playlist(pid)
-    recipe = store.playlist_recipes.get_recipe(playlist.scope_ref) if playlist else None
+    recipe = store.playlist_recipes.get_recipe(playlist.playlist_scope_id) if playlist else None
     if not isinstance(recipe, dict) or recipe.get('media') != 'video':
         return None
     metadata = {t['video_id']: t for t in recipe.get('videos', [])}
@@ -63,7 +64,7 @@ def build(ctx):
 
     def preparation_message():
         pool = tv.cached(ctx.store) or {}
-        if (ctx.store.rec_proposals.get_proposals('tv_preparation') or {}).get('failed'):
+        if (ctx.store.tv_preparation.state() or {}).get('failed'):
             return 'TV couldn’t reach the video catalog. We’re reconnecting; you can also reset TV to try again.'
         if pool.get('state') == 'no_sources':
             return 'TV needs a few liked songs or discoveries to find videos. Your library is still being prepared.'
@@ -109,7 +110,7 @@ def build(ctx):
         ctx.store.settings.set_setting(tv.SETTING, 'unlimited' if maximum is None else str(maximum))
         return status()
 
-    @router.post('/home/tv/play')
+    @router.post('/home/tv/play', dependencies=[Depends(guard(ctx, 'tv'))])
     def play():
         items = tv.queue(ctx.store, ctx.now_fn())
         if not items:
@@ -120,11 +121,11 @@ def build(ctx):
                 result['message'] = message
             return JSONResponse(result, status_code=202)
         try:
-            identity_id, client = client_for(ctx.store, ctx.client_provider())
+            account_id, client = client_for(ctx.store, ctx.client_provider())
             recipe = {'lane': 'tv', 'media': 'video', 'max_minutes': tv.max_minutes(ctx.store),
                       'videos': items, 'tv_stream': uuid.uuid4().hex}
             result = activity_for(ctx).wrap('create TV playlist', create_generated_playlist,
-                ctx.store, 'TV', items, client, ctx.now_fn(), identity_id, recipe=recipe,
+                ctx.store, 'TV', items, client, ctx.now_fn(), account_id, recipe=recipe,
                 max_duration_s=math.inf if recipe['max_minutes'] is None else recipe['max_minutes'] * 60)()
             playlist, videos = playlist_items(ctx.store, result['pid'])
             tv.record_draw(ctx.store, videos)
@@ -149,7 +150,7 @@ def build(ctx):
     @router.post('/home/tv/playlist/{pid}/refill')
     def refill(pid: int, form=Depends(request_form)):
         playlist = ctx.store.playlists.get_playlist(pid)
-        recipe = ctx.store.playlist_recipes.get_recipe(playlist.scope_ref) if playlist else None
+        recipe = ctx.store.playlist_recipes.get_recipe(playlist.playlist_scope_id) if playlist else None
         if not isinstance(recipe, dict) or recipe.get('media') != 'video':
             return JSONResponse({'error': 'This TV playlist is no longer available.'}, status_code=404)
         try:
@@ -168,11 +169,11 @@ def build(ctx):
         if not refill_lock.acquire(blocking=False):
             return JSONResponse({'preparing': True}, status_code=202)
         try:
-            identity_id, client = client_for(ctx.store, ctx.client_provider(), playlist_id=pid)
+            account_id, client = client_for(ctx.store, ctx.client_provider(), playlist_id=pid)
             items = tv.queue(ctx.store, ctx.now_fn(), exclude=exclude, recent=recent,
                              current=form.get('current'), limit=4)
             next_pid, stream, confirmed = activity_for(ctx).wrap('continue TV playlist', tv_stream.refill,
-                ctx.store, client, identity_id, playlist, recipe, token, request_id, items, ctx.now_fn())()
+                ctx.store, client, account_id, playlist, recipe, token, request_id, items, ctx.now_fn())()
             next_playlist, videos = playlist_items(ctx.store, next_pid)
             metadata = {t['video_id']: t for t in videos}
             videos = [metadata[t['video_id']] for t in confirmed if t['video_id'] in metadata]
@@ -211,7 +212,7 @@ def build(ctx):
         item = next((t for t in items if t['video_id'] == form.get('video_id')), None)
         if kind not in {'play', 'state', 'tick', 'track_exit', 'ended', 'bye', 'player_error'} or item is None:
             return JSONResponse({'error': 'Invalid video playback event.'}, status_code=400)
-        identity = next((i for i in ctx.store.identities.get_identities() if i.id == playlist.identity_id), None)
+        identity = next((i for i in ctx.store.accounts.get_accounts() if i.id == playlist.account_id), None)
         if identity is None:
             return JSONResponse({'error': 'Playlist account not found.'}, status_code=404)
         try:
@@ -233,7 +234,7 @@ def build(ctx):
         # Use saved, confirmed metadata and account ownership rather than credits
         # supplied by the browser. These are the same handlers used by audio.
         msg = {'kind': kind, 'videoId': item['video_id'], 'title': item['title'],
-               'artist': item['artist'], 'playlist': playlist.ytm_playlist_id,
+               'artist': item['artist'], 'playlist': playlist.provider_playlist_id,
                'brandId': identity.brand_account_id or '', 'brandKnown': True,
                'position': position, 'duration': item['duration'],
                'state': form.get('state'), 'timeZone': form.get('time_zone')}

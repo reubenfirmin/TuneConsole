@@ -32,16 +32,31 @@
   <div class="tab-panel" role="tabpanel" x-show="tab === 'home'" x-cloak>
     <section class="card" aria-labelledby="setup-home-title">
       <h2 class="section section-flush" id="setup-home-title">Your landing page</h2>
-      <p class="section-note">You can switch between listening modes at any time. Choose which one opens when you return to Home.</p>
-      <form hx-post="/home/format" hx-trigger="change" hx-swap="none" x-data="{ saved: false, failed: false }"
+      <form hx-post="/home/format" hx-trigger="change" hx-swap="none" hx-sync="this:queue last"
+            x-data="{ saved: false, failed: false }" @change="saved = false; failed = false"
             @htmx:after-request="saved = $event.detail.successful; failed = !saved">
-        <label for="setup-home-format">Start Home with</label>
-        <select id="setup-home-format" name="format" @change="saved = false; failed = false">
-          {% for value, label in [('auto','Follow my listening'), ('mixes','Mix tapes'), ('albums','Long play'), ('radio','On air'), ('both','My last listening tab')] %}
-          <option value="{{ value }}" {{ 'selected' if home_format == value }}>{{ label }}</option>
+        <fieldset class="setup-home-formats">
+          <legend>Start Home with</legend>
+          {% for value, label in [('mixes','Mix tapes'), ('albums','Long play'), ('radio','On air'), ('both','My last listening tab')] %}
+          <label class="setup-home-choice">
+            <input type="radio" name="format" value="{{ value }}" {{ 'checked' if home_format == value }}>
+            <span class="setup-home-tile">
+              {% if value == 'both' %}
+              <span class="setup-home-last" aria-hidden="true">
+                <svg viewBox="0 0 120 80" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round">
+                  <rect x="18" y="18" width="66" height="44" rx="5"/>
+                  <rect x="36" y="28" width="66" height="44" rx="5"/>
+                  <path d="M36 40h66M50 28v12M64 28v12"/>
+                </svg>
+              </span>
+              {% else %}
+              <img src="/static/onboarding-{{ value }}.png" alt="" width="1536" height="1024">
+              {% endif %}
+              <span class="setup-home-choice-label">{{ label }}</span>
+            </span>
+          </label>
           {% endfor %}
-        </select>
-        <p class="section-note">Follow my listening starts with your onboarding choice and adapts after you choose and play a format on three separate days. Choose a specific mode to keep it fixed.</p>
+        </fieldset>
         <p class="section-note" role="status" x-show="saved" x-cloak>Saved.</p>
         <p class="section-note" role="alert" x-show="failed" x-cloak>Could not save your choice. Try again.</p>
       </form>
@@ -589,9 +604,9 @@ function setupForm(rows, masterIdx, configured, savedIdentities, initialMessage,
         if (!response.ok) throw new Error('check failed');
         const result = await response.json();
         for (const check of result.checks) {
-          const before = definitions.find(saved => saved.id === check.identity_id);
-          if (before && this.savedIdentities.some(saved => saved.id === check.identity_id && saved.brand === before.brand)) {
-            this.identityChecks[check.identity_id] = check;
+          const before = definitions.find(saved => saved.id === check.account_id);
+          if (before && this.savedIdentities.some(saved => saved.id === check.account_id && saved.brand === before.brand)) {
+            this.identityChecks[check.account_id] = check;
           }
         }
         if (this.identityChecks[this.openIdentityHelp]?.state === 'valid') this.openIdentityHelp = null;

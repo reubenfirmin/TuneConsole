@@ -2,7 +2,8 @@
 import hashlib
 import json
 
-from yt_playlist.rec import choice_learning, home_vibe, musical_character, rec_params
+from yt_playlist.rec import album_feedback_state, choice_learning, home_vibe, musical_character, rec_params
+from yt_playlist.core.mix_choices import PRECISION
 
 DECAY_TICK_S = 3600
 
@@ -14,7 +15,12 @@ def ranking_configuration(store):
     cannot silently leave an older pool current. These dependencies request
     ranking work; model fitting has its own narrower configuration contract.
     """
+    if (store._db_path is not None and not getattr(store, '_read_only', False)
+            and not store._lock.held_by_current_thread):
+        with store.read_view() as reader:
+            return ranking_configuration(reader)
     return {'records': store.rec_model.weight_records(),
+            'mix_choice_precision': PRECISION,
             'vibe_version': home_vibe.VERSION,
             'musical_profile_version': musical_character.VERSION,
             'params': {spec.name: rec_params.get_param(store, spec.name)
@@ -22,6 +28,10 @@ def ranking_configuration(store):
 
 
 def preferences(store, now):
+    if (store._db_path is not None and not getattr(store, '_read_only', False)
+            and not store._lock.held_by_current_thread):
+        with store.read_view() as reader:
+            return preferences(reader, now)
     ranking = ranking_configuration(store)
     records = ranking['records']
     # Decay has no source-row mutation. Refresh at most hourly while there is
@@ -38,7 +48,7 @@ def preferences(store, now):
                      'choices': choices.get('interest_version'),
                      'bandit': bandit.get('state_version'),
                      'bandit_active': bandit.get('expires_at') is None or now < bandit['expires_at'],
-                     'album_feedback': store.settings.get_setting('album_feedback'),
+                     'album_feedback': album_feedback_state.state(store),
                      'decay_tick': int(now // DECAY_TICK_S) if decaying or choice_decay else None}
     fingerprint = hashlib.sha256(json.dumps(configuration, sort_keys=True).encode()).hexdigest()
     return fingerprint

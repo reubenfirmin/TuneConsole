@@ -1,0 +1,100 @@
+"""Typed fallback ranks and trial controls retain their separate lifecycles."""
+import sqlite3
+
+import pytest
+
+from tests.core.test_tv_state_migration import store, cutover
+from yt_playlist.core import library_pool_state, model_comparison_state
+from yt_playlist.core.db_revisions import Revisions
+from yt_playlist.rec import library_pool, product_comparison
+
+
+def test_clicked_pool_keeps_complete_ranks_parameters_unknowns_and_observation_time(store):
+    store.rec_ledger.record_serving_policy('original-pool', {'algorithm': 'retained'}, 1)
+    items = []
+    for index in range(515):
+        store.tracks.upsert_track(f'video{index}', f'Song {index}', 'Artist', None, 100)
+        items.append({'key': f'song {index}|artist', 'score': 1 / (index + 1), 'pool_policy': 'original-pool',
+                      'reason': 'Original explanation'})
+    items.append({'key': 'unknown|artist', 'pool_policy': 'original-pool', 'score': .1})
+    parameters = {'lane': 'wheelhouse', 'epoch': 4, 'include_genres': ['unknown-historical-genre'], 'avoid_genres': []}
+    surface = 'home_pool:wheelhouse'
+    store.rec_proposals.put_proposals(surface, {'parameters': parameters, 'tracks': items}, None)
+    cutover(store)
+    result = store.rec_proposals.get_proposals(surface)
+    assert result['parameters'] == parameters
+    assert [track['key'] for track in result['tracks']] == [track['key'] for track in items[:-1]]
+    assert [track['score'] for track in result['tracks']] == [track['score'] for track in items[:-1]]
+    assert all(track['reason'] == 'Original explanation' for track in result['tracks'])
+    assert store.conn.execute('SELECT built_at FROM clicked_library_pools').fetchone()[0] is None
+    assert tuple(store.conn.execute('SELECT genre_key,resolution_reason FROM clicked_library_genres').fetchone()) == (None, 'unknown_genre')
+    assert store.conn.execute('SELECT raw_key FROM unresolved_recommendation_candidates').fetchone()[0] == 'unknown|artist'
+    with pytest.raises(sqlite3.IntegrityError, match='immutable'), store.conn.atomic():
+        store.conn.execute('UPDATE clicked_library_pools SET epoch=5')
+    with pytest.raises(sqlite3.IntegrityError, match='retained'), store.conn.atomic():
+        store.conn.execute('DELETE FROM clicked_library_genres')
+
+
+def test_fresh_clicked_build_uses_staged_rank_publication_and_current_filters(store, monkeypatch):
+    from tests.conftest import seed_catalog_track
+    from tests.rec.test_choice_bandit import modes
+    from yt_playlist.rec.surfaces import ForYouItem
+    cutover(store)
+    modes(store)
+    store._snapshot_revisions = Revisions(store.conn)
+    ranked = []
+    for index in range(8):
+        seed_catalog_track(store, f'song {index}|artist', f'Song {index}', 'Artist', video_id=f'video{index}')
+        ranked.append(ForYouItem(f'Song {index}', 'Artist', '', f'video{index}', None, 0,
+                                'Controlled scorer result', key=f'song {index}|artist'))
+    def score(reader, *args, **kwargs):
+        reader.recommendations.head('home')
+        store.modes.log_impressions(1, [('wheelhouse', 1)], 100)
+        return ranked
+    monkeypatch.setattr(library_pool.surfaces, 'for_you', score)
+    parameters = {'lane': 'wheelhouse', 'epoch': 1, 'include_genres': [], 'avoid_genres': []}
+    library_pool.prepare(store, 100, parameters)
+    result = store.rec_proposals.get_proposals('home_pool:wheelhouse')
+    assert result and result['parameters'] == parameters and len(result['tracks']) == 8
+    assert store.recommendations.pool('home_pool:wheelhouse', 'all', 'wheelhouse')['eligible_count'] == 8
+    selected = library_pool.pick(store, 100, parameters, exclude_keys=['song 0|artist'])
+    assert selected and all(track['key'] != 'song 0|artist' for track in selected)
+    # Feedback arriving after publication must change eligibility immediately;
+    # the retained, complete ranking is still the original eight candidates.
+    for index in range(7):
+        store.rec_model.record_feedback('for_you', f'song {index}|artist', 'dismiss', now=101)
+    selected = library_pool.pick(store, 102, parameters)
+    assert [track['key'] for track in selected] == ['song 7|artist']
+    assert store.rec_proposals.get_proposals('home_pool:wheelhouse') == result
+
+
+def test_trial_monitor_and_held_assignment_are_exact_typed_state_with_explicit_run_custody(store):
+    run = store.model_selection.start_selection(1, {'kind': 'product', 'previous': {'method': 'svd', 'dim': 2}})
+    plan = {'phase': 'observing', 'run_id': run, 'attempt': 1, 'policy': product_comparison.POLICY,
+            'previous': {'method': 'svd', 'dim': 2}, 'challenger': {'method': 'svd', 'dim': 3},
+            'generation': 'frozen', 'vectors': 'captured-artifact', 'alpha': .025,
+            'started_at': 1, 'exposure_until': 100, 'decision_at': 101}
+    monitor = {'run_id': run, 'policy': product_comparison.POLICY, 'setup': {'method': 'svd', 'dim': 3},
+               'baseline': [.1, .5, 1.], 'complete': False, 'next_at': 200}
+    assignment = {'epoch': 10, 'comparison': {'run_id': run, 'arm': 'challenger', 'format': 'albums',
+                  'probability': .5, 'window': '10', 'unit': '0', 'controlled': True}}
+    sources = {'model_live_comparison': plan, 'model_listening_monitor': monitor, 'model_album_assignment': assignment}
+    for surface, value in sources.items():
+        store.rec_proposals.put_proposals(surface, value, None)
+    cutover(store)
+    for surface, value in sources.items():
+        assert store.rec_proposals.get_proposals(surface) == value
+        assert not store.conn.execute('SELECT 1 FROM rec_proposals WHERE surface=?', (surface,)).fetchone()
+    assert [entry[0] for entry in store.conn.execute('SELECT value FROM model_monitor_baseline ORDER BY position')] == [.1, .5, 1.]
+    with pytest.raises(sqlite3.IntegrityError), store.conn.atomic():
+        store.conn.execute('DELETE FROM rec_model_selection_runs WHERE id=?', (run,))
+    with pytest.raises(sqlite3.IntegrityError), store.conn.atomic():
+        store.conn.execute('UPDATE model_comparison_plan SET run_ref=NULL')
+    with pytest.raises(InterruptedError), store.conn.atomic():
+        model_comparison_state.write(store.conn, 'model_live_comparison', {**plan, 'phase': 'retained'}, 2)
+        raise InterruptedError('Before control publication commit')
+    assert store.rec_proposals.get_proposals('model_live_comparison') == plan
+    with store.conn.atomic():
+        model_comparison_state.clear(store.conn)
+        store.conn.execute('DELETE FROM rec_model_selection_runs WHERE id=?', (run,))
+    assert store.rec_proposals.get_proposals('model_live_comparison') is None

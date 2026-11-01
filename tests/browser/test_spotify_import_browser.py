@@ -20,8 +20,8 @@ pytestmark = pytest.mark.browser
 
 @pytest.fixture
 def spotify_app(store, request):
-    first = store.identities.upsert_identity("First account", "first", None, True)
-    second = store.identities.upsert_identity("Destination account", "second", None, False)
+    first = store.accounts.upsert_account("First account", "first", None, True)
+    second = store.accounts.upsert_account("Destination account", "second", None, False)
     first_client = FakeClient(search_results=[_track("first-song", "Song", "Artist")])
     second_client = FakeClient(search_results=[_track("chosen-song", "Song", "Artist")])
     if getattr(request, "param", None) == "albums":
@@ -78,7 +78,7 @@ def test_zip_import_waits_for_confirmation_and_uses_selected_destination(spotify
     expect(page.get_by_text("Spotify import complete.", exact=True)).to_be_visible(timeout=15000)
     assert spotify_app.first.created == []
     assert spotify_app.second.added == [(spotify_app.second.created[0][0], ["chosen-song"])]
-    assert spotify_app.store.playlists.get_playlists()[0].identity_id == spotify_app.destination
+    assert spotify_app.store.playlists.get_playlists()[0].account_id == spotify_app.destination
 
 
 @pytest.mark.parametrize("spotify_app", ["albums"], indirect=True)
@@ -109,7 +109,7 @@ def test_album_only_preview_choice_save_and_explicit_playlist(spotify_app, page)
     assert spotify_app.second.added == [(spotify_app.second.created[0][0], ["yt-Two"])]
     assert spotify_app.first.created == []
     assert [a['browse'] for a in spotify_app.store.collection.get_saved_albums(
-        identity_id=spotify_app.destination)] == ['MPRE-One']
+        account_id=spotify_app.destination)] == ['MPRE-One']
     page.get_by_role("link", name="View report", exact=True).click()
     expect(page.get_by_role("button", name="Delete this report")).to_be_visible()
     page.get_by_role("button", name="Delete this report").click()
@@ -122,7 +122,7 @@ def test_history_upload_health_learning_and_removal(spotify_app, page):
     tid = store.tracks.upsert_track('history-song', 'Song', 'Artist', None, 180)
     store.tracks.set_track_genre(tid, 'Techno')
     key = store.tracks.identity_key_for_video('history-song')
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     store.history.import_listening_events(iid, [(key, None, 1000)], source='takeout')
     rec_params.set_param(store, 'source_w_play', 1.0)
     rec_params.set_param(store, 'theme_threshold', 0.2)

@@ -25,8 +25,8 @@ def test_saved_legacy_json_keeps_track_order_and_metadata_without_store_reads():
                             {"kind": "genre", "key": "genre:Rock", "name": "Rock"},
                             {"kind": "era", "key": "era:1990", "name": "1990"}]},
     }))
-    # A store with no repository interfaces makes accidental repicking fail immediately.
-    assert road_trip.normalized(state, object()) is state
+    # With no store, normalization uses only captured values and cannot repick.
+    assert road_trip.normalized(state) is state
     assert [c["video_id"] for c in draft_tracks(state)] == ["owned", "passenger"]
     assert state["picks"] == ["owned", "passenger"]
     assert [c["video_id"] for c in state["pool"]] == ["passenger"]
@@ -37,7 +37,7 @@ def test_saved_legacy_json_keeps_track_order_and_metadata_without_store_reads():
     assert [a["key"] for a in state["axes"]["theirs"]] == ["genre:Rock", "era:1990", "era:2000"]
     assert state["targets"]["theirs"] == {"genre:Rock": .4}
     before = json.dumps(state, sort_keys=True)
-    road_trip.normalized(state, object())
+    road_trip.normalized(state)
     assert json.dumps(state, sort_keys=True) == before
 
 

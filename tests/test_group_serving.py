@@ -1,8 +1,18 @@
 from fastapi.testclient import TestClient
 
-from tests.group_support import publish, recordings
+from tests.conftest import seed_catalog_track
+from tests.group_support import publish as publish_groups, recordings
+from tests.recommendation_support import publish_bundles
 from yt_playlist.rec import group_serving
 from yt_playlist.web.app import create_app
+
+
+def publish(store, tracks, *args):
+    for i, track in enumerate(tracks):
+        if not store.conn.execute('SELECT 1 FROM recordings WHERE identity_key=?', (track.key,)).fetchone():
+            seed_catalog_track(store, track.key, f'Song {i}', f'Artist {i // 2}',
+                               video_id=f'v{i}', album=f'Album {i // 2}', genre=track.genre)
+    return publish_groups(store, tracks, *args)
 
 
 def test_preview_wait_survives_missing_head_and_budget_then_clears_on_publication(store, monkeypatch):
@@ -56,7 +66,8 @@ def hidden_ancestor_preview(store):
         ('classic-rock', 'hidden-rock', 'Classic Rock', 55, True),
         ('orphan', 'missing', 'Jazz', 30, True),
     ]
-    preview = {'generation': 'collapsed-preview', 'counts': {'known': 1793, 'unknown': 0},
+    head = publish(store, recordings([('House', 12, .4)]))
+    preview = {'generation': head['generation'], 'counts': {'known': 1793, 'unknown': 0},
                'groups': [{'version': version, 'parent_version': parent, 'name': name,
                            'size': size, 'display': display, 'frames': {}}
                           for version, parent, name, size, display in rows]}
@@ -80,7 +91,15 @@ def test_view_preserves_visible_ancestry_through_hidden_names_without_mutating_p
 def pools(store, tracks, *, one_album=False):
     pool = [{'key': r.key, 'title': f'Song {i}', 'video_id': f'v{i}', 'artist': f'Artist {i // 2}',
              'album': 'One album' if one_album else f'Album {i // 2}'} for i, r in enumerate(tracks)]
-    store.rec_proposals.put_proposals('mode_bundles', {'all': {'wheelhouse': pool, 'fresh': pool}}, 1000)
+    for track, item in zip(tracks, pool):
+        if not store.conn.execute('SELECT 1 FROM recordings WHERE identity_key=?', (track.key,)).fetchone():
+            seed_catalog_track(store, track.key, item['title'], item['artist'],
+                               video_id=item['video_id'], album=item['album'], genre=track.genre)
+        else:
+            with store.conn:
+                store.conn.execute('UPDATE youtube_items SET album=? WHERE video_id=?',
+                                   (item['album'], item['video_id']))
+    publish_bundles(store, {'all': {'wheelhouse': pool, 'fresh': pool}})
 
 
 def test_full_mix_requires_twelve_actual_diverse_eligible_members(store):

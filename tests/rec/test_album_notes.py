@@ -15,6 +15,14 @@ def healthy_providers(monkeypatch):
     monkeypatch.setattr(album_editorial, 'lookup', lambda *args: None)
     monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: None)
     monkeypatch.setattr(wikipedia, 'fetch_artwork', lambda *args: None)
+    monkeypatch.setattr(deepseek._iao, '_request', lambda *args, **kwargs: {})
+    monkeypatch.setattr(deepseek._iao.pacer, 'wait', lambda: None)
+
+
+@pytest.fixture
+def admitted_album(store):
+    store.discovery.upsert_discovered_album(ALBUM['browse_id'], ALBUM['artist'], ALBUM['title'],
+                                            None, None, 1)
 
 
 def release():
@@ -59,7 +67,7 @@ def test_wrong_search_hit_is_never_opened_or_attributed(store, monkeypatch):
     assert result['rating'] is None and not result['links']
 
 
-def test_notes_worker_publishes_json_evidence_and_preserves_last_good_on_outage(store, monkeypatch):
+def test_notes_worker_publishes_json_evidence_and_preserves_last_good_on_outage(store, monkeypatch, admitted_album):
     monkeypatch.setattr(wikipedia, 'fetch_summary', lambda *args: {
         'title': ALBUM['artist'], 'extract': 'A Swiss instrumental duo.',
         'url': 'https://en.wikipedia.org/wiki/Hermanos_Gutierrez'})
@@ -326,7 +334,7 @@ def test_thumbnail_upgrade_retains_art_during_outage_and_retries(store, monkeypa
     assert album_notes.read(store, ALBUM)['artwork'] == upgraded
 
 
-def test_hand_written_cache_is_excluded_and_worker_gets_automatic_copy(store, monkeypatch):
+def test_hand_written_cache_is_excluded_and_worker_gets_automatic_copy(store, monkeypatch, admitted_album):
     store.rec_proposals.publish_album_note(ALBUM['browse_id'], {
         'description': {'text': 'A hand-written album paragraph.', 'source': 'Research ledger',
                         'url': 'https://example.com/release'},
@@ -334,16 +342,18 @@ def test_hand_written_cache_is_excluded_and_worker_gets_automatic_copy(store, mo
     assert not album_notes.read(store, ALBUM)['description']
     monkeypatch.setattr(release_notes, 'fetch', lambda *args: {'evidence': [], 'retry': False})
     monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'test-key')
-    monkeypatch.setattr(deepseek, 'describe', lambda album, key: {
-        'description': 'A generated, album-specific description.', 'confidence': 'moderate',
-        'uncertainty': '', 'model': deepseek.MODEL, 'usage': {}, 'prompt_version': 1})
+    def generate(album, send):
+        send({})
+        return {'description': 'A generated, album-specific description.', 'confidence': 'moderate',
+                'uncertainty': '', 'model': deepseek.MODEL, 'usage': {}, 'prompt_version': 1}
+    monkeypatch.setattr(deepseek, 'describe', generate)
     album_notes.prepare(store, 2, [ALBUM])
     description = album_notes.read(store, ALBUM)['description']
     assert description['text'] == 'A generated, album-specific description.'
     assert description['kind'] == 'generated' and not description['quote']
 
 
-def test_old_catalogue_filler_is_hidden_and_replaced_by_persistent_generated_copy(store, monkeypatch):
+def test_old_catalogue_filler_is_hidden_and_replaced_by_persistent_generated_copy(store, monkeypatch, admitted_album):
     store.rec_proposals.publish_album_note(ALBUM['browse_id'], {
         'description': {'text': 'Catalogued as Electro, Dance.', 'source': 'Deezer',
                         'url': 'https://www.deezer.com/album/42', 'kind': 'catalog',
@@ -353,7 +363,8 @@ def test_old_catalogue_filler_is_hidden_and_replaced_by_persistent_generated_cop
     monkeypatch.setattr(release_notes, 'fetch', lambda *args: {'evidence': [], 'retry': False})
     monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'test-key')
     calls = []
-    def generate(album, key):
+    def generate(album, send):
+        send({})
         calls.append(album)
         return {'description': 'Album-specific prose.', 'model': deepseek.MODEL, 'usage': {}}
     monkeypatch.setattr(deepseek, 'describe', generate)
@@ -365,13 +376,15 @@ def test_old_catalogue_filler_is_hidden_and_replaced_by_persistent_generated_cop
     assert len(calls) == 1
 
 
-def test_refreshed_menu_discards_old_queue_without_paying_for_hidden_records(store, monkeypatch):
+def test_refreshed_menu_discards_old_queue_without_paying_for_hidden_records(store, monkeypatch, admitted_album):
     old = {**ALBUM, 'browse_id': 'previous', 'title': 'Previous album'}
+    store.discovery.upsert_discovered_album(old['browse_id'], old['artist'], old['title'], None, None, 1)
     store.rec_proposals.request_album_notes([old], 1)
     monkeypatch.setattr(release_notes, 'fetch', lambda *args: {'evidence': [], 'retry': False})
     monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'test-key')
     calls = []
-    def generate(album, key):
+    def generate(album, send):
+        send({})
         calls.append(album['browse_id'])
         return {'description': 'Album-specific prose.', 'model': deepseek.MODEL, 'usage': {}}
     monkeypatch.setattr(deepseek, 'describe', generate)
@@ -380,7 +393,7 @@ def test_refreshed_menu_discards_old_queue_without_paying_for_hidden_records(sto
     assert not album_notes.prepare(store, 3, [ALBUM])
     assert calls == [ALBUM['browse_id']]
     assert not album_notes.read(store, old)['description']
-    assert store.rec_proposals.get_proposals('album_description_usage')['requests'] == 1
+    assert store.conn.execute('SELECT count(*) FROM provider_usage').fetchone()[0] == 1
     # The discarded record has no fresh negative cache to suppress it later.
     assert not album_notes.prepare(store, 4, [old])
     assert calls == [ALBUM['browse_id'], old['browse_id']]

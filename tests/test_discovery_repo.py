@@ -13,7 +13,7 @@ def _artist_with(store, iid, name, plays=0, playlists=0, saved=0):
 
 
 def test_interested_artists_ranks_by_combined_signal(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     # Big: in 3 playlists; Small: 1 play only
     big = store.tracks.upsert_track("v1", "S1", "Big", None, None)
     for i in range(3):
@@ -27,7 +27,7 @@ def test_interested_artists_ranks_by_combined_signal(store):
 
 
 def test_artists_due_for_scan_skips_fresh_and_honors_ttl(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     for n in ("A", "B"):
         t = store.tracks.upsert_track(f"v{n}", f"S{n}", n, None, None)
         store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"P{n}", "p", 1, "h", 0.0), [t])
@@ -39,7 +39,7 @@ def test_artists_due_for_scan_skips_fresh_and_honors_ttl(store):
 
 
 def test_artists_due_for_scan_respects_budget(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     for n in range(5):
         t = store.tracks.upsert_track(f"v{n}", f"S{n}", f"Art{n}", None, None)
         store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"P{n}", "p", 1, "h", 0.0), [t])
@@ -109,7 +109,7 @@ class _Ctx:
 
 def test_run_discovery_accumulates_and_skips_fresh(store, monkeypatch):
     from yt_playlist.rec import discover
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     for n in ("A", "B"):
         t = store.tracks.upsert_track(f"v{n}", f"S{n}", n, None, None)
         store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"P{n}", "p", 1, "h", 0.0), [t])

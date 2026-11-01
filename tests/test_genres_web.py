@@ -13,6 +13,7 @@ from yt_playlist.web.app import create_app
 
 
 def _client(store):
+    store.genres.configure_catalog()
     # base_url is local so state-changing POSTs pass the cross-origin guard.
     return TestClient(create_app(store, lambda: {}, now_fn=lambda: 1.0),
                       base_url="http://127.0.0.1")
@@ -33,7 +34,7 @@ def test_page_renders_chip_list_zone(store):
 
 def test_add_returns_fragment_with_genre(store):
     c = _client(store)
-    n = len(g.builtin_names())
+    n = len(store.genres.get_genre_whitelist())
     r = c.post("/genres/add", data={"name": "Whack-a-doodle"})
     assert r.status_code == 200
     assert "<!doctype html>" not in r.text.lower()   # a fragment, not the whole page
@@ -56,13 +57,15 @@ def test_remove_drops_genre(store):
 
 def test_reset_restores_defaults(store):
     c = _client(store)
-    n = len(g.builtin_names())
+    defaults = store.genres.get_genre_whitelist()
+    n = len(defaults)
     c.post("/genres/add", data={"name": "Whack-a-doodle"})
     assert len(store.genres.get_genre_whitelist()) == n + 1
     r = c.post("/genres/reset")
     assert r.status_code == 200
     assert "Rock" in r.text and "Whack-a-doodle" not in r.text
     assert len(store.genres.get_genre_whitelist()) == n
+    assert store.genres.get_genre_whitelist() == defaults
 
 
 def test_empty_add_returns_oob_toast(store):
@@ -104,3 +107,50 @@ def test_query_survives_edits_and_escapes_input(store):
     r = c.get("/genres/list", params={"q": "<script>bad</script>"})
     assert "<script>bad</script>" not in r.text
     assert "&lt;script&gt;bad&lt;/script&gt;" in r.text
+
+
+def test_current_taxonomy_controls_follow_rename_alias_family_and_merge(store, unlocked_home_controls):
+    client = _client(store)
+    store.genres.rename_genre('synth pop','Renamed style')
+    store.genres.set_genre_alias('Searchable custom alias','synth pop')
+    store.genres.set_genre_family('synth pop','jazz')
+    body = client.get('/genres/list',params={'q':'Searchable custom alias'}).text
+    assert 'Renamed style' in body and 'Jazz' in body
+    assert 'aria-label="Remove Synth Pop"' not in body
+    options = client.get('/home/genres').json()['options']
+    assert {'name':'synth pop','label':'Renamed style','kind':'genre'} in options
+    store.genres.add_genre('Retired custom style')
+    store.genres.merge_genres('retired custom style','synth pop')
+    assert 'Retired custom style' in client.get('/genres/list',params={'q':'Retired custom style'}).text
+    options = client.get('/home/genres').json()['options']
+    assert not any(row['name']=='retired custom style' for row in options)
+    client.post('/genres/remove',data={'name':'Searchable custom alias'})
+    assert 'Renamed style' not in store.genres.get_genre_whitelist()
+
+
+def test_preference_edits_do_not_reconfigure_the_catalog(store, monkeypatch):
+    client = _client(store)
+    before = dict(store.conn.execute('SELECT genre_key,enabled FROM genre_preferences'))
+
+    def unexpected_rebuild(**kwargs):
+        raise AssertionError('Preference edits must only reload the matcher')
+
+    monkeypatch.setattr(store.genres, 'configure_catalog', unexpected_rebuild)
+    assert client.post('/genres/add', data={'name':'Custom sound'}).status_code == 200
+    assert client.post('/genres/remove', data={'name':'rap'}).status_code == 200
+    after = dict(store.conn.execute('SELECT genre_key,enabled FROM genre_preferences'))
+    assert after == {**before, 'custom sound':1, 'hip hop':0}
+
+
+def test_full_editor_reads_taxonomy_without_per_genre_queries(store):
+    client = _client(store)
+    queries = []
+    store.conn.set_trace_callback(queries.append)
+    try:
+        response = client.get('/genres/list')
+    finally:
+        store.conn.set_trace_callback(None)
+    assert response.status_code == 200 and 'Rock' in response.text
+    # The normal catalog has over 2,000 genres. A full render must not do
+    # separate identity/family/redirect lookups for every label and alias.
+    assert len(queries) < 30, len(queries)

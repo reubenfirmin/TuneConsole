@@ -1,0 +1,12 @@
+<form class="growth-home-choice" x-show="choosing && growth.home_choice_available" x-cloak @submit.prevent="saveHome()">
+  <fieldset><legend>Choose what opens on Home</legend>
+    <div class="growth-format-options">
+      {% for value, label, detail in [('albums', 'Long play', 'Choose a recommended album and play it from the beginning.'), ('mixes', 'Mix tapes', 'Choose and adjust a prepared mix of songs.'), ('radio', 'On air', 'Choose a starting song and keep listening as more songs are selected.')] %}
+      <label :class="{'is-selected': homeChoice === '{{ value }}'}"><input type="radio" name="growth-home-format" value="{{ value }}" x-model="homeChoice"><strong>{{ label }}</strong><span>{{ detail }}</span></label>
+      {% endfor %}
+    </div>
+  </fieldset>
+  <p role="alert" x-show="choiceError" x-text="choiceError"></p>
+  <div class="growth-choice-actions"><button class="btn btn-primary" type="submit" :disabled="!homeChoice || savingChoice" x-text="savingChoice ? 'Saving…' : 'Save Home choice'"></button>
+    <button class="btn-ghost" type="button" @click="decideLater()">Decide later</button></div>
+</form>

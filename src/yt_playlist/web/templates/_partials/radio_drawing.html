@@ -37,8 +37,8 @@
       <path class="radio-record-shine" d="M155 112a107 107 0 0 1 137-37m40 155a107 107 0 0 1-137 37"/>
       <image class="radio-record-cover" x="187" y="114" width="114" height="114"
              clip-path="url(#radio-record-label)" preserveAspectRatio="xMidYMid slice"
-             :href="recordCover || null" x-show="recordCover && recordCoverFailed !== recordCover"
-             @error="if ($el.getAttribute('href') === recordCover) recordCoverFailed = recordCover"/>
+             x-effect="syncRecordCover($el)" :href="recordCoverUrl || null" x-show="recordCoverUrl"
+             @load="recordCoverLoaded($el)" @error="recordCoverError($el)"/>
       <circle class="radio-record-rim" cx="244" cy="171" r="57"/>
       <circle class="radio-record-spindle" cx="244" cy="171" r="9"/>
       <circle class="radio-record-pin" cx="244" cy="171" r="2.5"/>

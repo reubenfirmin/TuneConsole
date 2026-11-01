@@ -1,10 +1,24 @@
 <div class="radio-home" x-ref="fieldContent" x-data="radioHome({{ radio_bootstrap|default({})|tojson|forceescape }})" x-effect="setVisible(panel === 'radio')"
-     :class="{'is-artwork-paused': !artworkRunning}"
+     :class="{'is-artwork-paused': !artworkRunning, 'has-launch-recovery': !!launchPhase}"
      @bridge-status.window="syncRecordPlayback($event.detail)"
      @playback-requested.window="previewRecord($event.detail)"
      @playback-settled.window="settleRecord($event.detail)"
      @resize.window.debounce.100ms="fitSpace()" @scroll.window.throttle.100ms="measureQueues()">
   {% include "_partials/radio_field.html" %}
+  <section class="radio-launch-recovery" role="status" x-show="launchPhase && !busy" x-cloak aria-label="Your Radio selection">
+    <template x-if="recoverySong?.thumbnail"><img :src="recoverySong.thumbnail" alt="" referrerpolicy="no-referrer" @error="$el.remove()"></template>
+    <div class="radio-recovery-copy">
+      <p class="radio-recovery-label">Radio from your selection</p>
+      <h2 x-text="recoveryTitle"></h2>
+      <p class="radio-recovery-artist" x-text="recoveryArtist"></p>
+      <p x-text="recoveryMessage"></p>
+      <div class="radio-recovery-actions">
+        <button class="btn btn-primary" type="button" x-show="!launchUncertain" @click="start(recoverySong, recoveryFromPlaylist)">Try this selection again</button>
+        <button class="btn" type="button" x-show="launchUncertain" @click="refresh().catch(() => {})">Check playback</button>
+        <a class="btn" :href="recoveryUrl" :target="recoveryFromPlaylist ? '_self' : '_blank'" rel="noopener" x-text="recoveryFromPlaylist ? 'Back to this playlist' : 'Play this song on YouTube Music'"></a>
+      </div>
+    </div>
+  </section>
   <div class="gen-stage radio-launch" x-ref="launch" x-show="launching" x-cloak role="status" aria-live="polite" aria-label="Starting radio">
     <template x-if="launching">
       {% with loader_radio=true %}{% include "_partials/launch_loader.html" %}{% endwith %}
@@ -13,7 +27,7 @@
   <div class="radio-seeds" x-ref="seeds" x-show="showSeeds" :aria-busy="busy || loading">
     <template x-for="song in seeds" :key="song.video_id">
       <div class="radio-seed">
-      <button type="button" class="radio-seed-start" :disabled="busy" @click="start(song)"
+      <button type="button" class="radio-seed-start" :disabled="busy || launchUncertain" @click="start(song)"
               :data-choice-opportunity="seedMenu" :data-choice-option="song.video_id"
               :aria-label="'Start radio with ' + song.title + ' by ' + song.artist">
         <span class="radio-seed-art">

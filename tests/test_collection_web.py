@@ -51,7 +51,7 @@ def test_artists_page_includes_saved_albums_without_playlists(store):
 
 
 def test_save_album_likes_and_refreshes(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     fc = AlbumClient()
     c = _client(store, lambda: {iid: fc})
 
@@ -62,9 +62,9 @@ def test_save_album_likes_and_refreshes(store):
 
 
 def test_unsave_album_unlikes_and_refreshes(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.collection.add_saved_album({"browse": "MPREb_x", "title": "The Album", "artist": "Artist X",
-                           "year": "2001", "thumbnail": ""},identity_id=iid)
+                           "year": "2001", "thumbnail": ""},account_id=iid)
     fc = AlbumClient()
     c = _client(store, lambda: {iid: fc})
 
@@ -75,28 +75,28 @@ def test_unsave_album_unlikes_and_refreshes(store):
 
 
 def test_unsave_targets_unique_non_main_owner_and_carries_owner_in_both_views(store):
-    main = store.identities.upsert_identity("Main", "cred", None, True)
-    other = store.identities.upsert_identity("Other", "cred", "other", False)
-    store.collection.add_saved_album({"browse": "B", "title": "Album", "artist": "Artist X"}, identity_id=other)
+    main = store.accounts.upsert_account("Main", "cred", None, True)
+    other = store.accounts.upsert_account("Other", "cred", "other", False)
+    store.collection.add_saved_album({"browse": "B", "title": "Album", "artist": "Artist X"}, account_id=other)
     clients = {main: AlbumClient(), other: AlbumClient()}
     c = _client(store, lambda: clients)
     for path in ("/albums", "/artist?name=Artist%20X"):
         html = c.get(path).text
-        assert f'name="identity_id" value="{other}"' in html
+        assert f'name="account_id" value="{other}"' in html
         assert "Other" in html
     response = c.post("/collection/unsave-album", data={"browse_id": "B"})
     assert _refreshes(response)
     assert clients[main].rated == []
     assert clients[other].rated == [("PLAUDIO", "INDIFFERENT")]
-    assert store.collection.get_saved_albums(identity_id=other) == []
+    assert store.collection.get_saved_albums(account_id=other) == []
 
 
 @pytest.mark.parametrize("selected", ["main", "other"])
 def test_multiple_owners_require_choice_and_remove_only_selected_membership(store, selected):
-    main = store.identities.upsert_identity("Main", "cred", None, True)
-    other = store.identities.upsert_identity("Other", "cred", "other", False)
+    main = store.accounts.upsert_account("Main", "cred", None, True)
+    other = store.accounts.upsert_account("Other", "cred", "other", False)
     for owner in (main, other):
-        store.collection.add_saved_album({"browse": "B", "title": "Album", "artist": "Artist X"}, identity_id=owner)
+        store.collection.add_saved_album({"browse": "B", "title": "Album", "artist": "Artist X"}, account_id=owner)
     clients = {main: AlbumClient(), other: AlbumClient()}
     c = _client(store, lambda: clients)
     html = c.get("/albums").text
@@ -104,48 +104,48 @@ def test_multiple_owners_require_choice_and_remove_only_selected_membership(stor
     assert c.post("/collection/unsave-album", data={"browse_id": "B"}).status_code == 422
     assert all(client.rated == [] for client in clients.values())
     chosen, retained = (main, other) if selected == "main" else (other, main)
-    response = c.post("/collection/unsave-album", data={"browse_id": "B", "identity_id": chosen})
+    response = c.post("/collection/unsave-album", data={"browse_id": "B", "account_id": chosen})
     assert _refreshes(response)
     assert clients[chosen].rated == [("PLAUDIO", "INDIFFERENT")]
     assert clients[retained].rated == []
-    assert store.collection.get_saved_albums(identity_id=chosen) == []
-    assert [a['browse'] for a in store.collection.get_saved_albums(identity_id=retained)] == ['B']
+    assert store.collection.get_saved_albums(account_id=chosen) == []
+    assert [a['browse'] for a in store.collection.get_saved_albums(account_id=retained)] == ['B']
 
 
 @pytest.mark.parametrize("owner_state", ["unavailable", "inactive"])
 def test_unavailable_album_owner_never_falls_back_to_main(store, owner_state):
-    main = store.identities.upsert_identity("Main", "cred", None, True)
-    other = store.identities.upsert_identity("Other", "cred", "other", False)
-    store.collection.add_saved_album({"browse": "B", "title": "Album"}, identity_id=other)
+    main = store.accounts.upsert_account("Main", "cred", None, True)
+    other = store.accounts.upsert_account("Other", "cred", "other", False)
+    store.collection.add_saved_album({"browse": "B", "title": "Album"}, account_id=other)
     clients = {main: AlbumClient()}
     if owner_state == "inactive":
         with store.conn:
-            store.conn.execute('UPDATE identities SET active=0 WHERE id=?', (other,))
+            store.conn.execute('UPDATE accounts SET active=0 WHERE id=?', (other,))
         clients[other] = AlbumClient()
     c = _client(store, lambda: clients)
-    response = c.post("/collection/unsave-album", data={"browse_id": "B", "identity_id": other})
+    response = c.post("/collection/unsave-album", data={"browse_id": "B", "account_id": other})
     assert response.status_code == 422 and "not connected" in response.text
     assert all(client.rated == [] for client in clients.values())
-    assert [a['browse'] for a in store.collection.get_saved_albums(identity_id=other)] == ['B']
-    assert store.collection.saved_album_owners('B')['B'][0]['identity_id'] == other
+    assert [a['browse'] for a in store.collection.get_saved_albums(account_id=other)] == ['B']
+    assert store.collection.saved_album_owners('B')['B'][0]['account_id'] == other
 
 
 def test_album_unsave_rejects_non_owner_and_unknown_legacy_ownership(store):
-    main = store.identities.upsert_identity("Main", "cred", None, True)
-    other = store.identities.upsert_identity("Other", "cred", "other", False)
-    store.collection.add_saved_album({"browse": "owned", "title": "Owned"}, identity_id=other)
+    main = store.accounts.upsert_account("Main", "cred", None, True)
+    other = store.accounts.upsert_account("Other", "cred", "other", False)
+    store.collection.add_saved_album({"browse": "owned", "title": "Owned"}, account_id=other)
     store.collection.add_saved_album({"browse": "legacy", "title": "Legacy"})
     clients = {main: AlbumClient(), other: AlbumClient()}
     c = _client(store, lambda: clients)
-    for data in ({"browse_id": "owned", "identity_id": main}, {"browse_id": "legacy"},
-                 {"browse_id": "legacy", "identity_id": main}, {"browse_id": "owned", "identity_id": "bad"}):
+    for data in ({"browse_id": "owned", "account_id": main}, {"browse_id": "legacy"},
+                 {"browse_id": "legacy", "account_id": main}, {"browse_id": "owned", "account_id": "bad"}):
         assert c.post("/collection/unsave-album", data=data).status_code == 422
     assert all(client.rated == [] for client in clients.values())
     assert store.collection.saved_album_ids() == {'owned', 'legacy'}
 
 
 def test_save_album_without_id_returns_toast(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     c = _client(store, lambda: {iid: AlbumClient()})
     r = c.post("/collection/save-album", data={})
     assert r.status_code == 422
@@ -156,7 +156,7 @@ def test_save_album_without_id_returns_toast(store):
 
 
 def test_save_album_client_error_returns_toast(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     fc = AlbumClient(album={})                       # no audioPlaylistId -> ValueError path
     c = _client(store, lambda: {iid: fc})
     r = c.post("/collection/save-album", data={"browse_id": "X"})
@@ -169,10 +169,10 @@ def test_save_album_client_error_returns_toast(store):
 @pytest.mark.parametrize('ack', [False, {'status': 'STATUS_FAILED'}, {'status': 'STATUS_ERROR'}])
 @pytest.mark.parametrize('saved', [False, True])
 def test_rejected_album_change_preserves_account_memberships(store, ack, saved):
-    main = store.identities.upsert_identity('Main', 'cred', None, True)
-    other = store.identities.upsert_identity('Other', 'cred', 'other', False)
+    main = store.accounts.upsert_account('Main', 'cred', None, True)
+    other = store.accounts.upsert_account('Other', 'cred', 'other', False)
     for owner in ([other] if saved else [main, other]):
-        store.collection.add_saved_album({'browse': 'B', 'title': 'Album'}, identity_id=owner)
+        store.collection.add_saved_album({'browse': 'B', 'title': 'Album'}, account_id=owner)
 
     class Rejected(AlbumClient):
         def rate_playlist(self, playlist_id, rating):
@@ -183,7 +183,7 @@ def test_rejected_album_change_preserves_account_memberships(store, ack, saved):
     client = _client(store, lambda: {main: fc, other: AlbumClient()})
     before = store.collection.saved_album_owners('B')
     response = client.post('/collection/' + ('save-album' if saved else 'unsave-album'),
-                           data={'browse_id': 'B', 'identity_id': main})
+                           data={'browse_id': 'B', 'account_id': main})
     assert response.status_code == 422
     assert 'did not confirm' in response.text
     assert 'hx-refresh' not in response.headers
@@ -195,7 +195,7 @@ def test_rejected_album_change_preserves_account_memberships(store, ack, saved):
 def test_manual_and_import_album_saves_share_confirmation_and_metadata(store, ack):
     from yt_playlist.library.spotify_library import _save_album
 
-    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
 
     class Confirmed(AlbumClient):
         def rate_playlist(self, playlist_id, rating):
@@ -205,20 +205,20 @@ def test_manual_and_import_album_saves_share_confirmation_and_metadata(store, ac
     fc = Confirmed()
     client = _client(store, lambda: {iid: fc})
     assert _refreshes(client.post('/collection/save-album', data={'browse_id': 'B'}))
-    manual = store.collection.get_saved_albums(identity_id=iid)
+    manual = store.collection.get_saved_albums(account_id=iid)
     assert _refreshes(client.post('/collection/unsave-album', data={'browse_id': 'B'}))
-    assert store.collection.get_saved_albums(identity_id=iid) == []
+    assert store.collection.get_saved_albums(account_id=iid) == []
     _save_album(store, fc, {'browse_id': 'B', 'title': 'Fallback'}, iid)
-    assert store.collection.get_saved_albums(identity_id=iid) == manual
+    assert store.collection.get_saved_albums(account_id=iid) == manual
 
 
 @pytest.mark.parametrize('ack', [False, {'status': 'STATUS_FAILED'}])
 def test_import_album_rejection_does_not_publish_membership(store, ack):
     from yt_playlist.library.spotify_library import _save_album
 
-    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
     fc = AlbumClient()
     fc.rate_playlist = lambda *args: ack
     with pytest.raises(ValueError, match='did not confirm'):
         _save_album(store, fc, {'browse_id': 'B', 'title': 'Fallback'}, iid)
-    assert store.collection.get_saved_albums(identity_id=iid) == []
+    assert store.collection.get_saved_albums(account_id=iid) == []

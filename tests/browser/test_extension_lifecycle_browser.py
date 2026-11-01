@@ -34,8 +34,8 @@ def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, requ
     if shutil.which("openssl") is None:
         pytest.fail("OpenSSL is required for the local Music TLS fixture")
     bridge = Bridge()
-    main = store.identities.upsert_identity("main", "bridge", None, True)
-    brand = store.identities.upsert_identity("band", "bridge", "brand-A", False)
+    main = store.accounts.upsert_account("main", "bridge", None, True)
+    brand = store.accounts.upsert_account("band", "bridge", "brand-A", False)
     ctx = SimpleNamespace(bridge=bridge, store=store, now_fn=time.time)
     app = FastAPI()
     app.include_router(build(ctx))
@@ -180,7 +180,7 @@ def test_worlds_delayed_metadata_and_ratings_keep_account_and_video_identity(ins
     assert _plays(h) == [], "unknown account must not persist as the main account"
     page.evaluate("fixture.known = true; fixture.sample()")
     h.eventually(lambda: len(_plays(h)) == 1)
-    assert _plays(h)[0]["identity_id"] == h.brand
+    assert _plays(h)[0]["account_id"] == h.brand
     assert _plays(h)[0]["video_id"] == "first"
     assert h.bridge.now_playing["thumbnail"] == "https://lh3.googleusercontent.com/album-art"
     page.evaluate("fixture.setRating('DISLIKE'); fixture.sample()")
@@ -199,7 +199,7 @@ def test_worlds_delayed_metadata_and_ratings_keep_account_and_video_identity(ins
     assert h.store.tracks.item_rating(h.brand, "second")["status"] == "LIKE"
     assert h.store.tracks.item_rating(h.brand, "first")["status"] == "DISLIKE"
     assert h.store.tracks.item_rating(h.main, "second") is None
-    assert [(p["video_id"], p["identity_id"]) for p in _plays(h)] == [
+    assert [(p["video_id"], p["account_id"]) for p in _plays(h)] == [
         ("first", h.brand), ("second", h.brand)]
 
 
@@ -422,4 +422,4 @@ def test_library_fetch_and_launch_share_one_real_tab_and_deliver_each_request(in
                  f"health={h.bridge.sensor_health}, tabs={tabs}, pages={diagnostics}")
     assert _plays(h)[0]["video_id"] == "launched"
     assert _plays(h)[0]["playlist_ytm_id"] == "PL_launch"
-    assert _plays(h)[0]["identity_id"] == h.brand
+    assert _plays(h)[0]["account_id"] == h.brand

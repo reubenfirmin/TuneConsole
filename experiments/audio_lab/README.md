@@ -4,6 +4,111 @@ The [external dataset plan for the vibe model](DATASET_PLAN.md)
 describes how each emotion dataset will be used, prioritizing supplied audio
 before datasets that need YouTube recording matching.
 
+Offline research uses the shared executable entrypoint `./experiments/run.py`.
+Run `./experiments/run.py --help` from the repository root; see
+[external experiments](EXTERNAL_EXPERIMENTS.md) for campaign, acquisition, audit,
+reference comparison, status and focused-check commands.
+The shared test lock is only for the global test suite. Experiments and focused
+research checks run independently; they must not wait for that lock.
+Default research commands also leave the suite's worker lifetime lock alone.
+The older `--independent-execution` option remains accepted for compatibility;
+it is no longer needed. Round-specific writer locks, numerical thread limits
+and subprocess deadlines still apply.
+
+Changing coordination changes the executable source hashes recorded by earlier
+experiments. Keep their frozen plans, source archives and receipts unchanged.
+Historical verification checks the archived evidence; it does not establish
+that today's source matches the old executable. A new fit or a resumed campaign
+must still pass its existing exact-source and execution-provenance checks.
+
+The [#424 browser evaluation](BROWSER_EVALUATION_424.md) records the current
+packaged-runtime comparison on 24 supplied recordings, input-policy sensitivity,
+capture resource budgets and exact artifact licence findings. Use
+`audio-evaluation` and `audio-evaluation-report` through the same entrypoint.
+The [paired preprocessing quality experiment](PREPROCESSING_QUALITY_424.md)
+completed all five frozen production-baseline cohorts: 1,310 recordings,
+2,191 inputs and twenty supported dataset/vibe comparisons. Cruise's primary
+advantage survives browser preparation; its Soundtracks weakness remains.
+Use `preprocessing-quality` and `preprocessing-quality-report` for the frozen
+comparison, its numerical controls and conditional quality intervals.
+
+The user declined additional human listening sessions, pairwise intensity and
+whole-mix ratings. Those requirements are won't fix (#584), not model or release
+gates. Quality feedback uses existing external annotations, continuing track
+labels and future issue reports. #424's completed experiments are ready for
+independent review; #587 retains automated comparisons and #573 retains its
+separate account/consumer engineering checks.
+
+The [independent per-vibe model comparison](PER_VIBE_RESULTS.md) records the new
+specialist-selection batches, their exact dataset scope, external human-target
+evaluation and the limits of the reused local vibe-label diagnostic.
+The [Release label audit](RELEASE_LABEL_AUDIT.md) and
+[mapping experiment plan](RELEASE_MAPPING_PLAN.md) cover #614's aggression,
+power and anger follow-up. The [completed results](RELEASE_MAPPING_RESULTS.md)
+retain the incumbent and exact prior aggression candidate; the power blend
+and source-balanced model do not improve its ranking.
+Use `./experiments/run.py release --help` for its
+audit, freeze, fitting, evaluation and receipt-verification commands.
+The [next two-stage pipeline plan](EXTERNAL_VIBE_PIPELINE_PLAN.md) makes external
+annotations the main evaluation reference through frozen attribute-to-vibe rules,
+starting with Reading/Studying supervision for Focus.
+The [external mapped-vibe results](MAPPED_VIBE_RESULTS.md) evaluate that pipeline
+on all thirteen source versions: 52 supported dataset/vibe pairs, the separate
+Focus work ablation, cross-corpus tests and six independent research scorers.
+Use `./experiments/run.py mapped-vibes --help` for the frozen round.
+The [common-target follow-up](CANDIDATE_FOLLOWUP_RESULTS.md) compares dimensional
+Cruise on ManyMusic/Memo2496 audio, activation and aggression on soundtrack
+ratings, and the direct Focus candidates. Use `./experiments/run.py candidates
+verify` to verify its saved evidence; `transfer-repair verify` checks the bounded
+connected-identity correction without repeating unaffected fits.
+The [product comparison and rollout plan](PRODUCT_CANDIDATE_PLAN.md) compares
+the exact configured production artifact on the same external recordings,
+inventories the enlarged local corpus, and defines the remaining shipping work.
+Use `./experiments/run.py product-baseline --help` for that bounded audit.
+The [Cruise production preparation](CRUISE_PRODUCTIONIZATION.md) records the
+compact individual artifact, mixed routing contract, real-capture checks and
+refreshed shared-model comparison. Use `cruise-package` and `cruise-baselines`
+through the same entrypoint. [Release production integration](RELEASE_PRODUCTIONIZATION.md)
+and [Relax production integration](RELAX_PRODUCTIONIZATION.md) record the next
+two specialist scorers. Relax uses #617's [fixed consensus](RELAX_CONSENSUS_RESULTS.md)
+with per-excerpt prediction averaging. Use `relax-package`, `relax-production`
+and `relax-wheel` for coefficient replay, isolated preparation and installed
+package checks.
+The [Uplift consensus research](UPLIFT_CONSENSUS_RESULTS.md) and
+[label audit](UPLIFT_LABEL_AUDIT.md) complete #618 with a retain recommendation:
+fixed and learned blends improve Soundtracks/Memo but exceed the declared
+ManyMusic regression limits. Use `./experiments/run.py uplift verify` to check
+the frozen evidence. The user subsequently selected the fixed blend, accepting
+the generated-music tradeoff. [Uplift production integration](UPLIFT_PRODUCTIONIZATION.md)
+under #630 records the exact export and four-specialist composition; use
+`uplift-package`, `uplift-production` and `uplift-wheel` for its validation.
+The [Energize comparison](ENERGIZE_CONSENSUS_RESULTS.md) and
+[label audit](ENERGIZE_LABEL_AUDIT.md) complete #616 with a retain recommendation.
+Activation, fixed consensus and exercise mappings were compared with component
+removals and omitted-corpus controls. No main candidate gives a reliable broad
+upgrade; removing joy is a follow-up lead with remaining losses. Use
+`./experiments/run.py energize verify` and
+`check --test test_energize_consensus.py` to verify the frozen evidence.
+The user subsequently selected the no-joy blend for broader labeled-source
+coverage, accepting the recorded losses. [Energize production integration](ENERGIZE_PRODUCTIONIZATION.md)
+under #631 records the exact export, five-specialist composition and shared
+radio-intensity preservation; use `energize-package`, `energize-production`
+and `energize-wheel` for its validation.
+The [Focus mapping comparison](FOCUS_MAPPING_RESULTS.md) and
+[label audit](FOCUS_LABEL_AUDIT.md) complete #615. Native-attribute consensus
+does not improve direct Reading/Studying prediction; the hybrid adds no clear
+gain. Direct remains stronger than shared production on this inspected corpus,
+but none of the new procedures beats the refitted #576 control by the frozen
+margin. Use `focus-mapping verify` and `check --test test_focus_mapping.py` for
+the retained experiment. Focus production remains unchanged.
+The [refreshed shared-model results](CRUISE_BASELINE_RESULTS.md) support Cruise
+as the first adoption; the later individual-model decisions are recorded above.
+The [independent-score contract](VIBE_SCORE_CONTRACT.md) and
+[calibration results](VIBE_SCORE_RESULTS.md) separate selected-vibe ranking from
+strong matches. Use `score-contract` through the same entrypoint; no strong-match
+threshold is established. `check --test test_suitability_contract.py` runs only
+that contract's focused checks without the global-suite lock.
+
 The user-facing POC is **Tools > Audio analysis preview** in the normal
 TuneConsole app (`/audio-preview`). Play music through On Air or Mix Tapes, then
 open the preview. The normal extension automatically captures a ten-second excerpt,
@@ -49,8 +154,16 @@ so their bytecode caches cannot make this extension unloadable in Chrome.
 
 ## Run the reference experiment
 
+The lab shares the production inference source in `extension/audio_model/`.
+Stage the verified runtime with the research UI before loading it:
+
+```sh
+python3 scripts/audio_model/bundle.py --destination /tmp/tuneconsole-audio-lab
+cp experiments/audio_lab/*.js experiments/audio_lab/*.html experiments/audio_lab/*.css experiments/audio_lab/manifest.json /tmp/tuneconsole-audio-lab/
+```
+
 1. Open `chrome://extensions`, enable Developer mode, choose **Load unpacked**,
-   and select this directory (`experiments/audio_lab`).
+   and select `/tmp/tuneconsole-audio-lab`.
 2. Pin **TuneConsole audio lab (experiment)**. Click its toolbar icon to open the
    reference tab.
 3. Choose a local audio file (up to 64 MiB), enter its title/artist/album, document
@@ -103,18 +216,18 @@ No recommendation policy consumes this experiment's results.
 
 ## Optional CPU model experiment
 
-Fetch the isolated research assets explicitly, then reload the unpacked extension:
+Fetch the shared model assets, then restage and reload the unpacked lab:
 
 ```sh
-python experiments/audio_lab_tools/fetch_model.py
+python3 scripts/audio_model/fetch_model.py
 ```
 
-This downloads approximately 7 MiB of code, model weights, metadata and licence
-files into the ignored `vendor/` directory. It downloads no recordings. The
+This downloads code, model weights, metadata and licence files into the ignored
+`extension/audio_model/vendor/` directory. It downloads no recordings. The
 bundle manifest records exact URLs, versions, sizes and SHA-256 digests. The
 installer checks existing artifacts against that manifest; the worker verifies
-the artifacts used for inference before loading them. The bundle is for local
-research only and is excluded from source control and the production package.
+the artifacts used for inference before loading them. Production packages include
+these assets; the lab consumes the same source and weights.
 
 The **Try the optional local MusiCNN research model** checkbox uses a compatible
 runtime when `vendor/runtime.json` is present. Build it explicitly using the recipe
@@ -148,7 +261,7 @@ An analysis job has a 30 second experiment timeout; this is a cancellation guard
 not an accepted production CPU budget.
 
 ```sh
-uv run pytest -m browser -s tests/bench_audio_lab_model.py --test-lock-wait=60
+./experiments/run.py investigate bench_audio_lab_model.py -m browser -s
 ```
 
 ### Measured synthetic baseline, 2026-10-25
@@ -181,7 +294,7 @@ Audio-derived vibe coverage remains unproven; no shared trait is adopted.
 
 ### Rebuild without dynamic code generation
 
-The research binding in `essentia_csp.cpp` exposes only MusiCNN preprocessing and
+The production binding in `scripts/audio_model/essentia_csp.cpp` exposes MusiCNN preprocessing and
 its dependencies. It uses unmodified, pinned Essentia C++ source and KISS FFT,
 compiled with Emscripten 3.1.64 and `DYNAMIC_EXECUTION=0`. The extension keeps its
 existing CSP. TensorFlow.js 3.18's regenerator bootstrap is given its expected
@@ -200,16 +313,17 @@ git clone --filter=blob:none --no-checkout https://github.com/MTG/essentia.git /
 git -C /tmp/tuneconsole-audio-build/essentia checkout --detach d65623a92ab1d26803c5d8656a3ad7c5b2929031
 curl --fail --location --output /tmp/tuneconsole-audio-build/eigen-3.3.7.tar.gz https://gitlab.com/libeigen/eigen/-/archive/3.3.7/eigen-3.3.7.tar.gz
 tar -xzf /tmp/tuneconsole-audio-build/eigen-3.3.7.tar.gz -C /tmp/tuneconsole-audio-build eigen-3.3.7/Eigen eigen-3.3.7/unsupported/Eigen
-python3.12 experiments/audio_lab_tools/build_runtime.py --source /tmp/tuneconsole-audio-build/essentia --emsdk /tmp/tuneconsole-audio-build/emsdk --eigen /tmp/tuneconsole-audio-build/eigen-3.3.7
+python3.12 scripts/audio_model/build_runtime.py --source /tmp/tuneconsole-audio-build/essentia --emsdk /tmp/tuneconsole-audio-build/emsdk --eigen /tmp/tuneconsole-audio-build/eigen-3.3.7
 ```
 
 Allow roughly 2 GiB for the local compiler and build workspace. The Eigen archive
 SHA-256 is `d56fbad95abf993f8af608484729e3d87ef611dd85b3380a8bad1d5cbc373a57`;
 the builder also verifies the extracted header tree, source revisions and active
-compiler version. It shares the repository's machine test lock and runs two
+compiler version. A dedicated audio-build lock excludes concurrent builders and
+surviving compiler children, independently of pytest. The builder runs two
 compiler processes at most. There is no upstream-source patch or system install.
 
-The ignored `vendor/runtime.json` records source/toolchain revisions, flags,
+The ignored `extension/audio_model/vendor/runtime.json` records source/toolchain revisions, flags,
 binding/header hashes and the resulting artifact digest. The worker checks that
 digest before import. Original artifacts remain available for comparisons via
 the explicit benchmark; `fetch_model.py` preserves the separately built runtime.
@@ -218,13 +332,13 @@ builds retain distinct identities.
 
 ### Audio attributes runtime
 
-The current optional build is `essentia-csp-audio-2`. It adds
+The current production build is `essentia-csp-audio-2`. It adds
 `RhythmExtractor2013` (multifeature, native confidence) and `LoudnessEBUR128` to the
 existing MusiCNN preprocessing binding. Both receive ten seconds at 44.1 kHz;
 loudness preserves stereo and represents mono with one active channel. The
 model still receives a separate 16 kHz mono rendering. Offline rendering creates
 no live audio output. Refresh both the fetched assets and the runtime before
-running `prepare_extension.py`.
+building the production extension or staging this lab.
 
 The pinned Meyda 5.6.3 bundle and its MIT license are included in the verified
 local research assets. Its scalar spectral/perceptual measurements use Hann
@@ -658,25 +772,24 @@ DEAM outputs retain the native 1–9 scale without clipping exported values. The
 are uncalibrated predictions, not confidence percentages or production vibe traits.
 No genre-to-chill mapping is introduced.
 
-Prepare the normal unpacked extension explicitly:
+Prepare the production build inputs and distribution:
 
 ```sh
-python3 experiments/audio_lab_tools/fetch_model.py
-python3 experiments/audio_lab_tools/prepare_extension.py
+python3 scripts/audio_model/fetch_model.py
+scripts/build-extension.sh
 ```
 
 The existing CSP-compatible runtime must already be built using the recipe above.
-The preparer checks artifact hashes and copies worker source plus the needed
-runtime/models/licences into ignored `extension/audio_model/`. It does not fetch
-anything. Re-run it after worker changes, then reload the normal bridge extension
-and reload the normal app preview. The optional model directory is excluded from
-Web Store packaging. No CDN or remote JavaScript execution is introduced.
+The packager checks artifact hashes and stages production worker source plus the
+required runtime/models/licences from `extension/audio_model/`. It does not fetch
+anything. Production worker source is tracked there; downloaded vendor assets
+are ignored by Git and included in every Web Store ZIP. Reload the updated bridge
+extension and normal app page. No CDN or remote JavaScript execution is introduced.
 
-Listen across styles and compare relaxed versus intense tracks within each style.
-Repeat on separated parts of changing songs before trusting a whole-track trait.
-The preview still samples one window per song; **Analyse again** can sample a later
-section. Representative blind reference judgments, held-out benefit and resource
-cost remain #424's gate. Only tracks actually played can gain audio evidence.
+The historical preview samples one window per song; **Analyse again** can sample
+a later section. Only tracks actually played can gain audio evidence. The
+completed #424 reports above replace the earlier proposed listening/resource
+gate. Additional human listening judgments are won't fix at the user's direction.
 
 The read-only preview does not require verified title/artist metadata to start:
 live playback can be healthy while artist-format matching leaves that flag false.
@@ -692,16 +805,12 @@ mixed classification evidence, not a half-intensity aggression measurement.
 Keep that distinction explicit and retain this judgment as evaluation evidence;
 do not turn it into a verified recording association or adopted vibe label.
 
-Keep the rebuilt runtime confined to the optional local research installation
-until reference preprocessing validation and listening evaluation establish its limits.
-The original prebuilt runtime remains rejected for MV3 integration.
-
-The listening gate is a 20–30 recording reference corpus with documented permissions
-and human judgments, artist/album holdouts, a metadata baseline and one candidate
-model. Include quiet intros, changing arrangements, gentle electronic tracks,
-intense instrumentals and weak/conflicting metadata. Use #405's evaluation format
-and keep model outputs separate from the blind judgment packet. Do not generate
-listening labels from model predictions or synthetic signal tests.
+The earlier optional-installation and listening-gate plan is superseded by the
+mainlined Cruise integration and completed #424 experiments. The original
+prebuilt runtime remains rejected for MV3 integration. Retain recording identity,
+artist/album exclusions and source permissions in automated label-based
+evaluation. Do not generate reference labels from model predictions or synthetic
+signal tests. New blind listening packets and whole-mix ratings are not required.
 
 Essentia.js/MusiCNN remains a candidate, not a selected production dependency.
 Measure feature extraction **and** embedding/classifier inference on browser CPU,

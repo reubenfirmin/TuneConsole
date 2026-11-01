@@ -11,7 +11,7 @@
   {% set is_cluster = recipe and recipe.model == 'cluster' %}
   <div class="fb-simple">
     {% if is_cluster %}
-    <a class="fb-type-chip" href="/clusters{% if has_cluster_canvas %}?from={{ pl.ytm_playlist_id|urlencode }}{% endif %}"
+    <a class="fb-type-chip" href="/clusters{% if has_cluster_canvas %}?from={{ pl.provider_playlist_id|urlencode }}{% endif %}"
        title="Open cluster editor" aria-label="Open cluster editor">Cluster</a>
     {% else %}
     <span class="fb-q">Want more music like this?</span>

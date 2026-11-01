@@ -256,7 +256,7 @@ def _album(browse="MPREb_x"):
 
 
 def _client(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     fc = FakeClient(albums=_album())
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), fc, iid
@@ -278,6 +278,8 @@ def test_album_page_renders_table_and_create_form(store):
     assert 'data-vid="v1"' in r.text and 'data-vid="v2"' in r.text
     assert '>Plays<' in r.text and 'like-btn' in r.text
     assert 'More like this album' not in r.text
+    assert "/album/MPREb_x/share.txt" in r.text
+    assert 'aria-label="Enrich"' in r.text
 
 
 def test_open_album_inline_keeps_the_complete_tracklist_and_simple_controls(store):
@@ -305,7 +307,8 @@ def test_unsaved_album_and_expansion_reuse_identical_standard_rows(store):
     assert page == inline
     assert page.count('<th ') == 10
     assert not store.collection.saved_album_ids()
-    assert store.charts.album_tracks_detail('MPREb_x') == []
+    assert [t['video_id'] for t in store.charts.album_tracks_detail('MPREb_x')] == ['v1','v2']
+    assert not store.conn.execute('SELECT 1 FROM library_memberships').fetchone()
 
 
 def test_album_fetch_retains_exact_upload_lengths_for_the_shared_clock_without_saving(store):
@@ -324,7 +327,8 @@ def test_album_fetch_retains_exact_upload_lengths_for_the_shared_clock_without_s
         'duration': 181, 'playlist': 'OLAK5uy_album'})
     assert c.get('/bridge/status').json()['now_playing']['duration'] == 160
     assert not store.collection.saved_album_ids()
-    assert store.charts.album_tracks_detail('MPREb_x') == []
+    assert [t['video_id'] for t in store.charts.album_tracks_detail('MPREb_x')] == ['v1','v2']
+    assert not store.conn.execute('SELECT 1 FROM library_memberships').fetchone()
 
 
 def test_inline_fetch_failure_does_not_show_incidental_library_subset(store):
@@ -362,24 +366,6 @@ def test_unsaved_album_shows_full_live_tracks_not_incidental_library_subset(stor
     assert "One" in r.text and "Two" in r.text   # BOTH live tracks, not just the incidental one
     assert 'tracks in your library. The album is not saved.' not in r.text
     assert 'aria-label="Save album to library"' in r.text
-
-
-def test_album_head_tools_show_share_and_enrich_icons(store):
-    """The album head shows the share + enrich icons (parity with playlists), even when unsaved."""
-    c, _fc, _iid = _client(store)
-    r = c.get("/album?browse=MPREb_x")
-    assert r.status_code == 200
-    assert "/album/MPREb_x/share.txt" in r.text          # share icon links to the album .txt
-    assert 'aria-label="Enrich"' in r.text               # the single waterfall enrich icon
-
-
-def test_album_share_txt_lists_live_track_urls(store):
-    c, _fc, _iid = _client(store)
-    r = c.get("/album/MPREb_x/share.txt")
-    assert r.status_code == 200
-    assert "https://music.youtube.com/watch?v=v1" in r.text
-    assert "https://music.youtube.com/watch?v=v2" in r.text
-    assert "attachment" in r.headers["content-disposition"]
 
 
 def test_album_play_requires_connection_and_confirms_exact_queue_separately(store):
@@ -440,7 +426,9 @@ def test_album_share_uses_full_live_album_not_incidental_library_track(store):
     c, _fc, _iid = _client(store)
     r = c.get("/album/MPREb_x/share.txt")
     assert r.status_code == 200
-    assert "v1" in r.text and "v2" in r.text   # both album tracks, not just the incidental v1
+    assert "https://music.youtube.com/watch?v=v1" in r.text
+    assert "https://music.youtube.com/watch?v=v2" in r.text
+    assert "attachment" in r.headers["content-disposition"]
     assert len([ln for ln in r.text.splitlines() if ln.strip()]) == 2
 
 

@@ -20,7 +20,7 @@ from yt_playlist.web.icons import arrow_icon
 
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.core import updatecheck
-from yt_playlist.core.activity import WorkClosing
+from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
 from yt_playlist.core.storage_maintenance import StorageMaintenance, StorageCompacting
 from yt_playlist.core.work_diagnostics import CpuDiagnostics
 from yt_playlist.core.update_lifecycle import acquire_restart_locks
@@ -263,6 +263,9 @@ def create_app(store, client_provider, *, now_fn=time.time,
                         if bridge.connected:
                             store.settings.set_setting('bridge_paired', '1')
                             ctx.clear_all_auth_expired()
+                        # Load saved genres before HTTP admission. Updating the
+                        # packaged catalog is separate local configuration work.
+                        genre_lib.configure(store)
                         ctx.radio.prepare()
                         ctx.rec_worker.start_ticker()
                         ctx.enrich_worker.start_ticker()
@@ -357,12 +360,14 @@ def create_app(store, client_provider, *, now_fn=time.time,
                 return PlainTextResponse("cross-origin request blocked", status_code=403)
             ctx = getattr(app.state, "ctx", None)
             playback_request = request.url.path in (
-                '/play', '/album/play', '/now-playing/next', '/now-playing/toggle',
+                '/play', '/album/play', '/home/generate', '/track/like', '/now-playing/next', '/now-playing/rate', '/now-playing/toggle', '/discovery/add',
                 '/radio/start', '/radio/stop', '/radio/select', '/radio/tune', '/radio/seen',
                 '/home/tv/takeover', '/heartbeat', '/goodbye') or (
                 request.url.path.startswith('/home/tv/playlist/') and request.url.path.endswith('/event'))
-            if ctx is not None and ctx.storage_maintenance.active and not playback_request:
-                return PlainTextResponse(str(StorageCompacting()), status_code=503)
+            if ctx is not None and not playback_request:
+                maintenance = ctx.storage_maintenance.status()
+                if maintenance['active']:
+                    return PlainTextResponse(maintenance['message'], status_code=503)
             if (ctx is not None and ctx.updater is not None
                     and ctx.updater.phase == "restarting"
                     and request.url.path not in ("/app-update/restart", "/app-update/restart/cancel", "/heartbeat", "/goodbye")):
@@ -392,8 +397,12 @@ def create_app(store, client_provider, *, now_fn=time.time,
     async def compacting_storage(request, error):
         return PlainTextResponse(str(error), status_code=503)
 
+    @app.exception_handler(WorkBudgetExceeded)
+    async def busy_publication(request, error):
+        return PlainTextResponse(str(error), status_code=503, headers={'Retry-After': '5'})
+
     from yt_playlist.providers import genres as genre_lib
-    genre_lib.configure(store)                                 # load (and seed) the genre whitelist
+    genre_lib.configure(store, read_only=True)
 
     ctx = Ctx(store=store, client_provider=client_provider, now_fn=now_fn,
               templates=templates, jobs=SyncJobs(), setup=setup, bridge=bridge)
@@ -402,13 +411,23 @@ def create_app(store, client_provider, *, now_fn=time.time,
         from yt_playlist.core.flatpak_update import FlatpakUpdater
         updater = FlatpakUpdater()
     ctx.updater = updater
-    ctx.storage_maintenance = StorageMaintenance(store, on_resume=ctx.radio.retain_provenance)
+    def resume_storage():
+        reload_config = getattr(ctx.setup,'load',None)
+        if reload_config is not None:
+            reload_config()
+        ctx.radio.retain_provenance()
+    ctx.storage_maintenance = StorageMaintenance(store, on_resume=resume_storage)
     templates.env.globals['storage_maintenance_status'] = ctx.storage_maintenance.status
 
     @app.get('/storage-maintenance/status')
     def storage_maintenance_status():
         status = ctx.storage_maintenance.status()
         return {**status, 'auth_labels': [] if status['active'] else list(ctx.auth_expired.values())}
+
+    @app.post('/storage-maintenance/compact', status_code=202)
+    def compact_storage():
+        ctx.storage_maintenance.start_compaction()
+        return ctx.storage_maintenance.status()
     app.include_router(build_bridge_route(ctx))
     from yt_playlist.rec.rec_worker import RecWorker
     ctx.rec_worker = RecWorker(ctx, enabled=background_work)
@@ -418,7 +437,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
     from yt_playlist.rec import onboarding
     templates.env.globals["initial_setup_pending"] = lambda: onboarding.initial_setup_pending(store, now_fn())
     templates.env.globals["has_multiple_identities"] = (
-        lambda: len(store.identities.get_identities()) > 1
+        lambda: len(store.accounts.get_accounts()) > 1
     )
     # Background library-sync daemon: runs the full sync (setup + periodic) with no manual card, so
     # the initial post-setup sync fires as soon as the extension connects and the library then

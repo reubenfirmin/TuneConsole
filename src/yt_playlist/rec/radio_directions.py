@@ -38,7 +38,8 @@ class RadioDirections:
 
     def _genres(self, history, *, current=None):
         theme = getattr(self.candidates, 'tuning', {}).get('theme', .5)
-        return GenrePolicy(theme, history, current=current)
+        store = getattr(self.candidates,'store',None)
+        return GenrePolicy(theme, history, current=current, store=store)
 
     def continue_sequence(self, history, prefix, anchor, excluded):
         """Extend an unsent branch using the current candidate and feedback policy."""
@@ -57,9 +58,11 @@ class RadioDirections:
                 destination = pick
         return proposal
 
-    @staticmethod
-    def _label(tracks, anchor):
-        families = Counter(genre_map.family(t.get("genre")) for t in tracks)
+    def _label(self, tracks, anchor):
+        store = getattr(self.candidates,'store',None)
+        axes = store.genres.feature_axes([t.get('genre') for t in tracks]) if store else None
+        families = Counter(axes.get(t.get('genre'), (None, None))[0] if axes is not None
+                           else genre_map.family(t.get('genre')) for t in tracks)
         families.pop(None, None)
         families.pop("", None)
         family = families.most_common(1)[0][0] if families else None

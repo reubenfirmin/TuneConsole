@@ -39,6 +39,11 @@ def _now_playing_snapshot(msg, previous=None):
     # Older sensors report a growing buffered endpoint as duration. Resolve the full
     # exact-upload length from the catalog when serving status, never from this frame.
     snapshot['duration'] = None
+    for field, key in (('brandId', 'brand_id'), ('brandKnown', 'brand_known')):
+        if field in msg:
+            snapshot[key] = msg[field]
+        elif previous and previous.get('video_id') == snapshot['video_id'] and key in previous:
+            snapshot[key] = previous[key]
     # Old sensors omit context on heartbeats. Preserve it only for the same video.
     for field, key in (("playlist", "playlist_ytm_id"), ("albumBrowseId", "album_browse_id")):
         if field in msg:
@@ -75,6 +80,23 @@ def _capture_diagnostics(value):
                     if isinstance(keys, list) else []
             result["sources"].append(item)
     return result
+
+
+def _record_connection(ctx):
+    # Maintenance can begin between socket acceptance and this worker running.
+    # Pairing is optional during maintenance; check its admission under the same
+    # lock that changes the serving connection's read-only state.
+    store = getattr(ctx, 'store', None)
+    clear = getattr(ctx, 'clear_all_auth_expired', None)
+    if store is None:
+        if callable(clear):
+            clear()
+        return
+    with store._lock:
+        if not store.activity_paused:
+            store.settings.set_setting('bridge_paired', '1')
+        if callable(clear):
+            clear()
 
 
 def build(ctx) -> APIRouter:
@@ -162,7 +184,7 @@ def build(ctx) -> APIRouter:
             playlist = (query.get('list') or [''])[0].removeprefix('RDAMPL')
             if playlist:
                 for pl in ctx.store.playlists.get_playlists():
-                    if pl.ytm_playlist_id == playlist and (ctx.store.playlist_recipes.get_recipe(pl.scope_ref) or {}).get('media') == 'video':
+                    if pl.provider_playlist_id == playlist and (ctx.store.playlist_recipes.get_recipe(pl.playlist_scope_id) or {}).get('media') == 'video':
                         return {'ok': True, 'tv_url': f'/?tv_playlist={pl.id}#tv'}
             bridge.send_control({"type": "navigate", "url": url}, intent=intent)
             video_id = (query.get("v") or [None])[0]
@@ -171,7 +193,7 @@ def build(ctx) -> APIRouter:
             elif query.get("list"):
                 playlist = query["list"][0].removeprefix("RDAMPL")
                 for pl in ctx.store.playlists.get_playlists():
-                    if pl.ytm_playlist_id == playlist:
+                    if pl.provider_playlist_id == playlist:
                         measurement.record_action(ctx.store, "start", ctx.now_fn(), playlist_id=pl.id)
                         break
             return {"ok": True}
@@ -208,11 +230,11 @@ def build(ctx) -> APIRouter:
             # Run it off the event loop so that transport's WebSocket replies can be received.
             loop = asyncio.get_running_loop()
 
-            def mirror(identity_id):
+            def mirror(account_id):
                 # The admitted worker owns the complete command even if its HTTP waiter leaves.
                 # Keep its per-item turn until native reconciliation and exact-track skip settle.
                 return asyncio.run_coroutine_threadsafe(
-                    mirror_rating(action, video_id, like_status, identity_id), loop).result()
+                    mirror_rating(action, video_id, like_status, account_id), loop).result()
 
             result = await activity_for(ctx).to_thread(ctx.ops().set_rating, video_id, like_status,
                                                        after_confirmed=mirror)
@@ -222,9 +244,7 @@ def build(ctx) -> APIRouter:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "error": "", **{k: v for k, v in result.items() if k == "player_error"}}
 
-    async def mirror_rating(action, video_id, like_status, identity_id):
-        if like_status == "LIKE":
-            await asyncio.to_thread(measurement.record_action, ctx.store, "save", ctx.now_fn(), video_id=video_id)
+    async def mirror_rating(action, video_id, like_status, account_id):
         # The API confirms the exact upload/account even if playback has moved on. When it
         # is still playing, also drive Music's native control so its selected thumb follows
         # the saved rating. Radio repairs its saved future before advancing.
@@ -232,9 +252,10 @@ def build(ctx) -> APIRouter:
         if bridge.connected and playing.get("video_id") == video_id:
             player_errors = []
             native_diagnostics = None
+            identity = None
             try:
-                identities = await asyncio.to_thread(ctx.store.identities.get_identities)
-                identity = next(i for i in identities if i.id == identity_id)
+                identities = await asyncio.to_thread(ctx.store.accounts.get_accounts)
+                identity = next(i for i in identities if i.id == account_id)
                 status, body = await bridge.request_control({
                     "type": "rate", "action": action, "videoId": video_id,
                     "likeStatus": like_status, "brandId": identity.brand_account_id or "",
@@ -249,9 +270,9 @@ def build(ctx) -> APIRouter:
                 player_errors.append(str(exc))
             # A missing native rating control must not prevent the requested
             # skip after the exact song's dislike has already been saved.
-            if like_status == "DISLIKE":
+            if like_status == "DISLIKE" and identity is not None:
                 try:
-                    skipped = await skip_song(video_id)
+                    skipped = await skip_song(video_id, brand_id=identity.brand_account_id or "")
                     if not skipped.get("ok"):
                         raise ValueError(skipped.get("error") or "The player did not advance")
                 except Exception as exc:
@@ -261,16 +282,51 @@ def build(ctx) -> APIRouter:
                 return {"ok": True, "error": "", "player_error": " ".join(player_errors)}
         return {"ok": True, "error": ""}
 
-    async def skip_song(video_id):
+    async def skip_song(video_id, *, brand_id=None):
+        playing, now = dict(bridge.now_playing or {}), getattr(ctx, 'now_fn', time.time)()
+        if (brand_id is not None and playing.get('brand_known') is True
+                and (playing.get('brand_id') or '') != brand_id):
+            return {'ok': False, 'error': 'Player account is unavailable or different'}
+        if brand_id is None and playing.get('brand_known') is True:
+            brand_id = playing.get('brand_id') or ''
+        if brand_id is not None and getattr(bridge, 'account_bound_next', None) is not True:
+            return {'ok': False, 'error': 'Update the TuneConsole extension before skipping for this account'}
         radio = getattr(ctx, "radio", None)
-        if radio is not None:
-            result = await activity_for(ctx).to_thread(radio.skip, video_id)
+        if radio is not None and not ctx.store.activity_paused:
+            options = {'brand_id': brand_id} if brand_id is not None else {}
+            result = await activity_for(ctx).to_thread(radio.skip, video_id, **options)
             if result is not None:
                 return result
-        status, body = await bridge.request_control({"type": "next", "videoId": video_id}, timeout=10)
+        # Gather optional catalog context before sending the command. A
+        # confirmed Next must reach its durable inbox even if replacement
+        # closes every main handle while the extension is responding.
+        identity, duration = None, None
+        if playing.get('video_id') == video_id and playing.get('brand_known') is True:
+            identity = live_plays.resolve_identity(ctx.store, playing.get('brand_id') or '')
+            if identity is not None:
+                from yt_playlist.core.db_space import StorageCompacting
+                try:
+                    with ctx.store.read_view() as reader:
+                        duration = reader.tracks.duration_for_video(video_id)
+                except StorageCompacting:
+                    pass  # Unknown duration remains explicit in the retained observation.
+        frame = {"type": "next", "videoId": video_id}
+        if brand_id is not None:
+            frame['brandId'] = brand_id
+        status, body = await bridge.request_control(frame, timeout=10)
         result = json.loads(body)
         if status != 200 or not result.get("ok"):
             return {"ok": False, "error": result.get("error") or "The player did not advance"}
+        if identity is not None:
+            def retain():
+                from yt_playlist.core import playback_feedback
+                playback_feedback.record_next(ctx.store, identity, video_id, playing.get('position'),
+                    duration, playing.get('playlist_ytm_id'), now)
+            try:
+                await asyncio.to_thread(retain)
+            except Exception:
+                logger.warning('Player advanced but local Next capture failed: video=%s', video_id, exc_info=True)
+                return {'ok': True, 'player_error': 'Playback advanced, but this skip could not be saved to local history.'}
         return {"ok": True}
 
     @router.post("/now-playing/next")
@@ -376,11 +432,7 @@ def build(ctx) -> APIRouter:
         ping_task = asyncio.create_task(keepalive())
         store = getattr(ctx, "store", None)
         try:
-            if store is not None and not getattr(store, 'activity_paused', False):
-                await run_in_threadpool(store.settings.set_setting, "bridge_paired", "1")
-            clear = getattr(ctx, "clear_all_auth_expired", None)
-            if callable(clear):
-                await run_in_threadpool(clear)
+            await run_in_threadpool(_record_connection, ctx)
             logger.info("extension bridge connected")
             wake = getattr(ctx, "sync_wake", None)
             if wake is not None:
@@ -416,6 +468,7 @@ def build(ctx) -> APIRouter:
                         logger.warning("malformed sensor-health frame, ignoring: %r", msg)
                         continue
                     bridge.playback_confirmation = msg.get("playbackConfirmation") is True
+                    bridge.account_bound_next = msg.get('accountBoundNext') is True
                     bridge.sensor_health = {**counts, "healthy": bool(msg.get("healthy")),
                         "recovering": bool(msg.get("recovering")), "error": str(msg.get("error") or "")[:500]}
                     if counts["ytm_tabs"] == 0:

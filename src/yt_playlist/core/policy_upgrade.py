@@ -116,6 +116,8 @@ def _compact(conn, directory):
 
 def run_once(conn, *, now=None, progress=lambda phase: None, on_deferred=lambda error: None):
     """Run in a background worker; never use the serving Store connection."""
+    if policy_storage.typed(conn):
+        return True
     row = conn.execute('SELECT value FROM settings WHERE key=?', (KEY,)).fetchone()
     state = json.loads(row[0]) if row else None
     if state and state['phase'] == 'done':

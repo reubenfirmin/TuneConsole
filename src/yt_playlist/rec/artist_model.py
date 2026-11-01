@@ -60,8 +60,8 @@ def artist_content_profiles(store):
         for artist in refs.get(k,()):
             p = _p(artist)
             if genre:
-                p["families"].add(genre_map.family(genre))
-                sub = genre_map.subgenre(genre)
+                p["families"].add(genre_map.family(genre,conn=store.conn))
+                sub = genre_map.subgenre(genre,conn=store.conn)
                 if sub:
                     p["subs"].add(sub)
             if year and str(year)[:4].isdigit():
@@ -136,7 +136,8 @@ def _discovered_artist_profiles(store):
     for a in store.discovery.get_discovered_artists():
         artist, genre = store.artists.key(a.get('artist_id') or a.get('artist')), a.get("genre")
         if artist and genre:
-            out[artist] = {"families": {genre_map.family(genre)}, "subs": set(), "decades": set(), "audio": {}}
+            sub = genre_map.subgenre(genre,conn=store.conn)
+            out[artist] = {"families": {genre_map.family(genre,conn=store.conn)}, "subs": {sub} if sub else set(), "decades": set(), "audio": {}}
     return out
 
 

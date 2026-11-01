@@ -31,8 +31,7 @@ def decide(store, decision, cohort, reason, now):
         # Resolve cohorts and encode retained evidence off the serving lock.
         # Publication rejects a concurrent evidence/settings change atomically.
         def publish():
-            store.conn.executemany("INSERT INTO settings(key,value) VALUES (?,?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", rows)
+            store.settings.publish_values(dict(rows))
         if not snapshot.publish(publish):
             raise ValueError("Listening evidence or experiment settings changed. Review the report and try again.")
     return {"state": "retained" if decision == "promote" else "retired",

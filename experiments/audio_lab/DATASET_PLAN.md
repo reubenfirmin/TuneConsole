@@ -1,13 +1,16 @@
 # External datasets for the vibe model
 
-Related issue: #507. Acquisition status updated on 28 October 2026.
+Related issues: #530 (current work), #507 (earlier experiments), #406, #405 and
+#136. Acquisition status updated on 29 October 2026.
 
 ## Product checkpoint and next experiments
 
-The user requested a stopping point on 28 October. Pause the broad campaign;
-retain downloaded audio, extracted features, and unfinished trials. Emotify's
-linear native-emotion expert with linear six-vibe calibration is the chosen
-checkpoint. See [model evidence and integration](MODEL_CHECKPOINT.md).
+Research resumed under #530 after the earlier product checkpoint. Keep all
+research changes and artifacts in `experiments/`; retain downloaded audio,
+extracted features, and unfinished trials. Emotify's linear native-emotion
+expert with linear six-vibe calibration remains the product comparator. See
+[current experiment evidence](EXTERNAL_EXPERIMENTS.md) and
+[model evidence and integration](MODEL_CHECKPOINT.md).
 
 Provider audio metadata supplies initial vibe estimates. Normal playback
 sampling then adds actual measurements, which feed the learned model and seed
@@ -16,18 +19,31 @@ vibe-rating UI is opt-in; ordinary collection must not depend on that switch.
 Predicted recordings never become independent measurement votes. Heart/skull
 continues to mean song preference, and regular users never supply vibe labels.
 
-Resume research in this order, retaining the checkpoint as the comparator:
+The source comparisons and one-time reserved-label evaluation are complete.
+No replacement is established. Decoder sensitivity and the bounded fresh/cold
+preparation checks are complete. The cold queue remains unfinished at its
+recorded time bound. A separate fresh consumer replay now demonstrates fallback
+Mix Tape/Radio output with title/artist data alone, 77 content vectors after
+copied genre/year metadata, and 462 direct vibe measurements after three captures.
+This bounded cohort does not establish signed-in account latency or musical fit.
+The five fixed library candidates have all been attempted: four complete the
+extended diagnostic, while activity semantics reaches its fixed warm-retune
+deadline. The original publication failure and that retune failure remain
+explicit; no replacement is established. A separate semantic restriction
+continuation reproduced all ordered playlists and found zero violations without
+retrying warm retunes. Exact results are in
+[the experiment evidence](EXTERNAL_EXPERIMENTS.md).
 
 | Priority | Data | Next use |
 | --- | --- | --- |
-| 1 | Emotify, 400 supplied excerpts | Compare the existing center window with early/center/late means, and unweighted training with listener-count weighting. Keep its nine native emotions and unchanged six-vibe meanings. This directly tests improvements to the shipped checkpoint. |
-| 2 | DEAM, 1,802 supplied recordings; PMEmo, 767 choruses | Resume DEAM extraction from its cache (last checkpoint: 50 complete, no errors). Train native static activation/positivity, then compare time-aligned windows. Test cross-corpus transfer in both directions without selecting on the developer vibe set. |
-| 3 | CAL500, 496 usable recordings | Reuse cached audio features to test original listener fractions for studying, reading, working, exercise, and driving. Focus is currently weak; activity evidence is more direct than inferring it from calmness alone. |
-| 4 | EMMA, 333 downloaded publisher previews | Train nine GEMS dimensions as an additional expert. Treat the 15-second previews as weak supervision because alignment with the originally rated excerpts is unverified. Compare alone, with Emotify, and in nested consensus. |
-| 5 | MERGE Audio Complete, 3,554 supplied clips | Resume the partial official download, verify its checksum, and train manually checked quadrants. Compare tag-derived continuous coordinates separately. Replace overlapping 4Q in mixtures, never give both independent votes. |
-| 6 | AMG1608 and NTWICM annotations | Use strict intersections with already acquired audio first: roughly 400 AMG1608 matches and 55 distinct NTWICM matches. Keep song/excerpt mismatch explicit. Test their native activation/positivity and transfer to PMEmo/DEAM before collecting more recordings. |
-| 7 | Soundtracks, 4Q, Coimbra, VGMIDI, Jamendo | Reuse completed features for source ablations, learner comparisons, and every nonempty consensus subset, including pairs. Use overlapping corpus versions as alternatives. Jamendo remains subject to its stated noncommercial research terms. |
-| 8 | Unrated audio pairs and all ready native corpora | Compare a duplicate-free consistency objective, unlabeled PCA/whitening, and shared representations with separate native tasks. Withhold native labels for the unlabeled pool and remove its robustness holdout from all matched training tasks. Never promote model agreement or playback duration to human truth. |
+| 1 | Emotify, 400 supplied excerpts | Artist-grouped, early/center/late, listener-count and reserved comparisons are complete. Preserve nine native emotions and unchanged six-vibe meanings; local additions do not establish a replacement. |
+| 2 | DEAM, 1,801 usable recordings; PMEmo, 767 choruses | Static/aligned native tasks and cross-corpus transfer are complete. New ManyMusic/Memo transfer adds separate human evidence; no target-corpus selection. One DEAM measurement decode has a one-sample boundary exclusion, audited below. |
+| 3 | CAL500, 496 usable recordings | Original activity-vote ranking, native learners, expanded consensus and fixed-semantic reserved comparisons are complete. The fixed activity mapping worsens reserved NLL; direct evidence for Focus remains weak. |
+| 4 | EMMA, 333 downloaded publisher previews | Native GEMS, standalone, and consensus comparisons are complete. Preview alignment remains unverified, so this stays weak supervision. |
+| 5 | MERGE Audio Complete, 3,553 usable clips | Native quadrant classification, separate tag-derived coordinates, and 4Q expansion comparisons are complete. One extraction failure remains recorded. MERGE and overlapping 4Q enter alternative mixtures. |
+| 6 | AMG1608 and NTWICM annotations | Native comparisons use 404 and 55 strict supplied-audio intersections. Keep song/excerpt mismatch explicit; further track-list recovery remains lower priority. |
+| 7 | Soundtracks, 4Q, Coimbra, VGMIDI, Jamendo | Native tasks, learner comparisons, source ablations, every nonempty selected-pool consensus subset and historical paired uncertainty are complete. No post hoc subset winner is selected. Source versions remain alternatives; Jamendo terms remain explicit. |
+| 8 | Unrated audio pairs and all ready native corpora | Duplicate-free consistency, PCA/whitening, local prediction ablations, shared-task comparisons and frozen reserved evaluation are complete. No reliable local-data gain is established. Model agreement and playback duration remain separate from human truth. |
 | Later | Remaining catalogue releases and unmatched songs | Follow the dataset-specific roles below. Prioritize usable supplied audio; YouTube identification and sampling comes after ready audio. TROMPA-MER, FME-24, and Moodo currently lack a useful verified audio intersection. |
 
 Every proposed improvement must report native held-out quality, per-vibe song
@@ -85,8 +101,19 @@ checks. A third-party Moodo XML copy has been recovered and examined (200 songs,
 Soundtracks Set 2, CAL500, Emotify, and PMEmo training completed on 28 October:
 110, 496, 400, and 767 usable recordings respectively. Expanded Soundtracks
 (470), the verified VGMIDI subset (76), Jamendo human annotations (216), Coimbra
-(903), and 4Q (900) are also complete. The offline campaign is paused at the
-user-requested product checkpoint; DEAM extraction is resumable. See
+(903), and 4Q (900) are also complete. The #530 extraction campaign now has 1,801
+usable DEAM recordings and 3,553 MERGE clips; one audio interval in each release
+failed extraction and remains recorded. It also completed artist-grouped
+Emotify, original CAL500 activity votes, Emotify+ and MERP.
+The later exclusion audit identifies a 4.778667-second MERGE file
+(`MT0002054074`). DEAM `2048` is 151.91 seconds long; timestamp-based trimming
+returns 440,999 rather than 441,000 stereo measurement frames, while its
+16 kHz model decode is complete. This is a one-sample boundary artifact, not
+short source audio. Preserve the completed 1,801-row comparisons and frozen
+reserved evaluation; record any recovered feature in a separate later audit.
+Emotify+ retains 265 identity-consistent tracks from its 399 audio joins;
+MERP supplies 54 verified WAVs, with four DEAM anchors excluded from its 50-song
+weak static pilot. See
 [running the experiments](EXTERNAL_EXPERIMENTS.md).
 
 The [local acquisition manifest](local/datasets/manifest.json)
@@ -111,6 +138,165 @@ advance immediately; an unavailable host must not hold up the other datasets.
 | [Jamendo Mood and Theme](https://github.com/MTG/mtg-jamendo-dataset) | **Official audio reachable:** shard 00 is verified against official archive and track SHA256 files; shards 07, 23, and 53 expand the sample. Select exact human-annotation/audio intersections, not songs chosen by model predictions. | Train seven explicit human tasks: relaxed, happy, aggressive, party, sad, acoustic, and electronic, using positive-vote fractions. Keep disagreement. Missing uploader tags remain unknown. Original split-0 test annotations enter training, so use new artist-group validation and do not report split 0 as an untouched test. The source states noncommercial research terms; product use must be resolved before release training. |
 | [Coimbra MIREX-like](https://mir.dei.uc.pt/) | **903 supplied clips local:** use the [audio mirror](https://github.com/ethanray123/AudioEmotionPredictionModel), pinned at `8bdd6492f520d76cc2fa74ff69885b2b2b9c5777`. Preserve its separate identity from original MIREX and 4Q. | Predict five native mood clusters derived from AllMusic tags. Exact numbered filenames and row-aligned cluster annotations determine targets; group artists. Audit the release's UTF-16 metadata and its one unquoted title semicolon before joining. |
 | [4Q Emotion Dataset](http://mir.dei.uc.pt/downloads.html) | **900 supplied clips local:** use the [audio mirror](https://github.com/ritam413/Music-Mood-Classifier-), pinned at `3b29a3f47c669b7a0c992211d638641ca5079594`. Join exact AllMusic recording IDs to CP1252 metadata; group 664 artists. | Train the four combinations of high/low activation and positive/negative emotion. This separates energetic-positive from energetic-tense music and calm-positive from subdued-sad music. Report classification accuracy and class-balanced metrics alongside one-hot regression error. |
+
+## New audio-backed leads audited on 29 October
+
+[ManyMusic-Stim v2](https://zenodo.org/records/23647077) supplies audio and
+[human validation ratings](https://manymusic.net/stim/plots_bhv.html). A bounded
+ZIP-range inspection recovered metadata using 1.47 MB instead of downloading the
+30.4 GB archive. Exactly 283 supplied recordings intersect the ratings: 188
+natural Jamendo tracks and 95 generated Suno tracks. All 283 members are now
+downloaded (2.19 GB compressed) with ZIP CRC checks and recorded SHA256 hashes;
+the annotation audit has rechecked the acquired audio. The full archive's MD5
+is unverified because only selected members were acquired. All rated recordings
+now have complete features for the fixed recording-balanced transfer pilot.
+
+The local audit finds 1,695 distinct rated windows and signed VA coordinates in
+[-1, 1]. Average repeated responses within each listener/window before averaging
+listeners: 112 repeat responses include 22 conflicting listener/window sets.
+Keep recorded thirty-second excerpt positions, all windows of a recording and
+Jamendo artist IDs together. Group generated tracks by prompt, report them
+separately, and exclude prompt words and supplied model predictions from targets.
+Apple/Spotify recordings lack supplied audio here. Jamendo overlaps and
+MusiCNN-based source curation limit independence. Track-specific Jamendo terms
+and the release's noncommercial terms remain explicit. The verified publisher
+attribution file now joins all 188 natural recordings to their artist credits,
+source URLs and individual licence URLs. The [publisher's source page](https://manymusic.net/stim/)
+specifies CC BY-NC-SA 4.0 for Suno audio, metadata and human ratings; natural
+recordings retain their individual Jamendo licences.
+
+[Memo2496](https://figshare.com/articles/dataset/Memo2496/25827034) offers 2,496
+instrumental MP3s and expert VA trajectories. Metadata and average-label CSVs
+passed the publisher's MD5 checks; archive directory inspection used 324 KB.
+A deterministic filename-hash sample selected 64 recordings before examining
+targets, avoiding the initial 12.3 GB full download. All 64 MP3s are now local
+(316,405,013 bytes), with member CRC checks, SHA256 records and verified joins
+to both expert trajectories. Feature extraction and all fixed transfer
+comparisons are complete. One pilot recording lacks complete annotations for the fixed
+15–75-second interval and is excluded, leaving 63 eligible recordings. Preserve
+blank late timestamps as missing observations. The [source protocol](https://arxiv.org/html/2512.13998v4)
+uses signed coordinates and a 15–75-second analysis segment. Match actual covered
+audio and labels without presenting padding as music. Artist metadata was
+removed, so this is initially a cross-corpus transfer/pipeline pilot with unknown
+artist independence. Emotion anchor words and radial distance are not our six
+vibes or the product's shared intensity. The record lists CC BY 4.0; retain
+source/audio provenance separately.
+
+Both sources advance ahead of new track-list recovery. Their native human
+annotations provide external evidence; they do not automatically label our six
+vibes. Acquisition and annotation audits live under ignored
+`local/datasets/discovery/`, with tooling in `dataset_range.py` and
+`dataset_audit.py`.
+
+The first transfer plan is now frozen under `checkpoint-1/new-corpora/plans/`.
+It selects one exact thirty-second ManyMusic window per recording by a target-
+independent identity hash and covers each eligible Memo interval with six
+ten-second chunks: 1,227 chunks across 346 recordings. Both mean-embedding and
+mean-prediction aggregation are fixed before evaluation. Source-only grouped
+regularization selection uses PMEmo and DEAM static/aligned targets; neither new
+dataset nor local labels fit or select these transfer models.
+
+The completed overlap audit flags ten natural recordings sharing known corpus
+identities or artists with previously used data. The primary slice excludes those known overlaps;
+all-audio results remain descriptive. Exact normalized artist credits add a
+cross-corpus check, while generic “Various Artists” credits remain unresolved.
+The final transfer rebuilt this audit after the full checkpoint. Unknown aliases, re-encodings, backbone
+pretraining and absent Memo artist identities prevent claiming full independence.
+All 346 planned intervals now have complete extracted audio coverage. A strict
+floating-point equality had falsely rejected 21 decimal-timestamp windows;
+the corrected run preserves those original results and verifies cache lineage.
+Natural
+and generated ManyMusic audio are separate strata, with artist/prompt-group
+uncertainty intervals. This bounded pilot precedes training on the new corpora
+or expanding Memo acquisition.
+
+Run this work through `./experiments/run.py`. `pilot --after-checkpoint` queues
+focused checks, the refreshed overlap audit, aligned extraction and transfer
+sequentially after the current heavy campaign; it stops on failures. The new
+interval/provenance, consistency, reserved-artifact and consumer-adapter guards
+have passed in the 46-check focused run. The corrected transfer and all 26
+source-comparison stages, reserved evaluation and four-recording actual browser
+capture are complete. Decoder sensitivity and fresh/cold/paired library checks
+continue sequentially through the same approved entrypoint.
+
+Two further supplied-audio leads now have bounded, reproducible metadata audits.
+Run `./experiments/run.py leads acquire song-describer` or `leads acquire emid`;
+these commands acquire metadata only and preserve checksummed publisher inputs.
+
+[Song Describer](https://github.com/mulab-mir/song-describer-dataset) offers
+human captions and a direct audio archive. Its released, publisher-MD5-verified
+CSV contains 1,106 captions for 706 recordings; the validated flags retain 746
+captions on **547** recordings, differing from the data card's 546. Exact
+Jamendo track/artist checks against our human Jamendo and ManyMusic collections
+leave 246 validated recordings without known overlap. Preserve this as an
+evaluation-only semantic lead, consistent with the publisher's single-split
+intent. Missing words in a caption are unknown, not negative vibe labels.
+Audio has not yet been acquired; retain per-recording terms from the supplied
+licence file and unresolved upstream training overlap.
+
+[EMID](https://huggingface.co/datasets/ecnu-aigc/EMID) supplies embedded audio
+in eight Parquet shards. The pinned publisher revision
+`c414773bbe9531cd13c039c40c1a554d9317ef47` has 10,738 unique filenames but only
+**1,836 original clips**. All 8,902 augmented rows repeat an original human
+annotation bundle; they are not additional independent judgments. A simple
+filename-parent join resolves only 5,925 augmented rows, so it is insufficient
+for grouped validation. Begin with original clips, preserving human feeling
+fractions and eleven named experience dimensions **only if a separate short-clip
+protocol is established**. The [paper](https://arxiv.org/html/2308.07622v2)
+states original clips span 3.7–9.4 seconds, mostly around five seconds: none
+provides our required ten seconds of actual audio. Do not pad them or borrow
+labels for longer retrieved recordings. Its expanded clips inherit labels
+through audio-similarity selection rather than fresh listening judgments.
+This limits immediate value for the current model despite direct audio access.
+One original has a missing
+dimension, repeated in four children; retain missingness instead of filling it
+as a measured value. Verify dimension ordering, original audio provenance,
+excerpt alignment and recording/artist groups before a bounded audio pilot.
+Generated image captions and image-emotion labels are excluded from music
+targets. No audio has been acquired, and this audit starts no new training.
+
+Other leads receive bounded access checks before any new acquisition:
+
+| Lead | Current evidence and disposition |
+| --- | --- |
+| [MusAV](https://mtg.github.io/musav-dataset/) | Human pairwise activation/positivity judgments for 2,092 previews are a useful independent ranking task. The [archived audio](https://zenodo.org/records/7448344) requires access approval. Keep this ahead of recording recovery once access exists; no access request has been sent. |
+| [GlobalMood](https://github.com/harin-git/GlobalMood) | `leads acquire globalmood` pins revision `975ec1ece254adf293e25eb304591dd5688b13d3` and verifies Git blobs. The actual CSV contains 1,180 distinct YouTube IDs, twenty songs for each of 59 curation countries, rather than the README's 1,182. Its 117,996 mean-rating rows cover five participant countries and twenty native tags per country; preserve those populations separately. Fifty-three standard deviations are missing, with finite means in 1–5 and 1–18 ratings per row. An exact complete artist/title scan across ten existing audio-feature manifests finds just one song, Wham!'s “Wake Me Up Before You Go-Go”, with unverified recording/excerpt identity. This does not support a useful benchmark or substantial audio recovery now. No audio was downloaded and no model was fitted. |
+| [MuChin](https://github.com/CarlWangChina/MuChin-V2-6066) | Chinese professional/amateur human descriptions and advertised supplied audio could broaden repertoire coverage. The 6,066-song Hugging Face release is gated and packages audio in a 26 GB archive. Keep behind usable acquired audio. Its source terms prohibit commercial audio training without holder authorization. The [v1 metadata documentation](https://github.com/CarlWangChina/MuChin/tree/main/dataset) identifies 724 overlaps between its 1,000-song version and v2; versions cannot be independent evidence. No audio or annotation corpus has been acquired. |
+| [Moods and activities](https://reshare.ukdataservice.ac.uk/852024/) | Secondary Focus lead, with no supplied audio established. Separate judgments made while hearing recordings from word/activity association tasks before treating it as supervision. Only bounded existing-audio intersections merit immediate work. |
+| [PHENICX-emotion](https://www.upf.edu/web/mtg/phenicx-emotion) | Publisher supplies fifteen mono WAV excerpts from one Beethoven symphony and acoustic descriptors, for academic research. The download listing alone does not establish usable human label files. Its narrow piece/performer coverage makes it a later diagnostic rather than a scalable independent corpus. |
+
+The 29 October concentration/activity search checked the following primary
+releases. None yet establishes an additional open, supplied-audio benchmark for
+Focus. Keep the acquired CAL500 listener votes as the current direct activity
+evidence and preserve their disagreement. These access observations are not
+claims that the underlying experiments lack value.
+
+| Lead | Evidence and disposition |
+| --- | --- |
+| [Music and Cognitive Performance](https://zenodo.org/records/8421227) | Describes task outcomes for 41 participants and Spotify identifiers/features for 17 stimuli. The listed files are restricted; a [later record](https://zenodo.org/records/14946483) is also restricted and reports a newer version. Latest access remains unresolved. The [experiment-code tree](https://github.com/amresearchlab/yiting-study-2024/tree/c7de1fc87c40f45f0a559e488b272971fa2f36ed) contains 187 files and no conventional music-audio files. Task-level music/control outcomes cannot be treated as independent per-song Focus labels. No files were acquired and no access request was sent. |
+| [Help Me study!](https://zenodo.org/records/10085104) | Lists five spreadsheets, including experience-sampling context, track identifiers and Spotify features; no supplied audio is listed. Studying while hearing a track is observational usage, not evidence that the track improves concentration. Defer track recovery. |
+| [Context-Aware Mobile Music Recommendation for Daily Activities](https://smcnus.comp.nus.edu.sg/archive/pdf/2012-2013/2012_Context.pdf) | The paper reports 1,200 songs judged by all ten listeners, with studying/working Fleiss kappa 0.09/0.03. Audio was recovered from YouTube after Grooveshark playlist discovery. No open packaged audio/annotation release was established in this search. Preserve listener fractions if recovered; do not assume agreement or objective task-performance labels. |
+| [Music in Use: activity corpus](https://repository.tudelft.nl/file/File_4042adbe-223b-4deb-a363-12c02a429775) | Describes 2,589 YouTube items; activity categories derive from titles. The release is described as video IDs, rather than supplied audio. Keep behind human judgments with supplied recordings. |
+| [Music in Use: derail moments](https://osf.io/n3zmp/) | The same thesis describes distraction judgments during transcription and a release of YouTube IDs plus moment annotations. Potentially useful for temporal distraction, not interchangeable with general Focus suitability. Direct OSF access was unresolved; supplied audio was not established. No recovery started. |
+
+The Release follow-up distinguishes expressed anger, felt emotion and the effect
+of listening on an already angry person. These are different targets. None of
+the following establishes per-recording cathartic suitability for our library.
+
+| Lead | Evidence and disposition |
+| --- | --- |
+| [Individual musicians playing emotional music](https://zenodo.org/records/10396364) | `leads acquire playing-musicians` recovered the questionnaire and spreadsheet with 185,850 bytes of checked archive ranges. The 59 unique label rows join 56 originals across eleven performers; `ms09_1`, `ms09_2` and `ms09_3` lack supplied audio. All four VA fields contain valid integer ratings in 1–5. The matched intended conditions are Angry 14, Happy 13, Relaxed 16 and Sad 13. The 168 split WAVs are dependent observations. Preserve intended, communicated and performer-felt targets separately and group performers. Publisher metadata lists CC BY 4.0; questionnaire members passed CRC/SHA256 checks, while the 1.3 GB archive checksum and audio durations/content remain unverified. No audio acquired or models fitted. |
+| [MUSMET VR](https://zenodo.org/records/18642655) | One musician performs eight pieces under four emotion conditions; the 4.2 GB release lists video and EEG. No independent listener ratings or usable standalone audio were established. Its small performer count and acquisition cost put it behind the eleven-musician lead. |
+| [Extreme Metal Music and Anger Processing](https://www.frontiersin.org/journals/human-neuroscience/articles/10.3389/fnhum.2015.00272/full) | A controlled study of 39 existing extreme-music listeners compares self-selected music with silence after anger induction. Anger-related ratings decline in both conditions, while active/inspired responses differ. Its table lists 46 song identities; no supplied-audio or participant-to-song outcome release was established. This supports preserving listener/context dependence, rather than labeling angry-sounding songs as effective Release tracks. Track-list recovery is deferred. |
+
+The musician audit is reproducible with `./experiments/run.py leads inspect
+playing-musicians`. Its `local/datasets/discovery/playing-musicians/` directory
+retains exact publisher metadata, range responses, extracted questionnaire
+members, native rows, joins and exclusions. Only the documented Sheet1 fields
+are labels: the workbook also contains formatted empty rows and a separate
+six-name scratch sheet. They do not add observations. Keep this small native
+diagnostic behind the outstanding fixed library replay; it does not fill the
+missing independent Release-suitability judgments.
 
 ## Use slower acquisition routes afterward
 
@@ -301,11 +487,13 @@ source training and select every parameter on source data only. These tests
 measure transfer across annotation populations without merging their targets or
 using the developer's vibe labels for selection.
 
-Run `python -m experiments.audio_lab_tools.external_campaign` in the project
-environment for the sequential campaign. It checkpoints each stage, records
-failures, preserves separate trial artifacts, and refreshes the local results
-table after each completed stage. Continue follow-up trials when evidence supports
-them; a temporarily empty original queue is not the stopping condition.
+Use the approved `./experiments/run.py` entrypoint for sequential research work.
+`checkpoint`, `complete` and `pilot` preserve their pinned stage receipts; `evidence`
+collects saved results without fitting or selecting again. Library diagnostics
+accept the user-authorized independent execution flag. Preserve completed frozen
+accuracy results and negative trials. New fitting requires a new protocol and
+evaluation cohort; a completed queue is not a reason to repeat selection on the
+reserved labels.
 
 Keep duplicate recordings, overlapping excerpts, and related versions together
 when splitting data, including overlaps across datasets. Use artist separation

@@ -140,7 +140,7 @@ def test_now_bonus_is_positive_bounded_and_neutral_at_zero_gain(base):
 
 @pytest.mark.parametrize("evidence", ["organic", "thin", "old", "radio", "stale_dimensions", "gain_zero"])
 def test_now_uses_persisted_confidence_gated_evidence_without_sampling_on_picks(store, prepared, monkeypatch, evidence):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     keys = [t["key"] for t in prepared[:3]]
     vectors = np.array([[1., 0.]] * 3, dtype=np.float32)
     if evidence == "stale_dimensions":
@@ -168,7 +168,7 @@ def test_now_uses_persisted_confidence_gated_evidence_without_sampling_on_picks(
 
 
 def test_persisted_now_evidence_changes_a_future_choice_and_keeps_existing_directions(store, prepared, monkeypatch):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     neutral = candidate(store, theme=0)
     before = neutral.next_track([])
     preferred = [t for t in prepared if t["genre"] != before["genre"]][:3]

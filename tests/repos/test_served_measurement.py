@@ -14,7 +14,7 @@ def _shown(store, request, at, key="song|artist", rank=1, surface="home"):
 
 
 def _seed_track(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("vid", "song", "artist", None, None)
     return iid
 
@@ -159,7 +159,7 @@ def test_home_records_final_card_order_and_trace(store):
 
 
 def test_coverage_conversion_and_variety_use_immutable_serving_metadata(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     tid = store.tracks.upsert_track("owned", "Owned", "Known artist", None, 200)
     store.tracks.set_track_genre(tid, "Techno")
     store.tracks.set_track_year(tid, "1999")
@@ -203,7 +203,7 @@ def test_explicit_outcomes_follow_bounded_nearest_ownership(store, offset, credi
 
 
 def test_cold_exit_depth_and_staleness_have_samples_per_surface(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.discovery.upsert_discovered_track("cold|artist", "cold", "Cold", "Artist", "", None,
                                   "Techno", None, "source", 0)
     measurement.record_recommendations(store, "similar", [{"key": "cold|artist"}], 100)
@@ -219,7 +219,7 @@ def test_cold_exit_depth_and_staleness_have_samples_per_surface(store):
 
 @pytest.mark.parametrize("position,outcome", [(20, "skip"), (190, "completion")])
 def test_cold_exit_attribution_survives_discovery_removal_and_report_boundaries(store, position, outcome):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     key = "cold|artist"
     store.discovery.upsert_discovered_track(key, "cold", "Cold", "Artist", "", None,
                                   "Techno", None, "source", 0)
@@ -230,7 +230,8 @@ def test_cold_exit_attribution_survives_discovery_removal_and_report_boundaries(
     assert before[outcome] == 1 and before["by_surface"]["similar"][outcome] == 1
 
     with store.conn:
-        store.conn.execute("DELETE FROM discovered_tracks WHERE identity_key=?", (key,))
+        store.conn.execute("DELETE FROM discovery_memberships WHERE recording_id IN "
+                           "(SELECT id FROM recordings WHERE identity_key=?)", (key,))
     assert store.discovery.get_discovered_tracks() == []
     assert scorecard.recommendation_scorecard(store, 90, 160) == before
     assert scorecard.recommendation_scorecard(store, 90, 110)[outcome] == 0

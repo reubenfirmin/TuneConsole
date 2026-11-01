@@ -19,7 +19,7 @@
         <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M7 3.5v17l14-8.5Z"/></svg>
       </a>
       {% else %}
-      <button type="button" class="playlist-play btn-primary" x-data='playlistPlayback({{ pl.ytm_playlist_id|tojson }})'
+      <button type="button" class="playlist-play btn-primary" x-data='playlistPlayback({{ pl.provider_playlist_id|tojson }})'
               @bridge-status.window="apply($event.detail)" @click="play()" :disabled="busy" :aria-busy="busy"
               :title="playing ? 'Pause on YouTube Music' : 'Play on YouTube Music'"
               :aria-label="playing ? 'Pause on YouTube Music' : 'Play on YouTube Music'"
@@ -88,7 +88,7 @@
 </div>
 {% endif %}
 <div class="card library-table-card">
-  <table class="track-table{{ ' is-lm' if pl.ytm_playlist_id == 'LM' }}">
+  <table class="track-table{{ ' is-lm' if pl.provider_playlist_id == 'LM' }}">
     <thead><tr>
       <th class="num col-thumb">#</th>
       <th class="col-thumb col-artwork"></th>

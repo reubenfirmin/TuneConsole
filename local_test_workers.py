@@ -6,22 +6,26 @@ import os
 import pytest
 
 
-def full_local_run(config):
-    if os.environ.get("CI") or config.getoption("ci_shard", default=None):
+def full_suite(config):
+    """Only selections spanning the complete suite need the machine lock."""
+    if config.getoption("ci_shard", default=None):
         return False
     if any(config.getoption(name, default=False) for name in (
-        "collectonly", "help", "version", "usepdb", "lf", "stepwise", "keyword", "deselect",
+        "collectonly", "help", "version", "lf", "stepwise", "keyword", "deselect",
         "run_flatpak_build", "run_live_radio",
     )):
         return False
     if config.getoption("markexpr", default="") not in ("", "not browser", "browser"):
         return False
-    if config.getoption("capture", default="fd") == "no":
-        return False
     if len(config.args) != 1:
         return False
     selected = (config.invocation_params.dir / config.args[0]).resolve()
     return selected in (config.rootpath.resolve(), (config.rootpath / "tests").resolve())
+
+
+def full_local_run(config):
+    return (not os.environ.get("CI") and not config.getoption("usepdb", default=False)
+            and config.getoption("capture", default="fd") != "no" and full_suite(config))
 
 
 def has_xdist(config):

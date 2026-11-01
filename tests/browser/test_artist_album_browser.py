@@ -74,8 +74,8 @@ def _free_port():
 def live_artist_app():
     s = Store(":memory:")
     s.init_schema()
-    iid = s.identities.upsert_identity("Main", "cred", None, True)
-    other = s.identities.upsert_identity("Other", "cred", "other", False)
+    iid = s.accounts.upsert_account("Main", "cred", None, True)
+    other = s.accounts.upsert_account("Other", "cred", "other", False)
     pid = s.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
     # a track with an album browse id -> the collection table renders a Save button for that album
     t = s.tracks.upsert_track("v1", "SongA", "Artist X", "The Album", 200, 1, album_browse_id="MPREb_x")
@@ -142,7 +142,7 @@ def test_unsave_album_flips_to_save_after_reload(live_artist_app, page):
     # start from a saved album so the button reads "Unsave"
     live_artist_app["store"].collection.add_saved_album({
         "browse": "MPREb_x", "title": "The Album", "artist": "Artist X",
-        "year": "2001", "thumbnail": ""}, identity_id=live_artist_app["iid"])
+        "year": "2001", "thumbnail": ""}, account_id=live_artist_app["iid"])
     page.goto(f"{live_artist_app['base']}/artist?name=Artist%20X")
     unsave = page.get_by_role("button", name="Unsave", exact=True)
     expect(unsave).to_be_visible()
@@ -156,7 +156,7 @@ def test_artist_multi_account_unsave_keeps_choices_in_modal(live_artist_app, pag
     for identity in (None, state['iid'], state['other']):
         state['store'].collection.add_saved_album(
             {'browse': 'MPREb_x', 'title': 'The Album', 'artist': 'Artist X', 'year': '2001'},
-            identity_id=identity)
+            account_id=identity)
     page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(f"{state['base']}/artist?name=Artist%20X")
     unsave = page.get_by_role('button', name='Unsave', exact=True)
@@ -238,7 +238,7 @@ def test_existing_album_page_uses_shared_player_and_library_icons(live_artist_ap
 def test_non_main_album_owner_is_removed_from_collection(live_artist_app, page, width):
     app = live_artist_app
     app['store'].collection.add_saved_album({
-        'browse': 'MPREb_x', 'title': 'The Album', 'artist': 'Artist X'}, identity_id=app['other'])
+        'browse': 'MPREb_x', 'title': 'The Album', 'artist': 'Artist X'}, account_id=app['other'])
     page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(f"{app['base']}/albums")
     expect(page.get_by_role('button', name='Unsave', exact=True)).to_be_visible()
@@ -256,7 +256,7 @@ def test_multiple_owners_choose_one_account_from_a_single_control(live_artist_ap
     app = live_artist_app
     for owner in (app['iid'], app['other']):
         app['store'].collection.add_saved_album({
-            'browse': 'MPREb_x', 'title': 'The Album', 'artist': 'Artist X'}, identity_id=owner)
+            'browse': 'MPREb_x', 'title': 'The Album', 'artist': 'Artist X'}, account_id=owner)
     page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(app['base'] + path)
     control = page.get_by_role('button', name='Remove album from library' if path.startswith('/album?') else 'Unsave', exact=True)
@@ -286,8 +286,8 @@ def test_multiple_owners_choose_one_account_from_a_single_control(live_artist_ap
         dialog.get_by_role('button', name='Unsave from Other', exact=True).click()
         expect(dialog).to_be_hidden()
         expect(page.get_by_text('The required account is not connected', exact=True)).to_be_visible()
-        assert app['store'].collection.get_saved_albums(identity_id=app['other'])
-        assert app['store'].collection.get_saved_albums(identity_id=app['iid'])
+        assert app['store'].collection.get_saved_albums(account_id=app['other'])
+        assert app['store'].collection.get_saved_albums(account_id=app['iid'])
         assert app['clients'][app['iid']].rated == []
         app['clients'][app['other']] = other_client
     control.click()
@@ -295,8 +295,8 @@ def test_multiple_owners_choose_one_account_from_a_single_control(live_artist_ap
     remaining = page.get_by_role('button', name="Remove album from Main's library" if path.startswith('/album?') else 'Unsave', exact=True)
     expect(remaining).to_be_visible()
     expect(page.get_by_role('dialog', name='Unsave album', exact=True)).to_have_count(0)
-    assert app['store'].collection.get_saved_albums(identity_id=app['other']) == []
-    assert app['store'].collection.get_saved_albums(identity_id=app['iid'])
+    assert app['store'].collection.get_saved_albums(account_id=app['other']) == []
+    assert app['store'].collection.get_saved_albums(account_id=app['iid'])
     assert app['clients'][app['iid']].rated == []
     assert app['clients'][app['other']].rated == [('PLAUDIO', 'INDIFFERENT')]
 
@@ -304,10 +304,10 @@ def test_multiple_owners_choose_one_account_from_a_single_control(live_artist_ap
 def test_unavailable_album_owner_shows_error_and_retains_membership(live_artist_app, page):
     app = live_artist_app
     app['store'].collection.add_saved_album({
-        'browse': 'MPREb_x', 'title': 'The Album', 'artist': 'Artist X'}, identity_id=app['other'])
+        'browse': 'MPREb_x', 'title': 'The Album', 'artist': 'Artist X'}, account_id=app['other'])
     app['clients'].pop(app['other'])
     page.goto(f"{app['base']}/albums")
     page.get_by_role('button', name='Unsave', exact=True).click()
     expect(page.get_by_text('The required account is not connected')).to_be_visible()
-    assert app['store'].collection.get_saved_albums(identity_id=app['other'])
+    assert app['store'].collection.get_saved_albums(account_id=app['other'])
     assert app['clients'][app['iid']].rated == []

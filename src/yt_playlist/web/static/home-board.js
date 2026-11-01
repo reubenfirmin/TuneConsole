@@ -4,6 +4,33 @@ function genPayload(id) { return document.querySelector('#' + CSS.escape(id) + '
 function genName(id) { const el = genPayload(id); return el ? el.dataset.name : ''; }
 function genRecipe(id) { const el = genPayload(id); return el ? (el.dataset.recipe || '') : ''; }
 
+function genHomeBusy(root) {
+  return !!root.querySelector('.gen-card.is-focused, [data-generation-pending], [data-generation-error]');
+}
+
+function automaticMixRefresh(detail) {
+  const path = new URL(detail.requestConfig?.path || '/', location.origin);
+  return detail.requestConfig?.verb === 'get' && path.origin === location.origin
+    && path.pathname === '/home/cards' && path.searchParams.has('prepare_attempt');
+}
+
+document.addEventListener('htmx:beforeRequest', event => {
+  const board = event.detail.elt;
+  if (automaticMixRefresh(event.detail) && genHomeBusy(board)) event.preventDefault();
+});
+
+document.addEventListener('htmx:beforeSwap', event => {
+  const target = event.detail.target;
+  const backgroundHome = target?.id === 'home'
+    && event.detail.requestConfig?.headers?.['X-Home-Refresh'] === 'sync';
+  if ((target?.id === 'home-mode-cards' && automaticMixRefresh(event.detail) || backgroundHome)
+      && genHomeBusy(target)) {
+    // A request may already be in flight when a mix opens. Keep its shell and
+    // save target mounted; polling can resume after the user returns to the board.
+    event.detail.shouldSwap = false;
+  }
+});
+
 function genReveal(id) {
   requestAnimationFrame(() => {
     document.querySelectorAll('#' + CSS.escape(id) + ' .gen-focus img').forEach((img) => { img.loading = 'eager'; });

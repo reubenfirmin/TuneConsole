@@ -6,7 +6,7 @@ from yt_playlist.repos import history
 
 
 def test_repeated_weekly_scans_are_summarized_and_parse_each_bucket_once(store, monkeypatch, caplog):
-    identity = store.identities.upsert_identity('main', 'credentials', None, True)
+    identity = store.accounts.upsert_account('main', 'credentials', None, True)
     rows = [(f'this-{i}|artist', 'This week') for i in range(54)]
     rows += [(f'last-{i}|artist', 'Last week') for i in range(13)]
     rows += [('dated|artist', 'Yesterday')]
@@ -33,7 +33,7 @@ def test_repeated_weekly_scans_are_summarized_and_parse_each_bucket_once(store, 
 
 
 def test_unknown_categories_warn_once_and_again_after_cooldown(store, monkeypatch, caplog):
-    identity = store.identities.upsert_identity('main', 'credentials', None, True)
+    identity = store.accounts.upsert_account('main', 'credentials', None, True)
     clock = [100.0]
     monkeypatch.setattr(history, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
     caplog.set_level(logging.DEBUG, logger=history.__name__)
@@ -53,7 +53,7 @@ def test_unknown_categories_warn_once_and_again_after_cooldown(store, monkeypatc
 
 
 def test_many_unknown_formats_have_bounded_warning_payload_and_memory(store, caplog):
-    identity = store.identities.upsert_identity('main', 'credentials', None, True)
+    identity = store.accounts.upsert_account('main', 'credentials', None, True)
     caplog.set_level(logging.WARNING, logger=history.__name__)
     store.history.record_history_plays(identity, 86400,
                                       [(f'{i}|artist', f'unknown {i}') for i in range(500)])

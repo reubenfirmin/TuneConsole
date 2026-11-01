@@ -70,7 +70,7 @@ def isolated_home(tmp_path, monkeypatch):
 
 
 def _deleted(store, client):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     pid = store.playlists.upsert_playlist(iid, "SOURCE", "Source", 2, "", 1)
     executor.delete_playlist(store, pid, client, 2)
     return iid, store.actions.get_actions()[0].id
@@ -81,7 +81,7 @@ def _journal(store, aid):
 
 
 def _copy(store, client):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     store.playlists.upsert_playlist(iid, "COPY", "Copy", 2, "", 1)
     aid = store.actions.record_action(COPY_PLAYLIST, "{}", "{}", "executed", json.dumps({
         "new_ytm": "COPY", "target_identity": iid,
@@ -116,7 +116,7 @@ def test_rejected_additions_resume_created_playlist_after_database_reopen(tmp_pa
 
 def test_failure_on_later_backup_does_not_recreate_completed_first_backup(store):
     client = RecoveryClient({"ONE": ["a"], "TWO": ["b"]})
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     backups = []
     for remote in ("ONE", "TWO"):
         pid = store.playlists.upsert_playlist(iid, remote, remote, 1, "", 1)
@@ -183,7 +183,7 @@ def test_copy_deletion_requires_verified_absence_and_resumes_safely(store, lost_
 
 def test_original_surviving_failed_forward_delete_is_reused_without_duplicate(store, monkeypatch):
     client = RecoveryClient({"SOURCE": ["a"], "KEEP": ["a"]})
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     src = store.playlists.upsert_playlist(iid, "SOURCE", "Source", 1, "", 1)
     keep = store.playlists.upsert_playlist(iid, "KEEP", "Keeper", 1, "", 1)
     delete = client.delete_playlist
@@ -221,8 +221,8 @@ def test_connection_failure_cannot_be_mistaken_for_missing_original(store, monke
 def test_move_with_lost_forward_delete_reply_retains_and_restores_its_backup(store):
     source = RecoveryClient({"SOURCE": ["a", "b"]})
     destination = RecoveryClient({})
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
-    other = store.identities.upsert_identity("Other", "bridge", None, False)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    other = store.accounts.upsert_account("Other", "bridge", None, False)
     pid = store.playlists.upsert_playlist(iid, "SOURCE", "Source", 2, "", 1)
     store.playlists.set_playlist_tracks(pid, [store.tracks.upsert_track(v, v, "Artist", None, 200) for v in ("a", "b")])
     source.lose_delete = True

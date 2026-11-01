@@ -46,6 +46,23 @@ def test_analytics_does_not_capture_publication_revisions_and_reuses_reader(data
         connections[0].execute('SELECT 1')
 
 
+def test_in_memory_private_reader_preserves_published_group_membership(store):
+    from tests.group_support import recordings
+    from tests.test_group_preparation import seed
+    from yt_playlist.rec import group_preparation
+
+    tracks = recordings([('House', 3, .1)])
+    seed(store, tracks)
+    assert group_preparation.Preparation(store).step(1000)
+    expected = store.taste_groups.head(members=True)
+    assert {key for group in expected['groups'] if group['leaf']
+            for key in group['members']} == {track.key for track in tracks}
+
+    with store.read_view() as reader:
+        assert reader.taste_groups.head(members=True) == expected
+        assert reader.taste_groups.definitions(expected['generation'], members=True) == expected['groups']
+
+
 def test_file_reader_pins_committed_state_without_copying_database(tmp_path, monkeypatch):
     store = Store(tmp_path / 'state.db')
     store.init_schema()
@@ -62,7 +79,12 @@ def test_file_reader_pins_committed_state_without_copying_database(tmp_path, mon
             with pytest.raises(sqlite3.OperationalError, match='readonly'):
                 reader.conn.execute("INSERT INTO settings VALUES ('forbidden','write')")
         assert Analytics(store).value() == 'new'
-        assert set(tmp_path.iterdir()) == before
+        added = set(tmp_path.iterdir()) - before
+        assert added <= {tmp_path / ('state.db.' + domain) for domain in ('policies', 'groups', 'recommendations')}
+        # Empty owner stores still establish their reader-lifetime lock before
+        # pinning SQL. They must not create a database or output snapshot.
+        for directory in added:
+            assert {path.name for path in directory.iterdir()} == {'.readers.lock'}
     finally:
         store.conn.close()
 

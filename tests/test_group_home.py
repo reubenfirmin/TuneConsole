@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient, seed_catalog_track
 from tests.group_support import publish, recordings
+from tests.recommendation_support import publish_bundles
 from yt_playlist.rec import (choice_evidence, group_home, group_serving, group_viz,
                              home_cards, home_prepared, taste_viz)
 from yt_playlist.web.app import create_app
@@ -21,7 +22,7 @@ def library(store):
         pool.append({'key': track.key, 'title': title, 'artist': artist, 'album': album,
                      'video_id': f'v{i}', 'thumbnail': '', 'genre': track.genre, 'year': 2000})
     head = publish(store, tracks)
-    store.rec_proposals.put_proposals('mode_bundles', {'all': {'wheelhouse': pool, 'explore': pool,
+    publish_bundles(store, {'all': {'wheelhouse': pool, 'explore': pool,
         'comfort': pool, 'fresh': []}, '_meta': {'full_pools': True, 'comfort_pool': 64}}, 1050)
     assert group_serving.prepare(store, 1100)
     return tracks, head
@@ -106,7 +107,7 @@ def test_small_initial_groups_remain_visible_without_replacing_usable_startup_mi
         pool.append({'key': track.key, 'title': f'Track {i}', 'artist': f'Artist {i}',
                      'video_id': f'v{i}', 'genre': 'House', 'album': '', 'thumbnail': ''})
     publish(store, tracks)
-    store.rec_proposals.put_proposals('mode_bundles', {
+    publish_bundles(store, {
         'all': {'wheelhouse': pool, 'explore': pool, 'comfort': [], 'fresh': []},
         '_meta': {'full_pools': True, 'unmodeled': True}}, 1000)
     assert group_serving.prepare(store, 1100)
@@ -122,7 +123,7 @@ def test_prepared_home_and_real_menu_capture_preserve_group_context(store):
     assert payload and payload['group_policy'] == 'adaptive'
     assert home_prepared._valid(payload)
     assert payload['choice_context']['group_generation'] == head['generation']
-    identity = store.identities.upsert_identity('main', 'cred', None, True)
+    identity = store.accounts.upsert_account('main', 'cred', None, True)
     fake = FakeClient()
     clock = [1300]
     app = create_app(store, lambda: {identity: fake}, now_fn=lambda: clock[0])
@@ -271,7 +272,7 @@ def test_rollback_rejects_cached_adaptive_menus_but_keeps_definitions(store):
 
 def test_recent_listening_is_mapped_to_exact_graph_memberships_without_vectors(store):
     tracks, _head = library(store)
-    identity = store.identities.upsert_identity('main', 'cred', None, True)
+    identity = store.accounts.upsert_account('main', 'cred', None, True)
     for i, track in enumerate(tracks[:6]):
         store.history.record_play_event(identity, track.key, f'v{i}', 1200 + i)
     reading = group_viz.mode_layers(store, 1300, group_viz.prepared(store))

@@ -8,6 +8,16 @@ from yt_playlist.rec import embed, embedding_vectors as vectors, model_refresh
 from yt_playlist.repos.rec_model import VectorChanges
 
 
+@pytest.fixture(autouse=True)
+def canonical_vector_owners(store):
+    # Publication fixtures own real subjects independently of the vector writer.
+    with store.conn:
+        store.conn.executemany('INSERT INTO recordings(identity_key) VALUES (?)',
+            [(key,) for key in ('song', 'same', 'update', 'removed', 'added', 'a', 'b', 'c')])
+        store.conn.execute("INSERT INTO artists(id,name,provisional) VALUES (1,'Artist',1)")
+        store.conn.execute("INSERT INTO artist_aliases VALUES (1,'artist','fixture')")
+
+
 def test_publication_owners_require_an_outer_transaction(store):
     for publish in (
         lambda: store.rec_model.publish_training_generation({}),
@@ -61,7 +71,7 @@ def test_vector_changes_preserve_unchanged_rows_and_omit_unrequested_spaces(stor
         assert changes == {'rec_vectors': VectorChanges((('update', new), ('added', new)), ('removed',))}
         assert snapshot.publish(lambda: store.rec_model.publish_training_generation(changes))
     assert dict(store.rec_model.get_rec_vectors()) == {'same': old, 'update': new, 'added': new}
-    assert store.rec_model.get_rec_artist_vectors() == [('artist', old)]
+    assert store.rec_model.get_rec_artist_vectors() == [('@artist:1', old)]
 
 
 def test_identical_vectors_do_not_write_or_invalidate_an_existing_snapshot(store):
@@ -112,8 +122,14 @@ def test_delta_loads_and_tied_rankings_match_full_replacement(store, space):
     replace = getattr(store.rec_model, f'replace_rec{space}_vectors')
     load = getattr(store.rec_model, f'get_rec{space}_vectors')
     blob = struct.pack('ff', 1, 0)
-    replace([('a', blob), ('c', blob)])
-    target = [('a', blob), ('b', blob), ('c', blob)]
+    keys = ['a', 'b', 'c']
+    if 'artist' in space:
+        with store.conn:
+            store.conn.executemany('INSERT INTO artists(id,name,provisional) VALUES (?,?,1)',
+                                   [(2, 'B'), (3, 'C')])
+        keys = ['@artist:1', '@artist:2', '@artist:3']
+    replace([(keys[0], blob), (keys[2], blob)])
+    target = [(key, blob) for key in keys]
     with store.read_snapshot() as snapshot:
         changes = snapshot.store.rec_model.prepare_training_changes({f'rec{space}_vectors': target})
         assert snapshot.publish(lambda: store.rec_model.publish_training_generation(changes))

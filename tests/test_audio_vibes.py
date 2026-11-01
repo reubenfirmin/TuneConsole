@@ -8,7 +8,8 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 import pytest
 
-from yt_playlist.core import features
+from yt_playlist.core import audio_annotations, features
+from yt_playlist.core.store import Store
 from yt_playlist.rec import audio_vibe_preview, home_vibe
 from yt_playlist.web.app import create_app
 
@@ -82,7 +83,7 @@ def test_flag_gates_rating_ui_and_feedback_but_not_collection(store, monkeypatch
             'point': value['point'], 'attempt': 1, 'phase': 'saving', 'message': 'Retry'}).status_code == 200
         assert client.get('/audio-vibes/runs/' + str(uuid4())).status_code == 200
         store.conn.set_trace_callback(None)
-        assert not any('audio_session_labels' in sql or 'audio_vibe_feedback' in sql for sql in statements)
+        assert not any('audio_annotation' in sql or 'audio_taxonom' in sql for sql in statements)
         monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1')
         for path in ('/', '/playlists', '/charts'):
             html = client.get(path).text
@@ -166,6 +167,65 @@ def test_samples_and_feedback_survive_reload_and_freeze_the_labeled_excerpts(sto
         assert state['feedback']['prediction']['arc']['order'] == 'position_seconds'
     assert store.settings.get_setting(home_vibe.SETTING) == 'release'
     assert store.conn.execute('SELECT COUNT(*) FROM rec_musical_profiles').fetchone()[0] == 0
+
+
+def test_feedback_route_preserves_withdrawal_and_explicit_empty_after_restart(tmp_path, monkeypatch):
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1')
+    path = tmp_path / 'judgments.db'
+    store = Store(path)
+    store.init_schema()
+    run = str(uuid4())
+    empty_sample = sample()
+    values = [sample(run_id=run, point=point) for point in ('thirty', 'middle', 'two_thirds')]
+
+    def latest(run_id):
+        return audio_annotations.latest(store.conn, run_id, kind='session',
+                                        taxonomy_version=audio_vibe_preview.TAXONOMY_VERSION)
+
+    try:
+        with TestClient(create_app(store, lambda: {}), base_url='http://127.0.0.1') as client:
+            for value in (*values, empty_sample):
+                response = client.post('/audio-vibes/samples', json=value)
+                assert response.status_code == 200, response.text
+            answer = {'run_id': run, 'sample_ids': [value['id'] for value in values],
+                      'vibes': ['cruise'], 'taxonomy_version': audio_vibe_preview.TAXONOMY_VERSION}
+            response = client.post('/audio-vibes/feedback', json=answer)
+            assert response.status_code == 200, response.text
+            first = latest(run)
+            frozen = audio_annotations.read(store.conn, first)
+            assert frozen['state'] == 'labeled' and frozen['prediction'] is not None
+            response = client.post('/audio-vibes/feedback', json={**answer, 'vibes': []})
+            assert response.status_code == 200, response.text
+            assert response.json()['feedback']['vibes'] == []
+            cleared = latest(run)
+            assert cleared['state'] == 'withdrawn'
+            assert store.conn.execute('SELECT supersedes_id,sealed FROM audio_annotations WHERE id=?',
+                                       (cleared['id'],)).fetchone()[:] == (first['id'], 1)
+            assert audio_annotations.read(store.conn, first) == frozen
+            withdrawn = audio_annotations.read(store.conn, cleared)
+            assert withdrawn['sample_ids'] == frozen['sample_ids']
+            assert withdrawn['prediction'] == frozen['prediction'] and withdrawn['vibes'] == []
+            # An initial empty submission has different meaning from clearing.
+            response = client.post('/audio-vibes/feedback', json={**answer,
+                'run_id': empty_sample['run_id'], 'sample_ids': [empty_sample['id']], 'vibes': []})
+            assert response.status_code == 200, response.text
+            assert latest(empty_sample['run_id'])['state'] == 'empty'
+        store.conn.close()
+        store = Store(path)
+        store.init_schema()
+        assert latest(run)['id'] == cleared['id'] and latest(run)['state'] == 'withdrawn'
+        assert latest(empty_sample['run_id'])['state'] == 'empty'
+        assert audio_annotations.read(store.conn, first) == frozen
+        with TestClient(create_app(store, lambda: {}), base_url='http://127.0.0.1') as client:
+            assert client.get('/audio-vibes/runs/' + run).json()['feedback']['vibes'] == []
+            # Repeated clear submissions must not turn a withdrawal into empty.
+            assert client.post('/audio-vibes/feedback', json={**answer, 'vibes': []}).status_code == 200
+            retry = latest(run)
+            assert retry['state'] == 'withdrawn'
+            assert store.conn.execute('SELECT supersedes_id FROM audio_annotations WHERE id=?',
+                                       (retry['id'],)).fetchone()[0] == cleared['id']
+    finally:
+        store.conn.close()
 
 
 def test_failures_are_bounded_metadata_and_reach_app_logs(store, monkeypatch, caplog):
@@ -448,7 +508,7 @@ def test_replay_restores_latest_exact_video_answer_without_copying_or_changing_i
     first, latest, unrelated, replay = [str(uuid4()) for _ in range(4)]
     store.audio_vibes.save_playback(first, 'repeat-song', 'Song', 'Artist', 1)
     store.audio_vibes.save_feedback(first, [], ['release'], audio_vibe_preview.TAXONOMY_VERSION, None, 2)
-    # Older sample-only runs also identify the exact video, without a runs row.
+    # Collection supplies the exact playback identity before the new judgment.
     value = sample(run_id=latest)
     value['video_id'] = 'repeat-song'
     store.audio_vibes.save_sample(value, 3)
@@ -482,7 +542,7 @@ def test_previous_answer_lookup_ignores_earlier_taxonomies(store):
     store.audio_vibes.save_playback(current, 'exact-song', 'Song', 'Artist', 1)
     store.audio_vibes.save_feedback(current, [], ['cruise'], audio_vibe_preview.TAXONOMY_VERSION, None, 2)
     store.audio_vibes.save_playback(earlier, 'exact-song', 'Song', 'Artist', 3)
-    store.audio_vibes.save_feedback(earlier, [], ['gentle'], 'audio-vibe-targets-1', None, 4)
+    store.audio_vibes.save_feedback(earlier, [], ['gentle'], 'audio-feedback-presets-1', None, 4)
     assert store.audio_vibes.latest_feedback('exact-song', exclude_run_id=str(uuid4()))['run_id'] == current
     assert store.audio_vibes.latest_feedback('unknown-song', exclude_run_id=current) is None
 

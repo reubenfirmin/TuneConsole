@@ -1,5 +1,7 @@
 """Temporary, explicit sound preferences for Home mixes, applied before track selection."""
 import math
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from yt_playlist.rec import mix_tuning, musical_character
 from yt_playlist.rec.ordering import _field
@@ -7,6 +9,17 @@ from yt_playlist.rec.ordering import _field
 SETTING = "home_mix_vibe"
 VERSION = 'musical-vibes-5'
 FIT_STEP = .04
+_NATURAL = ContextVar('onboarding_natural_mix', default=False)
+
+
+@contextmanager
+def natural():
+    """Inspect ordinary preparation without a remembered, possibly locked Vibe."""
+    token = _NATURAL.set(True)
+    try:
+        yield
+    finally:
+        _NATURAL.reset(token)
 
 # Listening purposes, with provisional cross-genre sound preferences. The full
 # descriptions also define the internal model-development labeling task; those
@@ -58,9 +71,14 @@ def axis_fit(preset, name, value):
 
 
 def current(store, now):
+    if _NATURAL.get():
+        return ''
     mix_tuning.expire(store, now)
     value = store.settings.get_setting(SETTING)
-    return value if value in PRESETS else ""
+    if value not in PRESETS:
+        return ''
+    from yt_playlist.rec import account_growth
+    return value if account_growth.has_access(account_growth.view(store, now), 'vibes') else ''
 
 
 def affinity(item, preset, profiles=None):

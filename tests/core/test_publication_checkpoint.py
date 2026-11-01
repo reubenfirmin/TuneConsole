@@ -7,6 +7,7 @@ import pytest
 from yt_playlist.core import db_checkpoint, db_snapshot
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core.store import Store
+from yt_playlist.rec import bundle_storage
 
 
 @pytest.fixture
@@ -90,6 +91,7 @@ def test_explicit_inline_publication_keeps_existing_checkpoint_policy(database, 
 def test_projection_outputs_and_settings_are_committed_before_checkpoint(database, monkeypatch, projection):
     surface = 'trend_rollups' if projection == 'trends' else 'mode_bundles'
     observed = []
+    expected = {'generation': '2'} if projection == 'trends' else 'projection-generation'
 
     def checkpoint(path):
         assert path == database._db_path
@@ -100,7 +102,9 @@ def test_projection_outputs_and_settings_are_committed_before_checkpoint(databas
                 return 'serving lock held'
             try:
                 with database.read_snapshot() as snapshot:
-                    return (snapshot.store.rec_proposals.get_proposals(surface),
+                    output = (snapshot.store.rec_proposals.get_proposals(surface) if projection == 'trends'
+                              else snapshot.store.recommendations.head('home')['external_key'])
+                    return (output,
                             snapshot.store.settings.get_setting('projection-version'))
             finally:
                 database._lock.release()
@@ -109,18 +113,30 @@ def test_projection_outputs_and_settings_are_committed_before_checkpoint(databas
 
     monkeypatch.setattr(db_snapshot, 'checkpoint_wal', checkpoint)
     with database.read_snapshot() as snapshot:
+        if projection == 'trends':
+            rows = snapshot.store.trends.prepare_first_play()
+            build = None
+        else:
+            policies = [('projection-policy', '{}', 2.)]
+            prepared = bundle_storage.prepare(snapshot.store.conn, {'all': {}}, [],
+                external_key=expected, policy_version='projection-policy', input_revision=0,
+                created_at=2., pending_policies=policies)
+            snapshot.release_reader()
+            build = database.recommendations.claim(prepared, policies=policies)
+            database.recommendations.stage(prepared, build)
+        # Staging also checkpoints; only the atomic head switch below is under
+        # test, so discard observations from hidden preparation.
+        observed.clear()
         def publish():
             assert database.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 0
             if projection == 'trends':
                 database.trends.publish_rollup(
-                    [('track', 'song', 0, 0., 'play_event')], '{"generation":2}', 2., None)
+                    rows, '{"generation":"2"}', 2., None)
             else:
-                database.rec_ledger.publish_prepared_policies([('projection-policy', '{}', 2.)])
-                database.rec_proposals.publish_prepared_bundles(
-                    '{"generation":2}', '[]', 2.)
+                database.recommendations.publish(build, 2.)
             database.settings.publish_values({'projection-version': '2'})
         assert snapshot.publish(publish)
-    assert observed == [({'generation': 2}, '2')]
+    assert observed == [(expected, '2')]
     assert database.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 17
 
 

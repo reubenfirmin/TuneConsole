@@ -14,6 +14,9 @@ def status(store):
 
 
 def report(store, phase, now, *, reason=None):
+    from yt_playlist.core.group_progress import PHASES
+    if phase not in PHASES:
+        raise ValueError('Unsupported grouping progress phase')
     store.settings.set_setting(PROGRESS, json.dumps({'phase': phase, 'at': now, 'reason': reason}))
 
 
@@ -61,10 +64,10 @@ class Preparation:
             with work_budget(self.budget.seconds):
                 if self._pending is not None:
                     snapshot, prepared = self._pending
-                    if snapshot.publish(lambda: None, allow_stale_tables=group_publication.STAGED_TABLES):
+                    if snapshot.publish(lambda: None, allow_stale_tables=self.store.taste_groups.staged_tables):
                         return self._publish_pending(now)
                     self._pending = None
-                    group_publication.abandon(self.store.taste_groups, prepared)
+                    self.store.taste_groups.abandon_staged(prepared)
                 return self._prepare(now)
         except group_publication.BuildUnavailable:
             report(self.store, 'deferred', now, reason='build-owned')
@@ -88,10 +91,10 @@ class Preparation:
                 for key, payload, profile in page:
                     check_stopping()
                     if payload['library'] is not None:
-                        recordings.append(group_similarity.recording(key, payload['library'], profile))
+                        recordings.append(group_similarity.recording(key, payload['library'], profile,conn=reader.conn))
                 after = page[-1][0]
             fingerprint = group_versions.fingerprint([self.policy.manifest(), [
-                [r.key, r.genre, r.year, r.values, r.support, r.profile_version] for r in recordings]])
+                [r.key, r.genre, r.family, r.year, r.values, r.support, r.profile_version] for r in recordings]])
             previous = reader.taste_groups.head(members=True)
             legacy_modes = reader.modes.list_modes(active_only=False)
             legacy_versions = reader.taste_groups.legacy_versions()
@@ -138,8 +141,13 @@ class Preparation:
     def _publish_pending(self, now):
         snapshot, prepared = self._pending
         owner = self.store.taste_groups.stage(prepared)
-        if snapshot.publish(lambda: self.store.taste_groups.finish_staged(prepared['generation'], owner),
-                            allow_stale_tables=group_publication.STAGED_TABLES):
+        def publish():
+            self.store.taste_groups.finish_staged(prepared['generation'],owner)
+            from yt_playlist.core import group_preparation_state
+            if group_preparation_state.available(self.store.conn):
+                group_preparation_state.checkpoint(self.store.conn,prepared['generation'],prepared['serial'],now)
+        if snapshot.publish(publish,
+                            allow_stale_tables=self.store.taste_groups.staged_tables):
             self._pending = None
             self.rebuild_requested = False
             report(self.store, 'ready', now)
@@ -147,6 +155,6 @@ class Preparation:
                 reasons=('shadow-generation',))
             return True
         self._pending = None
-        group_publication.abandon(self.store.taste_groups, prepared)
+        self.store.taste_groups.abandon_staged(prepared)
         report(self.store, 'deferred', now, reason='inputs-changed')
         return False

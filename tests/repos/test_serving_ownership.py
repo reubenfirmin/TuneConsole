@@ -11,7 +11,7 @@ def test_scorecard_inputs_remain_usable_after_all_connections_close(tmp_path):
     store = Store(tmp_path / "report.db")
     store.init_schema()
     try:
-        iid = store.identities.upsert_identity("main", "credential", None, True)
+        iid = store.accounts.upsert_account("main", "credential", None, True)
         store.tracks.upsert_track("video", "Song", "Artist", None, 200)
         store.rec_ledger.record_served_impressions("shown", "home", [{
             "key": "song|artist", "rank": 1,

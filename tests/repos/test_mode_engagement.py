@@ -6,8 +6,8 @@ from tests.mode_fixtures import seed_modes
 @pytest.fixture
 def picked(store):
     seed_modes(store,1,2)
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    other = store.identities.upsert_identity("other", "other-cred", None, False)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
+    other = store.accounts.upsert_account("other", "other-cred", None, False)
     pid = store.playlists.upsert_playlist(iid, "PL_saved", "Saved mode", 1, "h", 1)
     store.modes.log_pick(pid, 1, now=100)
     return iid, other, pid

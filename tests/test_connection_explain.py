@@ -19,7 +19,7 @@ from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
@@ -31,13 +31,11 @@ def _unit(deg):
 
 def _track(store, title, artist, *, album="", album_browse_id=None, genre="", year="", xy=None):
     """Insert a track (optionally genre/year/vector) and return its identity_key."""
-    store.tracks.upsert_track(f"v_{title}_{artist}", title, artist, album, 200, thumbnail="t.jpg",
+    entry = store.tracks.upsert_track(f"v_{title}_{artist}", title, artist, album, 200, thumbnail="t.jpg",
                               album_browse_id=album_browse_id)
     k = identity_key(title, artist)
     if genre or year:
-        store.conn.execute("UPDATE tracks SET genre=?, mb_year=? WHERE identity_key=?",
-                           (genre, year, k))
-        store.conn.commit()
+        store.tracks.set_track_enrichment(entry,genre,year)
     return k
 
 
@@ -52,7 +50,7 @@ def _playlist(store, iid, title, keys, ytm=None):
 # --- grounded co-occurrence reasons -------------------------------------------------------------
 
 def test_shared_playlist_names_the_co_occurring_artists(store):
-    iid = store.identities.upsert_identity("m", "c", None, True)
+    iid = store.accounts.upsert_account("m", "c", None, True)
     child = _track(store, "Train", "Younger Brother")
     seed = _track(store, "Spektrum", "Ritmo")
     other = _track(store, "Dorset", "Ott")
@@ -67,7 +65,7 @@ def test_shared_playlist_names_the_co_occurring_artists(store):
 
 
 def test_same_artist_is_reported(store):
-    store.identities.upsert_identity("m", "c", None, True)
+    store.accounts.upsert_account("m", "c", None, True)
     a = _track(store, "Song A", "Bonobo")
     b = _track(store, "Song B", "Bonobo")
     facts = connection_reasons(store.cluster_evidence.connection(a, [b]))
@@ -75,7 +73,7 @@ def test_same_artist_is_reported(store):
 
 
 def test_genre_family_and_decade_facts(store):
-    store.identities.upsert_identity("m", "c", None, True)
+    store.accounts.upsert_account("m", "c", None, True)
     child = _track(store, "C", "AristA", genre="psytrance", year="2003")
     path = _track(store, "P", "Pista", genre="goa trance", year="2007")
     facts = connection_reasons(store.cluster_evidence.connection(child, [path]))
@@ -86,14 +84,14 @@ def test_genre_family_and_decade_facts(store):
 
 
 def test_no_direct_basket_returns_empty(store):
-    store.identities.upsert_identity("m", "c", None, True)
+    store.accounts.upsert_account("m", "c", None, True)
     a = _track(store, "Lonely A", "Artist X")
     b = _track(store, "Lonely B", "Artist Y")
     assert connection_reasons(store.cluster_evidence.connection(a, [b])) == []
 
 
 def test_child_excluded_from_its_own_path(store):
-    store.identities.upsert_identity("m", "c", None, True)
+    store.accounts.upsert_account("m", "c", None, True)
     a = _track(store, "Solo", "Solo Artist")
     # path is just the child itself -> nothing to compare against
     assert connection_reasons(store.cluster_evidence.connection(a, [a])) == []
@@ -102,6 +100,9 @@ def test_child_excluded_from_its_own_path(store):
 # --- embed.connection_geometry: score + bridge --------------------------------------------------
 
 def _put(store, vecs):
+    from tests.conftest import seed_catalog_track
+    for key in vecs:
+        seed_catalog_track(store,key,key,'Artist')
     rows = []
     for k, xy in vecs.items():
         v = np.asarray(xy, dtype=np.float32)

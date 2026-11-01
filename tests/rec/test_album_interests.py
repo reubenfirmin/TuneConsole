@@ -35,8 +35,8 @@ def test_saved_album_only_library_seeds_both_spaces_without_history(store):
 def test_album_day_counts_keep_lifetime_cross_account_deduplication(store):
     keys = album(store, 'release', 'Record', 'Jazz', 2)
     store.collection.cache_album_tracklist('release', 'Record', 'Record', None, keys)
-    first = store.identities.upsert_identity('first', 'cred', None, True)
-    second = store.identities.upsert_identity('second', 'cred', None, False)
+    first = store.accounts.upsert_account('first', 'cred', None, True)
+    second = store.accounts.upsert_account('second', 'cred', None, False)
     unrelated = store.tracks.upsert_track('other', 'Unrelated', 'Elsewhere', None, 100)
     other_key = store.conn.execute('SELECT identity_key FROM tracks WHERE id=?', (unrelated,)).fetchone()[0]
     at = 1_000_000_000
@@ -98,10 +98,12 @@ def test_companion_work_is_limited_to_the_frontier_with_identical_track_selectio
     model_support.build_content_model(store)
     discoveries = [{'browse_id': f'new-{i}', 'artist': f'New artist {i}', 'title': f'New record {i}',
                     'genre': 'Jazz' if i % 2 else 'Techno', 'year': '2020'} for i in range(40)]
-    pool = [{'key': key, 'video_id': f'video-{i}', 'artist': f'Track artist {i // 3}'}
-            for i, key in enumerate(keys)]
-    store.rec_proposals.put_proposals('mode_bundles', {'all': {'wheelhouse': pool}}, 1)
-    # The reference evaluates all 80 candidate rows using the existing companion algorithm.
+    from tests.recommendation_support import publish_bundles
+    tracks = store.rec_query.tracks_by_keys(keys)
+    pool = [{**tracks[key],'key':key} for key in keys]
+    publish_bundles(store,{'all':{'wheelhouse':pool}},now=1)
+    # Evaluate every candidate in admitted batches for the reference. The
+    # prepared path below must still visit only its selected frontier.
     from yt_playlist.rec import content_model
     import json
     snapshot = store.rec_model.content_generation()
@@ -114,8 +116,11 @@ def test_companion_work_is_limited_to_the_frontier_with_identical_track_selectio
         vector = matrix[rows].mean(0) if rows else content_model.encode_content(model, item['genre'], item['year'], {})
         features.append(vector / np.linalg.norm(vector))
     original = album_choices._companions
-    expected = dict(zip([a['browse_id'] for a in all_albums],
-                        original(store, all_albums, np.asarray(features), matrix, index)))
+    reference = []
+    for offset in range(0,len(all_albums),24):
+        reference.extend(original(store,all_albums[offset:offset+24],
+                                  np.asarray(features[offset:offset+24]),matrix,index))
+    expected = dict(zip([a['browse_id'] for a in all_albums],reference))
     calls = []
 
     def bounded(store, albums, features, matrix, index):
@@ -161,7 +166,7 @@ def test_album_reason_excludes_unheard_records_and_other_editions_of_itself():
 
 
 def test_album_returns_scale_from_one_favorite_to_several_to_the_whole_record_in_both_spaces(store):
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
     cases = [('one', 12, 1), ('five', 12, 5), ('whole', 12, 12), ('short', 6, 6), ('long', 24, 24)]
     vectors = []
     for browse, size, played in cases:
@@ -191,7 +196,7 @@ def test_album_returns_scale_from_one_favorite_to_several_to_the_whole_record_in
 
 
 def test_partial_album_returns_focus_on_heard_tracks_without_shrinking_the_denominator(store):
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
     keys = album(store, 'record', 'Record', None, 12)
     store.collection.cache_album_tracklist('record', 'Record', 'Record', None, keys)
     store.collection.remove_saved_album('record')
@@ -217,20 +222,21 @@ def test_partial_album_returns_focus_on_heard_tracks_without_shrinking_the_denom
 
 @pytest.mark.parametrize('tracklist', ['missing', 'truncated', 'unresolved', 'empty'])
 def test_unknown_album_coverage_keeps_saved_support_without_guessing_a_return_boost(store, tracklist):
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
     keys = album(store, 'record', 'Record', 'Techno', 6)
     if tracklist != 'missing':
-        store.collection.cache_album_tracklist('record', 'Record', 'Record', None,
-                                               [] if tracklist == 'empty' else keys)
-        aid = store.collection.album_id('record')
         if tracklist == 'truncated':
-            store.conn.execute('DELETE FROM album_tracks WHERE album_id=? AND id=(SELECT MAX(id) '
-                               'FROM album_tracks WHERE album_id=?)', (aid, aid))
-        elif tracklist == 'unresolved':
-            store.conn.execute('UPDATE album_tracks SET entry_id=NULL,recording_id=NULL,legacy_track_key=? '
-                               'WHERE album_id=? AND id=(SELECT MAX(id) FROM album_tracks WHERE album_id=?)',
-                               ('', aid, aid))
-        store.conn.commit()
+            from yt_playlist.core import album_tracklists
+            with store.conn:
+                aid = store.collection.album_id('record')
+                tid = album_tracklists.begin(store.conn,aid,'record',expected_count=len(keys))
+                for position,key in enumerate(keys[:-1]):
+                    rid = store.conn.execute('SELECT id FROM recordings WHERE identity_key=?',(key,)).fetchone()[0]
+                    album_tracklists.occurrence(store.conn,tid,recording_id=rid,position=position)
+                album_tracklists.finish(store.conn,tid,complete=False)
+        else:
+            store.collection.cache_album_tracklist('record', 'Record', 'Record', None,
+                [] if tracklist == 'empty' else keys[:-1]+[''] if tracklist=='unresolved' else keys)
     store.history.import_listening_events(iid, [
         (key, None, 1_700_000_000 + day * 86400) for day in range(3) for key in keys], source_timezone='UTC')
     store.rec_model.replace_rec_vectors([
@@ -244,8 +250,8 @@ def test_unknown_album_coverage_keeps_saved_support_without_guessing_a_return_bo
 
 
 def test_album_returns_do_not_pool_different_songs_days_or_count_generated_and_duplicate_plays(store):
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
-    other = store.identities.upsert_identity('other', 'cred', None, False)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    other = store.accounts.upsert_account('other', 'cred', None, False)
     keys = album(store, 'record', 'Record', 'Techno', 6)
     # Repeating a recording within the tracklist cannot enlarge its coverage share.
     entries = [{'entry_id': row[0]} for row in store.conn.execute(
@@ -271,7 +277,7 @@ def test_album_returns_do_not_pool_different_songs_days_or_count_generated_and_d
 
 @pytest.mark.parametrize('played', [1, 5, 12])
 def test_confirmed_album_queue_returns_use_track_coverage_and_corrections_without_organic_leakage(store, played):
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
     keys = album(store, 'record', 'Record', 'Techno', 12)
     anchor = album(store, 'anchor', 'Anchor', 'Folk', 2)
     store.collection.cache_album_tracklist('record', 'Record', 'Record', None, keys)
@@ -329,6 +335,7 @@ def test_confirmed_album_queue_returns_use_track_coverage_and_corrections_withou
 
 
 def test_album_feedback_changes_only_the_declared_release_and_is_reversible(store):
+    store.accounts.upsert_account('main','credentials',None,True)
     album(store, "release-a", "Techno", "Techno", 2)
     album(store, "release-b", "Folk", "Folk", 2)
     model_support.build_content_model(store)
@@ -386,7 +393,7 @@ def test_organic_current_and_session_layers_affect_album_picker_and_expire(store
     store.modes.replace_modes([{'mode_id': i, 'label': browse, 'families': [], 'size': 2,
         'centroid': matrix[index[key]], 'rep_keys': [key], 'space': space}
         for i, (browse, key) in enumerate([('Techno', 'track 0|techno'), ('Folk', folk[0])])], [], 1)
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
     rec_params.set_param(store, 'now_min_events', 2)
     rec_params.set_param(store, 'play_transient_w', 0)
     rec_params.set_param(store, 'audio_transient_w', 0)

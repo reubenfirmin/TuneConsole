@@ -48,7 +48,7 @@ def test_historical_production_comparison_reports_formats_and_pause_without_over
 
 @pytest.mark.parametrize("width", [1920, 1440, 1024, 390, 320])
 def test_model_health_groups_results_and_explains_tuning(live_app, store, page, monkeypatch, width, tmp_path):
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     tracks, vectors = [], []
     for i in range(24):
         tid = store.tracks.upsert_track(f"health-{i}", f"Track {i}", f"Artist {i % 4}", "Album", None)
@@ -213,7 +213,7 @@ def test_automatic_selection_explains_waiting_and_empty_measurements(live_app, s
             "comparison": {"eligible": True, "trials": 80, "windows": 3, "previous_score": .4, "score": .4}})
     if state == "insufficient":
         # Reproduce the screenshot: library/history gates pass, but the actual test is short.
-        iid = store.identities.get_identities()[0].id
+        iid = store.accounts.get_accounts()[0].id
         store.history.record_history_plays(iid, 1 - 15 * 86400, ["earlier|artist"], source_timezone="UTC")
         store.history.record_history_plays(iid, 1, ["later|artist"], source_timezone="UTC")
         store.rec_model.replace_rec_vectors([(f"track {i}|artist", np.ones(2, dtype=np.float32).tobytes()) for i in range(100)])

@@ -133,7 +133,7 @@ def test_play_frame_persists_event():
     import time
     from yt_playlist.core.store import Store
     s = Store(":memory:"); s.init_schema()
-    s.identities.upsert_identity("main", "bridge", None, True)
+    s.accounts.upsert_account("main", "bridge", None, True)
     bridge = Bridge()
     app = FastAPI()
     ctx = type("C", (), {"bridge": bridge, "store": s,
@@ -242,7 +242,7 @@ def test_rich_now_playing_heartbeat_restores_expired_ui_without_recording_play()
     persistence path."""
     from yt_playlist.core.store import Store
     store = Store(":memory:"); store.init_schema()
-    store.identities.upsert_identity("main", "bridge", None, True)
+    store.accounts.upsert_account("main", "bridge", None, True)
     bridge = Bridge()
     app = FastAPI()
     ctx = type("C", (), {"bridge": bridge, "store": store})()
@@ -432,7 +432,7 @@ def test_bridge_status_falls_back_to_artwork_for_the_exact_video(store, thumbnai
     ("", "", {"kind": "album", "title": "Release", "url": "/album?browse=MPRE_album", "external": False}),
 ])
 def test_bridge_status_links_to_playing_source(store, playlist, album, expected):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.playlists.upsert_playlist(iid, "PL_source", "Source", 1, "h", 0)
     store.tracks.upsert_track("v1", "Song", "Artist", "Release", 200, album_browse_id="MPRE_album")
     store.collection.add_saved_album({"browse": "MPRE_other", "title": "Other release"})
@@ -452,7 +452,7 @@ def test_bridge_status_links_to_playing_source(store, playlist, album, expected)
 def test_active_radio_links_to_specialist_view(store, active, playing, kind, url):
     from types import SimpleNamespace
 
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.playlists.upsert_playlist(iid, "PL_radio", "Radio Session", 1, "", 1)
     store.playlists.upsert_playlist(iid, "PL_other", "Another mix", 1, "", 1)
     bridge = Bridge()
@@ -487,6 +487,20 @@ def test_sensor_health_is_observable_and_clears_on_disconnect():
                           "mainVersion": 4, "mainRevision": 2, "mainAgeMs": 0, "capture": None}],
         }
     assert bridge.sensor_health is None
+
+
+@pytest.mark.parametrize('capability', [None, False, True, 'true', 1])
+def test_account_bound_next_requires_an_explicit_current_worker_report(capability):
+    bridge = Bridge()
+    client = TestClient(_app(bridge))
+    with client.websocket_connect('/bridge/ws', headers={'origin': EXTENSION_ORIGIN}) as ws:
+        ws.send_json({'type': 'sensor-health', 'accountBoundNext': capability})
+        deadline = time.monotonic() + 2
+        while bridge.sensor_health is None and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert bridge.sensor_health is not None
+        assert bridge.account_bound_next is (capability is True)
+    assert bridge.account_bound_next is None
 
 
 def test_native_rating_recovery_logs_terminal_binding_evidence_without_changing_api_state(caplog):
@@ -566,7 +580,7 @@ def test_repeated_paused_play_frames_only_refresh_presence(caplog):
     from yt_playlist.core.store import Store
 
     store = Store(":memory:"); store.init_schema()
-    store.identities.upsert_identity("main", "bridge", None, True)
+    store.accounts.upsert_account("main", "bridge", None, True)
     bridge = Bridge()
     app = FastAPI()
     ctx = type("C", (), {"bridge": bridge, "store": store})()
@@ -678,7 +692,7 @@ def test_confirmed_rating_updates_native_player_and_skips_only_dislikes(store, l
     from tests.conftest import FakeClient
     from yt_playlist.library.ops import PlaylistOps
 
-    main = store.identities.upsert_identity("Main", "bridge", "main-brand", True)
+    main = store.accounts.upsert_account("Main", "bridge", "main-brand", True)
     remote = FakeClient()
     ops = PlaylistOps(store, lambda: {main: remote}, lambda: 1234)
     bridge = Bridge()
@@ -687,6 +701,11 @@ def test_confirmed_rating_updates_native_player_and_skips_only_dislikes(store, l
         bridge=bridge, store=store, ops=lambda: ops, now_fn=lambda: 1234)))
     client = TestClient(app)
     with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
+        ws.send_json({'type': 'sensor-health', 'accountBoundNext': True})
+        deadline = time.monotonic() + 2
+        while bridge.account_bound_next is None and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert bridge.account_bound_next is True
         bridge.now_playing = {"video_id": "radio-song", "playlist_ytm_id": "PLRADIO"}
         result = []
         action = "dislike" if like_status == "DISLIKE" else "like"
@@ -703,7 +722,7 @@ def test_confirmed_rating_updates_native_player_and_skips_only_dislikes(store, l
                       "body": json.dumps({"ok": player_ok, "error": "No next song"})})
         if like_status == "DISLIKE":
             skip = ws.receive_json()
-            assert skip == {"id": skip["id"], "type": "next", "videoId": "radio-song"}
+            assert skip == {"id": skip["id"], "type": "next", "videoId": "radio-song", "brandId": "main-brand"}
             ws.send_json({"id": skip["id"], "status": 200, "body": json.dumps({"ok": True})})
         worker.join(timeout=5)
         assert not worker.is_alive()
@@ -717,16 +736,16 @@ def test_confirmed_rating_updates_native_player_and_skips_only_dislikes(store, l
 def test_rate_uses_library_api_for_exact_target_without_blocking_socket(store, monkeypatch, outcome, like_status):
     from types import SimpleNamespace
     from tests.conftest import FakeClient
-    from yt_playlist.core.config import IdentityConfig
+    from yt_playlist.core.config import AccountConfig
     from yt_playlist.core.identities import build_client
     from yt_playlist.library import ratings
     from yt_playlist.library.ops import PlaylistOps
 
     bridge = Bridge()
-    other = store.identities.upsert_identity("Other", "bridge", "other-brand", False)
-    main = store.identities.upsert_identity("Main", "bridge", "main-brand", True)
+    other = store.accounts.upsert_account("Other", "bridge", "other-brand", False)
+    main = store.accounts.upsert_account("Main", "bridge", "main-brand", True)
     remote_other = FakeClient()
-    remote_main = build_client(IdentityConfig("Main", "bridge", "main-brand", True), bridge)
+    remote_main = build_client(AccountConfig("Main", "bridge", "main-brand", True), bridge)
     ops = PlaylistOps(store, lambda: {other: remote_other, main: remote_main}, lambda: 1234)
     ctx = SimpleNamespace(bridge=bridge, store=store, ops=lambda: ops, now_fn=lambda: 1234)
     app = FastAPI()
@@ -774,7 +793,7 @@ def test_pevent_frame_persists_raw_event():
     import time
     from yt_playlist.core.store import Store
     s = Store(":memory:"); s.init_schema()
-    s.identities.upsert_identity("main", "bridge", None, True)
+    s.accounts.upsert_account("main", "bridge", None, True)
     bridge = Bridge()
     app = FastAPI()
     ctx = type("C", (), {"bridge": bridge, "store": s,
@@ -796,7 +815,7 @@ def test_live_play_frame_is_processed():
     # as an untagged frame did before deck attribution existed (see test_play_frame_persists_event).
     from yt_playlist.core.store import Store
     s = Store(":memory:"); s.init_schema()
-    s.identities.upsert_identity("main", "bridge", None, True)
+    s.accounts.upsert_account("main", "bridge", None, True)
     bridge = Bridge()
     app = FastAPI()
     ctx = type("C", (), {"bridge": bridge, "store": s,

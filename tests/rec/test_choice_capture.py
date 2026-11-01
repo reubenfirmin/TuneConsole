@@ -48,7 +48,7 @@ def test_capture_freezes_menu_and_observations_before_worker_writes(capture, mon
     assert len(worker.jobs.measurements) == 3
     assert choices.opportunity(store, oid)['at'] == 100
     # Confirmed playback can bind to a menu while its raw write is still queued.
-    iid = store.identities.upsert_identity('main', 'test', None, True)
+    iid = store.accounts.upsert_account('main', 'test', None, True)
     choice_outcomes.bind(store, iid, 'PL', 'v1', oid, 'a', 104)
     assert choice_outcomes.observe(store, iid, 'PL', 'v1', 'ended', 180, 180, 1, 105)
     assert not calls
@@ -223,7 +223,7 @@ def test_worker_reclaims_acknowledged_diagnostics_for_the_actual_failed_allocati
     ledger = store.rec_ledger.evidence()
     monkeypatch.setattr(store.rec_ledger, 'evidence', lambda: ledger)
     worker.ctx.now_fn = lambda: 2000
-    old = choices.issue(store, 'mixes', [{'id': 'a', 'mode_id': 1, 'score': 1},
+    old = choices.issue(store, 'albums', [{'id': 'a', 'score': 1},
                                        {'id': 'b', 'mode_id': 2, 'score': 0}], 100,
                         context={'at': 100, 'groups': groups, 'layers': {'saved': 'x' * 20_000}})
     choices.respond(store, old, 'choice', 101, option_id='a')
@@ -270,7 +270,7 @@ def test_preparation_reclaims_capacity_and_keeps_original_inputs(capture, monkey
     monkeypatch.setattr(store.rec_ledger, 'evidence', lambda: ledger)
     originals = []
     for index in range(3):
-        identity = choices.issue(store, 'mixes', [{'id': 'a', 'mode_id': 1, 'score': 1}],
+        identity = choices.issue(store, 'albums', [{'id': 'a', 'score': 1}],
             100 + index, context={'at': 100 + index, 'groups': groups,
                                   'layers': {'saved': str(index) * 80_000}})
         assert choices.respond(store, identity, 'choice', 110 + index, option_id='a')
@@ -325,7 +325,7 @@ def test_failed_preparation_is_not_memoized_as_a_success(capture, monkeypatch):
 
 
 @pytest.mark.parametrize('phase', ['before-maintenance', 'after-ledger-inventory'])
-def test_maintenance_preserves_response_admitted_after_protection_inventory(capture, monkeypatch, phase):
+def test_ledger_retention_preserves_response_admitted_after_protection_inventory(capture, monkeypatch, phase):
     from yt_playlist.rec import rec_params
 
     store, worker = capture
@@ -358,7 +358,10 @@ def test_maintenance_preserves_response_admitted_after_protection_inventory(capt
             return maintain(before, **kwargs)
 
     monkeypatch.setattr(ledger, 'maintain', admit_after_inventory)
-    result = choices.maintain_storage(store, now)
+    # Exercise the ledger's final deletion guard directly. The application
+    # maintenance wrapper now pauses new recording before taking inventory.
+    result = ledger.maintain(now - rec_params.get_param(store, 'choice_retention_d') * 86400,
+                            protected_opportunities=(), pending_protection=store.choice_capture.protection)
     assert ledger.get('opportunity', offer)
     assert result['retired_unanswered'] == 0
     worker._flush_measurements()

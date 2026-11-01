@@ -35,7 +35,7 @@ def _free_port():
 def live_road_trip_app(monkeypatch):
     store = Store(":memory:")
     store.init_schema()
-    iid = store.identities.upsert_identity("Main", "cred", None, True)
+    iid = store.accounts.upsert_account("Main", "cred", None, True)
     # A handful of songs of your own, not one: your side of the mix is the whole collection, so a
     # one-song library leaves nothing to swap in when a slot is crossed out.
     pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", 6, "h", 1.0)
@@ -356,7 +356,7 @@ def test_build_curate_then_save_road_trip_recipe(live_road_trip_app, page, monke
     last_ytm = recipes[0]["last_playlist_id"]
     assert last_ytm is not None
     assert store.playlists.get_playlist_groups()[last_ytm] == GENERATED_GROUP
-    playlist = next(p for p in store.playlists.get_playlists() if p.ytm_playlist_id == last_ytm)
+    playlist = next(p for p in store.playlists.get_playlists() if p.provider_playlist_id == last_ytm)
     expect(page).to_have_url(f"{base_url}/playlist/{playlist.id}")
 
 

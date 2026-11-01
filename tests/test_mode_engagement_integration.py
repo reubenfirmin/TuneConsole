@@ -8,11 +8,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
+from tests.playlist_fixture_support import remote_catalog
+from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 from tests.test_mode_cards_route import prepare_home
 from yt_playlist.library import live_plays, player_events
 from yt_playlist.library.listen_derive import classify_exit
 from yt_playlist.rec import mode_eval
 from yt_playlist.web.app import create_app
+
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
 
 
 class _Cards(HTMLParser):
@@ -42,7 +46,7 @@ class _Cards(HTMLParser):
 
 @pytest.fixture
 def engagement(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.modes.replace_modes([
         {"mode_id": mid, "label": genre, "families": [[genre, 1]],
          "centroid": np.eye(2, dtype=np.float32)[mid - 1], "size": 40, "rep_keys": []}
@@ -55,10 +59,12 @@ def engagement(store):
              "title": f"Song {mid} {i}", "artist": f"Artist {mid} {i}", "album": "",
              "thumbnail": None, "plays": 0, "reason": "", "lane": lane, "genre": genre}
             for i in range(20)]}
-    store.rec_proposals.put_proposals("mode_bundles", payload, 1)
+    seed_bundle_subjects(store, payload)
+    publish_bundles(store, payload, 1)
     clock = [1_700_000_000.0]
     prepare_home(store, clock[0])
-    fake = FakeClient()
+    fake = FakeClient(catalog=remote_catalog(
+        track for mid in (1, 2) for tracks in payload[str(mid)].values() for track in tracks))
     client = TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: clock[0]),
                         base_url="http://127.0.0.1")
     response = client.get("/home/cards")
@@ -83,10 +89,10 @@ def engagement(store):
         at = clock[0] + offset
         assert live_plays.handle_play_event(ctx, {
             "type": "play", "videoId": track["video_id"], "title": track["title"],
-            "artist": track["artist"], "playlist": selected[1].ytm_playlist_id}, at)
+            "artist": track["artist"], "playlist": selected[1].provider_playlist_id}, at)
         assert player_events.handle_player_event(ctx, {
             "type": "pevent", "kind": "track_exit", "videoId": track["video_id"],
-            "position": position, "duration": 200, "playlist": selected[1].ytm_playlist_id}, at + position)
+            "position": position, "duration": 200, "playlist": selected[1].provider_playlist_id}, at + position)
     yield SimpleNamespace(store=store, cards=cards, selected=selected, ctx=ctx, start=clock[0])
     client.close()
 
@@ -95,11 +101,11 @@ def test_saved_mode_retains_attributed_plays_and_exit_depth_over_multiple_days(e
     data = engagement
     events = data.store.history.play_events_since(data.start)
     assert len(events) == 3
-    assert {event["playlist_ytm_id"] for event in events} == {data.selected[1].ytm_playlist_id}
+    assert {event["playlist_ytm_id"] for event in events} == {data.selected[1].provider_playlist_id}
     assert events[-1]["played_at"] - events[0]["played_at"] == 86400
     exits = data.store.player_events.player_events_since(data.start, kind="track_exit")
     assert [classify_exit(event["position"], event["duration"]) for event in exits] == ["completion", "skip", "completion"]
-    assert {event["playlist_ytm_id"] for event in exits} == {data.selected[1].ytm_playlist_id}
+    assert {event["playlist_ytm_id"] for event in exits} == {data.selected[1].provider_playlist_id}
     board = {row["mode_id"]: row for row in mode_eval.mode_scoreboard(data.store)}
     assert (board[1]["offered"], board[1]["picked"], board[1]["plays"]) == (1, 1, 3)
     assert (board[2]["offered"], board[2]["picked"], board[2]["plays"]) == (1, 1, 0)
@@ -111,7 +117,7 @@ def test_saved_mode_retains_attributed_plays_and_exit_depth_over_multiple_days(e
 def test_saved_mode_retains_the_link_needed_to_read_skip_and_completion_depth(engagement):
     store = engagement.store
     picks = dict(store.modes.pick_rows())
-    playlist_ids = {playlist.ytm_playlist_id: playlist.id for playlist in store.playlists.get_playlists()}
+    playlist_ids = {playlist.provider_playlist_id: playlist.id for playlist in store.playlists.get_playlists()}
     exits = store.player_events.player_events_since(engagement.start, kind="track_exit")
     # Part C requires a persistent trace of mode choice and engagement. Use the stored pick,
     # playlist provenance and production exit classifier, without inventing a scoreboard API.

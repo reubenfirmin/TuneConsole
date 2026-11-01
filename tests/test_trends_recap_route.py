@@ -75,7 +75,7 @@ _NOW = datetime(2026, 7, 15, tzinfo=timezone.utc).timestamp()
 def _client(story, synced=True, now_fn=lambda: _NOW):
     store = Store(":memory:")
     store.init_schema()
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     if synced:
         store.settings.set_setting("last_sync_at", "1700000000")
         publish_personal_mix(store, now=now_fn())

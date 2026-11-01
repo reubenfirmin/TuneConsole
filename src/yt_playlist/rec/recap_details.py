@@ -38,13 +38,13 @@ def new_this_month(data, month):
     artist_first = {}
     artist_names = {}
     for key, first in data["first"].items():
-        artist = data["meta"].get(key, {}).get("artist")
-        if not artist:
-            continue
-        normalized = artist.casefold()
-        artist_names.setdefault(normalized, artist)
-        artist_first[normalized] = min(artist_first.get(normalized, first), first)
-        artist_counts[normalized] += counts[key]
+        card = data['meta'].get(key,{})
+        artist = card.get('artist')
+        credits = card.get('artist_ids',(artist.casefold(),) if artist else ())
+        for aid in credits:
+            artist_names.setdefault(aid,data.get('artist_labels',{}).get(aid,artist))
+            artist_first[aid] = min(artist_first.get(aid,first),first)
+            artist_counts[aid] += counts[key]
     artists = [{"title": artist_names[a], "detail": f"{n} plays",
                 "href": f"/artist?name={quote(artist_names[a], safe='')}"}
                for a, n in sorted(artist_counts.items(), key=lambda pair: (-pair[1], pair[0]))
@@ -56,11 +56,11 @@ def new_this_month(data, month):
         if calendar_day(p, "created_at")[:7] != month:
             continue
         songs = p["track_count"]
-        plays = playlist_plays[p["ytm_playlist_id"]]
+        plays = playlist_plays[p["provider_playlist_id"]]
         size = f"{songs:,} song{'s' if songs != 1 else ''} · " if songs is not None else ""
         playlists.append({"title": p["title"] or "Untitled playlist",
                           "detail": f"{size}{plays:,} play{'s' if plays != 1 else ''}",
-                          "href": f"https://music.youtube.com/playlist?list={quote(p['ytm_playlist_id'], safe='')}"})
+                          "href": f"https://music.youtube.com/playlist?list={quote(p['provider_playlist_id'], safe='')}"})
     groups = [{"label": label, "entries": entries[:3], "total": len(entries)}
               for label, entries in (("Albums", albums), ("Playlists", playlists), ("Artists", artists))
               if entries]
@@ -74,7 +74,7 @@ def _finding(key, category, title, detail, score, support=frozenset()):
             "score": score, "support": support}
 
 
-def comparison_screens(current, previous):
+def comparison_screens(current, previous, artist_labels=None):
     """Changes clear both an effect-size floor and 3 median absolute deviations.
 
     Habits need positive evidence now and in at least 75% of the baseline. A recurring
@@ -179,6 +179,8 @@ def comparison_screens(current, previous):
                                   and len(getattr(p, day_attr).get(label, ())) >= 3 for p in previous)
             delta = value - center
             display = label.replace("-", " ") if category == "genre" else label
+            if category=='artist':
+                display = (artist_labels or {}).get(label,label)
             detail = (f"{count} plays over {days} days. {value:.0%} of your listening, "
                       f"compared with your usual {center:.0%}.")
             priority = {"genre": .02, "era": .01, "artist": 0}[category]
@@ -222,7 +224,7 @@ def comparison_screens(current, previous):
 def screens(data, month):
     new = new_this_month(data, month)
     current, previous = baselines(data, month)
-    return ([new] if new else []) + comparison_screens(current, previous)
+    return ([new] if new else []) + comparison_screens(current, previous,data.get('artist_labels'))
 
 
 def build(store, month):

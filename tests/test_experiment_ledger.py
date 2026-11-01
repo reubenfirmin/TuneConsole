@@ -47,7 +47,7 @@ def test_pair_replay_and_actual_assignment_propensity(store):
 
 
 def test_shadow_cannot_steal_actions_or_listening(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     _record(store, "pair:live")
     _record(store, "pair:shadow", "counterfactual", "ppr", at=110)
     store.history.import_play_events(iid, [("song|band", "v1", 120)])
@@ -141,7 +141,7 @@ def test_experiment_endpoints_validate_decisions(store):
 @pytest.fixture
 def mature_live_arms(store):
     base = 100 * 86400
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.playlists.set_playlist_group("PLGEN", "Generated")
     store.playlists.mark_generated_playlist('PLGEN')
     for i in range(100):

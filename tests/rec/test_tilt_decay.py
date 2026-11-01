@@ -11,7 +11,7 @@ DAY = 86400.0
 @pytest.mark.parametrize("source", ["mood", "play", "like", "skip"])
 def test_ranking_contribution_fades_by_source_half_life(store, space, source):
     now = 1000 * DAY
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("v", "Song", "Artist", None, 200)
     key = "song|artist"
     keys, vectors = [key, "other|artist"], np.eye(2, dtype=np.float32)
@@ -62,7 +62,7 @@ def test_missing_and_zero_vectors_do_not_dilute_bounded_tilt(store):
 
 
 def test_disabled_play_source_cannot_dilute_mood_signal(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     rec_params.set_param(store, "play_transient_w", 0)
     store.rec_signals.record_mood(["a|x"], 1, now=1000)
     store.history.record_play_event(iid, "b|y", "v", 1000)
@@ -72,7 +72,7 @@ def test_disabled_play_source_cannot_dilute_mood_signal(store):
 
 def test_session_ranking_contribution_fades_without_new_plays(store):
     now = 1000 * DAY
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     keys = ["a|x", "b|y", "other|z"]
     V = np.array([[1, 0], [1, 0], [0, 1]], dtype=np.float32)
     idx = {k: i for i, k in enumerate(keys)}

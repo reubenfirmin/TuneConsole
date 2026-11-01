@@ -48,7 +48,7 @@ def themed_pool(store, genres: GenrePolicy, excluded, excluded_keys, allowed, *,
         return []
     with store._lock:
         labels = [r[0] for r in store.conn.execute(
-            "SELECT DISTINCT genre FROM recordings WHERE genre IS NOT NULL "
+            "SELECT DISTINCT genre FROM catalog_tracks WHERE genre IS NOT NULL "
             "UNION SELECT json_extract(value_json,'$') FROM entry_field_choices WHERE field='genre'")
             if isinstance(r[0], str) and genres.allows({"genre": r[0]})]
     if not labels:

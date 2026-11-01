@@ -22,11 +22,11 @@ def _seed_modes(store):
 
 def test_scoreboard_offered_picked_plays(store):
     _seed_modes(store)
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     pid = store.playlists.upsert_playlist(iid, "PL_saved", "Saved mode", 7, "h", 1)
     store.modes.log_impressions(1, [("wheelhouse", 1), ("explore", 2)], now=100.0)
     store.modes.log_impressions(2, [("wheelhouse", 1)], now=110.0)     # mode 1 offered twice
-    store.modes.log_pick(playlist_id=pid, mode_id=1, now=120.0)         # mode 1 picked once
+    store.modes.log_pick(membership_ref_id=pid, mode_id=1, now=120.0)         # mode 1 picked once
     for i in range(7):
         store.history.record_play_event(iid, f"song {i}|artist", f"v{i}", 993 + i,
                                 playlist_ytm_id="PL_saved")

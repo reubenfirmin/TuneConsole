@@ -10,7 +10,7 @@ def _disliked(genre="metal"):
 
 
 def test_sync_dislike_suppresses_and_feeds_negative_transient(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     fake = FakeClient(playlists=[{"playlistId": "PL1", "title": "Mix", "count": 1}],
                       tracks={"PL1": [_disliked()]})
     sync.sync_identity(store, iid, fake, now=1000.0)
@@ -27,7 +27,7 @@ def test_sync_dislike_suppresses_and_feeds_negative_transient(store):
 
 
 def test_sync_dislike_idempotent(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     fake = FakeClient(playlists=[{"playlistId": "PL1", "title": "Mix", "count": 1}],
                       tracks={"PL1": [_disliked()]})
     sync.sync_identity(store, iid, fake, now=1000.0)
@@ -39,7 +39,7 @@ def test_sync_dislike_idempotent(store):
 
 
 def test_sync_reconciles_undislike(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     t = _disliked()
     fake = FakeClient(playlists=[{"playlistId": "PL1", "title": "Mix", "count": 1}], tracks={"PL1": [t]})
     sync.sync_identity(store, iid, fake, now=1000.0)

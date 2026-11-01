@@ -59,18 +59,13 @@ def test_first_in_order_fills_and_disagreement_is_recorded(store):
     c = store.conn.execute("SELECT field, candidates FROM enrichment_conflict WHERE track_id=?",
                            (t["id"],)).fetchall()
     assert len(c) == 1 and c[0]["field"] == "genre"
-
-
-def test_every_provider_field_is_logged(store):
-    t = _track(store)
-    mb = FakeProv("musicbrainz", {"Hyperballad": {"genre": "Electronic"}})
-    dc = FakeProv("discogs", {"Hyperballad": {"genre": "Art Pop"}})
-    _run(store, [t], [mb, dc], _cfg(("musicbrainz", True), ("discogs", True)))
     logged = store.conn.execute(
         "SELECT provider, field, value FROM enrichment_log WHERE track_id=? ORDER BY id",
         (t["id"],)).fetchall()
     assert ("musicbrainz", "genre", "Electronic") in [tuple(r) for r in logged]
     assert ("discogs", "genre", "Art Pop") in [tuple(r) for r in logged]
+    assert ("musicbrainz", "year", "1995") in [tuple(r) for r in logged]
+    assert ("discogs", "year", "1995") in [tuple(r) for r in logged]
 
 
 @pytest.mark.parametrize('first,later', [('Rock', 'Psychedelic Rock'), ('Psychedelic Rock', 'Rock')])

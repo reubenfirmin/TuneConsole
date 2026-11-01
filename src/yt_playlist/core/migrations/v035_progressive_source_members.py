@@ -29,6 +29,16 @@ def statements():
 
 
 def apply(conn, context):
+    from .current import _tokens
+    from .runner import MigrationError
+    # Development installations can already contain these additions. Reject
+    # incompatible definitions before publishing the version or copying data;
+    # a later migration must not discover the error after history has advanced.
+    for name, sql in OBJECTS:
+        existing = conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone()
+        if existing is not None and _tokens(existing[0]) != _tokens(sql):
+            kind = 'index' if sql.startswith('CREATE INDEX') else 'table'
+            raise MigrationError(f'Incompatible current {kind}: {name}')
     missing_members = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE name='rec_source_members'").fetchone() is None
     for name, sql in OBJECTS:

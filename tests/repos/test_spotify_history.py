@@ -11,8 +11,8 @@ from yt_playlist.web.context import Ctx
 
 
 def test_removal_preserves_shared_sources_other_accounts_and_independent_days(store):
-    one = store.identities.upsert_identity('main','bridge',None,True)
-    two = store.identities.upsert_identity('second','bridge2',None,False)
+    one = store.accounts.upsert_account('main','bridge',None,True)
+    two = store.accounts.upsert_account('second','bridge2',None,False)
     shared, only, other = ('shared',None,1700000000), ('spotify-only',None,1700000100), ('other',None,1700000200)
     store.history.import_listening_events(one,[shared,only],source='spotify_export')
     store.history.import_listening_events(one,[shared],source='takeout')
@@ -32,7 +32,7 @@ def test_removal_preserves_shared_sources_other_accounts_and_independent_days(st
 
 
 def test_removal_only_removes_artists_without_independent_discovery_provenance(store):
-    iid = store.identities.upsert_identity('main','bridge',None,True)
+    iid = store.accounts.upsert_account('main','bridge',None,True)
     store.discovery.upsert_discovered_artist('Shared',9,['reason'],['fit'],None,10)
     store.discovery.seed_spotify_artists(iid,{'Shared':4,'Spotify only':5},20)
     # Later independent rediscovery must also retain its own origin.
@@ -49,7 +49,7 @@ def test_removal_only_removes_artists_without_independent_discovery_provenance(s
 
 
 def test_unmatched_interest_accumulates_once_across_overlapping_files(store):
-    iid = store.identities.upsert_identity('main','bridge',None,True)
+    iid = store.accounts.upsert_account('main','bridge',None,True)
     def payload(days):
         return json.dumps([{'ts':f'2024-01-{day:02}T10:00:00Z', 'ms_played':180000,
                            'master_metadata_track_name':'Unknown',
@@ -70,7 +70,7 @@ def test_unmatched_interest_accumulates_once_across_overlapping_files(store):
 
 
 def test_removal_clears_models_forecasts_and_rollbacks_but_keeps_user_choices(store):
-    iid = store.identities.upsert_identity('main','bridge',None,True)
+    iid = store.accounts.upsert_account('main','bridge',None,True)
     store.tracks.upsert_track('yt','Song','Artist',None,180)
     key = store.tracks.identity_key_for_video('yt')
     store.history.import_listening_events(iid,[(key,None,1700000000)],source='spotify_export')
@@ -82,8 +82,11 @@ def test_removal_clears_models_forecasts_and_rollbacks_but_keeps_user_choices(st
         store.settings.set_setting(name, 'previous generation')
     run = store.model_selection.start_selection(100,{'status':'applied'})
     with store.conn:
-        store.conn.execute("INSERT INTO rec_vectors VALUES (?,x'00000000')",(key,))
-        store.conn.execute('INSERT INTO rec_model_previous_vectors SELECT ?,identity_key,vec FROM rec_vectors',(run,))
+        store.conn.execute("INSERT INTO recording_embeddings "
+            "SELECT id,'collaborative','spotify-test',1,x'00000000',100 FROM recordings WHERE identity_key=?", (key,))
+        store.conn.execute("INSERT INTO rec_model_previous_vectors SELECT ?,r.identity_key,e.vector "
+            "FROM recording_embeddings e JOIN recordings r ON r.id=e.recording_id "
+            "WHERE e.space='collaborative'", (run,))
         store.conn.execute("INSERT INTO rec_model_forecasts VALUES (?,100,'{}')",(run,))
     store.history.remove_spotify_history()
     assert store.rec_model.rec_vectors_count() == 0
@@ -101,7 +104,7 @@ def test_removal_clears_models_forecasts_and_rollbacks_but_keeps_user_choices(st
 
 @pytest.mark.parametrize('source', ['spotify', 'spotify_export', 'takeout'])
 def test_imported_listening_learns_saved_preferences_without_double_counting_shared_plays(store, source):
-    iid = store.identities.upsert_identity('main','bridge',None,True)
+    iid = store.accounts.upsert_account('main','bridge',None,True)
     tid = store.tracks.upsert_track('yt','Song','Artist',None,180)
     store.tracks.set_track_genre(tid,'Techno')
     key = store.tracks.identity_key_for_video('yt')
@@ -125,7 +128,7 @@ def test_imported_listening_learns_saved_preferences_without_double_counting_sha
 
 
 def test_removing_spotify_stops_further_learning_and_keeps_saved_preferences(store):
-    iid = store.identities.upsert_identity('main','bridge',None,True)
+    iid = store.accounts.upsert_account('main','bridge',None,True)
     tid = store.tracks.upsert_track('yt','Song','Artist',None,180)
     store.tracks.set_track_genre(tid,'Techno')
     key = store.tracks.identity_key_for_video('yt')
@@ -146,7 +149,7 @@ def test_removing_spotify_stops_further_learning_and_keeps_saved_preferences(sto
 
 
 def test_artist_identity_reconciliation_preserves_removable_import_origin(store):
-    iid = store.identities.upsert_identity('main','bridge',None,True)
+    iid = store.accounts.upsert_account('main','bridge',None,True)
     store.discovery.seed_spotify_artists(iid,{'Provisional':4},10)
     # Resolving an artist against provider evidence must move its receipt and origin.
     with store.conn:
@@ -161,7 +164,7 @@ def test_artist_identity_reconciliation_preserves_removable_import_origin(store)
 
 
 def test_failed_removal_rolls_back_evidence_and_artist_changes(store):
-    iid = store.identities.upsert_identity('main','bridge',None,True)
+    iid = store.accounts.upsert_account('main','bridge',None,True)
     store.history.import_listening_events(iid,[('keep-on-failure',None,1700000000)],source='spotify_export')
     store.discovery.seed_spotify_artists(iid,{'Keep on failure':3},10)
     with store.conn:
@@ -175,7 +178,7 @@ def test_failed_removal_rolls_back_evidence_and_artist_changes(store):
 
 
 def test_later_takeout_interest_keeps_an_artist_after_spotify_is_removed(store):
-    iid = store.identities.upsert_identity('main','bridge',None,True)
+    iid = store.accounts.upsert_account('main','bridge',None,True)
     store.discovery.seed_spotify_artists(iid,{'Shared':5},10)
     assert seed_discovery_from_unmatched(store,{'Shared':7},20) == 0
     assert store.history.remove_spotify_history()['artists_removed'] == 0
@@ -196,7 +199,7 @@ def test_model_suggestions_derived_from_spotify_are_removed_or_refreshed(store):
 
 @pytest.mark.parametrize('evidence', ['events', 'days', 'artists'])
 def test_discovery_pass_keeps_spotify_derived_suggestions_removable(store, monkeypatch, evidence):
-    iid = store.identities.upsert_identity('main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('main', 'bridge', None, True)
     if evidence == 'events':
         store.history.import_listening_events(iid, [('song',None,1700000000)], source='spotify_export')
     elif evidence == 'days':

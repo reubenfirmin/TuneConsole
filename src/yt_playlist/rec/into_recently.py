@@ -84,10 +84,10 @@ def _baseline_genre_shares(store) -> dict:
     total = sum(corpus.values()) or 1
     counts: dict = {}
     for g, c in corpus.items():
-        fam = genre_map.family(g)
+        fam = genre_map.family(g,conn=store.conn)
         if fam:
             counts[fam] = counts.get(fam, 0) + c
-        sub = genre_map.subgenre(g)
+        sub = genre_map.subgenre(g,conn=store.conn)
         if sub and sub != fam:
             counts[sub] = counts.get(sub, 0) + c
     return {tok: c / total for tok, c in counts.items()}
@@ -120,7 +120,7 @@ def ranked_subjects(store, now) -> list:
         if key in ('electronic', 'electronica', 'electronic music', 'electronic dance music',
                    'music', 'other', 'unknown', 'dance'):
             continue
-        sub, family = genre_map.subgenre(raw), genre_map.family(raw)
+        sub, family = genre_map.subgenre(raw,conn=store.conn), genre_map.family(raw,conn=store.conn)
         strength = max(leans.get(f'genre:{key}', 0), leans.get(f'genre:{sub}', 0),
                        leans.get(f'genre:{family}', 0) * .5)
         if strength <= 0:
@@ -423,7 +423,8 @@ def _publish_pool(store, now):
                                    if s['subject'] in appearances},
                    "cards": cards, "pending": pending}
         encoded = json.dumps(payload, separators=(",", ":"))
-        if not snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(encoded, now, surface=SURFACE)):
+        if not snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(
+                encoded, now, surface=SURFACE, input_revision=snapshot._changes)):
             return None
         return subjects, pending
 

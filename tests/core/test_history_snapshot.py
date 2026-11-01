@@ -173,7 +173,7 @@ def test_http_error_reports_only_status_without_private_message():
 def test_unsupported_history_preserves_prior_plays_and_success_freshness(store, monkeypatch):
     from tests.test_sync_outcomes import Client
 
-    iid = store.identities.upsert_identity('Main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('Main', 'bridge', None, True)
     client = Client()
     monkeypatch.setattr(sync, 'with_retry', lambda fn, **_kw: fn())
     sync.sync_all(store, {iid: client}, 100)
@@ -196,7 +196,7 @@ def test_unsupported_history_preserves_prior_plays_and_success_freshness(store, 
 def test_verified_empty_history_advances_freshness_without_removing_retained_listening(store, monkeypatch):
     from tests.test_sync_outcomes import Client
 
-    iid = store.identities.upsert_identity('Main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('Main', 'bridge', None, True)
     client = Client()
     monkeypatch.setattr(sync, 'with_retry', lambda fn, **_kw: fn())
     sync.sync_all(store, {iid: client}, 100)

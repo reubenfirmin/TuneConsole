@@ -9,7 +9,7 @@ def _track(store, vid, title, artist, **kw):
 
 def _play(store, identity_key, n=1):
     # Enrichment uses listening-day counts, independently of exact replay frequency.
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     for day in range(n):
         store.history.record_history_plays(iid,day*86400+43200,[identity_key],source_timezone='UTC')
 
@@ -20,7 +20,7 @@ def _names(batch):
 
 def test_tiers_ordered_new_played_container_orphan(store):
     from yt_playlist.util.matching import identity_key
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     # a played song (tier 1)
     played = _track(store, "v1", "Played", "A", created_at=10.0)
     _play(store, identity_key("Played", "A"), 5)
@@ -165,7 +165,7 @@ def test_container_counts_deduplicate_recordings_and_retries_yield_fairly(store)
     playlist_candidate = _track(store, "playlist", "Playlist candidate", "Playlist artist", created_at=1)
     store.discovery.upsert_discovered_track(identity_key("Playlist candidate", "Playlist artist"),
         "playlist", "Playlist candidate", "Playlist artist", None, None, None, None, "radio:s", 1)
-    identity = store.identities.upsert_identity("main", "cred", None, True)
+    identity = store.accounts.upsert_account("main", "cred", None, True)
     playlist = store.playlists.upsert_playlist(identity, "PL", "Mix", 4, "h", 1)
     store.playlists.set_playlist_tracks(playlist, [playlist_anchor, alternate, additional, playlist_candidate])
     album_anchor = _track(store, "album-anchor", "Album anchor", "Album anchor artist",

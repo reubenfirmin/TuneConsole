@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 import pytest
 
-from tests.conftest import FakeClient
+from tests.conftest import FakeClient, _track
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.web.app import create_app
 from yt_playlist.rec import road_trip
@@ -22,9 +22,10 @@ class Client(FakeClient):
 @pytest.mark.parametrize('order',['main-last','main-first','main-missing'])
 @pytest.mark.parametrize('operation',['home','cluster','road-trip','album','discovery'])
 def test_global_mutations_keep_the_configured_main_account(store,monkeypatch,order,operation):
-    other = store.identities.upsert_identity('Other','c','brand',False)
-    main = store.identities.upsert_identity('Main','c',None,True)
-    remote_other,remote_main = Client(),Client()
+    other = store.accounts.upsert_account('Other','c','brand',False)
+    main = store.accounts.upsert_account('Main','c',None,True)
+    catalog = {'video': _track('video', 'Song', 'Artist', 120, 'Album')}
+    remote_other,remote_main = Client(catalog=catalog),Client(catalog=catalog)
     mapping = {other:remote_other,main:remote_main}
     if order=='main-first':
         mapping = {main:remote_main,other:remote_other}
@@ -47,7 +48,7 @@ def test_global_mutations_keep_the_configured_main_account(store,monkeypatch,ord
         monkeypatch.setattr(road_trip,'draft_tracks',lambda state:state['picked'])
         url,data = f'/road_trip/draft/{rid}/save',{}
     elif operation=='album':
-        store.collection.add_saved_album(dict(browse='ALBUM',title='Album'),identity_id=other)
+        store.collection.add_saved_album(dict(browse='ALBUM',title='Album'),account_id=other)
         url,data = '/collection/save-album',dict(browse_id='ALBUM')
     else:
         key = store.discovery.upsert_discovered_track('new|artist','new','New','Artist',None,None,None,None,'radio:seed',1)
@@ -62,26 +63,26 @@ def test_global_mutations_keep_the_configured_main_account(store,monkeypatch,ord
             assert 'connect' in response.text.lower()
         elif operation in {'home','cluster','road-trip'}:
             assert remote_main.created
-            created = [p for p in store.playlists.get_playlists() if p.ytm_playlist_id!='LM']
-            assert created and all(p.identity_id==main for p in created)
+            created = [p for p in store.playlists.get_playlists() if p.provider_playlist_id!='LM']
+            assert created and all(p.account_id==main for p in created)
         elif operation=='album':
             assert remote_main.rated==[('AUDIO','LIKE')]
-            owners = {r[0] for r in store.conn.execute('SELECT identity_id FROM album_library_memberships')}
+            owners = {r[0] for r in store.conn.execute('SELECT account_id FROM saved_album_memberships')}
             assert owners=={other,main}
             # With two owners, removing an album requires choosing the account.
             # An ambiguous request must preserve both local and remote memberships.
             assert http.post('/collection/unsave-album',data=data).status_code==422
             assert remote_main.rated==[('AUDIO','LIKE')] and not remote_other.rated
             assert {r[0] for r in store.conn.execute(
-                'SELECT identity_id FROM album_library_memberships')}==owners
-            assert http.post('/collection/unsave-album',data={**data,'identity_id':main}).status_code==200
+                'SELECT account_id FROM saved_album_memberships')}==owners
+            assert http.post('/collection/unsave-album',data={**data,'account_id':main}).status_code==200
             assert remote_main.rated==[('AUDIO','LIKE'),('AUDIO','INDIFFERENT')]
             assert not remote_other.rated
-            assert store.collection.get_saved_albums(identity_id=other)
-            assert not store.collection.get_saved_albums(identity_id=main)
+            assert store.collection.get_saved_albums(account_id=other)
+            assert not store.collection.get_saved_albums(account_id=main)
         else:
             assert remote_main.rated==[('new','LIKE')]
-            row = store.conn.execute("SELECT identity_id FROM item_ratings WHERE video_id='new'").fetchone()
+            row = store.conn.execute("SELECT account_id FROM item_ratings WHERE video_id='new'").fetchone()
             assert row[0]==main
 
 
@@ -89,8 +90,8 @@ def test_global_mutations_keep_the_configured_main_account(store,monkeypatch,ord
 def test_radio_creation_uses_the_main_account(store,monkeypatch,order):
     from yt_playlist.web import radio_session
     from yt_playlist.library import playlist_generated
-    other = store.identities.upsert_identity('Other','c','brand',False)
-    main = store.identities.upsert_identity('Main','c',None,True)
+    other = store.accounts.upsert_account('Other','c','brand',False)
+    main = store.accounts.upsert_account('Main','c',None,True)
     remotes = {other:object(),main:object()}
     clients = dict(reversed(list(remotes.items()))) if order=='main-first' else dict(remotes)
     if order=='main-missing':

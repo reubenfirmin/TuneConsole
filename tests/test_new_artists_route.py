@@ -5,7 +5,7 @@ from tests.conftest import FakeClient
 
 
 def test_new_artists_fragment_serves_cached(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.discovery.upsert_discovered_artist("Donato Dozzy", 1.0, ["Recondite", "Rrose"], ["Deep Focus"], None, now=1.0)
     from yt_playlist.rec import home_prepared
     home_prepared.prepare(store, 1)
@@ -18,7 +18,7 @@ def test_new_artists_fragment_serves_cached(store):
 
 
 def test_new_artists_building_polls(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     app.state.ctx.rec_worker.jobs.merge('full')
     c = TestClient(app, base_url="http://127.0.0.1")

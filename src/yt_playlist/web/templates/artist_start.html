@@ -1,0 +1,76 @@
+<div id="onboarding-start" class="artist-start" data-onboarding-artists data-artist-stage="artists"
+     x-data='artistStart({{ {"selected": artist_choices, "minimum": minimum_artists}|tojson }})'
+     :data-artist-stage="stage" @bridge-status.window="playback($event.detail)"
+     @artist-choose="stage = 'artists'; resuming = false">
+  <section x-show="stage === 'artists'" aria-labelledby="artist-start-title">
+    <header class="artist-start-head">
+      <h2 id="artist-start-title">Pick 3 artists you love.</h2>
+      <span class="artist-start-count" x-show="selected.length" x-text="selected.length + ' selected'" x-cloak></span>
+    </header>
+    <form class="artist-start-search" role="search" @submit.prevent="search()">
+      <label class="sr-only" for="artist-start-search">Search YouTube Music artists</label>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="m15 15 6 6"/></svg>
+      <input id="artist-start-search" type="search" placeholder="Search artists" maxlength="80"
+             x-model="query" @input.debounce.350ms="search()" autocomplete="off">
+      <button class="artist-start-clear" type="button" x-show="query" @click="clearSearch()" aria-label="Clear artist search">×</button>
+    </form>
+    <p class="artist-start-feedback" role="status" aria-live="polite" x-show="searching || searchNote" x-text="searching ? 'Searching YouTube Music…' : searchNote" x-cloak></p>
+    <div x-show="selected.length && !query && (relatedLoading || relatedNote)" x-cloak>
+      <p class="artist-start-feedback" role="status" x-text="relatedLoading ? 'Finding related artists…' : relatedNote"></p>
+      <button class="btn-ghost" type="button" x-show="relatedNote && !relatedLoading" @click="suggestions()">Try related artists again</button>
+    </div>
+    <div class="artist-start-grid">
+      <template x-for="item in visibleArtists" :key="item.browse_id">
+        <button class="artist-start-card" type="button" :class="{'is-selected': isSelected(item)}"
+                :aria-pressed="isSelected(item)" :aria-label="(isSelected(item) ? 'Remove ' : 'Choose ') + item.name"
+                :disabled="saving" @click="toggle(item)">
+          <img :src="item.thumbnail || '/static/onboarding-welcome.webp'" alt="" referrerpolicy="no-referrer" @error="$el.hidden = true">
+          <span class="artist-start-card-shade" aria-hidden="true"></span>
+          <span class="artist-start-pick" aria-hidden="true">
+            <svg x-show="isSelected(item)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="m5 12 5 5L20 7"/></svg>
+            <svg x-show="!isSelected(item)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M12 5v14M5 12h14"/></svg>
+          </span>
+          <span class="artist-start-card-copy"><strong x-text="item.name"></strong>
+            <span x-text="isSelected(item) ? 'Selected' : item.because ? 'Related to ' + item.because : 'Add artist'"></span>
+          </span>
+        </button>
+      </template>
+    </div>
+    <button class="btn-ghost" type="button" x-show="hasMoreArtists" @click="expanded = !expanded"
+            x-text="expanded ? 'Show fewer artists' : 'Show more artists'"></button>
+    <p class="artist-start-error" role="alert" x-show="error" x-text="error" x-cloak></p>
+    <div class="artist-start-continue" x-show="selected.length >= minimum" x-cloak>
+      <button class="btn btn-primary artist-start-primary" type="button" :disabled="saving" @click="listen()">
+        <span>Find my first set</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" aria-hidden="true"><path d="M3 12h17m-7-7 7 7-7 7"/></svg>
+      </button>
+    </div>
+    <button class="artist-start-spotify" type="button" @click="stage = 'spotify'; error = ''">Coming from Spotify?</button>
+  </section>
+
+  <section class="artist-start-listen" x-show="stage === 'listen'" x-cloak>
+    <div x-show="resuming" :data-artist-resuming="resuming" x-cloak><h2>Your first set is waiting.</h2><a class="btn btn-primary artist-start-primary" :href="'https://music.youtube.com/watch?list=' + encodeURIComponent(pendingPlaylist)" target="_blank" rel="noopener">Open my first set {{ arrow_icon('external') }}</a></div>
+    <div id="artist-first-listen" aria-live="polite"></div>
+    <button class="btn-ghost" type="button" @click="stage = 'artists'; resuming = false">Change artists</button>
+  </section>
+
+  <section class="artist-start-spotify-help" x-show="stage === 'spotify'" x-cloak aria-labelledby="artist-spotify-title">
+    <p class="artist-start-eyebrow">An optional head start</p>
+    <h2 id="artist-spotify-title">Your old favorites can come too.</h2>
+    <p class="artist-start-intro">Bring playlists, albums or past listens from Spotify.</p>
+    <p>Spotify can take a few days to send your files. Pick your artists and listen now; add your files later in Setup, Import.</p>
+    <div class="artist-start-help-actions">
+      <button class="btn btn-primary artist-start-primary" type="button" @click="stage = 'artists'">Back to my artists</button>
+      <button class="btn-ghost" type="button" @click="spotifySteps = !spotifySteps" :aria-expanded="spotifySteps">How to request my files</button>
+      <a href="/setup?tab=import" target="_blank" rel="noopener">I already have my files {{ arrow_icon('external') }}</a>
+    </div>
+    <div class="artist-start-export" x-show="spotifySteps" x-cloak>
+      <p>In <a href="https://www.spotify.com/account/privacy/" target="_blank" rel="noopener">Spotify’s privacy settings {{ arrow_icon('external') }}</a>, request the files you want:</p>
+      <ul>
+        <li><strong>Account data:</strong> playlists and albums. You’ll review the YouTube Music matches before saving anything.</li>
+        <li><strong>Extended streaming history:</strong> past listening, to help TuneConsole get to know your taste.</li>
+      </ul>
+      <p>Spotify may ask you to confirm by email. When the downloads arrive, upload each zip in Setup, Import.</p>
+    </div>
+  </section>
+</div>

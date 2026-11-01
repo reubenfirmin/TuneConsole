@@ -17,11 +17,7 @@ def request(store, name, now):
     if store.artists.resolve(name) is None:
         return False
     key = search_squash(name)
-    requests = store.rec_proposals.get_proposals(REQUESTS) or {}
-    if key not in requests:
-        requests[key] = name
-        store.rec_proposals.put_proposals(REQUESTS, dict(list(requests.items())[-LIMIT:]), now)
-    return True
+    return store.rec_proposals.request_tv_artwork(key, name, now)
 
 
 def images(store, name):
@@ -52,6 +48,8 @@ def prepare(store, client, names, now):
     if not pending:
         return False
     name = pending[0]
+    key = search_squash(name)
+    observation = store.rec_proposals.tv_artwork_observation(key)
     photos, _ = images(store, name)
     failed = False
     try:
@@ -78,11 +76,7 @@ def prepare(store, client, names, now):
             vendor_retry_at = getattr(exc, 'retry_at', 0)
     failed = failed or bool(errors)
     vendor_retry_at = max([vendor_retry_at, *(net.retry_after(error, now) for error in errors)])
-    cache.pop(search_squash(name), None)
-    cache[search_squash(name)] = {'images': list(dict.fromkeys(photos))[:6],
+    value = {'images': list(dict.fromkeys(photos))[:6],
         'retry_at': max(now + (60 if failed else 86400), vendor_retry_at), 'at': now}
-    store.rec_proposals.put_proposals(SURFACE, dict(list(cache.items())[-LIMIT:]), now)
-    if not failed and search_squash(name) in requests:
-        requests.pop(search_squash(name))
-        store.rec_proposals.put_proposals(REQUESTS, requests, now)
-    return len(pending) > 1
+    published = store.rec_proposals.publish_tv_artwork(key, value, now, observation, complete=not failed)
+    return len(pending) > 1 or not published

@@ -27,8 +27,8 @@ def live_move_app(monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     s = Store(":memory:")
     s.init_schema()
-    i1 = s.identities.upsert_identity("Main", "c1", None, True)
-    i2 = s.identities.upsert_identity("Alt", "c2", None, False)
+    i1 = s.accounts.upsert_account("Main", "c1", None, True)
+    i2 = s.accounts.upsert_account("Alt", "c2", None, False)
     tracks = {}
     for n, title in enumerate(("Evening", "Mix", "Weekend")):
         pid = s.playlists.upsert_playlist(i1, f"PL{n}", title, 1, "h", 1.0)

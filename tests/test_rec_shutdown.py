@@ -34,14 +34,16 @@ def test_quit_interrupts_rollup_sql_rolls_back_and_releases_waiting_request(
     caplog.set_level(logging.INFO, logger=__name__)
     worker = RecWorker(SimpleNamespace(store=store, work=work,
         logger=logging.getLogger(__name__), now_fn=lambda: 1), debounce_s=0)
-    store.trends.upsert_first_play_min([("track", "saved", 1, 86400, "saved")])
+    store.accounts.upsert_account('Listener','c',None,True)
+    store.history.record_history_plays(1,86400,['saved'],source_timezone='UTC')
+    store.trends.refresh_first_play()
     entered, request_waiting = threading.Event(), threading.Event()
     store.conn.create_function("query_started", 0, lambda: (entered.set(), 0)[1])
 
     # Exercise the real first-play refresh savepoint: cancellation must retain its
     # previously published data, even if SQLite rolls back the savepoint itself.
     if operation == "first-play":
-        monkeypatch.setattr(store.trends, "_rebuild_artist_first_play",
+        monkeypatch.setattr(store.trends, "_replace_first_play",
                             lambda: store.conn.execute(SLOW_SQL).fetchone())
         calculate = store.trends.refresh_first_play
     else:

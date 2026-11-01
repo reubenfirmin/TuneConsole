@@ -1,6 +1,7 @@
 <section class="fingerprint card" id="fingerprint" x-data="fpPanel()" :class="{ 'is-collapsed': collapsed }"
          data-tuning-remaining="{{ fingerprint.tuning_remaining|default(0) }}"
          data-tuning-active="{{ 'true' if tuning_active else 'false' }}"
+         data-vibes-ready="{{ 'true' if vibes_ready|default(false) else 'false' }}"
          data-vibe="{{ vibe }}" @home-vibe-sync.window="vibe = $event.detail"
          @home-vibe-saving.window="close()" @home-vibe-edit.window="selectTab('vibe'); show()"
          @home-mix-open.window="close()" @home-mixes-applied.window="close()">
@@ -32,8 +33,9 @@
   <div class="fp-tabs" role="tablist" aria-label="Mix controls"
        @keydown.right.prevent="moveTab(1)"
        @keydown.left.prevent="moveTab(-1)"
-       @keydown.home.prevent="selectTab('vibe', true)" @keydown.end.prevent="selectTab('preferences', true)">
+       @keydown.home.prevent="selectTab(vibesAvailable ? 'vibe' : 'mixes', true)" @keydown.end.prevent="selectTab('preferences', true)">
     <button type="button" role="tab" id="fp-vibe-tab" x-ref="vibeTab" aria-controls="fp-vibe-panel"
+            x-show="vibesAvailable" x-cloak
             :aria-selected="tab === 'vibe'" :tabindex="tab === 'vibe' ? 0 : -1"
             @click="selectTab('vibe')" :title="vibe ? 'Vibe adjustment active' : 'Choose a vibe'">Vibe <span class="fp-tab-dot" aria-hidden="true" :hidden="!vibe" hidden></span></button>
     <button type="button" role="tab" id="fp-mixes-tab" x-ref="mixesTab" aria-controls="fp-mixes-panel"
@@ -67,13 +69,13 @@
     <p id="home-theme-summary" class="section-note fp-theme-status" role="status"></p>
   </div>
   <div class="fp-tab-panel" id="fp-vibe-panel" role="tabpanel" aria-labelledby="fp-vibe-tab"
-       :hidden="tab !== 'vibe'" hidden>
+       :hidden="tab !== 'vibe' || !vibesAvailable" hidden>
     <div class="fp-intro"><h2>Meet the moment.</h2><p>Same taste in music. A different kind of day.</p></div>
     <form id="home-vibe-form" hx-post="/home/vibe" hx-target="#home-mode-cards" hx-swap="outerHTML"
           hx-trigger="change" hx-sync="#fingerprint:queue last" hx-disabled-elt="find fieldset"
           @keydown.space="if ($event.target.matches('input[type=radio]:checked')) { $event.preventDefault(); close(); }"
           @click="if ($event.target.matches('input[type=radio]')) close()">
-      <fieldset class="fp-vibe-fields">
+      <fieldset class="fp-vibe-fields" :disabled="!vibesAvailable">
         <legend class="sr-only">Choose a vibe for your mixes</legend>
         <div class="fp-vibe-grid">
           <label class="fp-vibe-card fp-vibe-card-natural" data-color="natural"
@@ -150,7 +152,7 @@
         <ul class="cg-suggest" x-show="open && suggest().length" x-cloak>
           <template x-for="(o, idx) in suggest()" :key="o.kind + o.name">
             <li :class="{ sel: sel === idx }" @mouseenter="sel = idx" @click="pick(o.name)">
-              <span class="cg-name" x-text="o.name"></span>
+              <span class="cg-name" x-text="o.label || o.name"></span>
               <span class="cg-kind" :class="o.kind" x-text="o.kind"></span>
             </li>
           </template>

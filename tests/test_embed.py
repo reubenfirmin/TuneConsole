@@ -8,7 +8,7 @@ from yt_playlist.util.matching import identity_key
 
 def _two_clusters(store):
     """Two disjoint 6-track clusters (A in playlist PA, B in PB). identity_key = 'a0|ab' etc."""
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(6)]
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(6)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 6, "h", 0.0), A)

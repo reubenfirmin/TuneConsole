@@ -12,27 +12,27 @@ from yt_playlist.rec import recipes
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.playlist_fixture_support import library_catalog
 
 
 def _client(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
+    app = create_app(store, lambda: {iid: FakeClient(catalog=library_catalog(store))}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
 
 def _track(store, vid, title, artist, *, genre="", year=""):
-    store.tracks.upsert_track(vid, title, artist, "Alb", 200, thumbnail="t.jpg")
+    entry = store.tracks.upsert_track(vid, title, artist, "Alb", 200, thumbnail="t.jpg")
     k = identity_key(title, artist)
     if genre or year:
-        store.conn.execute("UPDATE tracks SET genre=?, mb_year=? WHERE identity_key=?", (genre, year, k))
-        store.conn.commit()
+        store.tracks.set_track_enrichment(entry,genre,year)
     return k
 
 
 # --- recipes.cluster_recipe ------------------------------------------------------------------
 
 def test_cluster_recipe_shape_and_seeds(store):
-    store.identities.upsert_identity("m", "c", None, True)
+    store.accounts.upsert_account("m", "c", None, True)
     a = _track(store, "v1", "Goa One", "A", genre="goa trance", year="2003")
     b = _track(store, "v2", "Goa Two", "B", genre="psytrance", year="2008")
     recipe, order = recipes.cluster_recipe(store, [a, b], seed_labels=["Ritmo"],
@@ -46,7 +46,7 @@ def test_cluster_recipe_shape_and_seeds(store):
 
 
 def test_cluster_recipe_derives_genres_without_whitelist(store):
-    store.identities.upsert_identity("m", "c", None, True)
+    store.accounts.upsert_account("m", "c", None, True)
     a = _track(store, "v1", "Goa One", "A", genre="goa trance")
     b = _track(store, "v2", "Goa Two", "B", genre="psytrance")
     recipe, _ = recipes.cluster_recipe(store, [a, b], seed_labels=[], allow_families=[])
@@ -54,14 +54,14 @@ def test_cluster_recipe_derives_genres_without_whitelist(store):
 
 
 def test_cluster_recipe_uses_chosen_journey(store):
-    store.identities.upsert_identity("m", "c", None, True)
+    store.accounts.upsert_account("m", "c", None, True)
     a = _track(store, "v1", "X", "A", genre="acid techno", year="1995")
     recipe, _ = recipes.cluster_recipe(store, [a], journey="time_machine")
     assert recipe["journey"] == "time_machine"
 
 
 def test_cluster_recipe_auto_journey_defaults_to_energy_arc(store):
-    store.identities.upsert_identity("m", "c", None, True)
+    store.accounts.upsert_account("m", "c", None, True)
     a = _track(store, "v1", "X", "A", genre="acid techno")
     for j in ("auto", "bogus", ""):
         recipe, _ = recipes.cluster_recipe(store, [a], journey=j)
@@ -82,7 +82,7 @@ def test_save_passes_journey_through(store):
 
 
 def test_cluster_recipe_remembers_inputs_in_params(store):
-    store.identities.upsert_identity("m", "c", None, True)
+    store.accounts.upsert_account("m", "c", None, True)
     a = _track(store, "v1", "X", "A", genre="acid techno")
     recipe, _ = recipes.cluster_recipe(store, [a], seed_labels=["A"], allow_families=["techno"])
     assert recipe["params"]["seeds"] == ["A"]

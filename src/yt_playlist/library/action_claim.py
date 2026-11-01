@@ -15,15 +15,15 @@ def claim_action(store, action_id, *, operation="Undo"):
 @contextmanager
 def claim_playlist_deletion(store, playlist):
     """Admit one deletion owner before reading intent or taking a backup."""
-    with claim_deletion_target(store, playlist.identity_id, playlist.ytm_playlist_id):
+    with claim_deletion_target(store, playlist.account_id, playlist.provider_playlist_id):
         if store.playlists.get_playlist(playlist.id) is None:
             raise ValueError("playlist no longer exists")
         yield
 
 
 @contextmanager
-def claim_deletion_target(store, identity_id, remote_id):
-    key = json.dumps(["playlist-deletion", identity_id, remote_id])
+def claim_deletion_target(store, account_id, remote_id):
+    key = json.dumps(["playlist-deletion", account_id, remote_id])
     with _claim(store, key, "Deletion is already running for this playlist. Reload the Action Log."):
         yield
 

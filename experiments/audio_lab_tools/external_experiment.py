@@ -23,6 +23,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 LAB = ROOT / 'experiments/audio_lab'
+MODEL = ROOT / 'extension/audio_model'
 DATA = LAB / 'local/datasets'
 OUT = LAB / 'local/external-20261028'
 POLICY = 'external-center-10s-ffmpeg-1'
@@ -231,9 +232,10 @@ def pmemo_rows():
     return rows
 
 
-def prepare(dataset):
+def prepare(dataset, *, lifetime_fd=None):
     from .external_emma import prepare_rows as emma_rows
     from .external_merge import prepare_rows as merge_rows
+    from .external_merp import prepare_rows as merp_rows
     from .external_vgmidi import prepare_rows as vgmidi_rows
     from .external_sources import coimbra_rows, deam_rows, jamendo_rows, quadrant_rows
     builders = {'soundtracks-set2': lambda: soundtrack_rows(False),
@@ -242,6 +244,7 @@ def prepare(dataset):
                 'vgmidi-original': vgmidi_rows, 'coimbra-mirex-like': coimbra_rows,
                 'deam': deam_rows, 'jamendo-human-00': jamendo_rows,
                 '4q-emotion': quadrant_rows, 'emma-preview-matched': emma_rows,
+                'merp-static': lambda: merp_rows(lifetime_fd=lifetime_fd),
                 'merge-quadrants': lambda: merge_rows('quadrants'),
                 'merge-tag-va': lambda: merge_rows('tag-va'),
                 'jamendo-human-4shards': lambda: jamendo_rows(('00', '07', '23', '53'))}
@@ -268,35 +271,46 @@ def prepare(dataset):
     return rows
 
 
-def probe(path):
+def probe(path, *, lifetime_fd=None):
     value = json.loads(subprocess.check_output(['ffprobe', '-v', 'quiet', '-show_format',
-                      '-show_streams', '-of', 'json', str(path)]))
+                      '-show_streams', '-of', 'json', str(path)],
+                      pass_fds=() if lifetime_fd is None else (lifetime_fd,)))
     stream = next(s for s in value['streams'] if s['codec_type'] == 'audio')
     return float(value['format']['duration']), min(2, int(stream['channels']))
 
 
-def pcm(path, start, rate, channels, target):
+def pcm(path, start, rate, channels, target, *, lifetime_fd=None):
     subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-threads', '1', '-filter_threads', '1',
                     '-ss', f'{start:.6f}', '-i', str(path), '-t', '10', '-ar', str(rate),
-                    '-ac', str(channels), '-f', 'f32le', '-y', str(target)], check=True, timeout=45)
+                    '-ac', str(channels), '-f', 'f32le', '-y', str(target)], check=True, timeout=45,
+                    pass_fds=() if lifetime_fd is None else (lifetime_fd,))
     if target.stat().st_size != rate * channels * 10 * 4:
         raise ValueError('Incomplete ten-second excerpt')
 
 
-def extract(dataset, *, limit=None, native=False, sample_fraction=.5, output_dataset=None):
+def extract(dataset, *, limit=None, native=False, sample_fraction=.5, output_dataset=None,
+            lifetime_fd=None, row_metadata=None):
     if not 0 <= sample_fraction <= 1:
         raise ValueError('Excerpt position must lie between the recording start and end')
     OUT.mkdir(parents=True, exist_ok=True)
-    rows = prepare(dataset)
+    rows = prepare(dataset, lifetime_fd=lifetime_fd)
+    if row_metadata is not None:
+        if set(row_metadata) != {row['id'] for row in rows}:
+            raise ValueError('Identity overrides must cover exactly the prepared recordings')
+        if any(set(values) - {'artist', 'title', 'group'} for values in row_metadata.values()):
+            raise ValueError('Identity overrides may only update artist, title and validation group')
+        rows = [{**row, **row_metadata[row['id']]} for row in rows]
     dataset = output_dataset or dataset
     work = OUT / 'pcm'
     work.mkdir(exist_ok=True)
     cache = OUT / 'features'
     cache.mkdir(exist_ok=True)
-    provenance = {name: digest(LAB / name) for name in ['model_worker.js', 'audio_attributes.js',
+    from .runtime_snapshot import ensure as frozen_runtime
+    runtime_root, worker_path = frozen_runtime()
+    provenance = {name: digest(runtime_root / name) for name in ['model_worker.js', 'audio_attributes.js',
                   'features.js', 'embedding_graph.js', 'runtime_loader.js', 'vendor/bundle.json', 'vendor/runtime.json']}
     provenance['decoder'] = subprocess.check_output(['ffmpeg', '-version'], text=True).splitlines()[0]
-    provenance['harness_sha256'] = digest(ROOT / 'experiments/audio_lab_tools/external_audio_worker.mjs')
+    provenance['harness_sha256'] = digest(worker_path)
     provenance['policy'] = POLICY
     provenance['backend'] = 'tensorflow-native' if native else 'tfjs-cpu'
     if native:
@@ -307,15 +321,16 @@ def extract(dataset, *, limit=None, native=False, sample_fraction=.5, output_dat
     environment.update(EXTERNAL_TFJS_NATIVE='1' if native else '0',
                        TF_NUM_INTRAOP_THREADS='1', TF_NUM_INTEROP_THREADS='1')
     log = (OUT / f'{dataset}.worker.log').open('a')
-    worker = subprocess.Popen(['nice', '-n', '10', 'node', str(ROOT / 'experiments/audio_lab_tools/external_audio_worker.mjs')],
+    worker = subprocess.Popen(['nice', '-n', '10', 'node', str(worker_path)],
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
-                              text=True, bufsize=1, env=environment)
+                              text=True, bufsize=1, env=environment,
+                              pass_fds=() if lifetime_fd is None else (lifetime_fd,))
     successes, errors = [], []
     started = time.monotonic()
     try:
         for index, row in enumerate(rows[:limit] if limit else rows):
             try:
-                duration, channels = probe(row['audio'])
+                duration, channels = probe(row['audio'], lifetime_fd=lifetime_fd)
             except (ValueError, KeyError, StopIteration, subprocess.SubprocessError) as error:
                 errors.append({'id': row['id'], 'error': 'audio_probe_failed: ' + str(error)})
                 continue
@@ -329,8 +344,8 @@ def extract(dataset, *, limit=None, native=False, sample_fraction=.5, output_dat
                 result = json.loads(feature_path.read_text())
             else:
                 try:
-                    pcm(row['audio'], start, 16000, 1, work / 'model.f32')
-                    pcm(row['audio'], start, 44100, channels, work / 'measurement.f32')
+                    pcm(row['audio'], start, 16000, 1, work / 'model.f32', lifetime_fd=lifetime_fd)
+                    pcm(row['audio'], start, 44100, channels, work / 'measurement.f32', lifetime_fd=lifetime_fd)
                     request = {'id': row['id'], 'model_pcm': str((work / 'model.f32').resolve()),
                                'measurement_pcm': str((work / 'measurement.f32').resolve()), 'channels': channels}
                     worker.stdin.write(json.dumps(request) + '\n')

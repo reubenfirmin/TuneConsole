@@ -14,8 +14,8 @@ def _album(bid):
 
 @pytest.fixture
 def mirror(store, monkeypatch):
-    first = store.identities.upsert_identity('main', 'bridge', None, True)
-    second = store.identities.upsert_identity('brand', 'bridge', 'brand-id', False)
+    first = store.accounts.upsert_account('main', 'bridge', None, True)
+    second = store.accounts.upsert_account('brand', 'bridge', 'brand-id', False)
     store.collection.add_saved_album({'browse': 'OLD', 'title': 'Previously saved', 'artist': 'Artist'})
     monkeypatch.setattr(sync, 'with_retry', lambda fn, **kwargs: fn())
     materialized = []
@@ -73,7 +73,7 @@ def test_sync_snapshot_cannot_undo_a_later_successful_membership_write(mirror,op
     collection = mirror.store.collection
     saved = {'browse':'SAVED','title':'Saved','artist':'Artist'}
     if operation in {'unsave','save-again'}:
-        collection.add_saved_album(saved,identity_id=mirror.first)
+        collection.add_saved_album(saved,account_id=mirror.first)
 
     class InterleavingClient:
         def get_library_albums(self,limit=None):
@@ -81,9 +81,9 @@ def test_sync_snapshot_cannot_undo_a_later_successful_membership_write(mirror,op
             # same-value writes must invalidate it too, even without changed rows.
             old = [_album('SAVED')] if operation.startswith('unsave') else []
             if operation.startswith('save'):
-                collection.add_saved_album(saved,identity_id=mirror.first)
+                collection.add_saved_album(saved,account_id=mirror.first)
             else:
-                collection.remove_saved_album('SAVED',identity_id=mirror.first)
+                collection.remove_saved_album('SAVED',account_id=mirror.first)
             return old
 
     outcomes,summary,_ = sync._sync_saved_albums(mirror.store,{
@@ -92,7 +92,7 @@ def test_sync_snapshot_cannot_undo_a_later_successful_membership_write(mirror,op
     assert {'OLD','OTHER'}<=collection.saved_album_ids()
     assert outcomes[str(mirror.first)]['status']=='skipped'
     assert summary['status']=='partial'
-    assert not mirror.store.conn.execute('SELECT 1 FROM album_library_snapshots WHERE identity_id=?',
+    assert not mirror.store.conn.execute('SELECT 1 FROM account_album_state WHERE account_id=? AND snapshot_observed_at IS NOT NULL',
                                          (mirror.first,)).fetchone()
 
 
@@ -101,7 +101,7 @@ def test_stale_snapshot_does_not_count_toward_legacy_reconciliation(mirror):
 
     class InterleavingClient:
         def get_library_albums(self,limit=None):
-            collection.remove_saved_album('absent',identity_id=mirror.first)
+            collection.remove_saved_album('absent',account_id=mirror.first)
             return []
 
     outcomes,summary,_ = sync._sync_saved_albums(mirror.store,{mirror.first:InterleavingClient()},None)
@@ -112,11 +112,11 @@ def test_stale_snapshot_does_not_count_toward_legacy_reconciliation(mirror):
 
 def test_deactivated_account_failure_and_missing_snapshot_keep_reconciliation_pending(mirror):
     with mirror.store.conn:
-        mirror.store.conn.execute('UPDATE identities SET active=0 WHERE id=?', (mirror.second,))
+        mirror.store.conn.execute('UPDATE accounts SET active=0 WHERE id=?', (mirror.second,))
     sync._sync_saved_albums(mirror.store,{mirror.first:AlbumClient([])},None)
     assert mirror.store.collection.saved_album_ids()=={'OLD'}
     with mirror.store.conn:
-        mirror.store.conn.execute('UPDATE identities SET active=1 WHERE id=?', (mirror.second,))
+        mirror.store.conn.execute('UPDATE accounts SET active=1 WHERE id=?', (mirror.second,))
     sync._sync_saved_albums(mirror.store,{
         mirror.first:AlbumClient([]),mirror.second:AlbumClient(TimeoutError('offline'))},None)
     assert mirror.store.collection.saved_album_ids()=={'OLD'}
@@ -134,7 +134,7 @@ def test_successful_account_refresh_preserves_failed_accounts_snapshot(mirror):
         mirror.first:AlbumClient([_album('NEW')]),
         mirror.second:AlbumClient(TimeoutError('offline'))},None)
     assert mirror.store.collection.saved_album_ids()=={'NEW','SECOND'}
-    assert {a['browse'] for a in mirror.store.collection.get_saved_albums(identity_id=mirror.second)}=={'SECOND'}
+    assert {a['browse'] for a in mirror.store.collection.get_saved_albums(account_id=mirror.second)}=={'SECOND'}
     assert summary['status']=='partial'
 
 
@@ -231,7 +231,7 @@ def test_partial_production_pagination_never_replaces_saved_membership(mirror, l
                             {mirror.first: client, mirror.second: AlbumClient([])}, events.append)
     assert len(bridge.calls) == 2
     assert mirror.store.collection.get_saved_albums() == mirror.before
-    assert mirror.store.conn.execute('SELECT identity_id FROM album_library_snapshots').fetchone()[0]==mirror.second
+    assert mirror.store.conn.execute('SELECT account_id FROM account_album_state WHERE snapshot_observed_at IS NOT NULL').fetchone()[0]==mirror.second
 
 
 @pytest.mark.parametrize('response', [{}, {'contents': {}},

@@ -209,7 +209,7 @@ def test_replacing_model_during_ranking_still_rejects_publication(database, monk
     def replace_model(reader, now, policies):
         result = calculate(reader, now, policies)
         with database.conn:
-            database.conn.execute('DELETE FROM rec_content_vectors')
+            database.conn.execute("DELETE FROM recording_embeddings WHERE space='content_library'")
         return result
 
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', replace_model)

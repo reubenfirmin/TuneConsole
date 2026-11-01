@@ -9,7 +9,7 @@ from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     from yt_playlist.rec import model_health
     assert model_health.prepare(store, 1000) is not None
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
@@ -28,7 +28,7 @@ def test_health_panel_renders_when_empty(store):
 
 def test_health_panel_separates_spotify_history_and_explains_effects(store):
     client = _client(store)
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     store.history.import_listening_events(iid,[('spotify-only',None,1700000000)],source='spotify_export')
     store.history.import_listening_events(iid,[('takeout-only',None,1700000100)],source='takeout')
     response = client.get('/taste/panels/health')
@@ -54,7 +54,7 @@ def test_health_panel_explains_unknown_historical_play_provenance(store):
     store.rec_ledger.record_served_impressions("one", "home", [{
         "lane": "wheelhouse", "identity_key": "song|band", "rank": 1,
     }], 100)
-    store.history.import_play_events(store.identities.get_identities()[0].id, [("song|band", "v1", 120)])
+    store.history.import_play_events(store.accounts.get_accounts()[0].id, [("song|band", "v1", 120)])
     response = client.get("/taste/recall")
     assert response.status_code == 200
     assert "Playlist context wasn’t recorded for plays of 1 recommendation." in response.text

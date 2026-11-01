@@ -34,7 +34,8 @@ def audio(store, tid, bpm):
     # Re-enrichment may replace a selected finding. The provider convenience
     # setter is deliberately fill-only and would leave an existing BPM intact.
     with store.conn:
-        store.conn.execute('UPDATE catalog_tracks SET bpm=? WHERE id=?', (bpm, tid))
+        store.conn.execute('UPDATE recordings SET bpm=? WHERE id IN '
+                           '(SELECT recording_id FROM catalog_entries WHERE id=?)', (bpm, tid))
 
 
 def drain(preparation, now=1000):
@@ -106,11 +107,11 @@ def test_basis_publishes_accepted_inputs_while_live_metadata_keeps_changing(stor
     build = content_model.build_library_content
     writes = []
 
-    def enrich_during_fit(inputs):
+    def enrich_during_fit(inputs, *, genre_axes=None):
         for i, tid in enumerate(ids):
             audio(store, tid, 300 + i)
             writes.append(tid)
-        return build(inputs)
+        return build(inputs,genre_axes=genre_axes)
 
     monkeypatch.setattr(content_model, 'build_library_content', enrich_during_fit)
     assert p.fit(1000)
@@ -175,7 +176,7 @@ def test_drain_does_not_swallow_deferred_fit_or_aged_small_update(store, monkeyp
     drain(p)
     build = content_model.build_library_content
     monkeypatch.setattr(content_model, 'build_library_content',
-                        lambda _: (_ for _ in ()).throw(WorkBudgetExceeded()))
+                        lambda _, **kwargs: (_ for _ in ()).throw(WorkBudgetExceeded()))
     assert not p.fit(1000) and not p.due(1059)
     monkeypatch.setattr(content_model, 'build_library_content', build)
     assert p.due(1060) and p.fit(1060)
@@ -200,10 +201,10 @@ def test_deferred_or_cancelled_fit_keeps_last_good_generation(store, monkeypatch
     if failure == 'memory':
         p.budget = replace(p.budget, memory_bytes=1)
     else:
-        def fail(inputs):
+        def fail(inputs, *, genre_axes=None):
             if failure == 'competing-publisher':
                 store.settings.set_setting('rec_content_generation', 'newer')
-                return build(inputs)
+                return build(inputs,genre_axes=genre_axes)
             raise WorkBudgetExceeded() if failure == 'time' else WorkClosing()
         monkeypatch.setattr(content_model, 'build_library_content', fail)
     if failure == 'cancel':
@@ -338,9 +339,9 @@ def test_deferred_full_fit_reuses_exact_svd_inputs_then_retrains_on_changed_bask
     def counted(*args, **kwargs):
         calls.append(kwargs['method'])
         return train(*args, **kwargs)
-    def changed_after_svd(inputs):
+    def changed_after_svd(inputs, *, genre_axes=None):
         audio(store, ids[0], 300 + len(calls))
-        return build(inputs)
+        return build(inputs,genre_axes=genre_axes)
     monkeypatch.setattr(embedding_training, 'build_vectors_from_baskets', counted)
     with monkeypatch.context() as patch:
         patch.setattr(content_model, 'build_library_content', changed_after_svd)

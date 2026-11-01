@@ -13,6 +13,7 @@ import numpy as np
 
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing, check_stopping, work_budget
 from yt_playlist.core.evidence_ledger import canonical
+from yt_playlist.core import embeddings
 from yt_playlist.rec import embedding_training as training, model_refresh, model_setup, progressive
 from yt_playlist.rec.vector_math import rank_by_context
 from yt_playlist.repos.rec_model import VectorChanges
@@ -31,11 +32,11 @@ def due(store, now):
     if (store.settings.get_setting('rec_selection_paused') == '1'
             or store.settings.get_setting('rec_selection_restore')):
         return False
-    return now >= (store.rec_proposals.get_proposals(SCHEDULE) or {}).get('next_at', 0)
+    return now >= store.model_selection.next_daily_at()
 
 
 def _schedule(store, now, delay):
-    store.rec_proposals.put_proposals(SCHEDULE, {'next_at': now + delay}, now)
+    store.model_selection.schedule_daily(now + delay, now)
 
 
 def readiness(store, now):
@@ -180,6 +181,7 @@ def _publish_fit(store, snapshot, run, now):
     weights = (training.cooc_weights(reader.rec_query.play_counts())
                if reader.settings.get_setting('rec_cooc_weighting') == '1' else None)
     previous_rows = dict(reader.rec_model.get_rec_vectors())
+    previous_basis = embeddings.head(reader.conn, 'rec_vectors')
     snapshot.release_reader()
     model_refresh._check_fit_memory(baskets, selected['dim'], progressive.Budget().full_memory_bytes)
     keys, vectors = training.build_vectors_from_baskets(baskets, dim=selected['dim'],
@@ -189,9 +191,13 @@ def _publish_fit(store, snapshot, run, now):
         raise ValueError('The selected setup could not fit the current library')
     rows = [(key, vector.astype('float32').tobytes()) for key, vector in zip(keys, vectors)]
     fresh = dict(rows)
-    changes = {'rec_vectors': VectorChanges(tuple((key, blob) for key, blob in rows
-                if previous_rows.get(key) != blob), tuple(previous_rows.keys() - fresh.keys()))}
     fit_inputs = model_refresh._fingerprint(['canonical-baskets-1', selected['method'], selected['dim'], baskets, weights])
+    basis = embeddings.version('rec_vectors', {'rec_fit_inputs': fit_inputs,
+        'rec_embed_method': selected['method'], 'rec_dim': str(selected['dim'])})
+    changes = {'rec_vectors': (VectorChanges(tuple(rows), (), replace=True, model_version=basis)
+        if not previous_basis or previous_basis[0] != basis else
+        VectorChanges(tuple((key, blob) for key, blob in rows if previous_rows.get(key) != blob),
+                      tuple(previous_rows.keys() - fresh.keys())))}
     applied = selected != run['previous']
     result = {key: value for key, value in run.items() if key != '_evaluations'}
     result.update(status='applied' if applied else 'retained', phase='complete', completed_at=now,
@@ -204,8 +210,10 @@ def _publish_fit(store, snapshot, run, now):
             store.rec_model.publish_training_generation(changes)
         store.settings.publish_values({'rec_fit_inputs': fit_inputs})
         store.conn.execute("DELETE FROM rec_proposals WHERE surface IN "
-            "('home_prepared','home_tuned','home_choice','album_prepared','mode_bundles','fresh_pool')")
-        store.rec_proposals.publish_prepared_home(json.dumps({'next_at': run['ran_at'] + DAY}), now, surface=SCHEDULE)
+            "('home_choice','mode_bundles','fresh_pool')")
+        from yt_playlist.rec.invalidation import clear_model_display
+        clear_model_display(store.conn)
+        store.model_selection.schedule_daily(run['ran_at'] + DAY, now)
     if not snapshot.publish(publish):
         raise ValueError('Model inputs changed before publication; the serving model was kept')
     return result

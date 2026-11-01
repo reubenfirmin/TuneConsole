@@ -75,7 +75,7 @@
 .gen-brand { position: absolute; z-index: 5; top: clamp(1.2rem, 4vh, 2.2rem); left: clamp(1.4rem, 5vw, 4rem); }
 
 /* Console status block, bottom-left: live system state with a blinking cursor. */
-.gen-copy { position: absolute; z-index: 5; left: clamp(1.4rem, 5vw, 4rem); right: clamp(1.4rem, 5vw, 4rem); bottom: clamp(1.4rem, 6vh, 4rem);
+.gen-copy, .gen-terminal { position: absolute; z-index: 5; left: clamp(1.4rem, 5vw, 4rem); right: clamp(1.4rem, 5vw, 4rem); bottom: clamp(1.4rem, 6vh, 4rem);
   max-width: 32rem; }
 .gen-stage .gen-status {
   font-family: var(--font-mono); font-size: clamp(1rem, 2.4vw, 1.5rem); font-weight: 500;

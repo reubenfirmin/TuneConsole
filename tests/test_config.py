@@ -1,5 +1,5 @@
 import pytest
-from yt_playlist.core.config import load_identities
+from yt_playlist.core.config import load_accounts, validate_accounts
 from yt_playlist.util.retry import with_retry
 
 def test_load_identities_requires_one_master(tmp_path):
@@ -7,7 +7,7 @@ def test_load_identities_requires_one_master(tmp_path):
     p.write_text(
         '[[identity]]\nlabel="main"\ncredential_ref="cred.json"\nis_master=true\n'
         '[[identity]]\nlabel="brand"\ncredential_ref="cred.json"\nbrand_account_id="123"\n')
-    ids = load_identities(p)
+    ids = load_accounts(p)
     assert len(ids) == 2
     assert sum(i.is_master for i in ids) == 1
     assert ids[1].brand_account_id == "123"
@@ -16,7 +16,7 @@ def test_load_identities_rejects_zero_masters(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text('[[identity]]\nlabel="a"\ncredential_ref="c"\n')
     with pytest.raises(ValueError):
-        load_identities(p)
+        load_accounts(p)
 
 def test_load_identities_rejects_multiple_masters(tmp_path):
     p = tmp_path / "config.toml"
@@ -24,7 +24,30 @@ def test_load_identities_rejects_multiple_masters(tmp_path):
         '[[identity]]\nlabel="a"\ncredential_ref="c"\nis_master=true\n'
         '[[identity]]\nlabel="b"\ncredential_ref="c"\nis_master=true\n')
     with pytest.raises(ValueError):
-        load_identities(p)
+        load_accounts(p)
+
+
+@pytest.mark.parametrize('flag', [2, -1, 1.0, 0.0, 'true', 'false', '', None, [], {}])
+def test_account_flags_reject_truthy_and_numeric_coercion(flag):
+    with pytest.raises(ValueError, match='boolean or integer 0 or 1'):
+        validate_accounts([{'label': 'main', 'credential_ref': 'c', 'is_master': flag}])
+
+
+@pytest.mark.parametrize('flag', ['"false"', '"true"', '2', '-1', '1.0'])
+def test_toml_account_flag_is_validated_before_bool_conversion(tmp_path, flag):
+    path = tmp_path / 'config.toml'
+    path.write_text(f'[[identity]]\nlabel="main"\ncredential_ref="c"\nis_master={flag}\n')
+    with pytest.raises(ValueError, match='boolean or integer 0 or 1'):
+        load_accounts(path)
+
+
+def test_integer_account_flags_load_as_booleans_without_changing_ids(tmp_path):
+    path = tmp_path / 'config.toml'
+    path.write_text('[[identity]]\nid=17\nlabel="main"\ncredential_ref="c"\nis_master=1\n'
+                    '[[identity]]\nid=21\nlabel="brand"\ncredential_ref="c"\nis_master=0\n')
+    configs = load_accounts(path)
+    assert [(config.account_id, config.is_master) for config in configs] == [(17, True), (21, False)]
+    assert all(type(config.is_master) is bool for config in configs)
 
 def test_with_retry_retries_then_succeeds():
     calls = {"n": 0}

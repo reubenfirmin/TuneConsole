@@ -2,7 +2,7 @@
 import logging
 from types import SimpleNamespace
 
-from yt_playlist.rec import home_cards, mode_surfaces, surfaces
+from yt_playlist.rec import home_cards, mode_surfaces, stored_home
 
 
 class Jobs:
@@ -41,16 +41,16 @@ def test_other_genre_fallback_records_only_final_offer_once(store, monkeypatch):
     home = service(store)
     offered, served, searches = [], [], []
 
-    def candidates(store, lane, now, **filters):
+    def candidates(store, now, **filters):
         searches.append(filters)
-        return proto() if not filters and lane == "wheelhouse" else None
+        return [] if filters.get('avoid') else [proto()]
 
-    monkeypatch.setattr(home_cards, "_one_card", candidates)
+    monkeypatch.setattr(stored_home, "unmodeled_cards", candidates)
     monkeypatch.setattr(home_cards, "_record_served_cards", lambda store, protos, now: served.append(protos))
     monkeypatch.setattr(store.discovery, "mark_offered", lambda kind, keys, now: offered.append(keys))
     result = home.cards(home_cards.CardsRequest(1000))
     assert "usual mixes" in result.genre_warning
-    assert any(search.get("avoid_genres") == {"jazz"} for search in searches)
+    assert any(search.get("avoid") == {"jazz"} for search in searches)
     assert offered == [["a|b"]]
     assert served == [[result.protos[0]]]
     assert home.jobs.admitted == []
@@ -93,7 +93,7 @@ def test_pool_failure_and_polling_do_not_admit_jobs_or_record_offers(store, monk
 
 def test_measurement_failure_keeps_offers_available(store, monkeypatch):
     home = service(store)
-    monkeypatch.setattr(home_cards, "_one_card", lambda store, lane, now, **kw: proto() if lane == "wheelhouse" else None)
+    monkeypatch.setattr(stored_home, "unmodeled_cards", lambda store, now, **kw: [proto()])
 
     def unavailable(*args, **kwargs):
         raise OSError("measurement unavailable")
@@ -103,18 +103,22 @@ def test_measurement_failure_keeps_offers_available(store, monkeypatch):
 
 
 def test_catalog_excludes_only_displayed_wheelhouse_tracks(store, monkeypatch):
-    shared = []
     for i in range(60):
         title, artist = f"Song {i}", f"Artist {i}"
         store.tracks.upsert_track(f"v{i}", title, artist, None, None)
-        shared.append(surfaces.ForYouItem(title, artist, "", f"v{i}", None, 0, "",
-                                         key=f"song {i}|artist {i}"))
-    monkeypatch.setattr(surfaces, "for_you", lambda *a, **kw: shared)
+    from yt_playlist.rec import measurement
+    shared = [{'key': f'song {i}|artist {i}'} for i in range(60)]
+    with store.read_snapshot() as snapshot:
+        policies = measurement.PoolPolicies(snapshot.store, 999)
+        pool = policies.stamp(shared, 'wheelhouse')
+        assert mode_surfaces._publish_typed_bundles(store, snapshot,
+            {'all': {'wheelhouse': pool, 'explore': pool}, '_meta': {'unmodeled': True}},
+            [], policies, {}, 999)
 
     result = service(store).cards(home_cards.CardsRequest(1000))
     by_lane = {p["lane"]: p["tracks"] for p in result.protos}
 
-    wheelhouse = {t.key for t in by_lane["wheelhouse"]}
-    catalog = {t.key for t in by_lane["explore"]}
+    wheelhouse = {t['key'] for t in by_lane["wheelhouse"]}
+    catalog = {t['key'] for t in by_lane["explore"]}
     assert len(wheelhouse) == len(catalog) == 12
     assert wheelhouse.isdisjoint(catalog)

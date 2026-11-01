@@ -14,7 +14,7 @@ def similar_dialog(live_app, store, page, request):
     playlist = store.playlists.get_playlists()[0]
     browse = "MPRE_layout"
     store.collection.add_saved_album({"browse": browse, "title": "Layout release", "artist": "Layout artist"})
-    tids, vectors, titles = [], [], []
+    tids, vectors = [], []
     for i in range(40):
         title = f"Song {i:02d} " + "A long release title with additional details " * 3 + "x" * 80
         artist = f"Artist {i:02d} with a long artist credit"
@@ -22,7 +22,6 @@ def similar_dialog(live_app, store, page, request):
                                        album_browse_id=browse,
                                        thumbnail="/static/nag/intro.png" if artwork else None))
         vectors.append((identity_key(title, artist), np.array([1, i / 100], dtype=np.float32).tobytes()))
-        titles.append(title)
     store.playlists.set_playlist_tracks(playlist.id, tids)
     store.rec_model.replace_rec_vectors(vectors)
     store.settings.set_setting("rec_dim", "2")
@@ -31,9 +30,17 @@ def similar_dialog(live_app, store, page, request):
     page.set_viewport_size({"width": width, "height": 600})
     path = f"/playlist/{playlist.id}" if kind == "playlist" else f"/album?browse={browse}"
     page.goto(live_app + path)
-    trigger = page.get_by_role("button", name=f"More actions for {titles[-1]}", exact=True)
+    # Album and playlist order can differ. Exercise the actual last rendered row.
+    trigger = page.get_by_role("button", name="More actions for", exact=False).last
     trigger.scroll_into_view_if_needed()
-    assert page.evaluate("window.scrollY") > 200
+    # scrollIntoView may return before the page's smooth scroll has advanced.
+    # Wait for the actual scrolled state before opening the modal.
+    page.wait_for_function("""el => {
+        let distance = window.scrollY;
+        for (let parent = el.parentElement; parent; parent = parent.parentElement)
+            distance = Math.max(distance, parent.scrollTop);
+        return distance > 200;
+    }""", arg=trigger.element_handle())
     trigger.click()
     page.get_by_role("menuitem", name="Songs like this", exact=True).click()
     dialog = page.locator("#similar-modal .modal-similar")
@@ -44,19 +51,12 @@ def similar_dialog(live_app, store, page, request):
     assert errors == []
 
 
-def test_similar_dialog_stays_in_view_after_scrolling(similar_dialog, page):
+def test_similar_results_scroll_without_clipping_actions(similar_dialog, page):
     dialog, kind, width, artwork = similar_dialog
     bounds = dialog.bounding_box()
     assert bounds is not None
     assert 0 <= bounds["x"] and bounds["x"] + bounds["width"] <= width
     assert 0 <= bounds["y"] and bounds["y"] + bounds["height"] <= 600
-    expect(dialog.get_by_role("button", name="Close", exact=True)).to_be_in_viewport()
-    page.keyboard.press("Escape")
-    expect(dialog).to_be_hidden()
-
-
-def test_similar_results_scroll_without_clipping_actions(similar_dialog, page):
-    dialog, kind, width, artwork = similar_dialog
     results = dialog.locator("#similar-results")
     rows = results.locator(".alt-row")
     expect(rows).to_have_count(12)

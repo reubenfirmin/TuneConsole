@@ -2,10 +2,10 @@
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field
 
-from yt_playlist.rec import album_choices, album_notes, album_tuning, choice_evidence, home_prepared, into_recently
+from yt_playlist.rec import account_growth, album_choices, album_notes, album_tuning, choice_evidence, home_prepared, into_recently
 from yt_playlist.rec.home_cards import _epoch
-from yt_playlist.util import genre_map
 from yt_playlist.web.context import request_form
+from yt_playlist.web.routes.home_access import guard, state as growth_state
 
 
 class StoryImpressions(BaseModel):
@@ -42,28 +42,31 @@ def build(ctx, views):
         if preference is not None:
             if preference not in {"auto", "albums", "mixes", "radio", "both"}:
                 return Response(status_code=400)
+            if not all(growth_state(ctx, request)['ready_formats'].values()):
+                return Response('Wait until all three listening formats are ready.', status_code=409)
             store.settings.set_setting("home_format", preference)
         if panel in {"album-choices", "directions", "radio"}:
+            if not account_growth.has_access(growth_state(ctx, request), panel):
+                return Response(status_code=409)
             store.settings.set_setting("home_last_panel", panel)
         return Response(status_code=204)
 
-    @router.get("/home/album-choices")
+    @router.get("/home/album-choices", dependencies=[Depends(guard(ctx, 'album-choices'))])
     def home_album_choices(request: Request):
         now = now_fn()
         prepared = album_choices.load(store, now, views.schedule)
         payload = prepared or {}
-        pool = album_choices.eligible(store, payload.get("items", []), now)
         playing = ctx.bridge.now_playing or {}
         current = playing.get("album_browse_id")
         if not current and playing.get("playlist_ytm_id"):
             source = store.collection.playback_source(playing["playlist_ytm_id"], playing.get("video_id"))
             current = source.get("browse") if source and source["kind"] == "album" else None
-        pool = [album for album in pool if album["browse_id"] != current]
         epoch = _epoch(store, "album_choices")
         tuning = album_tuning.state(store, now)
         refresh = store.rec_proposals.get_proposals('album_menu_refresh') or {}
         excluded = refresh.get('exclude', []) if refresh.get('epoch') == epoch else []
-        items, policy = album_choices.menu(pool, tuning['values'], epoch, tuning['genres'], exclude=excluded)
+        pool, items, policy = album_choices.selection(store, payload.get('items', []), now,
+            tuning['values'], epoch, tuning['genres'], exclude=excluded, current=current)
         policy['temporary_until'] = now + tuning['remaining'] if tuning['remaining'] else None
         policy['standing_defaults'] = album_tuning.defaults(store)
         options = [{**a, "id": a["browse_id"], "position": i + 1} for i, a in enumerate(items)]
@@ -83,7 +86,7 @@ def build(ctx, views):
                   'familiarity': _familiarity(listening[album['browse_id']]),
                   'notes_pending': album['browse_id'] in queued_notes and ctx.rec_worker is not None}
                  for album in items]
-        genres = sorted({genre_map.family(album.get('genre')) for album in pool} - {''})
+        genres = sorted({axis[0] for axis in store.genres.feature_axes(album.get('genre') for album in pool).values()} - {''})
         genres = sorted(set(genres) | set(tuning['genres']))
         return templates.TemplateResponse(request, "_partials/album_choices.html", {
             "albums": items, "opportunity_id": oid, "preparing": prepared is None,
@@ -102,19 +105,19 @@ def build(ctx, views):
             epoch = _epoch(store, 'album_choices')
             refresh = store.rec_proposals.get_proposals('album_menu_refresh') or {}
             excluded = refresh.get('exclude', []) if refresh.get('epoch') == epoch else []
-            items, _ = album_choices.menu(album_choices.eligible(store, payload.get('items', []), now),
+            _, items, _ = album_choices.selection(store, payload.get('items', []), now,
                 tuning['values'], epoch, tuning['genres'], exclude=excluded)
             ids = [item['browse_id'] for item in items]
         store.rec_ledger.refresh_card('album_choices', 1, now)
         store.rec_proposals.put_proposals('album_menu_refresh',
             {'epoch': _epoch(store, 'album_choices'), 'exclude': ids}, now)
 
-    @router.post("/home/album-choices/refresh")
+    @router.post("/home/album-choices/refresh", dependencies=[Depends(guard(ctx, 'album-choices'))])
     def refresh_album_choices(request: Request, form=Depends(request_form)):
         rotate_album_choices(form.get('opportunity_id', ''))
         return home_album_choices(request)
 
-    @router.post('/home/album-choices/tune')
+    @router.post('/home/album-choices/tune', dependencies=[Depends(guard(ctx, 'album-choices'))])
     def tune_album_choices(request: Request, form=Depends(request_form)):
         try:
             if form.get('reset') == '1':
@@ -122,9 +125,10 @@ def build(ctx, views):
             else:
                 values = {axis['key']: float(form[axis['key']]) / 100 for axis in album_tuning.AXES}
                 genres = form.getlist('genre')
-                known = set(genre_map.all_families())
+                known = set(store.genres.taxonomy()['families'])
                 payload = album_choices.load(store, now_fn()) or {}
-                known.update(genre_map.family(album.get('genre')) for album in payload.get('items', []))
+                known.update(axis[0] for axis in store.genres.feature_axes(
+                    album.get('genre') for album in payload.get('items', [])).values())
                 if any(genre not in known for genre in genres):
                     raise ValueError('Unknown album genre')
                 album_tuning.apply(store, now_fn(), values, genres)
@@ -133,7 +137,7 @@ def build(ctx, views):
         rotate_album_choices(form.get('opportunity_id', ''))
         return home_album_choices(request)
 
-    @router.get('/home/album-notes')
+    @router.get('/home/album-notes', dependencies=[Depends(guard(ctx, 'album-choices'))])
     def home_album_notes(request: Request, browse: str, opportunity: str = '', attempt: int = 0):
         prepared = album_choices.load(store, now_fn()) or {}
         albums = prepared.get('items', [])
@@ -166,7 +170,7 @@ def build(ctx, views):
             ctx.rec_worker.trigger_home_refresh()
         return Response(status_code=204)
 
-    @router.get("/home/into-recently")
+    @router.get("/home/into-recently", dependencies=[Depends(guard(ctx, 'recent'))])
     def home_into_recently(request: Request):
         """Read worker-prepared stories; the request only rotates the already decorated pool."""
         now = now_fn()
@@ -180,19 +184,25 @@ def build(ctx, views):
                                                "preparing": preparing})
         return Response(status_code=200)
 
-    @router.post("/home/into-recently/impressions", status_code=204)
+    @router.post("/home/into-recently/impressions", status_code=204, dependencies=[Depends(guard(ctx, 'recent'))])
     def story_impressions(visible: StoryImpressions):
         payload = store.rec_proposals.get_proposals(into_recently.SURFACE) or {}
         known = {card['subject'] for card in payload.get('cards', [])}
         store.rec_ledger.record_story_views(known.intersection(visible.subjects), now_fn())
         return Response(status_code=204)
 
-    @router.get("/home/discovery")
+    @router.get("/home/discovery", dependencies=[Depends(guard(ctx, 'discover'))])
     def home_discovery(request: Request):
         return templates.TemplateResponse(request, "_partials/home_discovery.html",
                                           views.discovery_context(now_fn()))
 
-    @router.get("/home/discover")
+    @router.get('/home/revisit', dependencies=[Depends(guard(ctx, 'rediscover'))])
+    def home_revisit(request: Request):
+        now = now_fn()
+        return templates.TemplateResponse(request, '_partials/rediscover.html',
+            home_prepared.collections(store, views.prepared(now), now))
+
+    @router.get("/home/discover", dependencies=[Depends(guard(ctx, 'discover'))])
     def home_discover(request: Request):
         # From the accumulating discovery pool: recency-biased, repeat-aware, filled in by the
         # background scan of every artist you're interested in (not a top-10 overwrite).
@@ -203,7 +213,7 @@ def build(ctx, views):
                                            "building": not albums and views.busy(),
                                            "stale": bool(albums) and views.busy()})
 
-    @router.get("/home/new-artists")
+    @router.get("/home/new-artists", dependencies=[Depends(guard(ctx, 'discover'))])
     def home_new_artists(request: Request):
         # From the accumulating new-artist pool: best taste-fit first, de-prioritizing recently-shown.
         now = now_fn()

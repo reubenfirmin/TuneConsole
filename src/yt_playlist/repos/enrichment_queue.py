@@ -48,7 +48,7 @@ class EnrichmentQueueRepo(Repo):
                      SELECT DISTINCT pt.playlist_id,tp.recording_id,tp.sp FROM playlist_tracks pt
                      JOIN tp ON tp.id=pt.track_id) GROUP BY playlist_id),
         al_plays AS (SELECT album_id,SUM(sp) c FROM (
-                     SELECT DISTINCT at.album_id,tp.recording_id,tp.sp FROM album_tracks at
+                     SELECT DISTINCT at.album_id,tp.recording_id,tp.sp FROM {album_tracks} at
                      JOIN tp ON tp.id=at.entry_id) GROUP BY album_id),
         ar_plays AS (SELECT ar,SUM(sp) c FROM (
                      SELECT DISTINCT t.artist ar,tp.recording_id,tp.sp FROM catalog_tracks t
@@ -129,12 +129,12 @@ class EnrichmentQueueRepo(Repo):
         row = self.conn.execute(
             "SELECT value FROM settings WHERE key='enrich_caught_up_at'").fetchone()
         caught_up = float(row["value"]) if row and row["value"] else 0.0
-        rows = self.conn.execute(self._QUEUE_CTES + ", " + TRACKS_CTE + """,
+        rows = self.conn.execute(self._QUEUE_CTES.format(album_tracks=self.album_tracks_table) + ", " + TRACKS_CTE + f""",
           queue AS (
             SELECT t.*, COALESCE(p.c, 0) sp,
               MAX(COALESCE((SELECT MAX(plp.c) FROM playlist_tracks pt JOIN pl_plays plp
                             ON plp.playlist_id=pt.playlist_id WHERE pt.track_id=t.id), 0),
-                  COALESCE((SELECT MAX(ap.c) FROM al_plays ap JOIN album_tracks at ON at.album_id=ap.album_id
+                  COALESCE((SELECT MAX(ap.c) FROM al_plays ap JOIN {self.album_tracks_table} at ON at.album_id=ap.album_id
                             JOIN catalog_entries e ON e.id=at.entry_id WHERE e.recording_id=t.recording_id), 0),
                   COALESCE((SELECT c FROM ar_plays WHERE ar=t.artist), 0)) AS best
             FROM enrichment_tracks t LEFT JOIN plays p ON p.identity_key=t.identity_key
@@ -198,8 +198,9 @@ class EnrichmentQueueRepo(Repo):
         track_ids = [catalog.resolve_entry(self.conn,t) for t in track_ids]
         qs = ",".join("?" * len(track_ids))
         self.conn.execute(
-            f"UPDATE catalog_tracks SET first_enriched_at = COALESCE(first_enriched_at, ?), "
-            f"last_enriched_at = ? WHERE id IN ({qs})", [now, now, *track_ids])
+            f"UPDATE recordings SET first_enriched_at = COALESCE(first_enriched_at, ?), "
+            f"last_enriched_at = ? WHERE id IN (SELECT recording_id FROM catalog_entries WHERE id IN ({qs}))",
+            [now, now, *track_ids])
         self.conn.commit()
 
     @synchronized
@@ -210,6 +211,7 @@ class EnrichmentQueueRepo(Repo):
             return
         qs = ",".join("?" * len(track_ids))
         self.conn.execute(
-            f"UPDATE catalog_tracks SET first_enriched_at=NULL, last_enriched_at=NULL WHERE id IN ({qs})",
+            f"UPDATE recordings SET first_enriched_at=NULL, last_enriched_at=NULL "
+            f"WHERE id IN (SELECT recording_id FROM catalog_entries WHERE id IN ({qs}))",
             track_ids)
         self.conn.commit()

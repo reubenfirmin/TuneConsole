@@ -15,7 +15,7 @@ def store():
 
 
 def _identity(store):
-    return store.identities.upsert_identity("main", "cred", None, True)
+    return store.accounts.upsert_account("main", "cred", None, True)
 
 
 def _install_modes(store):

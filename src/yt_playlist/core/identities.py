@@ -1,5 +1,5 @@
 from ytmusicapi import YTMusic
-from yt_playlist.core.config import IdentityConfig
+from yt_playlist.core.config import AccountConfig
 from yt_playlist.core.bridge_session import BridgeSession
 
 # ytmusicapi needs an auth blob to build its headers and pass _check_auth for writes. The real auth
@@ -55,7 +55,7 @@ class BridgeClient(YTMusic):
         return self._session._bridge.source_timezone
 
 
-def build_client(cfg: IdentityConfig, bridge) -> YTMusic:
+def build_client(cfg: AccountConfig, bridge) -> YTMusic:
     # All network I/O is executed by the extension via the bridge session; STUB_AUTH just satisfies
     # ytmusicapi's own construction and auth checks. brand_account_id still selects the identity.
     return BridgeClient(STUB_AUTH, cfg.brand_account_id,

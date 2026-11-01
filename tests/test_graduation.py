@@ -49,7 +49,7 @@ def test_graduation_never_suppresses(store):
 
 
 def test_recs_mood_route_feeds_graduation(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     tid = store.tracks.upsert_track("v1", "S", "Coltrane", None, None, 1)
     store.tracks.set_track_genre(tid, "jazz")
     pid = store.playlists.upsert_playlist(iid, "PL", "Mix", 1, "h", 0.0)
@@ -65,4 +65,4 @@ def test_recs_mood_route_feeds_graduation(store):
 def TestClient_factory(store, iid):
     from fastapi.testclient import TestClient
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
-                      base_url="http://127.0.0.1")
+                      base_url="http://127.0.0.1", backend_options={'use_uvloop':True})

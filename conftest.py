@@ -1,12 +1,14 @@
-"""One test session per machine, with coordinated workers for complete local runs."""
+"""Lock complete suites; focused checks run independently without the machine lock."""
 
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import shlex
+import shutil
 import sys
 import time
 import uuid
@@ -21,13 +23,37 @@ pytest_plugins = ["ci_test_shards", "local_test_workers", "tests.browser_fixture
 _LOCK_PATH = Path(f"/tmp/tuneconsole-tests-{os.getuid()}.lock")
 
 
+def pytest_make_parametrize_id(val, argname):
+    # Oversized-input checks must not embed megabytes of fixture data in node
+    # IDs, which pytest stores persistently and repeats in failure reports.
+    if isinstance(val, (str, bytes)) and len(val) > 120:
+        data = val.encode("utf-8", errors="surrogatepass") if isinstance(val, str) else val
+        digest = hashlib.sha256(data).hexdigest()[:12]
+        unit = "chars" if isinstance(val, str) else "bytes"
+        return f"{argname}-{len(val)}{unit}-{digest}"
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_sessionfinish(session):
+    try:
+        return (yield)
+    finally:
+        # Pytest's retention settings do not clean an explicit --basetemp.
+        # Wait until teardown and report writers finish, and only remove a
+        # directory the temp factory actually used (collection may not use it).
+        factory = getattr(session.config, "_tmp_path_factory", None)
+        if session.config.getoption("basetemp", default=None) and factory is not None:
+            if factory._basetemp is not None:
+                shutil.rmtree(factory._basetemp)
+
+
 def pytest_addoption(parser):
     parser.addoption('--listening-acceptance-url', default=None, metavar='URL',
         help='Inspect Charts in an already running app without recording review impressions.')
     parser.addoption('--listening-acceptance-db', default=None, metavar='PATH',
         help='Run listening visual acceptance against a read-only copy of this saved database.')
     parser.addoption('--policy-recovery-source', default=None, metavar='PATH',
-        help='Rehearse policy recovery against a read-only saved database under the shared test lock.')
+        help='Rehearse policy recovery against a read-only saved database.')
     parser.addoption('--policy-recovery-output', default=None, metavar='PATH',
         help='Keep the verified backup, compact candidate and report in this new directory.')
     parser.addoption('--group-readonly-db', default=None, metavar='PATH',
@@ -40,7 +66,7 @@ def pytest_addoption(parser):
         help='Rehearse vibe migration and startup on an isolated copy of this read-only database.')
     parser.addoption(
         "--test-lock-wait", type=float, default=0, metavar="SECONDS",
-        help="Wait up to SECONDS for the shared test lock (default: fail immediately).",
+        help="Wait up to SECONDS for the full-suite test lock (default: fail immediately).",
     )
     parser.addoption(
         "--run-flatpak-build", action="store_true",
@@ -76,6 +102,8 @@ def pytest_configure(config):
         local_test_workers.join_owner(config, _LOCK_PATH)
         return
     local_test_workers.validate(config)
+    if not local_test_workers.full_suite(config):
+        return
 
     lock = _LOCK_PATH.open("a+", encoding="utf-8")
     # Cleanup runs after session teardown, and also when configuration fails.

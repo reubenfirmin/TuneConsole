@@ -20,9 +20,8 @@ def test_picked_mode_outsamples_ignored_mode_on_average():
     # Mode 1: 10/20 picked. Mode 2: 0/20 offered, never picked. Over many seeds the
     # posterior for mode 1 must dominate: this is the bandit actually using acceptance.
     stats = {1: (10, 20), 2: (0, 20)}
-    wins = sum(1 for seed in range(400)
-               if thompson_mode_scores(stats, [1, 2], random.Random(seed))[1]
-               > thompson_mode_scores(stats, [1, 2], random.Random(seed))[2])
+    samples = [thompson_mode_scores(stats, [1, 2], random.Random(seed)) for seed in range(400)]
+    wins = sum(sample[1] > sample[2] for sample in samples)
     assert wins > 360                                    # ~Beta(11,11) vs Beta(1,21)
 
 

@@ -6,9 +6,11 @@ from pathlib import Path
 import shutil
 import socket
 import struct
+import subprocess
 import time
 from urllib.parse import urlparse
 import wave
+import zipfile
 
 import pytest
 from playwright.sync_api import expect
@@ -42,9 +44,32 @@ def _wait(cdp, expression, timeout=15, context_id=None):
 @pytest.fixture
 def preview_browser(playwright, browser_type_launch_args, live_app, tmp_path, request):
     if not available():
-        pytest.skip('Install the optional local audio research model first')
+        pytest.skip('Prepare the production audio model assets first')
+    variant = getattr(request, 'param', None)
     extension = tmp_path / 'extension'
-    shutil.copytree(EXT, extension)
+    if variant in {'packaged', 'packaged_sampling'}:
+        build = tmp_path / 'build'
+        shutil.copytree(EXT, build / 'extension')
+        (build / 'scripts').mkdir()
+        shutil.copyfile(EXT.parent / 'scripts/build-extension.sh', build / 'scripts/build-extension.sh')
+        shutil.copytree(EXT.parent / 'scripts/audio_model', build / 'scripts/audio_model',
+                        ignore=shutil.ignore_patterns('__pycache__'))
+        result = subprocess.run(['bash', str(build / 'scripts/build-extension.sh')],
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        archive, = (build / 'dist').glob('*.zip')
+        with zipfile.ZipFile(archive) as package:
+            package.extractall(extension)
+        manifest_path = extension / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        assert 'key' not in manifest
+        assert not {'tabs', 'history'} & set(manifest['permissions'])
+        # Give this unpacked ZIP the app's recognized development identity.
+        # All inference source, runtime and weights remain the packaged bytes.
+        manifest['key'] = json.loads((EXT / 'manifest.json').read_text())['key']
+        manifest_path.write_text(json.dumps(manifest))
+    else:
+        shutil.copytree(EXT, extension)
     shutil.copyfile(EXT.parent / 'experiments/audio_lab/embedding_probe.js', extension / 'audio_model/embedding_probe.js')
     shutil.copyfile(EXT.parent / 'experiments/audio_lab/attributes_probe.js', extension / 'audio_model/attributes_probe.js')
     if getattr(request, 'param', None) == 'tampered_head':
@@ -73,7 +98,7 @@ def preview_browser(playwright, browser_type_launch_args, live_app, tmp_path, re
         audio.setframerate(48000)
         second = b''.join(struct.pack('<h', int(3276 * math.sin(2 * math.pi * 440 * i / 48000)))
             for i in range(48000))
-        duration = 195 if getattr(request, 'param', None) in {'natural_sampling', 'natural_offset'} else (
+        duration = 195 if variant in {'natural_sampling', 'natural_offset', 'packaged_sampling'} else (
             180 if getattr(request, 'param', None) == 'scheduled_sampling' else 30)
         audio.writeframes(second * duration)
 
@@ -101,7 +126,7 @@ def preview_browser(playwright, browser_type_launch_args, live_app, tmp_path, re
         cdp.on('Runtime.executionContextCreated', lambda event: worlds.append(event['context']))
         cdp.send('Runtime.enable')
         song_id = 'vibe_song' if getattr(request, 'param', None) in {
-            'scheduled_sampling', 'natural_sampling', 'natural_offset'} else 'preview_song'
+            'scheduled_sampling', 'natural_sampling', 'natural_offset', 'packaged_sampling'} else 'preview_song'
         source.goto('https://music.youtube.com/')
         deadline = time.monotonic() + 10
         isolated = None
@@ -117,7 +142,7 @@ def preview_browser(playwright, browser_type_launch_args, live_app, tmp_path, re
         assert isolated is not None
         _evaluate(cdp, 'window.postMessage({__tcSensorVersion:4,__tcSensorRevision:8,__tcNow:{videoId:'
                   + json.dumps(song_id) + ',title:"Fixture song",paused:false}},"*")')
-        if getattr(request, 'param', None) in {'natural_sampling', 'natural_offset'}:
+        if variant in {'natural_sampling', 'natural_offset', 'packaged_sampling'}:
             # Real native playback supplies both clocks. Only the exposed raw
             # media timeline is offset, as YTM does when reusing its stream.
             # The production MAIN sensor reads the player's per-song getter.
@@ -268,7 +293,7 @@ def test_native_attributes_match_known_levels_and_rhythm_without_audio_output(pr
         assert all(value is None or math.isfinite(value) for value in values.values())
 
 
-@pytest.mark.parametrize('preview_browser', ['no_activation', 'normal_playback', 'mobile', 'unverified_playback'], indirect=True)
+@pytest.mark.parametrize('preview_browser', ['no_activation', 'normal_playback', 'mobile', 'unverified_playback', 'packaged'], indirect=True)
 def test_app_automatically_captures_and_runs_model_without_capture_click(live_app, preview_browser, tmp_path, request):
     context, worker, source, source_cdp, isolated = preview_browser
     source_activated = _evaluate(source_cdp, 'navigator.userActivation.hasBeenActive')
@@ -479,7 +504,7 @@ def test_changed_mood_weights_fail_closed_and_release_audio(live_app, preview_br
     mock_playback(page)
     page.goto(live_app + '/audio-preview')
     expect(page.locator('[data-preview-status]')).to_contain_text(
-        'Research artifact changed: relaxed/group1-shard1of1.bin', timeout=25000)
+        'Audio artifact changed: relaxed/group1-shard1of1.bin', timeout=25000)
     expect(page.locator('[data-preview-result]')).to_be_hidden()
     expect(page.get_by_role('button', name='Stop analysis')).to_be_disabled()
     _released(cdp, isolated)

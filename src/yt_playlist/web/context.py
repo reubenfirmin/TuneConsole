@@ -18,6 +18,8 @@ from fastapi.templating import Jinja2Templates
 
 from yt_playlist.library.ops import PlaylistOps
 from yt_playlist.core.activity import Activity
+from yt_playlist.core import account_auth_state
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.web.jobs import SyncJobs
 
 logger = logging.getLogger("yt_playlist.web")
@@ -70,38 +72,66 @@ class Ctx:
     spotify_import_lock: object = field(default_factory=threading.Lock)
 
     def __post_init__(self):
+        if getattr(self.store,'_collection_files',False):
+            self.auth_expired.update(account_auth_state.read(self.store.conn))
+            return
         raw = self.store.settings.get_setting(AUTH_EXPIRED_KEY)
         if raw:
             try:                                    # keys are ints (identity ids) so on_auth_ok's pop matches
-                self.auth_expired.update({int(k): v for k, v in json.loads(raw).items()})
+                self.auth_expired.update(account_auth_state.legacy_map(json.loads(raw)))
             except (ValueError, TypeError):         # corrupt/legacy value: ignore, the next sync rebuilds it
                 self.logger.warning("ignoring unreadable %s setting", AUTH_EXPIRED_KEY)
 
-    def _persist_auth_expired(self):
+    def _persist_auth_expired(self, *, account_id=None, label=None, clear_all=False):
         if getattr(self.store, 'activity_paused', False):
             return
-        if self.auth_expired:
-            self.store.settings.set_setting(AUTH_EXPIRED_KEY,
-                                   json.dumps({str(k): v for k, v in self.auth_expired.items()}))
-        else:
-            self.store.settings.delete_setting(AUTH_EXPIRED_KEY)
+        with atomic_write(self.store):
+            if getattr(self.store, 'activity_paused', False):
+                return
+            if account_auth_state.available(self.store.conn):
+                if clear_all:
+                    account_auth_state.clear(self.store.conn)
+                elif label is not None:
+                    account_auth_state.flag(self.store.conn, account_id, label)
+                else:
+                    account_auth_state.clear(self.store.conn, account_id)
+                current = account_auth_state.read(self.store.conn)
+            else:
+                raw = self.store.settings.get_setting(AUTH_EXPIRED_KEY)
+                try:
+                    current = account_auth_state.legacy_map(json.loads(raw)) if raw else {}
+                except (ValueError, TypeError):
+                    self.logger.warning('ignoring unreadable %s setting', AUTH_EXPIRED_KEY)
+                    current = {}
+                if clear_all:
+                    current.clear()
+                elif label is not None:
+                    current[account_id] = label
+                else:
+                    current.pop(account_id, None)
+                if current:
+                    self.store.settings.set_setting(AUTH_EXPIRED_KEY, json.dumps(current))
+                else:
+                    self.store.settings.delete_setting(AUTH_EXPIRED_KEY)
+        self.auth_expired.clear()
+        self.auth_expired.update(current)
 
-    def flag_auth_expired(self, identity_id, label):
+    def flag_auth_expired(self, account_id, label):
         """Record (and persist) that an identity's session expired. Drives the re-auth banner."""
-        self.auth_expired[identity_id] = label or str(identity_id)
-        self._persist_auth_expired()
+        self.auth_expired[account_id] = label or str(account_id)
+        self._persist_auth_expired(account_id=account_id, label=self.auth_expired[account_id])
 
-    def clear_auth_expired(self, identity_id):
+    def clear_auth_expired(self, account_id):
         """Clear one identity's expired flag (a successful re-sync of that account)."""
-        if self.auth_expired.pop(identity_id, None) is not None:
-            self._persist_auth_expired()
+        self.auth_expired.pop(account_id, None)
+        self._persist_auth_expired(account_id=account_id)
 
     def clear_all_auth_expired(self):
         """Clear every expired flag (a re-auth / sign-out resolves the whole banner)."""
         self.auth_expired.clear()
         # A healthy bridge can clear RAM while repair discards writes. A fresh
         # confirmation after repair must also remove the stale persisted flag.
-        self._persist_auth_expired()
+        self._persist_auth_expired(clear_all=True)
 
     def now(self):
         return self.now_fn()

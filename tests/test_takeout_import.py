@@ -9,7 +9,7 @@ DAY = 86400.0
 
 def _store():
     s = Store(":memory:"); s.init_schema()
-    s.identities.upsert_identity("main", "bridge", None, True)
+    s.accounts.upsert_account("main", "bridge", None, True)
     s.tracks.upsert_track("vidA", "Suave", "Danny Wabbit", "", 200)
     s.tracks.upsert_track("vidB", "Pulse", "Klockworks", "", 300)
     return s

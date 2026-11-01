@@ -15,8 +15,20 @@ from yt_playlist.core.activity import Activity
 from yt_playlist.rec.rec_worker import RecWorker
 
 
-@pytest.fixture
-def trial(store):
+def _vectors(store, values):
+    store.tracks.upsert_track('recording-video', 'Song', 'Artist', None, 200)
+    return [('song|artist', np.array(values, dtype=np.float32).tobytes())]
+
+
+def _remove_trial(store):
+    if store._model_comparison_state:
+        store.conn.execute('DELETE FROM model_comparison_plan')
+    else:
+        store.conn.execute('DELETE FROM rec_proposals WHERE surface=?', (product.SURFACE,))
+    store.conn.commit()
+
+
+def _trial(store):
     policy = dict(product.POLICY)
     current = {'phase': 'observing', 'attempt': 1, 'seed': 'balanced', 'policy': policy,
         'alpha': .025, 'previous': {'method': 'svd', 'dim': 2},
@@ -28,6 +40,23 @@ def trial(store):
     current['run_id'] = store.model_selection.start_selection(0, run)
     store.rec_proposals.put_proposals(product.SURFACE, current, 0)
     return current
+
+
+@pytest.fixture
+def trial(store):
+    return _trial(store)
+
+
+@pytest.fixture
+def paired_album_store(tmp_path):
+    from yt_playlist.core.store import Store
+
+    source = Store(tmp_path / 'paired-albums.db')
+    source.init_schema()
+    try:
+        yield source
+    finally:
+        source.conn.close()
 
 
 def offer(store, current, day, *, format='mixes', episode='episode', outcome=1, suffix=''):
@@ -86,8 +115,8 @@ def test_comparison_preferences_serialize_with_concurrent_settings_updates(store
 
 
 def test_comparison_services_queued_capture_between_individual_menus(store, trial, monkeypatch):
-    old = [('recording', np.array([1., 0.], dtype=np.float32).tobytes())]
-    new = [('recording', np.array([0., 1., 0.], dtype=np.float32).tobytes())]
+    old = _vectors(store, [1., 0.])
+    new = _vectors(store, [0., 1., 0.])
     store.rec_model.replace_rec_vectors(old)
     store.settings.set_setting('rec_dim', '2')
     trial['vectors'] = store.rec_ledger.evidence().artifact({arm: [
@@ -118,7 +147,7 @@ def test_comparison_services_queued_capture_between_individual_menus(store, tria
                 assert not store.rec_ledger.evidence().get('opportunity', oid)
             finally:
                 release.set()
-            assert future.result(15), store.model_selection.selection_run(trial['run_id'])
+            assert future.result(15), store.model_selection.selection_run(trial['run_id']).get('preparation_error')
         assert checkpoints and all(ident != threading.get_ident() for ident in checkpoints)
         assert choices.opportunity(store, oid)
         assert store.rec_ledger.evidence().get('response', f'{oid}:visible:')
@@ -132,8 +161,12 @@ def test_comparison_services_queued_capture_between_individual_menus(store, tria
         saved_run = store.model_selection.selection_run(trial['run_id'])
         sizes, timings = saved_run['preparation_bytes'], saved_run['preparation_timings']
         assert len(sizes['projections']) == 6
-        assert sizes['total'] == sum(len(row[0].encode()) for row in store.conn.execute(
-            'SELECT payload FROM rec_proposals WHERE surface LIKE ?', (f"model_pair:{trial['run_id']}:%",)))
+        if store._model_projections:
+            assert sizes['total'] == store.conn.execute('SELECT sum(f.byte_size) FROM model_pair_files f '
+                'JOIN model_pair_publications p ON p.id=f.publication_id WHERE p.run_id=?', (trial['run_id'],)).fetchone()[0]
+        else:
+            assert sizes['total'] == sum(len(row[0].encode()) for row in store.conn.execute(
+                'SELECT payload FROM rec_proposals WHERE surface LIKE ?', (f"model_pair:{trial['run_id']}:%",)))
         assert sizes['total'] <= comparison_preparation.MAX_PREPARED_BYTES
         for arm in ('incumbent', 'challenger'):
             assert all(f'{arm}: mix menu {index + 1}' in timings for index in range(12))
@@ -212,7 +245,7 @@ def test_a_single_listening_format_can_supply_the_complete_comparison(store, tri
 
 
 def test_missing_promotion_artifact_keeps_the_current_model_and_reports_retention(store, trial):
-    old = [('recording', np.array([1., 0.], dtype=np.float32).tobytes())]
+    old = _vectors(store, [1., 0.])
     store.rec_model.replace_rec_vectors(old)
     store.settings.set_setting('rec_dim', '2')
     trial['vectors'] = 'missing'
@@ -264,10 +297,39 @@ def test_pair_quota_failure_retains_complete_previous_pairs_and_records_sizes(st
 
 
 def test_interrupted_admission_without_published_trial_state_recovers_as_failed(store, trial):
-    store.conn.execute('DELETE FROM rec_proposals WHERE surface=?', (product.SURFACE,))
-    store.conn.commit()
+    _remove_trial(store)
     model_selection.recover_interrupted(store)
     assert store.model_selection.selection_run(trial['run_id'])['status'] == 'failed'
+
+
+@pytest.mark.parametrize('changed', ['model', 'head'])
+def test_staged_comparison_still_rejects_changed_model_or_serving_heads(store, trial, monkeypatch, changed):
+    if not store._model_projections:
+        pytest.skip('Requires owned comparison generations')
+    store.settings.set_setting('rec_dim', '2')
+    trial['vectors'] = store.rec_ledger.evidence().artifact({'incumbent': [], 'challenger': []})
+    saved = {}
+    for arm in ('incumbent', 'challenger'):
+        surface = product.pair_surface(trial['run_id'], arm, 'radio')
+        saved[surface] = {'run_id': trial['run_id'], 'data': {'last_good': arm}}
+        store.rec_proposals.put_proposals(surface, saved[surface], 0)
+    original = store.recommendations.stage
+    raced = False
+    def stage(plan, build):
+        nonlocal raced
+        original(plan, build)
+        if not raced:
+            raced = True
+            if changed == 'model':
+                store.settings.set_setting('rec_dim', '3')
+            else:
+                with store.conn.atomic():
+                    store.recommendations.publish(build, product.DAY)
+    monkeypatch.setattr(store.recommendations, 'stage', stage)
+    assert not comparison_preparation.prepare(store, trial, product.DAY)
+    assert raced
+    assert 'inputs changed' in store.model_selection.selection_run(trial['run_id'])['preparation_error']
+    assert all(store.rec_proposals.get_proposals(surface) == value for surface, value in saved.items())
 
 
 def test_fixed_horizon_can_promote_real_serving_evidence_and_retains_with_missing_coverage(store, trial):
@@ -280,15 +342,15 @@ def test_fixed_horizon_can_promote_real_serving_evidence_and_retains_with_missin
 
 
 def test_promotion_restart_restore_and_resume_keep_preferences_and_vectors(store, trial):
-    old = [('recording', np.array([1., 0.], dtype=np.float32).tobytes())]
-    new = [('recording', np.array([0., 1., 0.], dtype=np.float32).tobytes())]
+    old = _vectors(store, [1., 0.])
+    new = _vectors(store, [0., 1., 0.])
     store.rec_model.replace_rec_vectors(old)
     store.settings.set_setting('rec_dim', '2')
     store.rec_model.set_weight('genre:jazz', 1.4, now=1)
     trial['vectors'] = store.rec_ledger.evidence().artifact({'challenger': [
         (key, base64.b64encode(blob).decode()) for key, blob in new]})
     trial['report'] = favorable(store, trial)
-    store.rec_proposals.put_proposals(product.SURFACE, trial, 0)
+    store.rec_proposals.put_proposals(product.SURFACE, {key: value for key, value in trial.items() if key != 'report'}, 0)
     model_selection.recover_interrupted(store)
     assert store.model_selection.selection_run(trial['run_id'])['status'] == 'running'
     comparison_preparation.maintain(store, trial['decision_at'])
@@ -353,9 +415,8 @@ def test_active_trial_retains_visible_unanswered_offers_past_the_retention_setti
 
 
 def test_restore_does_not_reset_the_repeated_comparison_error_budget(store, trial, monkeypatch):
-    store.conn.execute('DELETE FROM rec_proposals WHERE surface=?', (product.SURFACE,))
-    store.conn.commit()
-    store.rec_model.replace_rec_vectors([('recording', np.array([1., 0.], dtype=np.float32).tobytes())])
+    _remove_trial(store)
+    store.rec_model.replace_rec_vectors(_vectors(store, [1., 0.]))
     monkeypatch.setattr(model_setup, 'MIN_TRACKS', 1)
     monkeypatch.setattr(store.charts, 'history_bounds', lambda: (0, 20 * product.DAY))
     monkeypatch.setattr(comparison_preparation, 'prepare', lambda *a: None)
@@ -366,7 +427,8 @@ def test_restore_does_not_reset_the_repeated_comparison_error_budget(store, tria
 
 
 def test_weekly_monitoring_requires_sustained_observed_decline_and_never_restores_automatically(store, trial):
-    plan = {**trial, 'started_at': 40 * product.DAY, 'exposure_until': 68 * product.DAY,
+    plan = {'run_id': trial['run_id'], 'generation': trial['generation'], 'policy': trial['policy'],
+            'setup': model_setup.current_setup(store), 'started_at': 40 * product.DAY, 'exposure_until': 68 * product.DAY,
             'next_at': 48 * product.DAY, 'baseline': [1.] * 14}
     store.rec_proposals.put_proposals(product.MONITOR, plan, 40 * product.DAY)
     for day in range(40, 54):
@@ -394,10 +456,24 @@ def test_storage_keeps_an_old_active_restore_point_and_radio_assignment(store, t
     store.model_selection.maintain_selection(400 * product.DAY)
     assert store.rec_proposals.get_proposals(product.pair_surface(trial['run_id'], 'incumbent', 'radio'))
     store.settings.set_setting('rec_selection_active_run', '')
-    store.settings.set_setting('radio_current_session', '{"comparison":{"run_id":1},"stopped":false}')
+    identity = store.accounts.upsert_account('Main', 'main.json', None, True)
+    radio = {'identity': identity, 'episode_id': 'held-radio', 'phase': 'playing', 'tracks': [],
+             'comparison': {'run_id': trial['run_id']}, 'stopped': False}
+    import json
+    from yt_playlist.core import radio_storage
+    if radio_storage.available(store.conn):
+        with store.conn.atomic():
+            radio_storage.save(store.conn, radio, expected=None, now=1)
+    else:
+        store.settings.set_setting('radio_current_session', json.dumps(radio))
     store.model_selection.maintain_selection(400 * product.DAY)
     assert store.rec_proposals.get_proposals(product.pair_surface(trial['run_id'], 'incumbent', 'radio'))
-    store.settings.set_setting('radio_current_session', '{"stopped":true}')
+    stopped = {**radio, 'stopped': True, 'phase': 'stopped'}
+    if radio_storage.available(store.conn):
+        with store.conn.atomic():
+            radio_storage.save(store.conn, stopped, expected=radio_storage.load(store.conn)[1], now=2)
+    else:
+        store.settings.set_setting('radio_current_session', json.dumps(stopped))
     store.model_selection.maintain_selection(400 * product.DAY)
     assert store.rec_proposals.get_proposals(product.pair_surface(trial['run_id'], 'incumbent', 'radio')) is None
 
@@ -481,6 +557,33 @@ def test_collaborative_change_affects_actual_album_scores_with_content_available
     assert next(row for row in first if row['browse_id'] == 'Third')['basis'] != 'collaborative'
 
 
+@pytest.mark.parametrize('held', ['missing', 'stale', 'current'])
+def test_album_readiness_does_not_publish_paired_assignments(paired_album_store, held):
+    from yt_playlist.rec import album_choices, onboarding
+    from yt_playlist.rec.home_cards import _epoch
+
+    store = paired_album_store
+    trial = _trial(store)
+    for arm in ('incumbent', 'challenger'):
+        store.rec_proposals.put_proposals(product.pair_surface(trial['run_id'], arm, 'albums'),
+            {'run_id': trial['run_id'], 'data': {'items': [{
+                'browse_id': arm, 'title': 'Ready record', 'artist': 'Artist',
+                'classification': 'discovery', 'score': .9}],
+                'context': {}, 'built_at': 1000}}, 1000)
+    if held == 'stale':
+        store.rec_proposals.put_proposals('model_album_assignment', {'epoch': 'old', 'comparison': {}}, 999)
+    elif held == 'current':
+        album_choices.load(store, 1000)
+        assert store.rec_proposals.get_proposals('model_album_assignment')['epoch'] == _epoch(store, 'album_choices')
+    before = store.rec_proposals.get_proposals('model_album_assignment')
+    with store.read_view() as reader:
+        assert reader.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+        assert onboarding.prepared_albums_ready(reader, 1000)
+        assert onboarding.arrival_status(reader, 1000)['setup']['albums_ready']
+        assert reader.rec_proposals.get_proposals('model_album_assignment') == before
+    assert store.rec_proposals.get_proposals('model_album_assignment') == before
+
+
 def test_paired_mix_and_album_menus_serve_the_assigned_model_and_keep_the_window(store, trial):
     from tests.rec.test_home_prepared import seed, service
     from yt_playlist.rec import album_choices, home_prepared
@@ -534,10 +637,13 @@ def test_rebuilt_home_menu_captures_new_opportunity_without_old_comparison(store
         original = deepcopy(first['choice_context'])
         assert original['comparison']['controlled']
         previous_id = first['protos'][0]['recipe']['opportunity_id']
-        lane = first['protos'][0]['lane']
-        old_keys = [t['key'] for t in first['protos'][0]['tracks']]
-        replacement = next(deepcopy(p) for menu in normal['menus'] for p in menu['protos']
-            if p['lane'] == lane and [t['key'] for t in p['tracks']] != old_keys)
+        replacement = deepcopy(next(p for p in first['protos'] if len(p['tracks']) > 1))
+        lane = replacement['lane']
+        old_keys = [t['key'] for t in replacement['tracks']]
+        # The replacement is controlled; randomized menu selection need not
+        # produce another menu with different contents for this exact lane.
+        replacement['tracks'] = replacement['tracks'][1:] + replacement['tracks'][:1]
+        assert [t['key'] for t in replacement['tracks']] != old_keys
         if rebuild == 'pool':
             monkeypatch.setattr(views.recommendations, 'pool',
                 lambda *args: SimpleNamespace(proto=replacement))

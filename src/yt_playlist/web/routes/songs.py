@@ -53,7 +53,7 @@ def build(ctx):
 
     def unconfirmed_result(exc, *, created):
         playlist = next((p for p in store.playlists.get_playlists()
-                         if p.ytm_playlist_id == exc.playlist_id), None)
+                         if p.provider_playlist_id == exc.playlist_id), None)
         return {"status": "partial", "added": bool(exc.confirmed),
                 "url": f"/playlist/{playlist.id}" if playlist else
                        "https://music.youtube.com/playlist?" + urlencode({"list": exc.playlist_id}),
@@ -92,12 +92,12 @@ def build(ctx):
     @router.get("/songs/playlists")
     def destinations(video_id: str):
         clients = ctx.clients() or {}
-        identities = {i.id: i.label for i in store.identities.get_identities()}
+        identities = {i.id: i.label for i in store.accounts.get_accounts()}
         containing = store.playlists.playlist_ids_for_video(video_id)
         playlists = [p for p in store.playlists.get_playlists()
-                     if p.ytm_playlist_id not in SYSTEM_PLAYLIST_IDS and p.identity_id in clients]
+                     if p.provider_playlist_id not in SYSTEM_PLAYLIST_IDS and p.account_id in clients]
         return {"playlists": [{"id": p.id, "title": p.title,
-                               "identity": identities.get(p.identity_id, ""),
+                               "identity": identities.get(p.account_id, ""),
                                "already_present": p.id in containing}
                               for p in sorted(playlists, key=lambda p: (p.title.casefold(), p.id))],
                 "multiple_identities": len(clients) > 1}
@@ -138,9 +138,9 @@ def build(ctx):
         playlist = store.playlists.get_playlist(body.playlist_id)
         if result["added"] and not result.get("already_present"):
             measurement.record_action(store, "save", ctx.now_fn(), video_id=body.song.video_id,
-                                      generated=store.playlists.is_quarantined_playlist(playlist.scope_ref))
+                                      generated=store.playlists.is_quarantined_playlist(playlist.playlist_scope_id))
         try:
-            ctx.bridge.send_control({"type": "refresh-view", "playlist": playlist.ytm_playlist_id})
+            ctx.bridge.send_control({"type": "refresh-view", "playlist": playlist.provider_playlist_id})
         except Exception:  # noqa: BLE001 - a disconnected player must not undo a successful add
             ctx.logger.debug("playlist refresh not sent", exc_info=True)
         return {"url": f"/playlist/{playlist.id}", "title": playlist.title,

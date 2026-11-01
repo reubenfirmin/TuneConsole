@@ -96,7 +96,7 @@ def describe_modes(store):
         families, tags, decades = Counter(), Counter(), Counter()
         for key in members:
             genre, year = content.get(key, (None, None))
-            families[genre_map.family(genre)] += 1
+            families[genre_map.family(genre,conn=store.conn)] += 1
             if genre:
                 tags[genre] += 1
             if year and str(year)[:4].isdigit():

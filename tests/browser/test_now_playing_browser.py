@@ -93,6 +93,42 @@ def test_progress_uses_control_divider_without_time_row_in_home_and_dock(live_ap
     expect(progress).to_have_attribute('value','4')
 
 
+@pytest.mark.parametrize('width', [1280, 390])
+def test_unknown_duration_stays_hidden_while_playback_position_advances(live_app, page, width, tmp_path):
+    status = {'connected': True, 'now_playing': {
+        'video_id': 'unknown-duration', 'title': 'Destination Sunshine',
+        'artist': 'Balearic Bill', 'position': 120, 'duration': 240, 'paused': True}}
+    page.route('**/bridge/status', lambda route: route.fulfill(json=status))
+    page.set_viewport_size({'width': width, 'height': 900})
+    page.clock.install()
+    page.goto(live_app + '/artists')
+    player = page.locator('.global-now-playing')
+    progress = player.get_by_role('progressbar', name='Track progress')
+    line = player.locator('.hs-progress')
+    expect(progress).to_be_visible()
+    expect(progress).to_have_attribute('max', '240')
+    assert 0.49 <= progress.evaluate('el => el.position') <= 0.51
+
+    status['now_playing'].update(duration=None, paused=False)
+    page.evaluate('window.playbackStatus.refresh()')
+    page.clock.run_for(500)
+    page.screenshot(path=tmp_path / f'unknown-duration-playing-{width}.png')
+    expect(line).to_be_hidden()
+    expect(progress).to_be_hidden()
+    page.evaluate('window.playbackStatus.refresh()')
+    page.clock.run_for(500)
+    expect(line).to_be_hidden()
+    page.reload()
+    expect(player).to_contain_text('Destination Sunshine')
+    page.clock.run_for(500)
+    expect(line).to_be_hidden()
+
+    status['now_playing'].update(duration=240, paused=True)
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(progress).to_be_visible()
+    assert 0.49 <= progress.evaluate('el => el.position') <= 0.51
+
+
 @pytest.mark.parametrize("kind", ["playlist", "album"])
 def test_track_table_and_dock_share_one_playback_request_per_interval(live_app, store, page, kind):
     playlist = store.playlists.get_playlists()[0]
@@ -474,7 +510,7 @@ def test_now_playing_returns_to_source(live_app, store, page, kind, width):
     expect(widget.locator(".hs-source")).to_have_count(0)
     # Another playlist, or another album sharing the /album route, still needs the link.
     if kind == "playlist":
-        other = store.playlists.upsert_playlist(playlist.identity_id, "PL_other", "Another mix", 0, "h", 0)
+        other = store.playlists.upsert_playlist(playlist.account_id, "PL_other", "Another mix", 0, "h", 0)
         page.goto(f"{live_app}/playlist/{other}")
     else:
         page.goto(f"{live_app}/album?browse=MPRE_other")
@@ -522,7 +558,7 @@ def test_failed_playback_does_not_open_an_uncontrolled_music_tab(live_app, store
     error = page.locator("#playback-error")
     expect(error).to_contain_text("Couldn’t start playback")
     assert len(page.context.pages) == 1
-    assert requests == [{"url": f"https://music.youtube.com/playlist?list={playlist.ytm_playlist_id}"}]
+    assert requests == [{"url": f"https://music.youtube.com/playlist?list={playlist.provider_playlist_id}"}]
     # The existing play control works on retry and clears the error once the bridge recovers.
     recovered = True
     control.click()

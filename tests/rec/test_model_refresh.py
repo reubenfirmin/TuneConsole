@@ -19,7 +19,7 @@ from tests import model_support
 
 
 def seed(store):
-    iid = store.identities.upsert_identity('Listener', 'fixture', None, True)
+    iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
     tids = []
     for i in range(96):
         tid = store.tracks.upsert_track(f'v{i}', f'Song {i:03}', f'Artist {i}', 'Album', None)
@@ -181,7 +181,8 @@ def test_failed_publication_rolls_back_models_settings_clusters_and_notification
     modes = [(m['mode_id'], m['centroid'].tobytes()) for m in store.modes.list_modes()]
     store.tracks.set_track_genre(tids[0], 'Classical')
     revision = store.rec_refresh.revision()
-    store.conn.execute("CREATE TRIGGER fail_training BEFORE INSERT ON rec_artist_content_vectors "
+    store.conn.execute("CREATE TRIGGER fail_training BEFORE INSERT ON artist_embeddings "
+                       "WHEN NEW.space='content' "
                        "BEGIN SELECT RAISE(ABORT,'injected failure'); END")
     with pytest.raises(sqlite3.IntegrityError, match='injected failure'):
         model_refresh.rebuild(store, 2001)

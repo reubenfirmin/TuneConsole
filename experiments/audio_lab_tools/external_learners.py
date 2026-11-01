@@ -8,7 +8,7 @@ from threadpoolctl import threadpool_limits
 
 from .external_experiment import OUT, digest, normalize, save, stamp
 from .external_training import (ALPHAS, SEED, feature_matrices, fit_path, folds,
-                                metrics, predict, standardize)
+                                metrics, predict, standardize, validation_groups)
 from .external_transfer import SNAPSHOT, VIBES, external_head_features, score
 
 GAMMAS = (.125, .5, 2., 8.)
@@ -111,7 +111,7 @@ def load(dataset, external_datasets):
     y = np.array([row['targets'] for row in rows], dtype=float)[:, selected]
     families, _, _, _ = feature_matrices(rows)
     features = {name: families[name] for name in ('attributes', 'embedding', 'attributes_embedding')}
-    return rows, y, [names[i] for i in selected], [row['group'] for row in rows], features, {'source_sha256': digest(path)}
+    return rows, y, [names[i] for i in selected], validation_groups(rows), features, {'source_sha256': digest(path)}
 
 
 def serializable(value):

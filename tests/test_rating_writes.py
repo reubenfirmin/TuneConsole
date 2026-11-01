@@ -16,8 +16,8 @@ from yt_playlist.web.routes.bridge import build
 
 @pytest.mark.parametrize("outcome", ["success", "retry", "rejected", "lost_reply"])
 def test_operations_instances_order_same_upload_and_allow_unrelated_work(store, monkeypatch, outcome):
-    main = store.identities.upsert_identity("Main", "bridge", None, True)
-    other = store.identities.upsert_identity("Other", "bridge", "other", False)
+    main = store.accounts.upsert_account("Main", "bridge", None, True)
+    other = store.accounts.upsert_account("Other", "bridge", "other", False)
     entered, release, queued = threading.Event(), threading.Event(), threading.Event()
     calls, remote = [], {}
     attempts = 0
@@ -72,7 +72,7 @@ def test_operations_instances_order_same_upload_and_allow_unrelated_work(store, 
 
 
 def test_native_reconciliation_holds_the_turn_and_late_confirmation_clock_cannot_reject_final_intent(store):
-    owner = store.identities.upsert_identity("Main", "bridge", None, True)
+    owner = store.accounts.upsert_account("Main", "bridge", None, True)
     entered, release, second_sent = threading.Event(), threading.Event(), threading.Event()
     client = FakeClient()
     original = client.rate_song
@@ -84,10 +84,10 @@ def test_native_reconciliation_holds_the_turn_and_late_confirmation_clock_cannot
 
     client.rate_song = rate
 
-    def native(identity_id):
+    def native(account_id):
         entered.set()
         assert release.wait(5)
-        ratings.record_confirmed(store, identity_id, "song", "LIKE", 200)
+        ratings.record_confirmed(store, account_id, "song", "LIKE", 200)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(ratings.set_rating, store, owner, "song", "LIKE", client, 100,
@@ -106,10 +106,10 @@ def test_native_reconciliation_holds_the_turn_and_late_confirmation_clock_cannot
 
 
 def test_failed_player_mirror_cannot_report_a_confirmed_rating_as_rejected(store):
-    owner = store.identities.upsert_identity("Main", "bridge", None, True)
+    owner = store.accounts.upsert_account("Main", "bridge", None, True)
     ops = PlaylistOps(store, lambda: {owner: FakeClient()}, lambda: 100)
 
-    def failed(identity_id):
+    def failed(account_id):
         raise TimeoutError("Native thumb response lost")
 
     assert ops.set_rating("song", "LIKE", after_confirmed=failed) == {
@@ -118,7 +118,7 @@ def test_failed_player_mirror_cannot_report_a_confirmed_rating_as_rejected(store
 
 
 def test_cancelled_http_waiter_keeps_native_work_owned_and_next_intent_ordered(store):
-    owner = store.identities.upsert_identity("Main", "bridge", None, True)
+    owner = store.accounts.upsert_account("Main", "bridge", None, True)
     remote = FakeClient()
 
     async def scenario():

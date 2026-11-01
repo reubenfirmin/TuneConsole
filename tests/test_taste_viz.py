@@ -27,7 +27,7 @@ def _install_now_content_vectors(store, monkeypatch, keys, V):
 
 def _seed_jazz(store):
     """A jazz track that has been played, so it registers in the play-weighted genre distribution."""
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Jazz")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
@@ -112,7 +112,7 @@ def test_overview_reports_recent_shifts_against_library_not_a_second_library_por
     keys = ["techno|artist", "folk1|artist", "folk2|artist"]
     _install_now_content_vectors(store, monkeypatch, keys,
                                  np.array([[1., 0.], [0., 1.], [0., 1.]], dtype=np.float32))
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.history.import_play_events(iid, [(key, f"v{i}", 1000.0) for i, key in enumerate(keys)])
     recent = taste_viz.overview(store, 1000.0)["recent"]
     by_label = {row["label"]: row for row in recent["shifts"]}
@@ -130,8 +130,10 @@ def test_overview_includes_week_old_feedback_without_turning_radio_plays_into_le
     _install_now_modes(store)
     keys = ["radio1|artist", "radio2|artist", "radio3|artist"]
     _install_now_content_vectors(store, monkeypatch, keys, np.ones((3, 2), dtype=np.float32))
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    store.settings.set_setting("radio_session_playlist_ids", '["radio"]')
+    iid = store.accounts.upsert_account("main", "cred", None, True)
+    from yt_playlist.core import radio_provenance
+    with store._lock, store.conn:
+        radio_provenance.remember(store.conn, 'radio', iid)
     for i, key in enumerate(keys):
         store.history.record_play_event(iid, key, f"v{i}", now - 60,
                                         playlist_ytm_id="radio", source_timezone="UTC")
@@ -172,7 +174,7 @@ def test_recent_rating_inputs_preserve_provenance_bounds_and_sync_idempotence(st
 
 
 def test_listening_comparison_counts_observed_tracks_independently_of_mapping(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     for key, video, at, playlist in (("shared|artist", "v1", 10, "radio"),
                                     ("other|artist", "v2", 11, "radio"),
                                     ("shared|artist", "v1", 14, "chosen"),
@@ -199,7 +201,7 @@ def test_recent_saved_changes_filters_time_before_limiting(store):
 def test_viz_reflects_param_overrides(store):
     # #85: stale_decay_halflife_d and the "freshness" payload key are gone (no sync-staleness relax
     # any more); the equivalent per-source override now shows up in sources.halflife_days.
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     rec_params.set_param(store, "mood_halflife_d", 10)
     payload = taste_viz.model_transparency(store, now=1000.0)
     assert payload["sources"]["halflife_days"]["mood"] == 10
@@ -294,7 +296,7 @@ def test_funnel_reports_threshold(store):
 
 def test_artists_populate_from_play_history(store):
     # Regression: _artist_shares read the wrong dict key, so the Artists panel was always empty.
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("va", "ASong", "Alice", None, None)
     store.tracks.upsert_track("vb", "BSong", "Bob", None, None)
     day = 86400.0
@@ -310,7 +312,7 @@ def test_artists_populate_from_play_history(store):
 def test_artist_shares_normalize_over_all_artists(store):
     # Shares must be normalized over ALL artists (like genres), not just the displayed top-N, so the
     # Artists card's "what you play" bars are on the same footing as the genre rose's.
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     for i in range(13):
         store.tracks.upsert_track(f"v{i}", f"S{i}", f"Art{i}", None, None)
         store.history.record_history_plays(iid, 10.0 + i, [f"s{i}|art{i}"], source_timezone="UTC")
@@ -329,7 +331,7 @@ def test_mode_layers_three_ribbons_share_colors_for_the_same_mode(store, monkeyp
     keys = ["a1", "a2", "b1"]
     V = np.array([[1.0, 0.02], [1.0, 0.03], [0.02, 1.0]], dtype=np.float32)
     _install_now_content_vectors(store, monkeypatch, keys, V)
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     now = 100_000.0
     # All three plays at age 0 -> decay_weight(0, ...) == 1.0 exactly, so SESSION's decay-weighted
     # shares land on the exact same 2/3, 1/3 split as NOW's plain-count posterior.
@@ -368,7 +370,7 @@ def test_mode_layers_three_ribbons_share_colors_for_the_same_mode(store, monkeyp
 def test_mode_evidence_reports_unmapped_realtime_plays(store, monkeypatch):
     _install_now_modes(store)
     _install_now_content_vectors(store, monkeypatch, ["mapped"], np.array([[1.0, 0.0]]))
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.history.import_play_events(iid, [("mapped", "v1", 1000.0), ("unmapped", "v2", 1000.0)])
 
     evidence = taste_viz.model_transparency(store, now=1000.0)["modes"]["evidence"]
@@ -398,7 +400,7 @@ def test_saved_style_portrait_survives_a_content_space_change(store, monkeypatch
     keys = ["a", "b", "c"]
     _install_now_content_vectors(store, monkeypatch, keys, np.array([[1.0, 0.0]] * 3))
     monkeypatch.setattr(embed, "content_space_id", lambda s, **kw: "new-content-space")
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.history.import_play_events(iid, [(k, "v" + k, 1000.0) for k in keys])
 
     ml = taste_viz.mode_layers(store, now=1000.0)
@@ -411,10 +413,13 @@ def test_saved_style_portrait_survives_a_content_space_change(store, monkeypatch
 
 
 def test_generation_examples_read_prepared_pools_and_filter_hidden_tracks(store):
-    store.rec_proposals.put_proposals("mode_bundles", {"all": {"wheelhouse": [
+    from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+    bundles = {"all": {"wheelhouse": [
         {"key": "hidden|artist", "title": "Hidden", "artist": "Artist"},
         {"key": "shown|artist", "title": "Shown", "artist": "Artist"},
-    ]}}, now=1.0)
+    ]}}
+    seed_bundle_subjects(store,bundles)
+    publish_bundles(store,bundles,now=1.0)
     store.rec_model.record_feedback("for_you", "hidden|artist", "dismiss", now=1.0)
     rec_params.set_param(store, "modes_artist_cap", 3)
 
@@ -443,8 +448,9 @@ def _install_tilt_space(store, monkeypatch, session, transient_dir):
     V = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
     idx = {k: i for i, k in enumerate(keys)}
     monkeypatch.setattr(taste_viz.vectors, "load_vectors", lambda s: (keys, V, idx))
-    monkeypatch.setattr(store.rec_query, "track_genres",
-                        lambda ks: {"t|techno": "Techno", "j|jazz": "Jazz"})
+    for title, artist, genre in (("t", "techno", "Techno"), ("j", "jazz", "Jazz")):
+        track = store.tracks.upsert_track(f"tilt-{artist}", title, artist, None, 200)
+        store.tracks.set_track_genre(track, genre)
     monkeypatch.setattr(taste_viz.layers, "session_tilt", lambda *a: session)
     monkeypatch.setattr(taste_viz.transient, "centroid_tilt", lambda *a: transient_dir)
 
@@ -496,7 +502,7 @@ def test_now_layer_has_no_embedding_direction(store, monkeypatch):
 # ── Misc ───────────────────────────────────────────────────────────────────
 
 def test_playlist_influence_preserves_whole_blend_and_listening_evidence(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     vectors, pids = [], []
     for i, (genre, plays) in enumerate((("Techno", 6), ("Jazz", 3), ("Folk", 1), ("Rock", 0))):
         tid = store.tracks.upsert_track(f"blend-{i}", f"Track {i}", "Artist", None, None)
@@ -527,7 +533,7 @@ def test_playlist_influence_preserves_whole_blend_and_listening_evidence(store):
 
 
 def test_playlist_influence_explains_equal_weights_before_listening(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     vectors = []
     for i in range(2):
         tid = store.tracks.upsert_track(f"equal-{i}", f"Track {i}", "Artist", None, None)
@@ -576,7 +582,7 @@ def test_breadth_word_thresholds():
 
 def test_recent_play_counts_are_frequency_weighted(store):
     # Exact replay events count individually; repeated coarse captures of a day do not.
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("v1", "Hit", "Star", None, None)
     store.tracks.upsert_track("v2", "Bsong", "Other", None, None)
     store.history.import_play_events(iid, [("hit|star", "v1", ts) for ts in (10.0, 20.0, 30.0)])

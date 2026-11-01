@@ -8,10 +8,10 @@ def build(ctx) -> APIRouter:
     store, templates, logger = ctx.store, ctx.templates, ctx.logger
 
     def _panel_context(*, source=None, target=None, results=None, error=None):
-        idents = store.identities.get_identities()
+        idents = store.accounts.get_accounts()
         labels = {i.id: i.label for i in idents}
-        rows = sorted((p for p in store.playlists.get_playlists() if p.identity_id in labels),
-                      key=lambda p: (labels[p.identity_id], p.title.lower()))
+        rows = sorted((p for p in store.playlists.get_playlists() if p.account_id in labels),
+                      key=lambda p: (labels[p.account_id], p.title.lower()))
         if source not in labels:
             source = idents[0].id if idents else None
         if target not in labels:
@@ -28,7 +28,7 @@ def build(ctx) -> APIRouter:
             summary.append(f"{counts['error']} failed")
         return {
             "playlists": rows, "identities": idents, "labels": labels,
-            "selection_rows": [{"id": p.id, "identity_id": p.identity_id} for p in rows],
+            "selection_rows": [{"id": p.id, "account_id": p.account_id} for p in rows],
             "source": source, "target": target, "results": results, "error": error,
             "summary": ". ".join(summary) + ("." if summary else ""),
             "has_issues": any(r["warning"] for r in results),
@@ -75,7 +75,7 @@ def build(ctx) -> APIRouter:
                     "warning": True}
         tracks = f"{res['added']} track{'s' if res['added'] != 1 else ''}"
         if res["deleted"]:
-            _refresh_deleted_source(src.ytm_playlist_id)
+            _refresh_deleted_source(src.provider_playlist_id)
             return {**result, "state": "moved", "message": f"Moved {tracks}."}
         extra = f"; {res['unresolved']} couldn’t be matched" if res["unresolved"] else ""
         if res.get("skipped"):
@@ -103,7 +103,7 @@ def build(ctx) -> APIRouter:
         def rejected(message):
             return _panel(request, source=source_identity, target=target_identity, error=message)
 
-        active = {i.id for i in store.identities.get_identities()}
+        active = {i.id for i in store.accounts.get_accounts()}
         if source_identity not in active or target_identity not in active:
             return rejected("An identity has been removed. Choose identities again.")
         if source_identity == target_identity:
@@ -117,7 +117,7 @@ def build(ctx) -> APIRouter:
         # Validate the entire selection before making any remote changes, including stale tabs.
         for pid in playlist_ids:
             playlist = store.playlists.get_playlist(pid)
-            if playlist is None or playlist.identity_id != source_identity:
+            if playlist is None or playlist.account_id != source_identity:
                 return rejected("The playlist selection has changed. Select playlists again.")
         results = [_transfer(pid, target_identity, bool(copy_only)) for pid in playlist_ids]
         return _panel(request, source=source_identity, target=target_identity, results=results)

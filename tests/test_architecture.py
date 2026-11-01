@@ -1,5 +1,6 @@
 """Keep repository ownership and import direction explicit as the application grows."""
 import ast
+from functools import cache
 from pathlib import Path
 import re
 
@@ -8,8 +9,14 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src"
 
 
+@cache
+def _source_tree(path):
+    return ast.parse(path.read_text(), filename=str(path))
+
+
+@cache
 def _modules():
-    return {".".join(p.relative_to(SOURCE).with_suffix("").parts): ast.parse(p.read_text())
+    return {".".join(p.relative_to(SOURCE).with_suffix("").parts): _source_tree(p)
             for p in (SOURCE / "yt_playlist").rglob("*.py")}
 
 
@@ -137,7 +144,7 @@ def test_callers_name_repository_owners_and_retired_modules_stay_retired():
     violations = []
     files = [*(SOURCE / "yt_playlist").rglob("*.py"), *(ROOT / "tests").rglob("*.py")]
     for path in files:
-        tree = ast.parse(path.read_text())
+        tree = _source_tree(path)
         for dependency in _imports(tree):
             if dependency in retired:
                 violations.append(f"{path.relative_to(ROOT)} imports {dependency}")
@@ -296,7 +303,7 @@ def reconciled(self):
     with self._lock:
         self.conn.execute("SAVEPOINT setup_identities")
         try:
-            yield self.conn.execute("SELECT * FROM identities").fetchall()
+            yield self.conn.execute("SELECT * FROM accounts").fetchall()
         finally:
             self.conn.execute("RELEASE setup_identities")
 ''').body[0]

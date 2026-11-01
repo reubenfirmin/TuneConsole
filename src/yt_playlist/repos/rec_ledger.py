@@ -4,8 +4,10 @@ Reports load a coherent set of detached inputs on a private snapshot. Recommenda
 services own statistical interpretation; this repository owns persistence and retention.
 """
 import json
+from contextlib import nullcontext
 
-from yt_playlist.repos.base import Repo, synchronized, snapshot_read
+from yt_playlist.core import entity_names, home_offers, playback_bindings, served_facts
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
 from yt_playlist.repos.scorecard_attribution import Attribution
 from yt_playlist.repos import policy_storage
 
@@ -16,40 +18,55 @@ POLICY_RETENTION_CURSOR = 'rec_policy_retention_cursor'
 
 class RecLedgerRepo(Repo):
     @synchronized
-    def bind_choice_playback(self, identity_id, playlist, video, opportunity, option, now, window_s):
+    def bind_choice_playback(self, account_id, playlist, video, opportunity, option, now, window_s):
         """Small exact-context index for delayed player observations; raw evidence stays in JSON.
 
         Retain recent track bindings across a restart and a direction change. Evicted or expired
         observations remain unattributed. The bound is a storage/work limit, not a taste weight.
         """
-        rows = json.loads(self._store.settings.get_setting('listening_playback_bindings') or '[]')
-        key = (identity_id, playlist, video)
-        rows = [row for row in rows if 0 <= now - row['at'] <= window_s
-                and (row['identity_id'], row['playlist'], row['video']) != key]
-        rows.append({'identity_id': identity_id, 'playlist': playlist, 'video': video,
-                     'opportunity_id': opportunity, 'option_id': str(option), 'at': now})
-        self._store.settings.set_setting('listening_playback_bindings', json.dumps(rows[-64:]))
+        if playback_bindings.available(self.conn):
+            with self.conn:
+                playback_bindings.put(self.conn,account_id,playlist,video,opportunity,option,now,window_s)
+            return
+        with self.conn:
+            if not self.conn.in_transaction:
+                self.conn.execute('BEGIN IMMEDIATE')
+            rows = [entity_names.account_document(row) for row in
+                    json.loads(self._store.settings.get_setting('listening_playback_bindings') or '[]')]
+            key = (account_id, playlist, video)
+            rows = [row for row in rows if 0 <= now - row['at'] <= window_s
+                    and (row['account_id'], row['playlist'], row['video']) != key]
+            rows.append({'account_id': account_id, 'playlist': playlist, 'video': video,
+                         'opportunity_id': opportunity, 'option_id': str(option), 'at': now})
+            self._store.settings.set_setting('listening_playback_bindings',
+                json.dumps([entity_names.external_account_document(row) for row in rows[-64:]]))
 
     @synchronized
-    def choice_playback(self, identity_id, playlist, video, now, window_s):
-        rows = json.loads(self._store.settings.get_setting('listening_playback_bindings') or '[]')
+    def choice_playback(self, account_id, playlist, video, now, window_s):
+        if playback_bindings.available(self.conn):
+            return playback_bindings.find(self.conn,account_id,playlist,video,now,window_s)
+        rows = [entity_names.account_document(row) for row in
+                json.loads(self._store.settings.get_setting('listening_playback_bindings') or '[]')]
         return next((row for row in reversed(rows)
-                     if (row['identity_id'], row['playlist']) == (identity_id, playlist)
+                     if (row['account_id'], row['playlist']) == (account_id, playlist)
                      and (video is None or row['video'] == video)
                      and 0 <= now - row['at'] <= window_s), None)
 
     @synchronized
     def evidence(self):
         """Size replay evidence from current library membership, including after imports."""
-        from yt_playlist.core.evidence_ledger import EvidenceLedger, library_byte_budget
-        from yt_playlist.core import paths
+        from yt_playlist.core.evidence_ledger import EvidenceLedger, library_byte_budget, root_for_database
         store = self._store
-        directory = (store._db_path.parent / (store._db_path.name + ".evidence") if store._db_path
-                     else paths.data_dir() / "test-evidence" / store._evidence_key)
+        directory = root_for_database(store._db_path, store._evidence_key)
         recordings = self.conn.execute(
             'SELECT COUNT(DISTINCT e.recording_id) FROM library_memberships m '
             'JOIN catalog_entries e ON e.id=m.entry_id').fetchone()[0]
-        return EvidenceLedger(directory, library_byte_budget(recordings))
+        return EvidenceLedger(directory, library_byte_budget(recordings), opportunity_projection=self._mix_projection)
+
+    @synchronized
+    def _mix_projection(self, record):
+        from yt_playlist.core import mix_choices
+        return mix_choices.project(self.conn, record)
 
     @synchronized
     def publish_prepared_policies(self, rows, bases=()) -> None:
@@ -64,12 +81,26 @@ class RecLedgerRepo(Repo):
     def scorecard_inputs(self, start, end, outcome_window_h=24,
                          impression_id=None, experiments_only=False):
         """Detach one coherent live impression range and its historical outcome ownership."""
+        live = served_facts.expression(self.conn, 'policy_kind', "COALESCE(json_extract(provenance,'$.policy_kind'),'live')")
+        comparison = served_facts.expression(self.conn, 'comparison_id', "json_extract(provenance,'$.experiment.comparison_id')")
+        columns = '*'
+        if served_facts.available(self.conn):
+            columns = ('id,request_id,surface,lane,mode_id,identity_key,rank,score,model_version,served_at,'
+                       'recording_id,raw_identity_key,CASE WHEN EXISTS('
+                       'SELECT 1 FROM served_facts f WHERE f.impression_id=id) THEN \'{}\' '
+                       'ELSE provenance END provenance')
         impressions = [dict(r) for r in self.conn.execute(
-            "SELECT * FROM rec_served_impressions WHERE served_at>=? AND served_at<? "
-            "AND COALESCE(json_extract(provenance,'$.policy_kind'),'live')='live' "
-            "AND (?=0 OR json_extract(provenance,'$.experiment.comparison_id') IS NOT NULL) "
+            f"SELECT {columns} FROM rec_served_impressions WHERE served_at>=? AND served_at<? "
+            f"AND {live}='live' AND (?=0 OR {comparison} IS NOT NULL) "
             "AND (? IS NULL OR id=?) ORDER BY served_at,id",
             (start, end, experiments_only, impression_id, impression_id)).fetchall()]
+        if served_facts.available(self.conn):
+            facts = {row['impression_id']: row for row in self.conn.execute(
+                'SELECT f.* FROM served_facts f JOIN rec_served_impressions i ON i.id=f.impression_id '
+                'WHERE i.served_at>=? AND i.served_at<?', (start, end))}
+            for row in impressions:
+                if row['id'] in facts:
+                    row['provenance'] = json.dumps(served_facts.reporting_trace(facts[row['id']]))
         horizon = max(0.0, float(outcome_window_h)) * 3600.0
         attribution = Attribution(self.conn, {r['identity_key'] for r in impressions}, start, end, horizon)
         return impressions, attribution
@@ -83,6 +114,13 @@ class RecLedgerRepo(Repo):
             return None
         result = dict(row)
         result["provenance"] = json.loads(result["provenance"])
+        if served_facts.available(self.conn):
+            fact = self.conn.execute('SELECT * FROM served_facts WHERE impression_id=?', (impression_id,)).fetchone()
+            if fact is not None:
+                trace = served_facts.diagnostic(self.conn, {**result, **dict(fact)})
+                result['diagnostic_status'] = 'expired' if trace is None else 'available'
+                result['provenance'] = trace if trace is not None else {
+                    **served_facts.reporting_trace(fact), **result['provenance']}
         result["configuration"] = policy_storage.configuration(self.conn, result['model_version'])
         pool = result["provenance"].get("pool_policy")
         result["pool_configuration"] = policy_storage.configuration(self.conn, str(pool)) if pool else None
@@ -94,19 +132,25 @@ class RecLedgerRepo(Repo):
     @snapshot_read
     def experiment_inputs(self, start, end, mature_end):
         inputs = self.scorecard_inputs(start, mature_end, experiments_only=True)
+        ranker = served_facts.expression(self.conn, 'ranker', "json_extract(provenance,'$.ranker')")
+        comparison = served_facts.expression(self.conn, 'comparison_id', "json_extract(provenance,'$.experiment.comparison_id')")
+        kind = served_facts.expression(self.conn, 'policy_kind', "json_extract(provenance,'$.policy_kind')")
         shadows = self.conn.execute(
-            "SELECT json_extract(provenance,'$.ranker') ranker,COUNT(*) rows,"
-            "COUNT(DISTINCT json_extract(provenance,'$.experiment.comparison_id')) opportunities "
+            f"SELECT {ranker} ranker,COUNT(*) rows,COUNT(DISTINCT {comparison}) opportunities "
             "FROM rec_served_impressions WHERE served_at>=? AND served_at<? "
-            "AND json_extract(provenance,'$.policy_kind')='counterfactual' GROUP BY ranker",
+            f"AND {kind}='counterfactual' GROUP BY ranker",
             (start, end)).fetchall()
         return inputs, [dict(r) for r in shadows]
 
     @synchronized
     def claim_home_offers(self, epoch, signatures, now):
-        """Deduplicate actual offers; home_shown is the ledger's reserved proposal key."""
+        """Claim the current window's signatures before counting actual offers."""
         if getattr(self._store, 'activity_paused', False):
             return set(signatures)
+        if home_offers.available(self.conn):
+            unit = nullcontext() if self.conn.in_transaction else self.conn.atomic()
+            with unit:
+                return home_offers.claim(self.conn, epoch, signatures, now)
         row = self.conn.execute("SELECT payload FROM rec_proposals WHERE surface='home_shown'").fetchone()
         try:
             previous = json.loads(row[0]) if row else {}
@@ -128,10 +172,8 @@ class RecLedgerRepo(Repo):
     # --- #113 served recommendation -> observed outcome ledger -------------------------------
     @synchronized
     def record_serving_policy(self, version, configuration, now) -> None:
-        self.conn.execute(
-            "INSERT OR IGNORE INTO rec_serving_policies VALUES (?,?,?)",
-            (version, json.dumps(configuration, sort_keys=True), now))
-        self.conn.commit()
+        with self.conn:
+            policy_storage.publish(self.conn, [(version, json.dumps(configuration, sort_keys=True), now)])
 
     @synchronized
     def record_prepared_policies(self, rows, bases=()) -> None:
@@ -181,10 +223,13 @@ class RecLedgerRepo(Repo):
         with self.conn:
             policy_storage.publish(self.conn, policies, bases)
             if rows:
-                self.conn.executemany(
-                    "INSERT OR IGNORE INTO rec_served_impressions("
-                    "request_id,surface,lane,mode_id,identity_key,rank,score,model_version,provenance,served_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+                if served_facts.active(self.conn):
+                    served_facts.insert(self.conn, rows)
+                else:
+                    self.conn.executemany(
+                        "INSERT OR IGNORE INTO rec_served_impressions("
+                        "request_id,surface,lane,mode_id,identity_key,rank,score,model_version,provenance,served_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
                 versions = []
                 for row in rows:
                     pool = json.loads(row[8]).get('pool_policy')
@@ -221,11 +266,42 @@ class RecLedgerRepo(Repo):
     @synchronized
     def lane_impression_counts(self, since=None) -> dict:
         """Actual exposure counts from the unified ledger, excluding replay rows."""
+        kind = served_facts.expression(self.conn, 'policy_kind', "COALESCE(json_extract(provenance,'$.policy_kind'),'live')")
         rows = self.conn.execute(
             "SELECT lane,COUNT(*) c FROM rec_served_impressions WHERE (? IS NULL OR served_at>=?) "
-            "AND COALESCE(json_extract(provenance,'$.policy_kind'),'live')='live' GROUP BY lane",
+            f"AND {kind}='live' GROUP BY lane",
             (since, since)).fetchall()
         return {r["lane"]: r["c"] for r in rows}
+
+    @synchronized
+    def maintain_impressions(self, now):
+        """Bounded idle maintenance; readers defer file retirement without waiting."""
+        if not served_facts.available(self.conn):
+            self._prune_impression_batch(now - RESPONSE_RETAIN_DAYS * 86400)
+            self._prune_response_batch(now - RESPONSE_RETAIN_DAYS * 86400)
+            return
+        from yt_playlist.core import policy_documents
+        root = served_facts.directory(self.conn)
+        root.mkdir(parents=True, exist_ok=True)
+        with (root / '.readers.lock').open('a+b') as lock:
+            unlock = policy_documents._try_file_lock(lock, exclusive=True)
+            if unlock is None:
+                return
+            try:
+                with self.conn:
+                    self.conn.execute('BEGIN IMMEDIATE')
+                    served_facts.expire(self.conn, now)
+                before = now - RESPONSE_RETAIN_DAYS * 86400
+                expired = [r[0] for r in self.conn.execute('SELECT id FROM rec_served_impressions '
+                    'WHERE served_at<? ORDER BY served_at,id LIMIT ?', (before, RETENTION_BATCH_SIZE))]
+                self._prune_impression_batch(before)
+                for identity in expired:
+                    (root / served_facts.relative(identity)).unlink(missing_ok=True)
+                self._prune_response_batch(before)
+                with self.conn:
+                    served_facts.collect_retired(self.conn)
+            finally:
+                unlock()
 
     @synchronized
     def story_views(self) -> dict:
@@ -267,7 +343,7 @@ class RecLedgerRepo(Repo):
         self.conn.commit()
         return n
 
-    @synchronized
+    @lookup_read
     def card_views(self, card) -> int:
         """Current view total for a Home card (0 if never shown), read-only, so previews and
         re-renders can compute the card's rotation epoch without advancing it."""

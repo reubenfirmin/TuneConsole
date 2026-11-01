@@ -17,8 +17,8 @@ from threadpoolctl import threadpool_limits
 
 from .external_experiment import LAB, OUT, ROOT, digest, normalize, pcm, save, stamp
 from .external_training import (ALPHAS, SEED, bootstrap_improvement, folds,
-                                metrics, predict, standardize)
-from .external_transfer import SNAPSHOT, VIBES, score
+                                metrics, predict, standardize, validation_groups)
+from .external_transfer import SNAPSHOT, VIBES, score, excluded_identities
 
 CONSISTENCY = OUT / 'unlabeled-consistency'
 LAMBDAS = (0., .1, 1., 10.)
@@ -199,7 +199,10 @@ def compare(dataset, pairs, holdout_pairs=(), *, output_dir=None):
         rows = json.loads((OUT / f'{dataset}.features.json').read_text())['rows']
         x = np.array([json.loads(Path(row['feature_file']).read_text())['prediction']['embedding']['values'] for row in rows])
         y = np.array([row['targets'] for row in rows])
-        names, groups = rows[0]['target_names'], [row['group'] for row in rows]
+        names, groups = rows[0]['target_names'], validation_groups(rows)
+    pmemo = {row['id']: row for row in json.loads((OUT / 'pmemo.features.json').read_text())['rows']}
+    overlapping = {row['id'] for row in excluded_identities([pmemo[pair['id']] for pair in pairs], rows)}
+    pairs = [pair for pair in pairs if pair['id'] not in overlapping]
     differences = np.array([np.array(pair['clean']) - pair['augmented'] for pair in pairs])
     if len(differences) < 30:
         raise ValueError('Need at least thirty usable unlabeled pairs')
@@ -242,11 +245,13 @@ def compare(dataset, pairs, holdout_pairs=(), *, output_dir=None):
               'unique_holdout_recordings': len(set(holdout_hashes)),
               'unlabeled_holdout_robustness': robustness,
               'source_pair_sha256': digest(CONSISTENCY / 'pairs.json'), 'script_sha256': digest(__file__),
+              'target_identity_excluded_pair_ids': sorted(overlapping),
               'objective': 'supervised squared loss + alpha coefficient penalty + lambda*n/u summed squared prediction changes on unlabeled pairs',
               'limitations': ['Same-excerpt gain/noise consistency only; no distant sections are forced to match.',
                               'No pseudo-labels or model outputs are used as supervision.',
                               'This is a frozen-embedding predictor update; the MusiCNN backbone is unchanged.',
                               'Known artist/title/audio overlaps with CAL500 and all gold were excluded from the unlabeled pool.',
+                              'The fixed robustness holdout separates recordings; artists may occur in unlabeled training and robustness audio.',
                               'Small developer vibe evaluation and unknown upstream pretraining overlap remain limitations.']}
     if not vibe:
         report['versus_ordinary_ridge'] = bootstrap_improvement(y, all_predictions['ordinary_ridge'],
@@ -264,12 +269,16 @@ def compare(dataset, pairs, holdout_pairs=(), *, output_dir=None):
     return report
 
 
-def compare_deduplicated():
+def compare_deduplicated(*, identity_exclusions=()):
     """Preserve the original trial and repeat with one contribution per audio."""
     source = json.loads((CONSISTENCY / 'pairs.json').read_text())
     split = json.loads((CONSISTENCY / 'pair-split.json').read_text())
     held_out = set(split['holdout_ids'])
     training_ids = set(split['training_ids'])
+    train_hashes = {pair['audio_sha256'] for pair in source['pairs'] if pair['id'] in training_ids}
+    heldout_hashes = {pair['audio_sha256'] for pair in source['pairs'] if pair['id'] in held_out}
+    if train_hashes & heldout_hashes:
+        raise ValueError('Duplicate audio crosses the original training/holdout split')
     unique, duplicated = {}, []
     for pair in source['pairs']:
         if pair['audio_sha256'] in unique:
@@ -280,6 +289,10 @@ def compare_deduplicated():
     holdout = [pair for pair in unique.values() if pair['id'] in held_out]
     if set(training_ids) & held_out or len(train) + len(holdout) != len(unique):
         raise ValueError('Original pair identities do not define a disjoint complete split')
+    index = json.loads((OUT / 'pmemo.features.json').read_text())['rows']
+    pair_ids = {pair['id'] for pair in unique.values()}
+    if excluded_identities([row for row in index if row['id'] in pair_ids], identity_exclusions):
+        raise ValueError('Frozen unlabeled pool overlaps protected local identities')
     destination = OUT / 'unlabeled-consistency-deduplicated'
     audit = {'created_at': stamp(), 'original_pair_entries': len(source['pairs']),
              'unique_recordings': len(unique), 'duplicate_entries': duplicated,
@@ -287,6 +300,7 @@ def compare_deduplicated():
              'training_ids': [pair['id'] for pair in train],
              'holdout_ids': [pair['id'] for pair in holdout],
              'original_pair_sha256': digest(CONSISTENCY / 'pairs.json'),
+             'additional_protected_identity_rows': len(identity_exclusions),
              'policy': 'Keep original split membership and held-out recordings; remove repeated audio hashes within training. Original reports remain preserved.'}
     save(destination / 'pair-audit.json', audit)
     with threadpool_limits(limits=1):

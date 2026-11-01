@@ -28,9 +28,10 @@ def test_paired_session_restores_its_assignment_and_visible_plans_after_cache_ch
     c.suspend()
     c._persist(c.session)
     before = deepcopy(c.session.directions.slots)
-    saved = json.loads(c.ctx.store.settings.get_setting('radio_current_session'))
-    saved['fingerprint'] = 'previous-cache'
-    c.ctx.store.settings.set_setting('radio_current_session', json.dumps(saved))
+    fingerprint = c.session.candidates.fingerprint
+    c.session.candidates.fingerprint = 'previous-cache'
+    c._persist(c.session)
+    c.session.candidates.fingerprint = fingerprint
     restored = PlaylistRadio(c.ctx)
     assert restored.join()['active']
     assert restored.session.candidates.comparison == c.session.candidates.comparison

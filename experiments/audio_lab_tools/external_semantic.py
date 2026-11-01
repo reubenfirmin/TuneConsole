@@ -29,6 +29,8 @@ VA_RULES = {
     'release': [('arousal', '+'), ('valence', '-')],
 }
 ALIASES = {'emotify': {'calm': 'calmness', 'joy': 'joyful_activation'},
+           'emotify-artist': {'calm': 'calmness', 'joy': 'joyful_activation'},
+           'emotify-artist-multiwindow': {'calm': 'calmness', 'joy': 'joyful_activation'},
            'emma-preview-matched': {'calm': 'peacefulness', 'joy': 'joy'}}
 ACTIVITIES = {'concentrate': ['Usage-At_work', 'Usage-Reading', 'Usage-Studying'],
               'energize': ['Usage-Exercising']}
@@ -57,7 +59,7 @@ def predict_export(artifact, embedding):
         raw = predict(model, embedding)[:, head['selected_columns']]
         ranked = percentiles(np.asarray(artifact['references'][source]), raw)
         names = [head['target_names'][i] for i in head['selected_columns']]
-        if source == 'cal500':
+        if source in plan.get('activity_sources', ['cal500']):
             activity = {vibe: ranked[:, [names.index(name) for name in labels]].mean(1)
                         for vibe, labels in plan['activity_support'].items()}
         else:
@@ -76,17 +78,23 @@ def predict_export(artifact, embedding):
     return result
 
 
-def evaluate():
+def evaluate(sources=None, *, identity_exclusions=(), run_name='semantic-fixed'):
     with threadpool_limits(limits=1):
         rows = [row for row in json.loads(SNAPSHOT.read_text())['gold'] if len(row.get('embedding_values', [])) == 200]
-        sources = ['emotify', 'pmemo', 'deam', 'cal500']
-        if (OUT / 'emma-preview-matched.report.json').exists():
-            sources.append('emma-preview-matched')
+        if sources is None:
+            sources = ['emotify', 'pmemo', 'deam', 'cal500']
+            if (OUT / 'emma-preview-matched.report.json').exists():
+                sources.append('emma-preview-matched')
+        activity_sources = [source for source in sources if source.startswith('cal500')]
+        if len(activity_sources) != 1:
+            raise ValueError('Exactly one CAL500 annotation variant is required')
         plan = {'created_at': stamp(), 'sources': sources, 'gems_rules': GEMS_RULES, 'va_rules': VA_RULES,
                 'aliases': ALIASES, 'activity_support': ACTIVITIES, 'script_sha256': digest(__file__),
+                'activity_sources': activity_sources,
                 'coefficient_policy': 'Equal terms within each fixed semantic rule; equal source votes; activity-support variant averages in direct CAL500 studying/reading/work and exercise predictions for those two vibes only. No gold-label parameter fitting or mixture selection.'}
-        save(OUT / 'semantic-fixed.plan.json', plan)
-        _, _, exclusions, signatures, heads = external_head_features(sources, rows)
+        save(OUT / f'{run_name}.plan.json', plan)
+        _, _, exclusions, signatures, heads = external_head_features(
+            sources, rows, identity_exclusions=identity_exclusions)
         references = {}
         for source, head in heads.items():
             retained = [row for row in json.loads((OUT / f'{source}.features.json').read_text())['rows']
@@ -98,20 +106,21 @@ def evaluate():
                     'native_heads': heads, 'references': serializable(references),
                     'gold_training_ids': [], 'embedding_signatures': sorted(signatures)}
         values = predict_export(artifact, np.array([row['embedding_values'] for row in rows]))
-        save(OUT / 'models/semantic-fixed.json', artifact)
+        save(OUT / f'models/{run_name}.json', artifact)
         # Human labels enter only after every fixed prediction is computed.
         y = np.array([[int(name in row['labels']) for name in VIBES] for row in rows], dtype=float)
-        report = {'created_at': stamp(), 'rows': len(rows), 'sources': sources, 'plan_sha256': digest(OUT / 'semantic-fixed.plan.json'),
+        report = {'created_at': stamp(), 'rows': len(rows), 'sources': sources, 'plan_sha256': digest(OUT / f'{run_name}.plan.json'),
                   'snapshot_sha256': digest(SNAPSHOT), 'gold_training_rows': 0,
                   'methods': {name: metrics(y, value) for name, value in values.items()},
                   'external_identity_exclusions': exclusions,
+                  'additional_protected_identity_rows': len(identity_exclusions),
                   'validation': 'No developer vibe labels enter native heads, reference percentiles, semantic rules, or source weighting. Gold is scored only after frozen predictions are produced.',
                   'limitations': ['The same previously inspected developer snapshot is exploratory; fixed rules were designed after earlier experiments and are not a preregistered independent benchmark.',
                                  'Semantic mappings are explicit, approximate assumptions. Calmness alone does not establish concentration, tension is not necessarily catharsis, and activity support is incomplete.',
                                  'Percentile scores are within-source ranking scales, not calibrated suitability probabilities. Binary log loss is descriptive only.',
                                  'Available external annotations and unknown upstream pretraining overlaps retain their original limitations.']}
-        save(OUT / 'semantic-fixed.report.json', report)
-        save(OUT / 'semantic-fixed.predictions.json', {'ids': [row['video_id'] for row in rows], 'observed': y.tolist(),
+        save(OUT / f'{run_name}.report.json', report)
+        save(OUT / f'{run_name}.predictions.json', {'ids': [row['video_id'] for row in rows], 'observed': y.tolist(),
              'predictions': {name: value.tolist() for name, value in values.items()}})
         print(json.dumps({'fixed_semantics': report['methods']}), flush=True)
         return report

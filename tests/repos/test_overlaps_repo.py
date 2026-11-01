@@ -54,8 +54,8 @@ def test_bulk_suppression_rolls_back_pairs_and_new_scopes_on_failure(store):
 
 
 def test_bulk_suppression_normalizes_account_references_before_deduplication(store):
-    owner = store.identities.upsert_identity('main', 'cred', None, True)
+    owner = store.accounts.upsert_account('main', 'cred', None, True)
     pid = store.playlists.upsert_playlist(owner, 'LM', 'Liked Music', 0, '', 1)
-    ref = store.playlists.get_playlist(pid).scope_ref
+    ref = store.playlists.get_playlist(pid).playlist_scope_id
     store.overlaps.suppress_overlaps([['LM', 'OTHER'], ['OTHER', ref]], now=2)
     assert store.overlaps.get_suppressed_overlaps() == [(ref, 'OTHER', 2)]

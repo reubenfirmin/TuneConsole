@@ -7,7 +7,7 @@ from yt_playlist.util.matching import identity_key
 
 
 def _library(store, monkeypatch, years, *, modes=1):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     tracks, vectors, membership = [], [], {}
     for mid in range(1, modes + 1):
         direction = np.eye(modes, dtype=np.float32)[mid - 1]

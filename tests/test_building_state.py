@@ -5,7 +5,7 @@ from tests.conftest import FakeClient
 
 
 def _app(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     return create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
 
 

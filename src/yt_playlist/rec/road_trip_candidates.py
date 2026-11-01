@@ -92,6 +92,7 @@ def own_candidates(store, now, state=None):
                                song["duration"], "mine", song["genre"] or extra.get("genre") or fallback.get("genre") or "",
                                song["year"] or extra.get("year") or fallback.get("year"), plays.get(song["key"], 0))
         candidate["engagement"] = candidate["plays"] + (LIKE_BONUS if song["liked"] else 0)
+        candidate["family"] = genre_map.family(candidate["genre"],conn=store.conn)
         out.append(candidate)
     out.sort(key=lambda candidate: candidate["engagement"])
     for index, candidate in enumerate(out):
@@ -313,6 +314,8 @@ def to_candidates(rows, store=None):
         genre = artist_genre(store, row["artist"]) or row["genre"] or facts.get("genre") or ""
         candidate = _candidate(row["video_id"], row["title"], row["artist"], row["album"], row["thumbnail"],
                                row["duration"] or facts.get("duration"), "theirs", genre, facts.get("year"))
+        if store is not None:
+            candidate["family"] = genre_map.family(genre,conn=store.conn)
         candidate["input"] = row.get("input")
         out.append(candidate)
     return out

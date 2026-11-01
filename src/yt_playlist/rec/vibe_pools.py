@@ -70,7 +70,7 @@ def prepare(store, bundles, now, policies):
                                                  f'{home_vibe.VERSION}:{preset}:{lane}')
             families = {}
             for item in candidates.values():
-                family = genre_map.family(item.get('genre'))
+                family = genre_map.family(item.get('genre'),conn=store.conn)
                 if family:
                     families.setdefault(family, []).append(item)
             genre_menus[preset][lane] = {family: policies.stamp(_reserve(items, preset, GENRE_RESERVE),
@@ -85,6 +85,8 @@ def prepare(store, bundles, now, policies):
 
 
 def candidates(store, preset, lane, *, bundles=None, include_genres=(), avoid_genres=()):
+    if bundles is None and getattr(store, '_recommendation_files', False):
+        return _stored_candidates(store, preset, lane, include_genres, avoid_genres)
     if bundles is None:
         filters = {'include_genres': include_genres, 'avoid_genres': avoid_genres}
 
@@ -120,11 +122,52 @@ def candidates(store, preset, lane, *, bundles=None, include_genres=(), avoid_ge
         groups = prepared.get('genres', {}).get(preset, {}).get(lane, {})
         pool += [item for family, items in groups.items() if family not in avoid_genres
                  and (not include_genres or family in include_genres) for item in items]
-        pool = [item for item in pool if genre_map.family(item.get('genre')) not in avoid_genres
-                and (not include_genres or genre_map.family(item.get('genre')) in include_genres)]
+        axes = store.genres.feature_axes(item.get('genre') for item in pool)
+        pool = [item for item in pool if axes.get(item.get('genre'), ('', None))[0] not in avoid_genres
+                and (not include_genres or axes.get(item.get('genre'), ('', None))[0] in include_genres)]
         pool = list({item['key']: item for item in pool}.values())
         pool.sort(key=lambda item: home_vibe.order_key(item, preset))
     return pool[:POOL_LIMIT]
+
+
+def _stored_candidates(store, preset, lane, include_genres, avoid_genres):
+    """Read selected bounded vibe pools without opening the old mode bundle."""
+    if not getattr(store, '_read_only', False):
+        with store.read_view() as reader:
+            return _stored_candidates(reader, preset, lane, include_genres, avoid_genres)
+    surface = 'vibe:' + preset
+    head = store.recommendations.head(surface)
+    if head is None:
+        return []
+    generation = head['id']
+    framing = store.recommendations.framing(surface, generation=generation) or {}
+    if framing.get('vibe_version') != home_vibe.VERSION:
+        return []
+    modes = ['']
+    if include_genres or avoid_genres:
+        modes.extend(row['mode_key'] for row in store.recommendations.selections(surface, lane, generation=generation)
+                     if row['mode_key'] and row['mode_key'] not in avoid_genres
+                     and (not include_genres or row['mode_key'] in include_genres))
+    pool = {}
+    for mode in modes:
+        check_cancellable_work()
+        page = store.recommendations.candidate_page(surface, mode, lane, generation=generation, limit=POOL_LIMIT)
+        profiles = musical_character.load(store, [item['key'] for item in page['tracks']])
+        axes = (store.genres.feature_axes(item.get('genre') for item in page['tracks'])
+                if include_genres or avoid_genres else {})
+        for item in page['tracks']:
+            family = axes.get(item.get('genre'), ('', None))[0]
+            if family in avoid_genres or include_genres and family not in include_genres:
+                continue
+            pool[item['key']] = {**item, 'musical': profiles.get(item['key'])}
+        # Merge only a bounded lookahead. Complete genre membership remains in
+        # its independently selected pool, including genres outside the main head.
+        if len(pool) > POOL_LIMIT:
+            pool = {item['key']: item for item in sorted(pool.values(), key=lambda item: home_vibe.order_key(item, preset))[:POOL_LIMIT]}
+    result = list(pool.values())
+    if include_genres or avoid_genres:
+        result.sort(key=lambda item: home_vibe.order_key(item, preset))
+    return result[:POOL_LIMIT]
 
 
 def eligible(store, items, now, lane, excluded=(), *, include_genres=(), avoid_genres=()):
@@ -136,6 +179,9 @@ def eligible(store, items, now, lane, excluded=(), *, include_genres=(), avoid_g
     weights = store.rec_model.get_weights(now=now)
     maximum = 60 * rec_params.get_param(store, 'max_track_minutes')
     muted = {normalize(artist) for artist in store.rec_model.muted_artists()}
+    axes = store.genres.feature_axes([*(item.get('genre') for item in items),
+        *(item.get('genre') for item in metadata.values()),
+        *(item.get('genre') for item in [*owned.values(), *discoveries.values()])])
     result = []
     for item in items:
         current = (discoveries if lane == 'fresh' else owned).get(item['key'])
@@ -144,12 +190,13 @@ def eligible(store, items, now, lane, excluded=(), *, include_genres=(), avoid_g
             continue
         details = metadata.get(current['video_id'], {})
         genre = details.get('genre') or current.get('genre') or item.get('genre') or ''
-        if (weights.get(f'genre:{genre_map.family(genre)}', 1) == 0
-                or weights.get(f'genre:{genre_map.subgenre(genre)}', 1) == 0
-                or genre_map.family(genre) in avoid_genres
-                or (include_genres and genre_map.family(genre) not in include_genres)
+        family, subgenre = axes.get(genre, ('', None))
+        if (weights.get(f'genre:{family}', 1) == 0
+                or weights.get(f'genre:{subgenre}', 1) == 0
+                or family in avoid_genres
+                or (include_genres and family not in include_genres)
                 or (details.get('duration') and details['duration'] > maximum)
-                or (item.get('genre') and genre_map.family(genre) != genre_map.family(item['genre']))):
+                or (item.get('genre') and family != axes[item['genre']][0])):
             continue
         result.append({**item, **{key: current[key] for key in ('title', 'artist', 'video_id', 'thumbnail')
                                   if key in current}})
@@ -182,8 +229,17 @@ def pick(store, now, preset, lane, excluded=(), *, bundles=None, size=12,
 
 
 def assemble(store, now, preset, epoch=0, *, bundles=None, include_genres=(), avoid_genres=()):
-    bundles = bundles if bundles is not None else store.rec_proposals.get_proposals('mode_bundles') or {}
-    meta = bundles.get('_meta', {})
+    if bundles is None and getattr(store, '_recommendation_files', False):
+        if not getattr(store, '_read_only', False):
+            with store.read_view() as reader:
+                return assemble(reader, now, preset, epoch, include_genres=include_genres, avoid_genres=avoid_genres)
+        meta = store.recommendations.framing('vibe:' + preset) or {}
+        meta = {**meta, 'comfort_pool': meta.get('comfort_pool') or 0,
+                'year_cuts': ([meta['year_low'], meta['year_high']]
+                                     if meta.get('year_low') is not None else None)}
+    else:
+        bundles = bundles if bundles is not None else store.rec_proposals.get_proposals('mode_bundles') or {}
+        meta = bundles.get('_meta', {})
     lanes = dict(_LABELS)
     if meta.get('comfort_pool', 0) < rec_params.get_param(store, 'comfort_min_pool'):
         del lanes['comfort']

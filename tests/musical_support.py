@@ -1,5 +1,6 @@
 """Prepare the same retained profile inputs and bounded vibe pools as the worker."""
-from yt_playlist.rec import measurement, musical_preparation, vibe_pools
+from tests.recommendation_support import publish_bundles
+from yt_playlist.rec import musical_preparation
 from yt_playlist.rec.progressive import Preparation
 
 
@@ -14,7 +15,8 @@ def prepare_profiles(store, now=1000):
 
 def prepare_vibes(store, now=1000):
     prepare_profiles(store, now)
-    bundles = store.rec_proposals.get_proposals('mode_bundles') or {}
-    vibe_pools.prepare(store, bundles, now, measurement.PoolPolicies(store, now))
-    store.rec_proposals.put_proposals('mode_bundles', bundles, now)
+    bundles = getattr(store, '_fixture_bundle_payload', None)
+    if bundles is None:
+        bundles = store.rec_proposals.get_proposals('mode_bundles') or {}
+    publish_bundles(store, bundles, now, vibes=True)
     return bundles

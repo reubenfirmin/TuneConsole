@@ -12,7 +12,7 @@ def _seed(store):
     techno appears twice in the corpus (Alpha + Gamma); house once (Beta).
     Recent days: Alpha on both, Beta on one. Old day: Gamma.
     """
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     a = store.tracks.upsert_track("v1", "Alpha", "Artist A", "Album A", 200, album_browse_id="album-a")
     b = store.tracks.upsert_track("v2", "Beta", "Artist B", "Album B", 200, album_browse_id="album-b")
     g = store.tracks.upsert_track("v3", "Gamma", "Artist A", "Album A", 200, album_browse_id="album-a")
@@ -48,7 +48,7 @@ def test_listen_distribution_genre_alltime_includes_old(store):
 
 
 def test_album_browse_ids_maps_release_key_to_browse(store):
-    store.identities.upsert_identity("me", "c", None, True)
+    store.accounts.upsert_account("me", "c", None, True)
     store.tracks.upsert_track("v1", "Song", "Art", "Cool Album", 200, album_browse_id="MPREb_X")
     store.tracks.upsert_track("v2", "Single", "Art", "Loose Single", 200)   # no browse -> excluded
     ids = store.charts.album_browse_ids()
@@ -67,7 +67,7 @@ def test_history_bounds_spans_earliest_to_latest(store):
 
 
 def test_history_bounds_empty_when_no_history(store):
-    store.identities.upsert_identity("me", "c", None, True)
+    store.accounts.upsert_account("me", "c", None, True)
     assert store.charts.history_bounds() == (None, None)
 
 
@@ -134,7 +134,7 @@ def test_corpus_distribution_playlist_distinct_tracks(store):
 
 def test_distributions_skip_untagged(store):
     """A song with no genre/year is excluded from those dimensions (not bucketed as '')."""
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     t = store.tracks.upsert_track("v1", "Solo", "Artist", "Alb", 200)   # no enrichment
     k = store.conn.execute("SELECT identity_key k FROM tracks WHERE id=?", (t,)).fetchone()["k"]
     store.history.record_history_plays(iid, NOW, [k], source_timezone="UTC")

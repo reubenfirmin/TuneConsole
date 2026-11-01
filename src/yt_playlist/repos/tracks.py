@@ -1,12 +1,12 @@
 """TrackRepo: track rows and their genre/year enrichment."""
 from yt_playlist.util.matching import identity_key, normalize, recording_title
-from yt_playlist.core import catalog, metadata
-from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.core import catalog, entity_names, metadata
+from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
 
 
 class TrackRepo(Repo):
     @synchronized
-    def remember_playback_alternate(self, identity_id, requested, accepted, *, evidence, now):
+    def remember_playback_alternate(self, account_id, requested, accepted, *, evidence, now):
         """A provider replacement is reusable only with matching version, time and artist.
 
         Keep its directed provenance without merging recordings, ratings or history.
@@ -25,19 +25,20 @@ class TrackRepo(Repo):
                     and type(first) in (int, float) and type(second) in (int, float)
                     and first > 0 and second > 0 and abs(first - second) <= 2)
         with self.conn:
+            alternates = entity_names.owner(self.conn, 'youtube_playback_alternates')
             self.conn.execute(
-                'INSERT INTO youtube_playback_alternates VALUES (?,?,?,?,?,?) '
-                'ON CONFLICT(identity_id,requested_video_id) DO UPDATE SET '
+                f'INSERT INTO {alternates.table} VALUES (?,?,?,?,?,?) '
+                f'ON CONFLICT({alternates.column("account_id")},requested_video_id) DO UPDATE SET '
                 'video_id=excluded.video_id,same_recording=excluded.same_recording,'
                 'evidence_json=excluded.evidence_json,observed_at=excluded.observed_at',
-                (identity_id, original, actual, int(same), json.dumps(evidence, sort_keys=True), now))
+                (account_id, original, actual, int(same), json.dumps(evidence, sort_keys=True), now))
 
     @synchronized
-    def playback_alternate(self, identity_id, video_id):
-        return self.playback_alternates(identity_id, [video_id]).get(video_id)
+    def playback_alternate(self, account_id, video_id):
+        return self.playback_alternates(account_id, [video_id]).get(video_id)
 
     @synchronized
-    def playback_alternates(self, identity_id, video_ids):
+    def playback_alternates(self, account_id, video_ids):
         result = {}
         video_ids = list(dict.fromkeys(video_ids))
         for offset in range(0, len(video_ids), 500):
@@ -45,12 +46,12 @@ class TrackRepo(Repo):
             rows = self.conn.execute(
                 'SELECT a.requested_video_id,c.*,c.identity_key AS key,c.duration_s AS duration '
                 'FROM youtube_playback_alternates a JOIN catalog_tracks c ON c.video_id=a.video_id '
-                'WHERE a.identity_id=? AND a.requested_video_id IN (' + ','.join('?' for _ in batch) + ') '
-                'AND a.same_recording=1 AND COALESCE(c.available,1)<>0', (identity_id, *batch)).fetchall()
+                'WHERE a.account_id=? AND a.requested_video_id IN (' + ','.join('?' for _ in batch) + ') '
+                'AND a.same_recording=1 AND COALESCE(c.available,1)<>0', (account_id, *batch)).fetchall()
             result.update((row['requested_video_id'], dict(row)) for row in rows)
         return result
 
-    @synchronized
+    @snapshot_read
     def track_detail(self, video_id):
         """Read the exact upload, with the catalog's effective metadata choices."""
         row = self.conn.execute('SELECT * FROM catalog_tracks WHERE video_id=?',
@@ -63,7 +64,7 @@ class TrackRepo(Repo):
         track['year'] = track.get('mb_year')
         track['playlists'] = [dict(p) for p in self.conn.execute(
             'SELECT p.id,p.title,i.label identity FROM playlist_items pi '
-            'JOIN playlists p ON p.id=pi.playlist_id JOIN identities i ON i.id=p.identity_id '
+            'JOIN playlists p ON p.id=pi.playlist_id JOIN accounts i ON i.id=p.account_id '
             'WHERE pi.video_id=? ORDER BY p.title COLLATE NOCASE,p.id', (video_id,))]
         track['playback_alternates'] = [dict(row) for row in self.conn.execute(
             'SELECT DISTINCT c.video_id,c.title,c.artist FROM youtube_playback_alternates a '
@@ -71,7 +72,7 @@ class TrackRepo(Repo):
             'WHERE a.requested_video_id=? AND a.same_recording=1 ORDER BY c.video_id', (video_id,))]
         return track
 
-    @synchronized
+    @snapshot_read
     def track_play_ledger(self, recording_id, *, page=0, limit=50):
         """Bounded evidence ledger; an imported observation is never an exact play.
 
@@ -82,15 +83,15 @@ class TrackRepo(Repo):
         rows = self.conn.execute(
             "SELECT 'play' kind,pe.id evidence_id,pe.played_at sort_at,pe.played_at,"
             "NULL day,NULL timezone,'exact_timestamp' precision,i.label identity,"
-            "COALESCE((SELECT group_concat(source, ', ') FROM play_event_sources s "
-            "WHERE s.event_id=pe.id),pe.source) source,pe.video_id,pe.playlist_ytm_id,"
-            "pe.is_generated FROM play_events pe JOIN identities i ON i.id=pe.identity_id "
+            "(SELECT group_concat(source, ', ') FROM play_event_sources s "
+            "WHERE s.event_id=pe.id) source,pe.video_id,pe.playlist_ytm_id,"
+            "pe.is_generated FROM play_event_subjects pe JOIN accounts i ON i.id=pe.account_id "
             "WHERE pe.recording_id=? UNION ALL "
             "SELECT 'observation',MIN(o.id),MAX(o.last_observed_at),NULL,o.source_day,o.timezone,"
             "o.precision,i.label,o.source,NULL,NULL,0 "
-            "FROM listening_observations o JOIN identities i ON i.id=o.identity_id "
+            "FROM listening_observation_subjects o JOIN accounts i ON i.id=o.account_id "
             "WHERE o.recording_id=? "
-            "GROUP BY o.identity_id,o.source_day,o.precision,o.source,o.timezone "
+            "GROUP BY o.account_id,o.source_day,o.precision,o.source,o.timezone "
             "ORDER BY sort_at DESC,kind,evidence_id DESC LIMIT ? OFFSET ?",
             (recording_id, recording_id, limit + 1, page * limit)).fetchall()
         return [dict(row) for row in rows[:limit]], len(rows) > limit
@@ -136,11 +137,11 @@ class TrackRepo(Repo):
                                       duration_s=duration_s,thumbnail=thumbnail)
 
     @synchronized
-    def record_item_rating(self, identity_id, video_id, status, *, source, now):
-        self.record_item_ratings(identity_id, {video_id: status}, source=source, now=now)
+    def record_item_rating(self, account_id, video_id, status, *, source, now):
+        self.record_item_ratings(account_id, {video_id: status}, source=source, now=now)
 
     @synchronized
-    def record_item_ratings(self, identity_id, statuses, *, source, now):
+    def record_item_ratings(self, account_id, statuses, *, source, now):
         """Newer observations win; confirmed actions win ties against sync evidence.
 
         Equal-time sync conflicts retain the existing observation. Equal-time actions are
@@ -150,6 +151,8 @@ class TrackRepo(Repo):
         retain_action = ("excluded.source='sync' AND item_ratings.status=excluded.status "
                          "AND item_ratings.source IN ('api','action')")
         with self.conn:
+            ratings = entity_names.owner(self.conn, 'item_ratings')
+            actions = entity_names.owner(self.conn, 'listening_rating_actions')
             observations = []
             for video_id, status in statuses.items():
                 observed_at = now
@@ -162,22 +165,22 @@ class TrackRepo(Repo):
                     if unban:
                         # Preserve action order even with a coarse/frozen clock.
                         observed_at = max(now, nextafter(unban[0], inf))
-                observations.append((identity_id, video_id, status, source, observed_at))
+                observations.append((account_id, video_id, status, source, observed_at))
                 # Native player readouts also use source='action', but hydration
                 # is not proof of a button press. Only confirmed commands qualify.
                 if source == 'api':
                     previous = self.conn.execute(
-                        'SELECT status,observed_at FROM item_ratings WHERE identity_id=? AND video_id=?',
-                        (identity_id, video_id)).fetchone()
+                        'SELECT status,observed_at FROM item_ratings WHERE account_id=? AND video_id=?',
+                        (account_id, video_id)).fetchone()
                     if (previous is None or previous['observed_at'] <= observed_at) and (
                             previous is None or previous['status'] != status):
-                        self.conn.execute('INSERT INTO listening_rating_actions '
-                            '(identity_id,video_id,previous_status,status,source,at) VALUES (?,?,?,?,?,?)',
-                            (identity_id, video_id, previous['status'] if previous else None,
+                        self.conn.execute(f'INSERT INTO {actions.table} '
+                            f'({actions.column("account_id")},video_id,previous_status,status,source,at) VALUES (?,?,?,?,?,?)',
+                            (account_id, video_id, previous['status'] if previous else None,
                              status, source, observed_at))
             self.conn.executemany(
-                'INSERT INTO item_ratings VALUES (?,?,?,?,?) '
-                'ON CONFLICT(identity_id,video_id) DO UPDATE SET '
+                f'INSERT INTO {ratings.table} VALUES (?,?,?,?,?) '
+                f'ON CONFLICT({ratings.column("account_id")},video_id) DO UPDATE SET '
                 f'source=CASE WHEN {retain_action} THEN item_ratings.source ELSE excluded.source END,'
                 f'observed_at=CASE WHEN {retain_action} THEN item_ratings.observed_at ELSE excluded.observed_at END,'
                 'status=excluded.status '
@@ -186,25 +189,25 @@ class TrackRepo(Repo):
                 observations)
 
     @synchronized
-    def retained_rating_statuses(self, identity_id, video_ids, *, newer_than=None):
+    def retained_rating_statuses(self, account_id, video_ids, *, newer_than=None):
         """Read winning exact-upload ratings, including actions absent from an older snapshot."""
         video_ids = list(video_ids)
         retained = {}
         for offset in range(0, len(video_ids), 500):
             batch = video_ids[offset:offset + 500]
             retained.update(self.conn.execute('SELECT video_id,status FROM item_ratings '
-                'WHERE identity_id=? AND video_id IN (' + ','.join('?' for _ in batch) + ')',
-                (identity_id,*batch)))
+                'WHERE account_id=? AND video_id IN (' + ','.join('?' for _ in batch) + ')',
+                (account_id,*batch)))
         if newer_than is not None:
             retained.update(self.conn.execute('SELECT video_id,status FROM item_ratings '
-                'WHERE identity_id=? AND observed_at>=?', (identity_id,newer_than)))
+                'WHERE account_id=? AND observed_at>=?', (account_id,newer_than)))
         return retained
 
-    @synchronized
-    def item_rating(self, identity_id, video_id):
+    @lookup_read
+    def item_rating(self, account_id, video_id):
         row = self.conn.execute(
-            "SELECT status,source,observed_at FROM item_ratings WHERE identity_id=? AND video_id=?",
-            (identity_id, video_id)).fetchone()
+            "SELECT status,source,observed_at FROM item_ratings WHERE account_id=? AND video_id=?",
+            (account_id, video_id)).fetchone()
         return dict(row) if row else None
 
     @synchronized
@@ -214,7 +217,7 @@ class TrackRepo(Repo):
         return rating_feedback.aggregate(self.conn, keys)
 
     @synchronized
-    def pending_action_ratings(self, identity_id):
+    def pending_action_ratings(self, account_id):
         """Unresolved actions or combined feedback still awaiting projection.
 
         An account's like suppressed by another contribution's dislike is reconciled,
@@ -227,8 +230,8 @@ class TrackRepo(Repo):
             "SELECT ir.video_id,ir.status,ir.observed_at,r.identity_key FROM item_ratings ir "
             "LEFT JOIN youtube_items y ON y.video_id=ir.video_id "
             "LEFT JOIN recordings r ON r.id=y.recording_id "
-            "WHERE ir.identity_id=? AND ir.source IN ('api','action') "
-            "ORDER BY ir.observed_at,ir.video_id", (identity_id,)).fetchall()
+            "WHERE ir.account_id=? AND ir.source IN ('api','action') "
+            "ORDER BY ir.observed_at,ir.video_id", (account_id,)).fetchall()
         keys = {row['identity_key'] for row in rows if row['identity_key']}
         combined = rating_feedback.aggregate(self.conn, keys)
         feedback = {}
@@ -261,14 +264,14 @@ class TrackRepo(Repo):
                 video_type, artist_browse_id, album_browse_id, thumbnail, created_at,
                 library=library, source_ref=source_ref,credits=credits)
 
-    @synchronized
+    @lookup_read
     def identity_key_for_video(self, video_id) -> str | None:
         """Resolve an observed upload in the catalog, independently of library membership."""
         row = self.conn.execute(
             "SELECT identity_key FROM catalog_tracks WHERE video_id=? LIMIT 1", (video_id,)).fetchone()
         return row["identity_key"] if row else None
 
-    @synchronized
+    @lookup_read
     def thumbnail_for_video(self, video_id) -> str | None:
         """Cached artwork for this exact upload, including tracks outside the library."""
         row = self.conn.execute(
@@ -277,7 +280,7 @@ class TrackRepo(Repo):
             (video_id,)).fetchone()
         return row["thumbnail"] if row else None
 
-    @synchronized
+    @lookup_read
     def duration_for_video(self, video_id):
         """Stored length of this exact upload, including tracks outside the library."""
         row = self.conn.execute(
@@ -313,7 +316,7 @@ class TrackRepo(Repo):
         """A saved album's folded-in tracks still missing genre or year, the album-scoped twin of
         tracks_to_enrich, so the same enrich runners work over an album."""
         rows = self.conn.execute(
-            "SELECT t.id, t.video_id, t.title, t.artist FROM catalog_tracks t JOIN album_track_links a ON a.entry_id=t.id WHERE a.browse_id=? "
+            f"SELECT t.id, t.video_id, t.title, t.artist FROM catalog_tracks t JOIN {self.album_track_links_table} a ON a.entry_id=t.id WHERE a.browse_id=? "
             "AND (t.genre IS NULL OR t.genre = '' OR t.mb_year IS NULL OR t.mb_year = '') "
             "ORDER BY t.id", (album_browse_id,)).fetchall()
         return [{"id": r["id"], "video_id": r["video_id"], "title": r["title"], "artist": r["artist"]}
@@ -356,7 +359,7 @@ class TrackRepo(Repo):
         tracks_for_waterfall."""
         rows = self.conn.execute(
             "SELECT t.id, t.video_id, t.title, t.artist, t.mb_recording_id, t.thumbnail FROM catalog_tracks t "
-            "JOIN album_track_links a ON a.entry_id=t.id "
+            f"JOIN {self.album_track_links_table} a ON a.entry_id=t.id "
             f"WHERE a.browse_id=? AND ({self._NEEDS}) ORDER BY t.id", (album_browse_id,)).fetchall()
         return [dict(r) for r in rows]
 
@@ -409,9 +412,8 @@ class TrackRepo(Repo):
                 value = values[field]
                 column = 'mb_year' if field == 'year' else field
                 if field in ('title', 'artist') and value == current['orig_' + field]:
-                    self.conn.execute('DELETE FROM entry_field_choices WHERE entry_id=? AND field=?',
-                                      (entry_id, field))
-                    self.conn.execute(f'UPDATE catalog_tracks SET {column}=? WHERE id=?', (value, entry_id))
+                    catalog.withdraw_choice(self.conn, entry_id, field)
+                    metadata.select(self.conn, entry_id, column, value, 'youtube')
                 elif value != current[field]:
                     catalog.choose_field(self.conn, entry_id, column, value)
 
@@ -445,19 +447,20 @@ class TrackRepo(Repo):
     @synchronized
     def reset_track_title(self, track_id) -> None:
         track_id = catalog.resolve_entry(self.conn, track_id)
-        self.conn.execute("DELETE FROM entry_field_choices WHERE entry_id=? AND field='title'", (track_id,))
-        # restore the original YouTube title (undo a manual fix).
-        self.conn.execute("UPDATE catalog_tracks SET title=orig_title WHERE id=? AND orig_title IS NOT NULL",
-                          (track_id,))
-        self.conn.commit()
+        with self.conn:
+            catalog.withdraw_choice(self.conn, track_id, 'title')
+            row = self.conn.execute('SELECT orig_title FROM catalog_tracks WHERE id=?', (track_id,)).fetchone()
+            if row is not None and row[0] is not None:
+                metadata.select(self.conn, track_id, 'title', row[0], 'youtube')
 
     @synchronized
     def reset_track_artist(self, track_id) -> None:
         track_id = catalog.resolve_entry(self.conn, track_id)
-        self.conn.execute("DELETE FROM entry_field_choices WHERE entry_id=? AND field='artist'", (track_id,))
-        self.conn.execute("UPDATE catalog_tracks SET artist=orig_artist WHERE id=? AND orig_artist IS NOT NULL",
-                          (track_id,))
-        self.conn.commit()
+        with self.conn:
+            catalog.withdraw_choice(self.conn, track_id, 'artist')
+            row = self.conn.execute('SELECT orig_artist FROM catalog_tracks WHERE id=?', (track_id,)).fetchone()
+            if row is not None and row[0] is not None:
+                metadata.select(self.conn, track_id, 'artist', row[0], 'youtube')
 
     @synchronized
     def tracks_missing_genre(self, playlist_id) -> list:
@@ -474,13 +477,8 @@ class TrackRepo(Repo):
         track_id = catalog.resolve_entry(self.conn, track_id)
         # fill-only: set a field just when it's currently blank. So enrichment fills gaps and never
         # overwrites what you already have. MusicBrainz and Last.fm each top up the other's misses.
-        self.conn.execute(
-            "UPDATE catalog_tracks SET "
-            "  genre = CASE WHEN (genre IS NULL OR genre='') AND ? <> '' THEN ? ELSE genre END, "
-            "  mb_year = CASE WHEN (mb_year IS NULL OR mb_year='') AND ? <> '' THEN ? ELSE mb_year END "
-            "WHERE id=?",
-            (genre or "", genre or "", year or "", year or "", track_id))
-        self.conn.commit()
+        with self.conn:
+            metadata.fill(self.conn,track_id,{'genre':genre,'mb_year':year},'track_enrichment',blank=True)
 
     @synchronized
     def get_track_enrichment(self, track_id):
@@ -509,12 +507,9 @@ class TrackRepo(Repo):
         updates = {c: v for c, v in fields.items() if v is not None}
         if not updates:
             return
-        catalog.replace_hints(self.conn,track_id,updates)
-        # column names come from the fixed literal dict above (not user input) -> safe to inline
-        sets = ", ".join(f"{c} = CASE WHEN {c} IS NULL THEN ? ELSE {c} END" for c in updates)
-        self.conn.execute(f"UPDATE catalog_tracks SET {sets} WHERE id=?",
-                          list(updates.values()) + [track_id])
-        self.conn.commit()
+        with self.conn:
+            catalog.replace_hints(self.conn,track_id,updates)
+            metadata.fill(self.conn,track_id,updates,'track_audio')
 
     @synchronized
     def get_track_audio(self, track_id):
@@ -532,11 +527,8 @@ class TrackRepo(Repo):
         # fill-only: keep the first MBID we resolve for a track.
         if not mbid:
             return
-        self.conn.execute(
-            "UPDATE catalog_tracks SET mb_recording_id = CASE "
-            "WHEN mb_recording_id IS NULL OR mb_recording_id='' THEN ? ELSE mb_recording_id END "
-            "WHERE id=?", (mbid, track_id))
-        self.conn.commit()
+        with self.conn:
+            metadata.fill(self.conn,track_id,{'mb_recording_id':mbid},'track_mbid',blank=True)
 
     @synchronized
     def tracks_missing_audio(self, playlist_id) -> list[dict]:
@@ -565,4 +557,4 @@ class TrackRepo(Repo):
     def materialized_album_ids(self) -> set:
         """Releases with any library track. This does not prove full materialization."""
         return {r["browse_id"] for r in self.conn.execute(
-            "SELECT DISTINCT a.browse_id FROM album_track_links a JOIN library_memberships m ON m.entry_id=a.entry_id")}
+            f"SELECT DISTINCT a.browse_id FROM {self.album_track_links_table} a JOIN library_memberships m ON m.entry_id=a.entry_id")}

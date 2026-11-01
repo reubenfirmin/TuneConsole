@@ -17,7 +17,7 @@ def _mark_generated(store, ytm):
 
 
 def test_generated_only_play_is_in_the_set(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     store.playlists.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
     _mark_generated(store, "PLGEN")
     store.history.record_play_event(iid, "a|x", "v1", 10.0, playlist_ytm_id="PLGEN", source_timezone='UTC')
@@ -26,7 +26,7 @@ def test_generated_only_play_is_in_the_set(store):
 
 def test_mixed_evidence_is_excluded(store):
     # Spaced beyond the live-dedup merge window (30 min) so these land as two distinct rows.
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     store.playlists.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
     _mark_generated(store, "PLGEN")
     store.history.record_play_event(iid, "a|x", "v1", 10.0, playlist_ytm_id="PLGEN", source_timezone='UTC')
@@ -35,7 +35,7 @@ def test_mixed_evidence_is_excluded(store):
 
 
 def test_radio_of_generated_playlist_counts_as_generated(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     store.playlists.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
     _mark_generated(store, "PLGEN")
     store.history.record_play_event(iid, "a|x", "v1", 10.0, playlist_ytm_id="RDAMPLPLGEN", source_timezone='UTC')
@@ -43,7 +43,7 @@ def test_radio_of_generated_playlist_counts_as_generated(store):
 
 
 def test_ordinary_playlist_play_is_excluded(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     store.playlists.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
     _mark_generated(store, "PLGEN")
     store.playlists.upsert_playlist(iid, "PLORD", "My playlist", 0, "h", 1.0)
@@ -52,7 +52,7 @@ def test_ordinary_playlist_play_is_excluded(store):
 
 
 def test_day_partitioning_keeps_only_the_generated_only_day(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     store.playlists.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
     _mark_generated(store, "PLGEN")
     # Day 0: generated-only.

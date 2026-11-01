@@ -55,4 +55,7 @@ packages = ["src/yt_playlist"]
 addopts = "-q -m 'not browser'"
 testpaths = ["tests"]
 pythonpath = ["."]
+# Test databases can be several gigabytes; keep reports explicitly, not fixtures.
+tmp_path_retention_count = 0
+tmp_path_retention_policy = "none"
 markers = ["browser: live-browser tests via Playwright (run with -m browser)"]

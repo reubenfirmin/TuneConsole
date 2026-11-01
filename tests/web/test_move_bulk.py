@@ -13,8 +13,8 @@ from yt_playlist.web.app import create_app
 @pytest.fixture
 def transfers(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    source = store.identities.upsert_identity("Main", "c1", None, True)
-    target = store.identities.upsert_identity("Alt", "c2", None, False)
+    source = store.accounts.upsert_account("Main", "c1", None, True)
+    target = store.accounts.upsert_account("Alt", "c2", None, False)
     playlists = []
     tracks = {}
     for n, title in enumerate(("Evening", "Mix", "Weekend")):
@@ -51,7 +51,7 @@ def test_bulk_copy_keeps_separate_playlists_and_originals(transfers):
     assert "Copied 2 playlists." in response.text
     assert [p[1] for p in t.tgt_client.created] == ["Evening", "Weekend"]
     assert all(t.store.playlists.get_playlist(pid) for pid in t.playlists)
-    copies = [p for p in t.store.playlists.get_playlists() if p.identity_id == t.target and p.id != t.other]
+    copies = [p for p in t.store.playlists.get_playlists() if p.account_id == t.target and p.id != t.other]
     assert [(p.title, p.track_count) for p in copies] == [("Evening", 1), ("Weekend", 1)]
     assert t.src_client.deleted == []
     assert t.refreshes == []
@@ -89,7 +89,7 @@ def test_invalid_selection_is_rejected_before_any_copy(transfers, invalid):
 
 def test_removed_target_is_rejected_even_from_a_stale_page(transfers):
     t = transfers
-    t.store.conn.execute("UPDATE identities SET active=0 WHERE id=?", (t.target,))
+    t.store.conn.execute("UPDATE accounts SET active=0 WHERE id=?", (t.target,))
     response = _transfer(t)
     assert "An identity has been removed" in response.text
     assert not t.tgt_client.created
@@ -182,4 +182,4 @@ def test_incomplete_delivery_keeps_source_and_explains_why(transfers, monkeypatc
     assert t.store.playlists.get_playlist(t.playlists[0]) is not None
     assert not t.src_client.deleted
     assert not t.refreshes
-    assert any(p.ytm_playlist_id == "PL_NEW_0" for p in t.store.playlists.get_playlists())
+    assert any(p.provider_playlist_id == "PL_NEW_0" for p in t.store.playlists.get_playlists())

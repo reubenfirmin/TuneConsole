@@ -4,7 +4,7 @@ All reads use this repository's connection, including when called on a pinned re
 Candidate ranking and historical basket construction consume these rules explicitly.
 """
 from yt_playlist.core.recommendation_settings import MAX_TRACK_MINUTES
-from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized
+from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized, lookup_read
 from yt_playlist.repos.playlist_eligibility import QUARANTINED_PLAYLIST_IDS_SQL
 
 
@@ -16,7 +16,7 @@ def exclude_ids(column, ids, *, connective="AND") -> str:
 
 
 class RecEligibilityRepo(Repo):
-    @synchronized
+    @lookup_read
     def offer_metadata(self, videos) -> dict:
         """Current genre and length for bounded offered uploads, without ranking."""
         videos = list(dict.fromkeys(videos))
@@ -35,7 +35,7 @@ class RecEligibilityRepo(Repo):
             self._store.settings.get_setting('rec_param:' + MAX_TRACK_MINUTES.name))
         return f"({col} IS NULL OR {col} <= {60 * minutes})"
 
-    @synchronized
+    @lookup_read
     def suppressed_candidate_keys(self, keys, now) -> set:
         """Track/artist bans for loaded candidates; genre bans use their metadata."""
         keys = list(dict.fromkeys(keys))
@@ -48,7 +48,7 @@ class RecEligibilityRepo(Repo):
             "OR kind='dislike') AND (until IS NULL OR until>?)", [*keys, now])}
         blocked.update(r[0] for r in self.conn.execute(
             "SELECT DISTINCT r.identity_key FROM rec_feedback f "
-            "JOIN track_artists ta ON ta.artist_id=f.artist_id "
+            f"JOIN {self.entry_artists_table} ta ON ta.artist_id=f.artist_id "
             "JOIN catalog_entries e ON e.id=ta.entry_id JOIN recordings r ON r.id=e.recording_id "
             f"WHERE r.identity_key IN ({qs}) AND f.kind='mute' AND (f.until IS NULL OR f.until>?)",
             [*keys, now]))
@@ -68,7 +68,7 @@ class RecEligibilityRepo(Repo):
         return {r["identity_key"] for r in self.conn.execute(
             "SELECT DISTINCT t.identity_key FROM playlist_tracks pt "
             "JOIN tracks t ON t.id=pt.track_id JOIN playlists p ON p.id=pt.playlist_id "
-            "JOIN quarantined_playlists g ON g.ytm=p.scope_ref WHERE g.name=?", (group,))}
+            "JOIN quarantined_playlists g ON g.playlist_scope_id=p.playlist_scope_id WHERE g.name=?", (group,))}
 
     @synchronized
     def generated_only_keys(self, group=GENERATED_GROUP) -> set:

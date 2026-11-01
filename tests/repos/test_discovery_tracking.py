@@ -38,7 +38,7 @@ def test_visible_impressions_are_deduplicated_per_visit():
     s.discovery.record_discovery_impressions("album", ["b1"], "visit2", 400.0)
     alb = s.discovery.get_discovered_albums()[0]
     assert alb["offered_count"] == 2 and alb["last_shown"] == 400.0
-    assert s.conn.execute("SELECT COUNT(*) FROM discovery_visible_impressions").fetchone()[0] == 2
+    assert s.conn.execute("SELECT COUNT(*) FROM discovery_impressions").fetchone()[0] == 2
 
 
 def test_mark_offered_album_and_artist():
@@ -55,6 +55,7 @@ def test_mark_offered_album_and_artist():
 
 def test_legacy_server_counts_are_preserved_without_starting_expiry(tmp_path):
     import sqlite3
+    from yt_playlist.core.migrations import registry, runner
 
     path = tmp_path / "legacy.db"
     with sqlite3.connect(path) as db:
@@ -67,6 +68,7 @@ def test_legacy_server_counts_are_preserved_without_starting_expiry(tmp_path):
                 ('album', 'Rita Payés', 'Rueda Eterna', '2026', NULL, 100, 300, NULL, 200, 18);
         """)
     s = Store(path)
+    runner.migrate(s.conn, registry=registry.MIGRATIONS)
     s.init_schema()
     album = s.discovery.discovery_album_view(400.0, 30)[0]
     assert album["legacy_offered_count"] == 18

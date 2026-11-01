@@ -14,7 +14,7 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     monkeypatch.setattr(mb, "enrich_full",
                         lambda title, artist, *, observations=None: {"S0": ("rock", "1998", None, [], []),
                                                "S1": ("jazz", "2003", None, [], [])}.get(title, (None, None, None, [], [])))
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "S0", "X", "Al", 200, 1),
                                   store.tracks.upsert_track("v1", "S1", "Y", "Al", 200, 1),
@@ -68,7 +68,7 @@ def test_jobs_find_active():
 
 
 def test_page_rejoins_active_enrichment(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "S", "X", "Al", 200, 1)])
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
@@ -93,7 +93,7 @@ def test_discogs_fills_genre_and_year(store, monkeypatch):
         {"title": "Underworld - Born Slippy", "year": "1995", "genre": ["Electronic"], "style": ["Techno"]},
         {"title": "Unrelated Artist - Different Song", "year": "1952", "genre": ["Classical"]},
     ] if "Born Slippy" in q else [])
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "Born Slippy", "Underworld", "Al", 200, 1),
                                   store.tracks.upsert_track("v1", "Unknown", "Nobody", "Al", 200, 1)])
@@ -120,7 +120,7 @@ def test_lastfm_fills_missing_genre_and_year(store, monkeypatch):
     # stub the Last.fm lookup: (genre, year) per track; one fully unknown
     monkeypatch.setattr(lf, "enrich", lambda title, artist, key, *, observations=None:
                         {"S0": ("Trip Hop", None), "S1": ("House", "2010")}.get(title, (None, None)))
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
     t0 = store.tracks.upsert_track("v0", "S0", "X", "Al", 200, 1)
     store.playlists.set_playlist_tracks(a, [t0, store.tracks.upsert_track("v1", "S1", "Y", "Al", 200, 1),
@@ -231,7 +231,7 @@ def test_lastfm_without_key_reports_error(store, monkeypatch, tmp_path):
     monkeypatch.delenv("LASTFM_API_KEY", raising=False)
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))   # empty config -> no key
     import json as _json
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "S0", "X", "Al", 200, 1)])
     from tests.conftest import only_provider

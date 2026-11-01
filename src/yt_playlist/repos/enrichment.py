@@ -8,7 +8,8 @@ lock and transaction; reporting never owns part of that write.
 import json
 import time
 
-from yt_playlist.core import catalog, metadata
+from yt_playlist.core import catalog, metadata, metadata_evidence, metadata_conflicts, metadata_attempts
+from yt_playlist.core import metadata_runtime
 from yt_playlist.repos.base import Repo, synchronized
 
 # Concept -> (canonical column, caster), shared with read-only review projections.
@@ -23,11 +24,34 @@ FIELD_COLUMN = {
 
 class EnrichmentRepo(Repo):
     @synchronized
-    def apply_provider_fields(self, track_id, provider, fields, *, providers=()):
+    def apply_provider_fields(self, track_id, provider, fields, *, providers=(), delivery_id=None):
         """Select typed provider findings below explicit user overrides."""
         track_id = catalog.resolve_entry(self.conn,track_id)
         with self.conn:
-            metadata.apply_provider(self.conn,track_id,provider,fields,providers)
+            return metadata.apply_provider(self.conn,track_id,provider,fields,providers,delivery_id=delivery_id)
+
+    @synchronized
+    def reuse_provider_fields(self, entry_id, provider, fields, *, providers=(), now=None, select=True):
+        entry_id = catalog.resolve_entry(self.conn, entry_id)
+        with self.conn:
+            if metadata_runtime.active(self.conn):
+                data = metadata_runtime.alternatives(self.conn, metadata_runtime.subject(self.conn, entry_id)[0], provider, now=now)
+                scoped = metadata_runtime.scoped_fields(self.conn, entry_id, data)
+                fields = {field: value for field, value in fields.items() if field in scoped and scoped[field] == value}
+                if select:
+                    metadata.apply_provider(self.conn, entry_id, provider, fields, providers, now=now)
+                return None
+            if not metadata_attempts.available(self.conn):
+                if select:
+                    metadata.apply_provider(self.conn, entry_id, provider, fields, providers, now=now)
+                return None
+            if not self.conn.in_transaction:
+                self.conn.execute('BEGIN IMMEDIATE')
+            observations = metadata_attempts.reusable_evidence(self.conn, entry_id, provider, fields, now=now)
+            if select:
+                metadata.apply_provider(self.conn, entry_id, provider, fields, providers, now=now,
+                                        supplying_observations=observations)
+            return observations
 
     @synchronized
     def replace_catalog_hints(self, track_id, fields):
@@ -39,6 +63,20 @@ class EnrichmentRepo(Repo):
     def upsert_conflict(self, track_id, field, candidates, now=None, *, refreshed_providers=None) -> None:
         """Refresh candidates; a resolved conflict reopens only for a newly offered value."""
         track_id = catalog.resolve_entry(self.conn, track_id)
+        if metadata_runtime.active(self.conn):
+            with self.conn:
+                if not self.conn.in_transaction:
+                    self.conn.execute('BEGIN IMMEDIATE')
+                metadata_runtime.upsert_conflict(self.conn, track_id, field, candidates, now=now,
+                                                 refreshed_providers=refreshed_providers)
+            return
+        if metadata_evidence.available(self.conn):
+            with self.conn:
+                if not self.conn.in_transaction:
+                    self.conn.execute('BEGIN IMMEDIATE')
+                metadata_conflicts.upsert(self.conn, track_id, field, candidates, now=now,
+                                          refreshed_providers=refreshed_providers)
+            return
         row = self.conn.execute(
             "SELECT candidates, resolved FROM enrichment_conflict WHERE track_id=? AND field=?",
             (track_id, field)).fetchone()
@@ -77,6 +115,16 @@ class EnrichmentRepo(Repo):
         can converge through another associated input; release/item facts cannot.
         """
         track_id = catalog.resolve_entry(self.conn, track_id)
+        if metadata_runtime.active(self.conn):
+            with self.conn:
+                metadata_runtime.converge(self.conn, track_id, evidence, now=now)
+            return
+        if metadata_evidence.available(self.conn):
+            with self.conn:
+                if not self.conn.in_transaction:
+                    self.conn.execute('BEGIN IMMEDIATE')
+                metadata_conflicts.converge(self.conn, track_id, evidence, now=now)
+            return
         subject = self.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?',
                                     (track_id,)).fetchone()
         if subject is None:
@@ -105,7 +153,7 @@ class EnrichmentRepo(Repo):
             v = cast(value) if value not in (None, "") else ("" if cast is str else None)
         except (TypeError, ValueError):
             v = value
-        catalog.choose_field(self.conn,track_id,col,v,'conflict_resolution',now=now)
+        return catalog.choose_field(self.conn,track_id,col,v,'conflict_resolution',now=now)
 
     @synchronized
     def set_track_field(self, track_id, field, value) -> None:
@@ -118,7 +166,16 @@ class EnrichmentRepo(Repo):
         track_id = catalog.resolve_entry(self.conn, track_id)
         at = time.time() if now is None else now
         with self.conn:
-            self._choose_track_field(track_id,field,value,now=at)
+            observation = self._choose_track_field(track_id,field,value,now=at)
+            if metadata_runtime.active(self.conn):
+                conflict = metadata_runtime.conflict(self.conn, track_id, field)
+                if conflict:
+                    self.conn.execute('UPDATE metadata_runtime_conflicts SET status=1,updated_at=? WHERE id=?',
+                                      (at, conflict['id']))
+                return
+            if metadata_evidence.available(self.conn):
+                metadata_conflicts.resolve(self.conn, track_id, field, observation, now=at)
+                return
             self.conn.execute(
                 "UPDATE enrichment_conflict SET resolved=1, resolved_value=?, updated_at=? "
                 "WHERE track_id=? AND field=?",
@@ -137,7 +194,9 @@ class EnrichmentRepo(Repo):
             (track_id, field)).fetchone()
         if row is None:
             return False
-        offered = {str(c["value"]) for c in json.loads(row["candidates"])}
+        candidates = (metadata_runtime.conflict_details(self.conn, metadata_runtime.conflict(self.conn, track_id, field), now=now)['candidates']
+                      if metadata_runtime.active(self.conn) else json.loads(row['candidates']))
+        offered = {str(c["value"]) for c in candidates}
         offered.add(str(row["current_value"]) if row["current_value"] is not None else "")
         if value not in offered:
             return False

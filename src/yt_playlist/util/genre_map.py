@@ -4,41 +4,18 @@ The hand-editable genre_families.json supplies curated anchors, distance and ene
 catalog projects explicit MusicBrainz parent relationships onto those same two levels. Unmapped
 or ambiguous genres keep a singleton family (distance 1 to everything else).
 """
-import functools
-import json
-from pathlib import Path
-
-from yt_playlist.util import genre_catalog
-_DATA = Path(__file__).parent.parent / "data" / "genre_families.json"   # data/ lives at the package root
+from yt_playlist.util import genre_catalog, genre_family_data
+from yt_playlist.util.genre_family_data import load as _load
 
 
-@functools.lru_cache(maxsize=1)
-def _load():
-    raw = json.loads(_DATA.read_text())
-    families = raw["families"]
-    adjacency = raw["adjacency"]
-    energy = raw.get("energy", {})
-    genre_to_family = {}
-    for fam, genres in families.items():
-        for g in genres:
-            genre_to_family[genre_catalog.normalize(g)] = fam
-    records, labels = genre_catalog.catalog()
-    for label, (key, _, _) in labels.items():
-        if fam := records[key]["family"]:
-            genre_to_family[label] = fam
-    families = {fam: sorted(set(members) | {
-        r["name"].lower() for r in records.values() if r["family"] == fam
-    }) for fam, members in families.items()}
-    return genre_to_family, adjacency, energy, families
-
-
-def family(genre) -> str:
+def family(genre, *, conn=None) -> str:
     """Family for a genre (case-insensitive). Unknown genres map to 'other:<genre>' (singleton)."""
     if not genre:
         return ""
-    g = genre.strip().lower()
-    g2f, _, _, _ = _load()
-    return g2f.get(genre_catalog.normalize(g), f"other:{g}")
+    if conn is not None:
+        from yt_playlist.core import genre_identity
+        return genre_identity.family(conn,genre)
+    return genre_family_data.family(genre)
 
 
 def family_distance(fam_a, fam_b) -> float:
@@ -64,11 +41,15 @@ def energy(genre) -> float:
     return en.get(family(genre), 0.5)
 
 
-def subgenre(genre) -> str | None:
+def subgenre(genre, *, conn=None) -> str | None:
     """The normalized (lowercased) subgenre tag for a known genre, or None if unknown.
     Distinct from family(): family() collapses subgenres to a bucket; subgenre() keeps the fine axis."""
     if not genre:
         return None
+    if conn is not None:
+        from yt_playlist.core import genre_identity
+        key, _ = genre_identity.resolve(conn,genre)
+        return key
     records, labels = genre_catalog.catalog()
     if label := labels.get(genre_catalog.normalize(genre)):
         return records[label[0]]["name"].lower()
@@ -76,8 +57,13 @@ def subgenre(genre) -> str | None:
     return genre.strip().lower() if genre_catalog.normalize(genre) in g2f else None
 
 
-def subgenres_of(fam) -> list:
+def subgenres_of(fam, *, conn=None) -> list:
     """All member genre tags (lowercased) for the given family. Empty list if the family is unknown."""
+    if conn is not None:
+        retired = ("AND NOT EXISTS(SELECT 1 FROM genre_redirects r WHERE r.retired_key=c.key)"
+                   if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='genre_redirects'").fetchone() else '')
+        return [row[0] for row in conn.execute('SELECT c.key FROM genre_catalog c WHERE family_key=? '
+                                              +retired+' ORDER BY c.name COLLATE NOCASE',(fam,))]
     _, _, _, families = _load()
     members = families.get(fam)
     if members is None:

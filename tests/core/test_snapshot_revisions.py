@@ -6,6 +6,7 @@ import weakref
 import pytest
 
 from yt_playlist.core.store import Store
+from yt_playlist.core import catalog
 from yt_playlist.core.db_revisions import column_group_reads
 
 
@@ -26,7 +27,7 @@ def test_unrelated_settings_and_analytics_do_not_invalidate_catalog_snapshot(dat
         assert snapshot.store.conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0] == 1
         assert snapshot.store.settings.get_setting("model-input") == "old"
         store.settings.set_setting("sync-watermark", "new")
-        store.rec_ledger.record_serving_policy("new", "{}", 10)
+        store.rec_ledger.record_serving_policy("new", {}, 10)
         assert snapshot.publish(lambda: published.append(True))
     assert published == [True]
 
@@ -59,6 +60,32 @@ def test_rolled_back_and_identical_updates_do_not_invalidate_snapshot(database):
         store.conn.execute("UPDATE settings SET value='new' WHERE key='input'")
         store.conn.rollback()
         assert snapshot.publish(lambda: None)
+
+
+def test_interrupted_writer_reservation_releases_transaction_before_retry(database):
+    store = database
+    interrupted = False
+
+    def cancel():
+        nonlocal interrupted
+        if store.conn.in_transaction and not interrupted:
+            interrupted = True
+            return 1
+        return 0
+
+    with store.read_snapshot() as snapshot:
+        snapshot.store.settings.get_setting('input')
+        snapshot.release_reader()
+        try:
+            store.conn.set_progress_handler(cancel, 1)
+            with pytest.raises(sqlite3.OperationalError, match='interrupt'):
+                snapshot.publish(lambda: pytest.fail('Published an interrupted reservation'))
+            assert interrupted and not store.conn.in_transaction
+        finally:
+            store.conn.set_progress_handler(None, 0)
+    store.settings.set_setting('after-cancellation', 'available')
+    with store.read_snapshot() as retry:
+        assert retry.publish(lambda: None)
 
 
 def test_cached_setting_reads_each_track_their_own_keys(database):
@@ -95,10 +122,33 @@ def test_external_commit_and_schema_change_remain_conservative(tmp_path):
         store.conn.close()
 
 
+@pytest.mark.parametrize('change', ['new-owner', 'new-column'])
+def test_new_schema_definitions_bind_counters_for_existing_connections(database, change):
+    store = database
+    with store.conn:
+        store.conn.execute('CREATE TABLE published_input(id INTEGER PRIMARY KEY,value TEXT)')
+        store.conn.execute("INSERT INTO published_input VALUES (1,'initial')")
+    if change == 'new-column':
+        with store.read_snapshot() as snapshot:
+            snapshot.store.conn.execute('SELECT value FROM published_input').fetchone()
+            assert snapshot.publish(lambda: None)
+        store.conn.execute('ALTER TABLE published_input ADD COLUMN fresh TEXT')
+    column = 'fresh' if change == 'new-column' else 'value'
+    with store.read_snapshot() as snapshot:
+        snapshot.store.conn.execute(f'SELECT {column} FROM published_input').fetchone()
+        store.settings.set_setting('unrelated-input', 'changed')
+        assert snapshot.publish(lambda: None)
+    with store.read_snapshot() as snapshot:
+        snapshot.store.conn.execute(f'SELECT {column} FROM published_input').fetchone()
+        with store.conn:
+            store.conn.execute(f'UPDATE published_input SET {column}=?', ('changed',))
+        assert not snapshot.publish(lambda: pytest.fail('Missed a write to a newly published field'))
+
+
 @pytest.mark.parametrize('change', ['timestamps', 'genre', 'insert', 'delete', 'rollback'])
 def test_declared_catalog_read_guards_data_but_not_enrichment_schedule(database, change):
     store = database
-    store.tracks.upsert_track('video', 'Song', 'Artist', None, None)
+    tid = store.tracks.upsert_track('video', 'Song', 'Artist', None, None)
     if change == 'delete':
         with store.conn:
             store.conn.execute("INSERT INTO recordings(identity_key) VALUES ('orphan')")
@@ -111,7 +161,7 @@ def test_declared_catalog_read_guards_data_but_not_enrichment_schedule(database,
             with store.conn:
                 store.conn.execute("DELETE FROM recordings WHERE identity_key='orphan'")
         elif change in ('genre', 'rollback'):
-            store.conn.execute("UPDATE recordings SET genre='House'")
+            catalog.choose_field(store.conn, tid, 'genre', 'House')
             if change == 'rollback':
                 store.conn.rollback()
             else:
@@ -136,12 +186,12 @@ def test_catalog_scope_does_not_weaken_unannotated_reads(database):
 
 def test_ranking_tolerance_does_not_relax_unlisted_preferences(database):
     store = database
-    store.tracks.upsert_track('video', 'Song', 'Artist', None, None)
+    tid = store.tracks.upsert_track('video', 'Song', 'Artist', None, None)
     with store.read_snapshot() as snapshot:
         snapshot.store.rec_query.track_content()
         snapshot.store.settings.get_setting('home_mix_vibe')
         with store.conn:
-            store.conn.execute("UPDATE recordings SET genre='House'")
+            catalog.choose_field(store.conn, tid, 'genre', 'House')
         store.settings.set_setting('home_mix_vibe', 'energetic')
         assert not snapshot.publish(lambda: pytest.fail('published superseded preferences'),
                                     allow_stale_tables={'recordings'})
@@ -151,12 +201,13 @@ def test_ranking_tolerance_keeps_external_writer_guard(tmp_path):
     path = tmp_path / 'state.db'
     store = Store(path)
     store.init_schema()
-    store.tracks.upsert_track('video', 'Song', 'Artist', None, None)
+    tid = store.tracks.upsert_track('video', 'Song', 'Artist', None, None)
     try:
         with store.read_snapshot() as snapshot:
             snapshot.store.rec_query.track_content()
             with sqlite3.connect(path) as other:
-                other.execute("UPDATE recordings SET genre='House'")
+                other.row_factory = sqlite3.Row
+                catalog.choose_field(other, tid, 'genre', 'House')
             assert not snapshot.publish(lambda: pytest.fail('ignored an external writer'),
                                         allow_stale_tables={'recordings'})
     finally:

@@ -259,22 +259,12 @@ def test_asking_for_40_percent_rock_gets_40_percent_of_the_playlist(store, monke
     _mixed_library(monkeypatch, store)
     state = road_trip.build_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
     assert _genre_share(state, "Rock") < 0.2         # the pool is thin on rock to start with
+    before = state["stats"]["own_count"]
 
     road_trip.set_share(state, "mine", "genre:Rock", 0.4, store)
 
     assert 0.3 <= _genre_share(state, "Rock") <= 0.5
     assert next(a["share"] for a in state["axes"]["mine"] if a["key"] == "genre:Rock") >= 0.3
-
-
-def test_forcing_a_genre_up_does_not_shrink_the_playlist(store, monkeypatch):
-    """...and it must not cost you the rest of the playlist: capping everything else at 60% while
-    rock can only reach 10% is what left a 5-song side."""
-    _mixed_library(monkeypatch, store)
-    state = road_trip.build_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
-    before = state["stats"]["own_count"]
-
-    road_trip.set_share(state, "mine", "genre:Rock", 0.4, store)
-
     assert state["stats"]["own_count"] >= before - 1
 
 

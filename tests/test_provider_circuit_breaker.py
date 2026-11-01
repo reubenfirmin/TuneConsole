@@ -48,7 +48,7 @@ def test_parse_error_counts_as_reachable():
 @pytest.mark.parametrize("offline", [False, True])
 def test_waterfall_probe_distinguishes_outages_from_confirmed_misses(
         provider, offline, store, monkeypatch):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     pid = store.playlists.upsert_playlist(iid, "PL", "Mix", 8, "h", 1000)
     ids = [store.tracks.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(8)]
     store.playlists.set_playlist_tracks(pid, ids)

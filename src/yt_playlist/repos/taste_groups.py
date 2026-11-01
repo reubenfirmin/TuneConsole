@@ -3,11 +3,14 @@ import json
 import time
 
 from yt_playlist.core.activity import WorkBudgetExceeded
+from yt_playlist.core import prepared_inputs
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.repos import group_publication
 
 
 class TasteGroupsRepo(Repo):
+    staged_tables = group_publication.STAGED_TABLES
+
     @synchronized
     def leaf_members(self, generation):
         """Exact partition for one retained generation, without provenance or vectors."""
@@ -31,8 +34,8 @@ class TasteGroupsRepo(Repo):
     @synchronized
     def preparation_progress(self):
         # These are separate units: a source job may affect many recordings.
-        prepared = self.conn.execute("SELECT COUNT(*) FROM rec_prepared_content "
-            "WHERE json_type(payload,'$.library')='object'").fetchone()[0]
+        prepared = self.conn.execute('SELECT COUNT(*) FROM prepared_recording_inputs '
+            'WHERE library_present=1').fetchone()[0]
         pending_recordings = self.conn.execute('SELECT COUNT(*) FROM rec_content_pending').fetchone()[0]
         sources = {row[0]: row[1] for row in self.conn.execute(
             'SELECT s.scope,COUNT(*) FROM rec_musical_pending p '
@@ -93,8 +96,8 @@ class TasteGroupsRepo(Repo):
 
     @synchronized
     def corpus_size(self, max_rows):
-        size = self.conn.execute("SELECT COUNT(*) FROM rec_prepared_content "
-                                 "WHERE json_type(payload,'$.library')='object'").fetchone()[0]
+        size = self.conn.execute('SELECT COUNT(*) FROM prepared_recording_inputs '
+                                 'WHERE library_present=1').fetchone()[0]
         if size > max_rows:
             raise WorkBudgetExceeded('Musical group corpus exceeds admitted memory')
         return size
@@ -104,17 +107,18 @@ class TasteGroupsRepo(Repo):
         # Bound raw bytes before fetching/decoding. Callers project each page and
         # release provenance trees, retaining only compact per-recording features.
         size = self.conn.execute('SELECT COALESCE(SUM(bytes),0) FROM (SELECT '
-            'length(CAST(p.payload AS BLOB))+COALESCE(length(CAST(m.payload AS BLOB)),0) bytes '
-            'FROM rec_prepared_content p LEFT JOIN rec_musical_profiles m USING(identity_key) '
-            "WHERE json_type(p.payload,'$.library')='object' AND p.identity_key>? "
-            'ORDER BY p.identity_key LIMIT ?)', (after, limit)).fetchone()[0]
+            + prepared_inputs.byte_bound() + '+COALESCE(length(CAST(m.payload AS BLOB))*4,0) bytes '
+            'FROM prepared_recording_inputs p JOIN recordings r ON r.id=p.recording_id '
+            'LEFT JOIN rec_musical_profiles m ON m.identity_key=r.identity_key '
+            'WHERE p.library_present=1 AND r.identity_key>? '
+            'ORDER BY r.identity_key LIMIT ?)', (after, limit)).fetchone()[0]
         if size > max_bytes:
             raise WorkBudgetExceeded('Musical group page exceeds admitted memory')
-        rows = self.conn.execute('SELECT p.identity_key,p.payload,m.payload profile FROM rec_prepared_content p '
-            "LEFT JOIN rec_musical_profiles m USING(identity_key) WHERE json_type(p.payload,'$.library')='object' "
-            'AND p.identity_key>? '
-            'ORDER BY p.identity_key LIMIT ?', (after, limit)).fetchall()
-        return [(r['identity_key'], json.loads(r['payload']), json.loads(r['profile']) if r['profile'] else None)
+        rows = self.conn.execute('SELECT r.identity_key,p.*,m.payload profile FROM prepared_recording_inputs p '
+            'JOIN recordings r ON r.id=p.recording_id LEFT JOIN rec_musical_profiles m ON m.identity_key=r.identity_key '
+            'WHERE p.library_present=1 AND r.identity_key>? '
+            'ORDER BY r.identity_key LIMIT ?', (after, limit)).fetchall()
+        return [(r['identity_key'], prepared_inputs.payload(r), json.loads(r['profile']) if r['profile'] else None)
                 for r in rows]
 
     @synchronized
@@ -141,10 +145,10 @@ class TasteGroupsRepo(Repo):
             'WHERE i.legacy_mode_id IS NOT NULL')}
 
     @synchronized
-    def definition(self, version):
+    def definition(self, version, *, generation=None):
         row = self.conn.execute('SELECT d.*,g.created_at FROM rec_group_definitions d '
             'JOIN rec_group_generations g USING(generation) JOIN rec_group_publications p USING(generation) '
-            'WHERE version=?', (version,)).fetchone()
+            'WHERE version=? AND (? IS NULL OR d.generation=?)', (version, generation, generation)).fetchone()
         return {**json.loads(row['payload']), **{key: row[key] for key in
                 ('version', 'group_id', 'generation', 'parent_version', 'created_at')}} if row else None
 
@@ -155,14 +159,17 @@ class TasteGroupsRepo(Repo):
         if len(keys) > 32:
             raise ValueError('Group assignment input page exceeds 32 recordings')
         qs = ','.join('?' for _ in keys)
-        used = self.conn.execute('SELECT COALESCE(SUM(length(p.payload)+COALESCE(length(m.payload),0)),0) '
-            'FROM rec_prepared_content p LEFT JOIN rec_musical_profiles m USING(identity_key) '
-            f'WHERE p.identity_key IN ({qs})', keys).fetchone()[0]
+        used = self.conn.execute('SELECT COALESCE(SUM(' + prepared_inputs.byte_bound()
+            + '+COALESCE(length(CAST(m.payload AS BLOB))*4,0)),0) '
+            'FROM prepared_recording_inputs p JOIN recordings r ON r.id=p.recording_id '
+            'LEFT JOIN rec_musical_profiles m ON m.identity_key=r.identity_key '
+            f'WHERE r.identity_key IN ({qs})', keys).fetchone()[0]
         if used > max_bytes:
             raise WorkBudgetExceeded('Group assignment evidence exceeds page budget')
-        return [(row[0], json.loads(row[1]), json.loads(row[2]) if row[2] else None) for row in self.conn.execute(
-            'SELECT p.identity_key,p.payload,m.payload FROM rec_prepared_content p '
-            f'LEFT JOIN rec_musical_profiles m USING(identity_key) WHERE p.identity_key IN ({qs})', keys)]
+        return [(row['identity_key'], prepared_inputs.payload(row), json.loads(row['profile']) if row['profile'] else None)
+                for row in self.conn.execute('SELECT r.identity_key,p.*,m.payload profile FROM prepared_recording_inputs p '
+                    'JOIN recordings r ON r.id=p.recording_id LEFT JOIN rec_musical_profiles m ON m.identity_key=r.identity_key '
+                    f'WHERE r.identity_key IN ({qs})', keys)]
 
     @synchronized
     def publish_assignments(self, rows):
@@ -185,6 +192,9 @@ class TasteGroupsRepo(Repo):
 
     def cleanup_staged(self):
         return group_publication.cleanup(self)
+
+    def abandon_staged(self, prepared):
+        return group_publication.abandon(self, prepared)
 
     @synchronized
     def expired_builds(self):

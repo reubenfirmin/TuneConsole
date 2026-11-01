@@ -12,7 +12,7 @@ from tests.conftest import FakeClient
 
 
 def _app(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     return iid, TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0),
                            base_url="http://127.0.0.1")
 
@@ -67,7 +67,7 @@ def test_dismissed_duplicate_members_still_show_unrelated_overlaps(store, near):
     c.post("/cleanup/ignore-merge", data={"members": "PLA,PLB"})
     result = analyze_cleanup(store)
     assert not result.groups and not result.near_pairs
-    assert {frozenset((o.playlist_a.ytm_playlist_id, o.playlist_b.ytm_playlist_id))
+    assert {frozenset((o.playlist_a.provider_playlist_id, o.playlist_b.provider_playlist_id))
             for o in result.overlaps} == {frozenset(("PLA", "PLC")), frozenset(("PLB", "PLC"))}
     assert _count_after_reload(c, store) == 3
 

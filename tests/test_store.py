@@ -7,11 +7,11 @@ def test_play_provenance_upgrade_preserves_unknown_history_and_reopens(tmp_path,
     iid = 1
     with store.conn:
         # Current repositories require account scopes and provenance tables absent in v7.
-        store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (?,'main','cred',1)", (iid,))
-        store.conn.execute("INSERT INTO playlists(identity_id,ytm_playlist_id,title) VALUES (?,'PLGEN','Generated')", (iid,))
+        store.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (?,'main','cred',1)", (iid,))
+        store.conn.execute("INSERT INTO playlists(account_id,provider_playlist_id,title) VALUES (?,'PLGEN','Generated')", (iid,))
         store.conn.execute("INSERT INTO playlist_group VALUES ('PLGEN','Generated')")
         store.conn.execute("INSERT INTO tracks(video_id,title,artist,identity_key) VALUES ('vid','Song','Artist','song|artist')")
-        store.conn.execute("INSERT INTO play_events(identity_id,identity_key,video_id,played_at,playlist_ytm_id) VALUES (?,'song|artist','vid',120,'RDAMPLPLGEN')", (iid,))
+        store.conn.execute("INSERT INTO play_events(account_id,identity_key,video_id,played_at,playlist_ytm_id) VALUES (?,'song|artist','vid',120,'RDAMPLPLGEN')", (iid,))
         store.conn.execute("ALTER TABLE play_events DROP COLUMN is_generated")
         store.conn.execute("DROP TABLE schema_migrations")
     store.conn.close()
@@ -39,13 +39,13 @@ def test_retired_source_weights_are_removed_and_not_restored(legacy_store):
     store.rec_model.set_weight("genre:jazz", 0, lo=0, now=800)
     expected = {axis: row for axis, row in store.rec_model.weight_records().items() if axis != "lane:explore"}
     param_keys = ("rec_param:breadth_bias",)
-    store.rec_model.save_taste_settings("old-source-checkpoint", param_keys, 1000)
+    store.rec_model.save_taste_settings("taste_settings_checkpoint_v1", param_keys, 1000)
     with store.conn:
         store.conn.execute("DROP TABLE schema_migrations")
 
     store.init_schema()
     assert store.rec_model.weight_records() == expected
-    assert store.rec_model.restore_taste_settings("old-source-checkpoint", param_keys)
+    assert store.rec_model.restore_taste_settings("taste_settings_checkpoint_v1", param_keys)
     assert store.rec_model.weight_records() == expected
     store.init_schema()
     assert store.rec_model.weight_records() == expected
@@ -58,9 +58,9 @@ def test_playlist_creation_date_migration_backfills_only_known_dates(legacy_stor
 
     # Recreate the previous schema, then exercise the real startup migration.
     with store.conn:
-        store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','cred',1)")
+        store.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'main','cred',1)")
         for ytm in ("song", "generated", "303", "Brexit List", "planned", "moved"):
-            store.conn.execute("INSERT INTO playlists(identity_id,ytm_playlist_id,title,track_count,content_hash,first_seen,last_seen,last_changed) VALUES (1,?,?,0,'',9000,9000,9000)", (ytm, ytm))
+            store.conn.execute("INSERT INTO playlists(account_id,provider_playlist_id,title,track_count,content_hash,first_seen,last_seen,last_changed) VALUES (1,?,?,0,'',9000,9000,9000)", (ytm, ytm))
         for kind, ytm, status, at in ((COPY_PLAYLIST, "song", "executed", 100),
                                       (COPY_PLAYLIST, "song", "executed", 200),
                                       (COPY_PLAYLIST, "planned", "planned", 300),
@@ -72,16 +72,16 @@ def test_playlist_creation_date_migration_backfills_only_known_dates(legacy_stor
         store.conn.execute("DELETE FROM settings WHERE key='playlist_created_at_backfilled'")
         store.conn.execute("DROP TABLE schema_migrations")
     store.init_schema()
-    dates = {p.ytm_playlist_id: p.created_at for p in store.playlists.get_playlists()}
+    dates = {p.provider_playlist_id: p.created_at for p in store.playlists.get_playlists()}
     assert dates == {"song": 100, "generated": 50, "303": None, "Brexit List": None,
                      "planned": None, "moved": None}
     store.playlist_recipes.set_recipe("generated", {"theme": "updated mix"}, 8000)
     store.init_schema()
-    assert {p.ytm_playlist_id: p.created_at for p in store.playlists.get_playlists()} == dates
+    assert {p.provider_playlist_id: p.created_at for p in store.playlists.get_playlists()} == dates
 
 
 def test_upsert_playlist_tracks_seen_and_changed(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     t1 = store.tracks.upsert_track("v1", "Song A", "Artist", "Alb", 200)
     t2 = store.tracks.upsert_track("v2", "Song B", "Artist", "Alb", 210)
     pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", 2, "hash1", 1000.0)
@@ -91,27 +91,27 @@ def test_upsert_playlist_tracks_seen_and_changed(store):
 
     # re-sync, same hash -> last_changed unchanged, last_seen updated
     store.playlists.upsert_playlist(iid, "PL1", "Mix", 2, "hash1", 2000.0)
-    pl = [p for p in store.playlists.get_playlists() if p.ytm_playlist_id == "PL1"][0]
+    pl = [p for p in store.playlists.get_playlists() if p.provider_playlist_id == "PL1"][0]
     assert pl.first_seen == 1000.0
     assert pl.last_seen == 2000.0
     assert pl.last_changed == 1000.0
 
     # re-sync, new hash -> last_changed bumps
     store.playlists.upsert_playlist(iid, "PL1", "Mix", 3, "hash2", 3000.0)
-    pl = [p for p in store.playlists.get_playlists() if p.ytm_playlist_id == "PL1"][0]
+    pl = [p for p in store.playlists.get_playlists() if p.provider_playlist_id == "PL1"][0]
     assert pl.last_changed == 3000.0
 
 def test_upsert_identity_is_idempotent(store):
-    a = store.identities.upsert_identity("main", "cred", "B1", True)
-    b = store.identities.upsert_identity("main", "cred2", "B1", True)  # same account, rotated credential
+    a = store.accounts.upsert_account("main", "cred", "B1", True)
+    b = store.accounts.upsert_account("main", "cred2", "B1", True)  # same account, rotated credential
     assert a == b
-    ids = store.identities.get_identities()
+    ids = store.accounts.get_accounts()
     assert len(ids) == 1
     assert ids[0].credential_ref == "cred2"
     assert ids[0].brand_account_id == "B1"
 
 def test_set_playlist_tracks_replace_semantics(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     t1 = store.tracks.upsert_track("v1", "Song A", "Artist", "Alb", 200)
     t2 = store.tracks.upsert_track("v2", "Song B", "Artist", "Alb", 210)
     t3 = store.tracks.upsert_track("v3", "Song C", "Artist", "Alb", 220)
@@ -143,7 +143,7 @@ def test_upsert_track_backfills_duration_on_resync(store):
     assert dur == 250
 
 def test_history_keys_window(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     day = 86400
     store.history.record_history_plays(iid, 5 * day, ["song a|artist", "song c|artist"], source_timezone="UTC")
     assert store.history.get_recent_history_keys(4 * day) == {"song a|artist", "song c|artist"}
@@ -167,7 +167,7 @@ def test_update_action_sets_undo(store):
     assert store.actions.get_action(aid).undo_json == '{"backup":"/x.json"}'
 
 def test_get_playlist_tracks_with_meta_includes_duration(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Artist", None, 207, True)
     pid = store.playlists.upsert_playlist(iid, "PL", "p", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(pid, [t])
@@ -179,7 +179,7 @@ def test_concurrent_access_is_serialized(store):
     # FastAPI serves sync routes from a threadpool, so the shared connection is hit from many
     # threads. Without the Store lock this raises sqlite3 ProgrammingError / corrupts state.
     import threading
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     errors = []
 
     def worker(n):

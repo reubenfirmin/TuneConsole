@@ -43,5 +43,6 @@ def _calculate(store, now) -> dict:
     meta = store.trends.track_meta()
     artist_first = store.trends.first_play_map("artist")
     catalog_artists = store.trends.catalog_artists()
-    months = stats.compute_months(day_counts, meta, artist_first, catalog_artists)
+    genre_axes = store.genres.feature_axes(row[1] for row in meta.values())
+    months = stats.compute_months(day_counts, meta, artist_first, catalog_artists,genre_axes=genre_axes)
     return trend_payload.assemble(store, now, day_counts, meta, months)

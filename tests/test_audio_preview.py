@@ -8,7 +8,8 @@ import pytest
 
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes import audio_preview
-from experiments.audio_lab_tools.prepare_extension import prepare
+from scripts.audio_model.bundle import prepare
+from tests.audio_model_fixtures import write_model_fixture
 
 
 def test_preview_receives_metadata_and_exposes_no_audio_or_model_endpoints(store, tmp_path, monkeypatch):
@@ -36,31 +37,14 @@ def test_preview_receives_metadata_and_exposes_no_audio_or_model_endpoints(store
         assert 'href="/audio-preview"' not in client.get('/').text
 
 
-def test_optional_extension_preparer_checks_hashes_before_replacing_installation(tmp_path):
-    import hashlib
-    import json
-
-    lab, destination = tmp_path / 'lab', tmp_path / 'extension'
-    vendor = lab / 'vendor'
-    vendor.mkdir(parents=True)
-    for name in ('model_worker.js', 'runtime_loader.js', 'features.js', 'embedding_graph.js', 'audio_attributes.js'):
-        (lab / name).write_text('// fixture')
-    artifact = b'verified runtime'
-    (vendor / 'essentia-csp.js').write_bytes(artifact)
-    row = {'path': 'essentia-csp.js', 'bytes': len(artifact), 'sha256': hashlib.sha256(artifact).hexdigest()}
-    (vendor / 'runtime.json').write_text(json.dumps({'runtime': 'essentia-csp-audio-2',
-        'flags': ['-sDYNAMIC_EXECUTION=0'], 'files': [row]}))
-    meyda = []
-    for name in ('meyda.min.js', 'meyda-LICENSE'):
-        (vendor / name).write_bytes(artifact)
-        meyda.append({**row, 'path': name})
-    (vendor / 'bundle.json').write_text(json.dumps({'meyda_version': '5.6.3',
-        'mood_heads': [{'id': name} for name in ('relaxed', 'aggressive', 'happy', 'sad', 'deam')], 'files': meyda}))
-    prepare(lab, destination)
+def test_audio_bundle_checks_hashes_before_replacing_installation(tmp_path):
+    source, destination = tmp_path / 'model', tmp_path / 'extension'
+    write_model_fixture(source)
+    prepare(source, destination)
     before = {str(path.relative_to(destination)): path.read_bytes() for path in destination.rglob('*') if path.is_file()}
-    (vendor / 'essentia-csp.js').write_bytes(b'tampered')
-    with pytest.raises(ValueError, match='Research artifact changed'):
-        prepare(lab, destination)
+    (source / 'vendor/essentia-csp.js').write_bytes(b'tampered')
+    with pytest.raises(ValueError, match='Audio artifact changed'):
+        prepare(source, destination)
     assert {str(path.relative_to(destination)): path.read_bytes() for path in destination.rglob('*') if path.is_file()} == before
 
 

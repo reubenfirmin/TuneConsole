@@ -1,5 +1,10 @@
 """The re-auth banner state must survive a server restart: it is persisted to the store and reseeded
 when a fresh Ctx is built (e.g. uvicorn --reload re-spawning the worker)."""
+import sqlite3
+
+import pytest
+
+from yt_playlist.core import account_auth_state
 from yt_playlist.core.store import Store
 from yt_playlist.web.context import Ctx, AUTH_EXPIRED_KEY
 
@@ -11,6 +16,8 @@ def _ctx(store):
 def _store():
     s = Store(":memory:")
     s.init_schema()
+    for number in range(1,8):
+        s.accounts.upsert_account(str(number),f'{number}.json',None,number==1)
     return s
 
 
@@ -19,7 +26,7 @@ def test_flag_persists_and_reseeds_across_restart():
     ctx = _ctx(store)
     ctx.flag_auth_expired(7, "flavor8100")
     assert ctx.auth_expired == {7: "flavor8100"}
-    assert store.settings.get_setting(AUTH_EXPIRED_KEY)                 # written through
+    assert account_auth_state.read(store.conn)=={7:'flavor8100'}
 
     fresh = _ctx(store)                                        # simulate a restart: brand-new Ctx, same store
     assert fresh.auth_expired == {7: "flavor8100"}            # int key, so on_auth_ok's pop(iid) matches
@@ -43,7 +50,7 @@ def test_clear_one_removes_and_persists():
 
     ctx.clear_auth_expired(2)
     assert ctx.auth_expired == {}
-    assert store.settings.get_setting(AUTH_EXPIRED_KEY) is None         # setting deleted when empty
+    assert account_auth_state.read(store.conn)=={}
 
 
 def test_clear_all_wipes_banner():
@@ -64,17 +71,19 @@ def test_healthy_extension_clears_warning_in_memory_during_repair_then_on_disk()
     store.conn.execute('PRAGMA query_only=ON')
     ctx.clear_all_auth_expired()
     assert ctx.auth_expired == {}
-    assert store.settings.get_setting(AUTH_EXPIRED_KEY)
+    assert account_auth_state.read(store.conn)=={1:'Main'}
     store.conn.execute('PRAGMA query_only=OFF')
     store.activity_paused = False
     # The still-connected extension is freshly confirmed when background work
     # resumes; an empty RAM dictionary must not leave a stale warning on disk.
     ctx.clear_all_auth_expired()
     assert _ctx(store).auth_expired == {}
-    assert store.settings.get_setting(AUTH_EXPIRED_KEY) is None
+    assert account_auth_state.read(store.conn)=={}
 
 
-def test_corrupt_setting_is_ignored():
+def test_retired_auth_map_cannot_replace_owned_account_state():
     store = _store()
-    store.settings.set_setting(AUTH_EXPIRED_KEY, "not json{")
-    assert _ctx(store).auth_expired == {}                      # tolerated, not a crash
+    with pytest.raises(sqlite3.IntegrityError,match='domain owner'):
+        store.settings.set_setting(AUTH_EXPIRED_KEY, "not json{")
+    store.conn.rollback()
+    assert _ctx(store).auth_expired == {}

@@ -14,11 +14,10 @@ def source_step(store, now, *, batch=32, seconds=2):
     key = store.musical_profiles.pending()
     if not key:
         return False
-    dependencies = {(table, 'key:' + key) for table in (
-        'rec_musical_pending', 'rec_musical_sources', 'rec_musical_links', 'rec_musical_source_profiles')}
+    dependencies, observation_ids = store.musical_profiles.source_dependencies(key)
     try:
         with work_budget(seconds), store.read_snapshot(dependencies=dependencies) as snapshot:
-            item = snapshot.store.musical_profiles.source_input(key, batch)
+            item = snapshot.store.musical_profiles.source_input(key, batch, observation_ids=observation_ids)
             if item is None:
                 return False
             source, pending, ids = item

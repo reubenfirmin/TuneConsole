@@ -2,6 +2,7 @@
 import json
 
 from yt_playlist.rec.invalidation import artist_reconciled
+from yt_playlist.core import legacy_evidence
 
 
 def reconcile_artist(conn, previous, target, *, source):
@@ -10,9 +11,8 @@ def reconcile_artist(conn, previous, target, *, source):
         'SELECT * FROM rec_artist_similar WHERE artist_id IN (?,?)', (previous,target))]
     if rows:
         for row in rows:
-            conn.execute('INSERT OR IGNORE INTO identity_state_archive VALUES (?,?,?,?)',
-                ('artist_reconcile:rec_artist_similar',json.dumps([previous,target,row['artist']]),
-                 json.dumps(row),source))
+            legacy_evidence.retain(conn, 'artist_reconcile:rec_artist_similar',
+                 json.dumps([previous,target,row['artist']]),json.dumps(row),source)
         winner = max(rows,key=lambda r:(r['fetched_at'] if r['fetched_at'] is not None else float('-inf'),
                                        r['artist_id']==target,json.dumps(r,sort_keys=True)))
         winner.update(artist_id=target,artist=f'@artist:{target}')

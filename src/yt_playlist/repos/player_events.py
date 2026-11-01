@@ -2,24 +2,26 @@
 these rows (skip vs completion, sessions) is a read-time derivation, never persisted here."""
 from yt_playlist.library.listen_derive import classify_exit, skip_blackouts, SKIP_HISTORY_DAYS
 from yt_playlist.core.db_revisions import keyed_reads
+from yt_playlist.core import entity_names
 from yt_playlist.repos.base import Repo, synchronized
 
 
 class PlayerEventsRepo(Repo):
     @synchronized
-    def record_player_event(self, identity_id, kind, video_id, position, duration,
+    def record_player_event(self, account_id, kind, video_id, position, duration,
                             playlist_ytm_id, payload, at) -> int:
+        events = entity_names.owner(self.conn, 'player_events')
         cur = self.conn.execute(
-            "INSERT INTO player_events(identity_id, kind, video_id, position, duration, "
+            f'INSERT INTO {events.table}({events.column("account_id")}, kind, video_id, position, duration, '
             "playlist_ytm_id, payload, at) VALUES (?,?,?,?,?,?,?,?)",
-            (identity_id, kind, video_id, position, duration, playlist_ytm_id, payload, at))
+            (account_id, kind, video_id, position, duration, playlist_ytm_id, payload, at))
         self.conn.commit()
         return cur.lastrowid
 
     @synchronized
     def player_events_since(self, since_ts, kind=None) -> list[dict]:
         """Events at/after since_ts, oldest first; optionally one kind."""
-        q = ("SELECT identity_id, kind, video_id, position, duration, playlist_ytm_id, payload, at "
+        q = ("SELECT account_id, kind, video_id, position, duration, playlist_ytm_id, payload, at "
              "FROM player_events WHERE at>=?")
         args = [since_ts]
         if kind is not None:
@@ -65,7 +67,7 @@ class PlayerEventsRepo(Repo):
         clause = (' AND r.identity_key IN (' + ','.join('?' for _ in keys) + ')') if keys is not None else ''
         with keyed_reads(self._store, 'player_events', ('track_exit', 'bye', 'next')):
             rows = self.conn.execute(
-                'SELECT r.identity_key AS key, pe.identity_id, pe.kind, pe.position, pe.duration, pe.at '
+                'SELECT r.identity_key AS key, pe.account_id, pe.kind, pe.position, pe.duration, pe.at '
                 'FROM player_events pe JOIN youtube_items y ON y.video_id=pe.video_id '
                 'JOIN recordings r ON r.id=y.recording_id '
                 "WHERE pe.kind IN ('track_exit','bye','next') AND pe.at>=? AND pe.at<=?" + clause +

@@ -12,7 +12,7 @@ def _client(store, iid):
 
 
 def test_refresh_card_advances_rotation_and_rerenders(store, monkeypatch):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     _seed_bundles(store)
     prepare_home(store)
 
@@ -31,5 +31,5 @@ def test_refresh_card_advances_rotation_and_rerenders(store, monkeypatch):
 
 
 def test_refresh_card_rejects_unknown_card(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     assert _client(store, iid).post("/home/refresh-card/bogus").status_code == 404

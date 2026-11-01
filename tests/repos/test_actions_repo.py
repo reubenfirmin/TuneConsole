@@ -1,6 +1,10 @@
 """DAO suite for ActionRepo (the undoable action log)."""
 import json
 
+import pytest
+
+from tests.core.test_predecessor_writes import installed
+
 
 def test_record_get_update(store):
     aid = store.actions.record_action("merge", "{}", "[]", "planned", "{}", 1.0)
@@ -8,6 +12,7 @@ def test_record_get_update(store):
     assert a.kind == "merge" and a.status == "planned" and a.executed_at is None
     store.actions.update_action(aid, "executed", 2.0)
     assert store.actions.get_action(aid).status == "executed"
+    store.actions.update_action(aid, "undoing", 2.5)
     store.actions.update_action(aid, "undone", 3.0, undo_json='{"x":1}')
     a = store.actions.get_action(aid)
     assert a.status == "undone" and a.undo_json == '{"x":1}'
@@ -23,12 +28,9 @@ def test_get_action_missing_returns_none(store):
     assert store.actions.get_action(999) is None
 
 
-def test_store_binding(store):
-    aid = store.actions.record_action("merge", "{}", "[]", "executed", "{}", 1.0)
-    assert store.actions.get_action(aid).kind == "merge"
-
-
-def test_pending_deletion_matches_account_and_playlist_in_the_same_entry(store):
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_pending_deletion_matches_account_and_playlist_in_the_same_entry(installed):
+    store, _ = installed
     def record(entries, status="delete_pending"):
         return store.actions.record_action("apply_merge", "{}", "{}", status,
                                            json.dumps({"deletions": entries}), 1)
@@ -52,7 +54,11 @@ def test_pending_deletion_matches_account_and_playlist_in_the_same_entry(store):
     assert store.actions.get_pending_deletion(7, "SOURCE").id == fresh
 
 
-def test_pending_deletion_excludes_completed_payloads_and_only_materializes_match(store, monkeypatch):
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_pending_deletion_excludes_completed_payloads_and_only_materializes_match(installed, monkeypatch):
+    # This checks the installed JSON owner and its partial index. Native v98
+    # admission has separate required fields and typed-target query coverage.
+    store, _ = installed
     from yt_playlist.repos import actions
 
     with store.conn:
@@ -82,7 +88,9 @@ def test_pending_deletion_excludes_completed_payloads_and_only_materializes_matc
     assert any("ix_actions_delete_pending" in row[3] for row in plan)
 
 
-def test_failed_deletion_lookup_matches_one_entry_and_preserves_manual_pending_lookup(store):
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_failed_deletion_lookup_matches_one_entry_and_preserves_manual_pending_lookup(installed):
+    store, _ = installed
     def record(entries, status="delete_failed"):
         return store.actions.record_action("gc_generated", "{}", "{}", status,
                                            json.dumps({"deletions": entries}), 1)

@@ -1,0 +1,111 @@
+"""Continuing writes through real installed layouts and their TEMP read views."""
+import sqlite3
+
+import pytest
+
+from yt_playlist.core import entity_names
+from yt_playlist.core.config import AccountConfig
+from yt_playlist.core.migrations import registry, runner
+from yt_playlist.core.store import Store
+
+
+@pytest.fixture(params=[79, 93, 102, 107])
+def installed(request, tmp_path):
+    path = tmp_path / 'installed.db'
+    setup = Store(path)
+    try:
+        runner.migrate(setup.conn, registry=registry.MIGRATIONS[:request.param])
+        setup.conn.execute('PRAGMA journal_mode=WAL')
+    finally:
+        setup.conn.close()
+    store = Store(path)
+    try:
+        store.init_schema(defer_metadata=True)
+        history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
+        yield store, request.param
+        assert [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')] == history
+        with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True) as reader:
+            reader.row_factory = sqlite3.Row
+            runner.validate_version(reader, request.param)
+    finally:
+        store.conn.close()
+
+
+def test_account_reconciliation_keeps_physical_ids_and_rolls_back(installed):
+    store, version = installed
+    main = store.accounts.upsert_account('Main', 'main.json', None, True)
+    brand = store.accounts.upsert_account('Brand', 'brand.json', 'remote-brand', False)
+    configs = [AccountConfig('Brand', 'main.json', None, True, main),
+               AccountConfig('Main', 'brand.json', 'remote-brand', False, brand)]
+    before = store.accounts.get_accounts()
+    with pytest.raises(RuntimeError, match='publication interrupted'):
+        with store.accounts.reconciled(configs):
+            raise RuntimeError('publication interrupted')
+    assert store.accounts.get_accounts() == before
+    assert store.accounts.replace_accounts(configs) == {'Brand': main, 'Main': brand}
+    assert store.accounts.get_master_account().id == main
+    with pytest.raises(ValueError, match='retargeted'):
+        store.accounts.upsert_account('Brand', 'new.json', 'another-remote-account', True)
+    table = 'identities' if version < 103 else 'accounts'
+    assert entity_names.owner(store.conn, 'accounts').table == 'main.' + table
+    assert [tuple(row) for row in store.conn.execute(f'SELECT id,label FROM main.{table} ORDER BY id')] == [
+        (main, 'Brand'), (brand, 'Main')]
+
+
+def test_playlist_sync_and_curation_keep_memberships_accounts_and_revisions(installed):
+    store, _ = installed
+    accounts = [store.accounts.upsert_account('Main', 'main.json', None, True),
+                store.accounts.upsert_account('Other', 'other.json', None, False)]
+    song = store.tracks.upsert_track('upload', 'Song', 'Artist', None, 123)
+    memberships = [store.playlists.upsert_playlist(account, 'LM', 'Liked Music', 0, '', 1)
+                   for account in accounts]
+    assert len(set(memberships)) == 2
+    for account, membership in zip(accounts, memberships):
+        revision = store.playlists.playlist_revision(account, 'LM')
+        result = store.playlists.publish_playlist_snapshot(account, 'LM', 'Updated', [song], 2,
+                                                          expected_revision=revision)
+        assert result is not None
+        playlist = store.playlists.get_playlist(membership)
+        assert playlist.account_id == account and playlist.provider_playlist_id == 'LM'
+        assert playlist.playlist_scope_id == f'@account:{account}:LM'
+        assert [row[0] for row in store.conn.execute('SELECT track_id FROM playlist_tracks WHERE playlist_id=?',
+                                                   (membership,))] == [song]
+        store.playlists.set_playlist_group('LM', 'Favorites', account_id=account)
+        store.playlists.hide_playlist('LM', account_id=account)
+        assert f'@account:{account}:LM' in store.playlists.get_hidden_playlists()
+        store.playlists.unhide_playlist('LM', account_id=account)
+        assert f'@account:{account}:LM' not in store.playlists.get_hidden_playlists()
+        store.playlists.set_playlist_title(membership, 'Renamed', 3)
+        assert store.playlists.get_playlist(membership).title == 'Renamed'
+    with pytest.raises(ValueError, match='Choose an account'):
+        store.playlists.playlist_reference('LM')
+    store.overlaps.suppress_overlap('First', 'Second', 4)
+    assert store.overlaps.get_suppressed_overlap_pairs() == {frozenset(('First', 'Second'))}
+    store.overlaps.unsuppress_overlap('First', 'Second')
+    assert not store.overlaps.get_suppressed_overlap_pairs()
+    store.overlaps.keep_overlap_pair('First', 'Second', 5)
+    assert store.overlaps.get_overlap_kept_pairs() == {frozenset(('First', 'Second'))}
+    store.overlaps.ignore_cleanup('First', 'empty', 6)
+    assert store.overlaps.get_cleanup_ignored() == {'empty': {'First'}}
+    store.overlaps.unignore_cleanup('First', 'empty')
+    assert not store.overlaps.get_cleanup_ignored()
+    store.overlaps.ignore_merge('ignored-argument', ['First', 'Second'], 7)
+    assert store.overlaps.get_ignored_merge_sigs() == {'First|Second'}
+
+
+def test_ratings_and_raw_player_events_keep_upsert_order_and_inserted_ids(installed):
+    store, _ = installed
+    account = store.accounts.upsert_account('Main', 'main.json', None, True)
+    store.tracks.upsert_track('upload', 'Song', 'Artist', None, 123)
+    store.tracks.record_item_rating(account, 'upload', 'LIKE', source='api', now=10)
+    store.tracks.record_item_rating(account, 'upload', 'DISLIKE', source='sync', now=9)
+    store.tracks.record_item_rating(account, 'upload', 'LIKE', source='sync', now=11)
+    assert store.tracks.retained_rating_statuses(account, ['upload']) == {'upload': 'LIKE'}
+    row, = store.conn.execute('SELECT source,observed_at FROM item_ratings').fetchall()
+    assert tuple(row) == ('api', 10)
+    ids = [store.player_events.record_player_event(account, 'next', 'upload', 3, 123, None, '{}', at)
+           for at in (12, 13)]
+    assert ids[1] > ids[0]
+    assert [row[0] for row in store.conn.execute('SELECT id FROM main.player_events ORDER BY id')] == ids
+    with store.read_view() as reader:
+        assert [row['account_id'] for row in reader.player_events.player_events_since(12)] == [account, account]

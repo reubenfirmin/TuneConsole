@@ -67,3 +67,44 @@ def test_prepared_card_order_applies_durable_dislike_delta(ranker):
     order = mode_surfaces._order_key(ranker, {"similar": 0, "unrelated": 1,
         "third": 2, "fourth": 3}, {}, {"similar": -0.35})
     assert [item["key"] for item in sorted(items, key=order)] == ["unrelated", "similar"]
+
+
+def test_live_steering_streams_distinct_dislikes_and_matches_complete_mean(store, monkeypatch):
+    from yt_playlist.repos.rec_model import RecModelRepo
+    keys = [f'bad-{index:03}' for index in range(259)] + ['candidate', 'zero']
+    angles = np.linspace(-1.4, 1.4, len(keys))
+    vectors = np.column_stack((np.cos(angles), np.sin(angles))).astype(np.float32)
+    vectors[-1] = 0
+    with store.conn:
+        store.conn.executemany('INSERT INTO recordings(identity_key) VALUES (?)', [(key,) for key in keys])
+    store.rec_model.replace_rec_vectors([(key, vector.tobytes()) for key, vector in zip(keys, vectors)])
+    with store.conn:
+        store.conn.executemany("INSERT INTO rec_feedback(surface,item_key,kind,scope,created_at) VALUES (? ,?,'dislike','',10)",
+            [('one', key) for key in keys[:259]] + [('two', key) for key in keys[:129]] + [('one', 'zero'), ('one', 'missing')])
+    expected = negative.penalties(store, vectors[-2:], {'candidate': 0, 'zero': 1},
+                                  evidence_vecs=(vectors, dict(zip(keys, range(len(keys))))))
+    calls, original = [], RecModelRepo.vectors_by_keys
+    def bounded(self, batch, **kwargs):
+        batch = list(batch)
+        calls.append(len(batch))
+        assert len(batch) <= 128
+        return original(self, batch, **kwargs)
+    monkeypatch.setattr(RecModelRepo, 'vectors_by_keys', bounded)
+    monkeypatch.setattr(RecModelRepo, 'disliked_identity_keys', lambda *args: pytest.fail('Loaded the complete dislike set'))
+    with store.read_view() as reader:
+        steering = negative.Steering(reader)
+        actual = steering.for_keys(['candidate', 'zero', 'absent'])
+        assert actual['candidate'] == pytest.approx(expected[0], abs=1e-12)
+        assert actual['zero'] == expected[1] == 0 and 'absent' not in actual
+        assert len(calls) == 4
+        steering.for_keys(['candidate'])
+        assert len(calls) == 5
+
+
+def test_zero_weight_and_empty_candidates_skip_vector_reads(store, monkeypatch):
+    from yt_playlist.repos.rec_model import RecModelRepo
+    monkeypatch.setattr(RecModelRepo, 'vectors_by_keys', lambda *args, **kwargs: pytest.fail('Read a disabled vector'))
+    monkeypatch.setattr(RecModelRepo, 'disliked_key_page', lambda *args, **kwargs: pytest.fail('Read disabled evidence'))
+    assert negative.for_keys(store, []) == {}
+    rec_params.set_param(store, 'dislike_durable_w', 0)
+    assert negative.for_keys(store, ['candidate']) == {}

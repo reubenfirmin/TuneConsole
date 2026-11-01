@@ -16,7 +16,7 @@ DAY = 86400
 
 @pytest.fixture
 def listener(store):
-    return store.identities.upsert_identity('Main', 'credential', None, True)
+    return store.accounts.upsert_account('Main', 'credential', None, True)
 
 
 def exit_event(store, listener, track, at, *, kind='track_exit', position=20, duration=200):
@@ -146,7 +146,7 @@ def test_a_file_backed_restart_retains_the_break(tmp_path):
     path = tmp_path / 'library.db'
     store = Store(path)
     store.init_schema()
-    iid = store.identities.upsert_identity('Main', 'credential', None, True)
+    iid = store.accounts.upsert_account('Main', 'credential', None, True)
     track, _ = catalog_track(store, 'restart')
     exit_event(store, iid, track, 100)
     store.conn.close()

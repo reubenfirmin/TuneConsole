@@ -24,7 +24,7 @@ DAY = 86400
 def db():
     store = Store(":memory:")
     store.init_schema()
-    store.identities.upsert_identity("main", "bridge", None, True)
+    store.accounts.upsert_account("main", "bridge", None, True)
     yield store
     store.conn.close()
 
@@ -64,7 +64,7 @@ def test_85_old_mood_has_less_ranking_influence(db):
 
 
 def test_22_unrelated_same_name_in_other_account_does_not_block_import(db):
-    other_identity = db.identities.upsert_identity("other", "other-bridge", None, False)
+    other_identity = db.accounts.upsert_account("other", "other-bridge", None, False)
     tid = db.tracks.upsert_track("unrelated", "Unrelated song", "Another artist", "", 200)
     pid = db.playlists.upsert_playlist(other_identity, "OTHER", "Road songs", 1, "hash", 1)
     db.playlists.set_playlist_tracks(pid, [tid])
@@ -115,7 +115,7 @@ def test_113_generated_provenance_survives_playlist_promotion(db):
     db.history.record_play_event(1, "song|artist", "vid", 120, playlist_ytm_id="RDAMPLPLGEN")
     before = scorecard.recommendation_scorecard(db, 90, 200)
     assert before["generated"] == 1 and before["organic"] == 0
-    db.conn.execute("DELETE FROM playlist_group WHERE ytm='PLGEN'")
+    db.conn.execute("UPDATE playlist_scopes SET group_name=NULL WHERE ref='PLGEN'")
     db.conn.commit()
     after = scorecard.recommendation_scorecard(db, 90, 200)
     assert after["generated"] == 1 and after["organic"] == 0, after
@@ -167,7 +167,7 @@ def test_44_cold_discovery_long_mix_is_excluded_before_saving(db):
     candidates = surfaces.cold_candidates(db, 100)
     tracks = [{"video_id": t.video_id, "title": t.title, "artist": t.artist} for t in candidates]
     client = FakeClient(song_durations={"one": 200, "mix": 7200, "two": 200})
-    create_generated_playlist(db, "Fresh songs", tracks, client, 100, identity_id=1)
+    create_generated_playlist(db, "Fresh songs", tracks, client, 100, account_id=1)
     assert "mix" not in [video for _, batch in client.added for video in batch]
 
 

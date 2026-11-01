@@ -30,8 +30,7 @@ def cached(store, video_id, now):
 
 
 def static_ids(store):
-    return {video for video, value in (store.rec_proposals.get_proposals(SURFACE) or {}).items()
-            if isinstance(value, dict) and value.get('version') == VERSION and value.get('verdict') == 'static'}
+    return store.rec_proposals.tv_static_ids(VERSION)
 
 
 def samples(storyboards, video_id, duration):
@@ -134,10 +133,7 @@ class Inspector:
                 # Missing previews and transport/decoder failures are inconclusive.
                 result = {'verdict': 'unknown'}
             result.update(version=VERSION, at=now, retry_at=now + RETRY_S)
-            cache = store.rec_proposals.get_proposals(SURFACE) or {}
-            cache.pop(video_id, None)
-            cache[video_id] = result
-            store.rec_proposals.put_proposals(SURFACE, dict(list(cache.items())[-LIMIT:]), now)
+            store.rec_proposals.publish_tv_visual(video_id, result, now)
             return result
         finally:
             self.lock.release()

@@ -5,21 +5,53 @@ belongs to core.metadata; these projections do not duplicate either mutation pol
 """
 import json
 
-from yt_playlist.core import catalog, metadata
+from yt_playlist.core import catalog, metadata, metadata_evidence, metadata_conflicts
+from yt_playlist.core import metadata_runtime, metadata_runtime_files
+from yt_playlist.core.preparation import conflict_publication, metadata_destinations, metadata_publication
 from yt_playlist.repos.base import Repo, snapshot_read, synchronized
 from yt_playlist.repos.enrichment import FIELD_COLUMN
 from yt_playlist.repos.enrichment_sql import TRACKS_CTE, pending_coverage
 
 
 class EnrichmentReportsRepo(Repo):
+    @property
+    def _conflict_table(self):
+        if metadata_runtime.active(self.conn):
+            return 'enrichment_conflict'
+        return conflict_publication.table(self.conn)
+
     @synchronized
     def metadata_provenance(self, track_id):
         track_id = catalog.resolve_entry(self.conn,track_id)
         track = self.conn.execute('SELECT * FROM catalog_tracks WHERE id=?', (track_id,)).fetchone()
         if track is None:
             return None
+        if metadata_evidence.available(self.conn):
+            return self._evidence_provenance(track_id, track)
+        if metadata_runtime.active(self.conn):
+            choices = {metadata_runtime.FIELDS[row['field']-1]: row for row in self.conn.execute(
+                'SELECT * FROM metadata_runtime_choices WHERE entry_id=?', (track_id,))}
+            decisions = []
+            for field, choice in choices.items():
+                for revision in range(1, choice['revision']+1):
+                    document = metadata_runtime_files.read(self.conn, 'choices', (choice['id'],), revision)
+                    decisions.append({'id': choice['id'], 'entry_id': track_id, 'field': field,
+                        'value_json': json.dumps(document['value']), 'source': document['source'],
+                        'chosen_at': document['at'], 'withdrawn': document['withdrawn']})
+            fields = {}
+            for field in (*catalog.ITEM_FIELDS, *catalog.RECORDING_FIELDS):
+                choice = choices.get(field)
+                override = bool(choice and choice['kind'] != 0)
+                source = None
+                if override:
+                    source = self.conn.execute('SELECT name FROM metadata_runtime_providers WHERE id=?',
+                                               (choice['provider_id'],)).fetchone()[0]
+                fields[field] = {'value': track[field], 'override': override,
+                    'source': source or metadata.selected_source(self.conn, track_id, field)
+                    or ('missing' if track[field] is None else 'unknown')}
+            return {'fields': fields, 'decisions': sorted(decisions, key=lambda d: (d['chosen_at'], d['id']))}
         choices = {r['field']:dict(r) for r in self.conn.execute(
-            'SELECT * FROM entry_field_choices WHERE entry_id=?', (track_id,))}
+            'SELECT * FROM '+metadata_publication.read_table(self.conn,'entry_field_choices')+' WHERE entry_id=?', (track_id,))}
         fields = {}
         for field in (*catalog.ITEM_FIELDS,*catalog.RECORDING_FIELDS):
             choice = choices.get(field)
@@ -28,8 +60,63 @@ class EnrichmentReportsRepo(Repo):
                              metadata.selected_source(self.conn,track_id,field) or
                              ('missing' if track[field] is None else 'unknown')}
         decisions = [dict(r) for r in self.conn.execute(
-            'SELECT * FROM metadata_decisions WHERE entry_id=? ORDER BY chosen_at,id', (track_id,))]
-        return {'fields':fields,'decisions':decisions}
+            'SELECT * FROM '+metadata_publication.read_table(self.conn,'metadata_decisions')+' WHERE entry_id=? ORDER BY chosen_at,id', (track_id,))]
+        lineage = metadata_destinations.lineage(self.conn,track_id,track['recording_id'])
+        return {'fields':fields,'decisions':decisions,**({'lineage':lineage} if lineage is not None else {})}
+
+    def _evidence_provenance(self, entry, track):
+        """Explain exact retained selections and choices without value matching."""
+        observations, deliveries = {}, {}
+
+        def explain(identity):
+            if identity is None:
+                return None
+            if identity not in observations:
+                row = dict(self.conn.execute('SELECT * FROM metadata_observations WHERE id=?',
+                                              (identity,)).fetchone())
+                delivery = row['delivery_id']
+                if delivery is not None and delivery not in deliveries:
+                    deliveries[delivery] = dict(self.conn.execute('SELECT * FROM metadata_deliveries WHERE id=?',
+                                                                  (delivery,)).fetchone())
+                observations[identity] = {'observation': row, 'delivery': deliveries.get(delivery),
+                    'derived_from': explain(row['derived_from_observation_id'])}
+            return observations[identity]
+
+        selections = {row['field']: dict(row) for row in self.conn.execute(
+            'SELECT * FROM recording_metadata_selections WHERE recording_id=?', (track['recording_id'],))}
+        selections.update({row['field']: dict(row) for row in self.conn.execute(
+            'SELECT * FROM entry_metadata_selections WHERE entry_id=?', (entry,))})
+        choices = {row['field']: explain(row['observation_id']) for row in self.conn.execute(
+            'SELECT field,observation_id FROM metadata_choice_heads WHERE entry_id=?', (entry,))}
+        fields, lineage = {}, {}
+        for field in (*catalog.ITEM_FIELDS, *catalog.RECORDING_FIELDS):
+            selection, choice = selections.get(field), choices.get(field)
+            overridden = bool(choice and choice['observation']['value_kind'] != 'withdrawn')
+            selected = explain(selection['observation_id']) if selection else None
+            effective = choice if overridden else selected
+            source = ((effective['delivery']['provider'] if effective['delivery'] else None)
+                      or effective['observation']['legacy_source']) if effective else None
+            source = source or (selection['legacy_source'] if selection and not overridden else None)
+            fields[field] = {'value': track[field], 'override': overridden,
+                             'source': source or ('missing' if track[field] is None else 'unknown')}
+            lineage[field] = {'selection': selection, 'evidence': selected, 'choice': choice}
+        decisions = []
+        for row in self.conn.execute("SELECT id FROM metadata_observations WHERE entry_id=? "
+                "AND origin IN ('user','legacy_choice') ORDER BY observed_at,id", (entry,)):
+            evidence = explain(row['id'])
+            value = evidence['observation']
+            withdrawn = value['value_kind'] == 'withdrawn'
+            decisions.append({'id': value['id'], 'entry_id': entry, 'field': value['field'],
+                'value_json': json.dumps(None if withdrawn or value['value_kind'] == 'unresolved'
+                                         else metadata_evidence.value_from_row(value).selected()),
+                'source': value['legacy_source'], 'chosen_at': value['observed_at'],
+                'legacy_ref': value['legacy_reference'], 'withdrawn': withdrawn, 'evidence': evidence})
+        conflicts = []
+        for row in metadata_conflicts.for_entry(self.conn, entry):
+            conflicts.append({**row, 'selected_evidence': explain(row['selected_observation_id']),
+                'candidates': [explain(candidate['observation_id'])
+                               for candidate in metadata_conflicts.candidates(self.conn, row['id'])]})
+        return {'fields': fields, 'lineage': lineage, 'decisions': decisions, 'conflicts': conflicts}
 
     @synchronized
     def genre_provenance(self, track_id) -> dict | None:
@@ -41,7 +128,7 @@ class EnrichmentReportsRepo(Repo):
         if track is None:
             return None
         rows = self.conn.execute(
-            "WITH relevant AS (SELECT * FROM enrichment_log WHERE field='genre' AND "
+            f"WITH relevant AS (SELECT * FROM {metadata_publication.read_table(self.conn,'enrichment_log')} WHERE field='genre' AND "
             "((field_scope='recording' AND (recording_id=? OR input_video_id IN "
             "(SELECT video_id FROM youtube_items WHERE recording_id=?))) OR "
             "(field_scope='legacy_item' AND (input_video_id=? OR track_id=?)))) "
@@ -50,12 +137,19 @@ class EnrichmentReportsRepo(Repo):
             (track['recording_id'],track['recording_id'],track['video_id'],track_id)
         ).fetchall()
         candidates = [{"provider": r["provider"], "value": r["value"] or ""} for r in rows]
+        if metadata_runtime.active(self.conn):
+            candidates = [{'provider': provider, 'value': data.get('fields', {}).get('genre') or ''}
+                for (provider,) in self.conn.execute('SELECT provider FROM enrichment_provider_state WHERE recording_id=?',
+                                                    (track['recording_id'],))
+                if (data := metadata_runtime.alternatives(self.conn, track['recording_id'], provider))]
         conflict = self.conn.execute(
-            "SELECT candidates FROM enrichment_conflict WHERE track_id=? AND field='genre'", (track_id,)
+            f"SELECT candidates FROM {self._conflict_table} WHERE track_id=? AND field='genre'", (track_id,)
         ).fetchone()
         seen = {(c["provider"], c["value"]) for c in candidates}
         if conflict:
-            for c in json.loads(conflict["candidates"]):
+            details = (metadata_runtime.conflict_details(self.conn, metadata_runtime.conflict(self.conn, track_id, 'genre'))['candidates']
+                       if metadata_runtime.active(self.conn) else json.loads(conflict['candidates']))
+            for c in details:
                 pair = (str(c.get("provider") or "unknown"), str(c.get("value") or ""))
                 if pair not in seen:
                     candidates.append({"provider": pair[0], "value": pair[1]})
@@ -80,7 +174,7 @@ class EnrichmentReportsRepo(Repo):
     @synchronized
     def conflict_count_for_playlist(self, playlist_id) -> int:
         row = self.conn.execute(
-            "SELECT COUNT(*) n FROM enrichment_conflict c "
+            f"SELECT COUNT(*) n FROM {self._conflict_table} c "
             "JOIN playlist_tracks pt ON pt.track_id=c.track_id "
             "WHERE pt.playlist_id=? AND c.resolved=0", (playlist_id,)).fetchone()
         return row["n"]
@@ -88,22 +182,24 @@ class EnrichmentReportsRepo(Repo):
     @synchronized
     def conflict_count_for_album(self, album_browse_id) -> int:
         row = self.conn.execute(
-            "SELECT COUNT(*) n FROM enrichment_conflict c "
+            f"SELECT COUNT(*) n FROM {self._conflict_table} c "
             "JOIN catalog_tracks t ON t.id=c.track_id "
-            "WHERE EXISTS(SELECT 1 FROM album_track_links a WHERE a.entry_id=t.id AND a.browse_id=?) "
+            f"WHERE EXISTS(SELECT 1 FROM {self.album_track_links_table} a WHERE a.entry_id=t.id AND a.browse_id=?) "
             "AND c.resolved=0", (album_browse_id,)).fetchone()
         return row["n"]
 
     def _conflicts(self, rows) -> list:
         return [{"track_id": r["track_id"], "title": r["title"], "artist": r["artist"],
                  "video_id": r["video_id"], "mb_recording_id": r["mb_recording_id"], "field": r["field"],
-                 "candidates": json.loads(r["candidates"])} for r in rows]
+                 "candidates": (metadata_runtime.conflict_details(self.conn,
+                     metadata_runtime.conflict(self.conn, r['track_id'], r['field']))['candidates']
+                     if metadata_runtime.active(self.conn) else json.loads(r['candidates']))} for r in rows]
 
     @synchronized
     def unresolved_conflicts_for_playlist(self, playlist_id) -> list:
         rows = self.conn.execute(
             "SELECT c.track_id, c.field, c.candidates, t.title, t.artist, t.video_id, t.mb_recording_id "
-            "FROM enrichment_conflict c "
+            f"FROM {self._conflict_table} c "
             "JOIN playlist_tracks pt ON pt.track_id=c.track_id "
             "JOIN catalog_tracks t ON t.id=c.track_id "
             "WHERE pt.playlist_id=? AND c.resolved=0 ORDER BY t.title, c.field",
@@ -114,8 +210,8 @@ class EnrichmentReportsRepo(Repo):
     def unresolved_conflicts_for_album(self, album_browse_id) -> list:
         rows = self.conn.execute(
             "SELECT c.track_id, c.field, c.candidates, t.title, t.artist, t.video_id, t.mb_recording_id "
-            "FROM enrichment_conflict c JOIN catalog_tracks t ON t.id=c.track_id "
-            "WHERE EXISTS(SELECT 1 FROM album_track_links a WHERE a.entry_id=t.id AND a.browse_id=?) "
+            f"FROM {self._conflict_table} c JOIN catalog_tracks t ON t.id=c.track_id "
+            f"WHERE EXISTS(SELECT 1 FROM {self.album_track_links_table} a WHERE a.entry_id=t.id AND a.browse_id=?) "
             "AND c.resolved=0 ORDER BY t.title, c.field",
             (album_browse_id,)).fetchall()
         return self._conflicts(rows)
@@ -156,7 +252,7 @@ class EnrichmentReportsRepo(Repo):
     @synchronized
     def outstanding_conflicts(self) -> int:
         return self.conn.execute(
-            "SELECT COUNT(*) n FROM enrichment_conflict WHERE resolved=0").fetchone()["n"]
+            f"SELECT COUNT(*) n FROM {self._conflict_table} WHERE resolved=0").fetchone()["n"]
 
     @synchronized
     def enrichment_activity_stats(self, now) -> dict:
@@ -186,12 +282,11 @@ class EnrichmentReportsRepo(Repo):
             (limit, offset)).fetchall()
         return self._review_conflicts(rows)
 
-    @staticmethod
-    def _review_select():
+    def _review_select(self):
         columns = ", ".join("t." + col for col in sorted({spec[0] for spec in FIELD_COLUMN.values()}))
         return ("SELECT c.track_id, c.field, c.candidates, c.resolved_value, "
                 "t.title, t.artist, t.video_id, t.mb_recording_id, "
-                f"{columns} FROM enrichment_conflict c JOIN catalog_tracks t ON t.id=c.track_id")
+                f"{columns} FROM {self._conflict_table} c JOIN catalog_tracks t ON t.id=c.track_id")
 
     def _review_conflicts(self, rows):
         """Offer saved values even when absent from provider candidates; label unknown sources."""
@@ -229,13 +324,17 @@ class EnrichmentReportsRepo(Repo):
                 if candidate["provider"] not in option["providers"]:
                     option["providers"].append(candidate["provider"])
             if not options[0]["providers"] and current_key is not None:
+                if metadata_runtime.active(self.conn):
+                    source = metadata.selected_source(self.conn, conflict['track_id'], spec[0] if spec else conflict['field'])
+                    if source:
+                        options[0]['providers'].append(source)
                 findings = self.conn.execute(
-                    "SELECT provider, value FROM enrichment_log WHERE track_id=? AND field=? ORDER BY id",
+                    f"SELECT provider, value FROM {metadata_publication.read_table(self.conn,'enrichment_log')} WHERE track_id=? AND field=? ORDER BY id",
                     (conflict["track_id"], conflict["field"])).fetchall()
                 for finding in findings:
                     if key(finding["value"]) == current_key and finding["provider"] not in options[0]["providers"]:
                         options[0]["providers"].append(finding["provider"])
-            override = self.conn.execute('SELECT 1 FROM entry_field_choices WHERE entry_id=? AND field=?',
+            override = self.conn.execute('SELECT 1 FROM '+metadata_publication.read_table(self.conn,'entry_field_choices')+' WHERE entry_id=? AND field=?',
                                          (conflict['track_id'],spec[0] if spec else conflict['field'])).fetchone()
             if override:
                 options[0]["source_note"] = "Your choice"

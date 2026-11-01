@@ -28,11 +28,11 @@ def available_seconds(pool, axis):
                if c["source"] != "mine" and matches(c, axis))
 
 
-def widen_terms(pool, genres, axis):
+def widen_terms(pool, genres, axis, *, family_genres=None):
     """Search terms for a genre, or an era crossed with the genres already in play."""
     kind, name = axis.split(":", 1)
     if kind == "genre":
-        return list(genre_map.subgenres_of(name))[:3] or [name]
+        return list(family_genres.get(name,()) if family_genres is not None else genre_map.subgenres_of(name))[:3] or [name]
     names = list(genres) + [_axis_genre(c) for c in pool if c["source"] == "theirs"]
     seen, terms = set(), []
     for genre in names:

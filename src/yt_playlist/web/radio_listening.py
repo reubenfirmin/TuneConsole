@@ -149,6 +149,23 @@ class RadioListening:
             self.policy.update_directions(s.candidate_view(), s.history_view(), force=force or s.feedback_dirty)
             s.feedback_dirty = False
 
+    def initial_directions(self, s):
+        """Plan an unpublished first menu without blocking status or Stop."""
+        from dataclasses import replace
+        from yt_playlist.rec.radio_directions import RadioDirections
+
+        with self.lock:
+            source = s.directions
+            planned = RadioDirections(s.candidates, source.seed)
+            planned.blocked = set(source.blocked)
+            view, history = replace(s.candidate_view(), directions=planned), s.history_view()
+        self.policy.update_directions(view, history, force=True)
+        with self.lock:
+            if s.stop.is_set() or s.directions is not source:
+                return
+            s.directions = planned
+            s.feedback_dirty = False
+
     def feedback(self, s):
         update = self.policy.feedback(s.candidate_view(), s.feedback_context())
         s.accept_feedback(update)
@@ -160,7 +177,10 @@ class RadioListening:
             s.directions.blocked.add(track['video_id'])
 
     def seed_offer(self, candidates):
-        tracks, menu_id = candidates.seed_offer(), uuid4().hex
+        tracks = candidates.seed_offer()
+        if not tracks:
+            return [], None
+        menu_id = uuid4().hex
         tracks = [{**track, 'serving_context': {**track.get('serving_context', {}),
                    'ordering_ranker': POLICY_VERSION, **musical_character.provenance(track)}} for track in tracks]
         measurement.record_recommendations(self.store, 'radio_seed', tracks,
@@ -182,6 +202,8 @@ class RadioListening:
     def capture_menu(self, s):
         menu_id = s.directions.menu_id
         branches = s.directions.public([])
+        if not branches:
+            return
         context = getattr(s.candidates, 'choice_context', None) or (self.store.rec_proposals.get_proposals("home_prepared") or {}).get("choice_context", {})
         choice_evidence.safe_issue(self.store, "radio", [{"id": branch["id"],
             "position": branch["slot"] + 1, "active": branch["active"], "tracks": branch["tracks"],
@@ -247,6 +269,8 @@ class RadioListening:
         if menu_id in s.seen_menus:
             return {"ok": True}, ()
         branches = s.directions.public([])
+        if not branches:
+            return {"ok": True}, ()
         self.capture_menu(s)
         choice_evidence.safe_respond(self.store, menu_id, "visible", self.now_fn(),
                                     visible=[branch["id"] for branch in branches])

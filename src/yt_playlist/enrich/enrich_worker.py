@@ -137,6 +137,7 @@ class EnrichWorker:
         store = self.ctx.store
         if self._stop():
             return 0
+        store.enrichment_state.expire_provider_alternatives(self.ctx.now_fn())
         limit = limit or self._batch_size()
         art_completed = 0
         scope = "queue"

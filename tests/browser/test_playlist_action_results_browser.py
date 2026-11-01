@@ -9,7 +9,7 @@ from yt_playlist.library.ops import PlaylistOps
 @pytest.mark.parametrize("outcome", ["failed", "partial"])
 def test_bulk_action_result_survives_navigation_and_reload(live_app, store, page, monkeypatch, operation, outcome):
     first = store.playlists.get_playlists()[0]
-    second = store.playlists.upsert_playlist(first.identity_id, "PLB", "Second playlist", 0, "", 0)
+    second = store.playlists.upsert_playlist(first.account_id, "PLB", "Second playlist", 0, "", 0)
     calls = []
     if operation == "copy":
         def copy(*args):

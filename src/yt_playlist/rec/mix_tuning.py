@@ -46,7 +46,7 @@ def remaining(store, now) -> float:
 
 def reset(store, *, keep_vibe=False) -> None:
     """Clear manual choices, keeping play history, feedback and learned weights."""
-    with store._lock:
+    with store._lock, store.conn.atomic(join=True):
         store.rec_model.clear_all_leans()
         store.rec_model.clear_hidden_facets()
         rec_params.reset_param(store, "breadth_bias")
@@ -69,15 +69,18 @@ def expire(store, now) -> bool:
         # until the first explicit vibe change gives them their own clock.
         ordinary = _left(store, UPDATED_AT_SETTING, now)
         vibe = _left(store, VIBE_UPDATED_AT_SETTING, now)
-        if vibe == 0 or (vibe is None and ordinary == 0):
-            changed = bool(store.settings.get_setting('home_mix_vibe')) or vibe is not None
-            store.settings.delete_setting('home_mix_vibe')
-            store.settings.delete_setting(VIBE_UPDATED_AT_SETTING)
-            if ordinary != 0:
-                _resume_genres(store, now)
-        if ordinary == 0:
-            reset(store, keep_vibe=True)
-            changed = True
+        if ordinary != 0 and vibe != 0:
+            return False
+        with store.conn.atomic(join=True):
+            if vibe == 0 or (vibe is None and ordinary == 0):
+                changed = bool(store.settings.get_setting('home_mix_vibe')) or vibe is not None
+                store.settings.delete_setting('home_mix_vibe')
+                store.settings.delete_setting(VIBE_UPDATED_AT_SETTING)
+                if ordinary != 0:
+                    _resume_genres(store, now)
+            if ordinary == 0:
+                reset(store, keep_vibe=True)
+                changed = True
         return changed
 
 

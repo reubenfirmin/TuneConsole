@@ -16,6 +16,8 @@ def test_manual_genre_year_overrides(store):
     assert store.tracks.get_track_enrichment(t) == ("Techno", "1999")
     store.tracks.set_track_genre(t, "")                    # blank clears
     assert store.tracks.get_track_enrichment(t) == ("", "1999")
+    store.tracks.set_track_year(t, "2020")
+    assert store.tracks.get_track_enrichment(t) == ("", "2020")
 
 
 def test_set_title_artist_and_reset(store):
@@ -44,7 +46,7 @@ def test_enrichment_is_fill_only(store):
 
 
 def test_missing_genre_and_year_queries(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     p = store.playlists.upsert_playlist(iid, "P", "P", 0, "h", 0.0)
     t1 = store.tracks.upsert_track("v1", "S1", "A", "Al", 100)
     t2 = store.tracks.upsert_track("v2", "S2", "A", "Al", 100)
@@ -57,12 +59,6 @@ def test_missing_genre_and_year_queries(store):
 def test_track_ids_for_videos_latest_wins(store):
     t = store.tracks.upsert_track("v1", "S", "A", "Al", 100)
     assert store.tracks.track_ids_for_videos(["v1", "nope"]) == {"v1": t}
-
-
-def test_store_binding(store):
-    t = store.tracks.upsert_track("v1", "S", "A", "Al", 100)
-    store.tracks.set_track_year(t, "2020")
-    assert store.tracks.get_track_enrichment(t) == ("", "2020")
 
 
 def test_identity_key_for_video(store):

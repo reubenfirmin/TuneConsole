@@ -22,7 +22,7 @@ def test_classify_exit(position, duration, want):
 
 @pytest.mark.parametrize('gap,days', [(30 * 86400, 2), (30 * 86400 + 1, 1)])
 def test_skip_repetition_window_is_relative_to_each_skip(gap, days):
-    first = dict(key='recording', identity_id=1, kind='next', position=20, duration=200, at=86400)
+    first = dict(key='recording', account_id=1, kind='next', position=20, duration=200, at=86400)
     repeated = {**first, 'at': first['at'] + gap}
     until = repeated['at'] + days * 86400
     assert skip_blackouts([repeated, first], repeated['at']) == {'recording': until}

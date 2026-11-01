@@ -40,8 +40,24 @@ from yt_playlist.web.app import create_app
     ('/road_trip/draft/1/save', {}),
 ])
 def test_forms_wait_for_database_outside_event_loop(store, monkeypatch, path, data):
-    app = create_app(store, lambda: {}, background_work=False)
+    guarded_home = path.startswith('/home/') and path != '/home/generate'
+    if guarded_home:
+        if path == '/home/vibe':
+            from tests.test_growth_destinations import publish_full_journey
+            publish_full_journey(store)
+        else:
+            from tests.onboarding_support import publish_personal_mix
+            from tests.test_growth_journey import early_journey
+            early_journey(store)
+            publish_personal_mix(store)
+    app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
     monkeypatch.setattr(app.state.ctx.bridge, 'send_control', lambda frame, *, intent: True)
+    if guarded_home:
+        from yt_playlist.web.routes.home_access import state
+        growth = state(app.state.ctx)
+        assert growth['ready_areas']['directions']
+        if path == '/home/vibe':
+            assert growth['vibes_ready']
 
     @app.get('/_test/event-loop')
     async def probe():
@@ -133,7 +149,7 @@ def test_cluster_save_keeps_event_loop_responsive_throughout(store, monkeypatch,
     from yt_playlist.rec import measurement, recipes
     from yt_playlist.util.matching import identity_key
 
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
     client = FakeClient(catalog={'v1': _track('v1', 'Song', 'Artist', set_video_id='set-v1')})
     store.tracks.upsert_track('v1', 'Song', 'Artist', '', 180)
     key = identity_key('Song', 'Artist')

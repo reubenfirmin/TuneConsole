@@ -1,5 +1,6 @@
 """Real ratings and frozen start observations reach the main Charts stories."""
 import json
+import re
 
 import pytest
 from playwright.sync_api import expect
@@ -15,9 +16,64 @@ def listening_enabled(monkeypatch):
     monkeypatch.setenv('YT_PLAYLIST_LISTENING_CHARTS', '1')
 
 
+@pytest.mark.parametrize('width', [390, 1440])
+def test_confirmed_choices_show_songs_and_reconcilable_totals(store, live_app, page, width, tmp_path):
+    from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
+
+    iid = store.accounts.upsert_account('Listener', 'cred', None, True)
+    store.settings.set_setting('listening_timezone', 'UTC')
+    for i in range(8):
+        video = f'choicevid{i}'
+        seed_catalog_track(store, f'choice-{i}', f'Song {i}', f'Artist {i}', video_id=video)
+        at = NOW - (i % 3) * 86400
+        ratings.record_confirmed(store, iid, video, 'LIKE', at-200)
+        ratings.record_confirmed(store, iid, video, 'DISLIKE', at-100)
+        ratings.record_confirmed(store, iid, video, 'INDIFFERENT', at)
+    listening_analytics.build(store, NOW)
+    story = ListeningAnalyticsRepo(store).prepared('listening_edition')['stories'][0]
+    assert story['family'] == 'rating_actions'
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.set_viewport_size({'width': width, 'height': 1100})
+    page.goto(live_app+'/charts')
+    panel = page.locator('.le-rating_actions')
+    expect(panel.locator('.le-evidence')).to_contain_text('24 confirmed rating changes across 8 songs')
+    expect(panel.locator('.le-format-key span')).to_have_text(['Hearts 8', 'Skulls 8', 'Clears 8'])
+    table = panel.get_by_role('table', name='Songs with confirmed rating changes')
+    expect(table.locator('tbody tr')).to_have_count(7)
+    expect(panel.locator('.le-rating-caption')).to_have_text('Latest 6 of 8 songs')
+    expect(table.locator('tbody tr').last.locator('th')).to_have_text('2 other songs')
+    expect(table.locator('tbody tr').last.locator('td')).to_have_text(['2', '2', '2'])
+    for row in table.locator('tbody tr').all()[:-1]:
+        expect(row.locator('a')).to_have_attribute('href', re.compile(r'https://music.youtube.com/watch\?v=choicevid\d'))
+        assert [cell.inner_text() for cell in row.locator('td').all()] == ['1', '1', '1']
+    expect(panel.locator('.le-svg-count').first).to_have_text('Actions')
+    page.evaluate('document.fonts.ready')
+    headers = table.locator('thead th')
+    expect(headers).to_have_text(['Song', 'Hearts', 'Skulls', 'Clears'])
+    header_bounds = headers.evaluate_all('''headers => headers.map(header => {
+        const range = document.createRange();
+        range.selectNodeContents(header);
+        const text = range.getBoundingClientRect();
+        const cell = header.getBoundingClientRect();
+        return {label: header.textContent, left: text.left, right: text.right,
+                cellLeft: cell.left, cellRight: cell.right};
+    })''')
+    (tmp_path / f'choices-header-layout-{width}.json').write_text(
+        json.dumps(header_bounds, indent=2) + '\n')
+    for header in header_bounds:
+        assert header['left'] >= header['cellLeft'] - .5, header_bounds
+        assert header['right'] <= header['cellRight'] + .5, header_bounds
+    for left, right in zip(header_bounds, header_bounds[1:]):
+        assert right['left'] - left['right'] >= 4, header_bounds
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / f'choices-{width}.png'), full_page=True)
+    assert not errors
+
+
 @pytest.mark.parametrize('width', [1440, 390])
 def test_current_genre_preferences_and_known_start_share_are_visible(store, live_app, page, width):
-    iid = store.identities.upsert_identity('Listener', 'cred', None, True)
+    iid = store.accounts.upsert_account('Listener', 'cred', None, True)
     store.settings.set_setting('listening_timezone', 'UTC')
     for i in range(9):
         seed_catalog_track(store, f'rating-{i}', f'Song {i}', f'Artist {i}', video_id=f'ratingvid{i}',
@@ -118,12 +174,18 @@ def test_sparse_rating_capture_keeps_four_useful_visible_analyses(store, live_ap
     payload = mixed_evidence()
     edition = listening_editions.prepare(payload, Repo(), NOW)
     repo = ListeningAnalyticsRepo(store)
-    repo.publish(json.dumps(edition), NOW, 'listening_edition')
     chunks, manifest = listening_analytics.partition({**payload, 'schema': 2, 'built_at': NOW})
-    repo.publish(json.dumps(manifest), NOW)
-    for key, chunk in chunks.items():
-        repo.publish(chunk, NOW, 'listening_chunk:'+key)
-    store.conn.commit()
+    from yt_playlist.core import listening_outputs
+    if store._listening_files:
+        plan = listening_outputs.prepare(chunks, json.dumps(manifest), json.dumps(edition), NOW)
+        with store.conn.atomic():
+            listening_outputs.publish(store.conn, plan)
+    else:
+        repo.publish(json.dumps(edition), NOW, 'listening_edition')
+        repo.publish(json.dumps(manifest), NOW)
+        for key, chunk in chunks.items():
+            repo.publish(chunk, NOW, 'listening_chunk:'+key)
+        store.conn.commit()
     page.set_viewport_size({'width': width, 'height': 1100})
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))

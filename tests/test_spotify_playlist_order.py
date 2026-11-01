@@ -42,7 +42,7 @@ class RecoveringClient(SongClient):
 @pytest.fixture
 def transfer(store, monkeypatch):
     monkeypatch.setattr("yt_playlist.library.spotify_library.with_retry", lambda fn: fn())
-    identity = store.identities.upsert_identity("Main", "bridge", None, True)
+    identity = store.accounts.upsert_account("Main", "bridge", None, True)
     raw = _playlists_zip(("Source", ["One", "Two", "Three"]))
     client = RecoveringClient()
     return store, identity, raw, client

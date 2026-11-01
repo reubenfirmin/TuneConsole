@@ -14,8 +14,8 @@ _queues = WeakKeyDictionary()
 
 
 @contextmanager
-def ordered(store, identity_id, video_id):
-    key, token = (identity_id, video_id), object()
+def ordered(store, account_id, video_id):
+    key, token = (account_id, video_id), object()
     with _condition:
         queues = _queues.setdefault(store, {})
         queue = queues.setdefault(key, deque())

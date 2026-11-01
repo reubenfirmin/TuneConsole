@@ -10,7 +10,7 @@ import json
 import pytest
 
 from tests.historical_captures import retained_capture
-from yt_playlist.core import repair
+from yt_playlist.core import repair, listening
 from yt_playlist.core.store import Store
 
 DAY = 86400
@@ -43,15 +43,15 @@ def _coverage(store, lo=10, hi=19, ident=1, **overrides):
 
 
 def _ev(store, ident, key, day, source="takeout", sec=100):
-    store.conn.execute(
-        "INSERT INTO play_events(identity_id,identity_key,video_id,played_at,source) VALUES (?,?,?,?,?)",
-        (ident, key, "v", day * DAY + sec, source))
+    at = day * DAY + sec
+    event = listening.append_event(store.conn,ident,key,at,video_id='v')
+    listening.project_event(store.conn,event,ident,at,source=source,timezone='UTC')
     store.conn.commit()
 
 
 def _keys(store):
     return sorted(r[0] for r in store.conn.execute(
-        "SELECT identity_key FROM listening_observations WHERE precision='legacy_unknown'"))
+        "SELECT identity_key FROM listening_observation_subjects WHERE precision='legacy_unknown'"))
 
 
 # --- the Takeout-authoritative window -------------------------------------------------------------
@@ -410,7 +410,7 @@ def test_failed_delete_rolls_back_prior_deletions_and_leaves_complete_backup(sto
     _coverage(store)
     _hist(store, 1, 15, ['a', 'b'])
     store.conn.execute("CREATE TRIGGER fail_repair BEFORE DELETE ON listening_observations "
-                       "WHEN OLD.identity_key='b' BEGIN SELECT RAISE(ABORT,'injected deletion failure'); END")
+                       "WHEN OLD.unresolved_subject_key='b' BEGIN SELECT RAISE(ABORT,'injected deletion failure'); END")
     backup = tmp_path / 'backup.jsonl'
     with pytest.raises(sqlite3.IntegrityError, match='injected deletion failure'):
         repair.purge_phantom_history(store.conn, backup)

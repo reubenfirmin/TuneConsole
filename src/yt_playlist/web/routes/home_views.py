@@ -6,10 +6,11 @@ board and tuning routes.
 """
 from fastapi import Response
 
-from yt_playlist.rec import choice_evidence, home_cards, home_prepared, home_vibe, mix_tuning, onboarding, rec_params
+from yt_playlist.rec import artist_start, choice_evidence, home_cards, home_prepared, home_vibe, mix_tuning, onboarding, rec_params
 from yt_playlist.rec.home_cards import _epoch
 from yt_playlist.web.jobs import start_fresh_pool, start_library_pool
 from yt_playlist.web.theme import genre_tint
+from yt_playlist.web.routes.home_access import state as growth_state
 
 
 class PoolJobs:
@@ -25,11 +26,11 @@ class PoolJobs:
 
 
 class HomeViews:
-    def __init__(self, ctx):
+    def __init__(self, ctx, *, store=None):
         self.ctx = ctx
-        self.store = ctx.store
+        self.store = ctx.store if store is None else store
         self.templates = ctx.templates
-        self.recommendations = home_cards.HomeCards(ctx.store, PoolJobs(ctx), ctx.logger)
+        self.recommendations = home_cards.HomeCards(self.store, PoolJobs(ctx), ctx.logger)
 
     def schedule(self):
         if self.ctx.rec_worker:
@@ -46,30 +47,40 @@ class HomeViews:
     def card_context(self, request, now, *, live=False, **options):
         store = self.store
         payload = self.prepared(now, request)
+        record = False
         if live:
-            result = self.recommendations.cards(home_cards.CardsRequest(now, record=False, **options))
+            mix_tuning.expire(store, now)
+            with store.read_view() as reader:
+                calculation = home_cards.HomeCards(reader, self.recommendations.jobs, self.ctx.logger)
+                result = calculation.cards(home_cards.CardsRequest(now, record=False, **options))
             home_prepared.remember(store, payload, result, now)
             self.schedule()
         else:
-            record = request.url.path in ("/", "/home/cards", "/home/refresh-cards")
-            if request.url.path == "/":
-                record = (onboarding._has_synced(store)
-                          and not onboarding.onboarding_active(store, now))
-            record = record and not getattr(store, 'activity_paused', False)
+            record = (request.url.path in ("/", "/home/cards", "/home/refresh-cards")
+                      and not getattr(store, 'activity_paused', False)
+                      and not getattr(store, '_read_only', False))
+            if record and request.url.path == "/":
+                record = growth_state(self.ctx, request)['ready_formats']['mixes']
             result = home_prepared.cards(store, payload, now, self.recommendations, self.schedule,
                                         record=record)
+        if not result.protos and not home_vibe.current(store, now):
+            first = artist_start.first_set(store, now)
+            if first:
+                result.protos = [first]
+                result.slots = [{'proto': first}]
+                result.preparing = True
+                result.choice_context = {'source': 'explicit_artist_choices',
+                                         'artists': first['recipe']['artists']}
         context = vars(result).copy()
         frozen_context = result.choice_context if result.choice_context is not None else (payload or {}).get('choice_context')
-        if result.protos and frozen_context is not None:
+        if (live or record) and result.protos and frozen_context is not None:
             for proto in result.protos:
                 if proto.get('experiment'):
                     proto['experiment']['ranker_controlled'] = False
             options = [{"id": p["experiment_id"], "position": i + 1,
-                        "label": p["label"], "note": p["note"], "mode_id": p.get("mode_id"),
-                        **{key: p[key] for key in ('group_id', 'group_version') if key in p},
-                        "intent": p["lane"], "recipe": {k: v for k, v in p.get("recipe", {}).items()
-                                                        if k not in {"opportunity_id", "option_id"}},
-                        "tracks": p["tracks"], "assignment": p.get("assignment")} for i, p in enumerate(result.protos)]
+                        "label": p["label"], "note": p["note"], "intent": p["lane"],
+                        "genres": list(p.get('genres', [])),
+                        "assignment": p.get("assignment")} for i, p in enumerate(result.protos)]
             try:
                 oid = choice_evidence.present(store, "mixes", options, now,
                     context=frozen_context, window=result.epoch)
@@ -109,9 +120,11 @@ class HomeViews:
 
     def feed_context(self, request, now):
         store = self.store
+        growth = growth_state(self.ctx, request)
         return {"fingerprint": home_prepared.fingerprint(store, self.prepared(now, request), now),
                 "tuning_active": self.tuning_active(),
-                "vibe_presets": home_vibe.PRESETS, "vibe": home_vibe.current(store, now),
+                "vibe_presets": home_vibe.PRESETS,
+                "vibes_ready": growth['vibes_ready'], "vibe": home_vibe.current(store, now),
                 "has_modes": bool(store.modes.list_modes(active_only=True)),
                 **self.card_context(request, now)}
 
@@ -152,10 +165,13 @@ class HomeViews:
 
     def tuning_fragment(self, request, now):
         store = self.store
+        growth = growth_state(self.ctx, request)
         controls = self.templates.TemplateResponse(
             request, "_partials/taste_fingerprint.html",
             {"fingerprint": home_prepared.fingerprint(store, self.prepared(now), now),
-             "tuning_active": self.tuning_active(), "vibe_presets": home_vibe.PRESETS,
+             "tuning_active": self.tuning_active(),
+             "vibe_presets": home_vibe.PRESETS,
+             "vibes_ready": growth['vibes_ready'],
              "vibe": home_vibe.current(store, now)})
         cards = self.cards_safe(request, now, swap_oob=True)
         return self.tuning_response(Response(controls.body + cards.body, media_type="text/html"), now)

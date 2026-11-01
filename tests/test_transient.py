@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from yt_playlist.core import radio_provenance
 from yt_playlist.core.store import Store
 from yt_playlist.rec import rec_params, transient
 from yt_playlist.util.matching import identity_key
@@ -23,7 +24,7 @@ def test_mood_event_moves_facet_lean(store):
 def test_recent_play_moves_lean_positive(store):
     k = _jazz_track(store, "v1", "S")
     # This assertion concerns a recent timestamped play, rather than a capture date.
-    iid = store.identities.upsert_identity("main", "c", None, True)
+    iid = store.accounts.upsert_account("main", "c", None, True)
     store.history.record_play_event(iid, k, "v1", 5.0, source_timezone="UTC")
     leans = transient.facet_leans(store, now=10.0)
     assert leans.get("artist:A", 0.0) > 0                      # a recent play pushes its facets up
@@ -73,7 +74,7 @@ def test_centroid_tilt_newest_dominates_and_persists(store):
 def test_centroid_tilt_includes_recent_plays():
     s = Store(":memory:")
     s.init_schema()
-    iid = s.identities.upsert_identity("m", "c", None, True)
+    iid = s.accounts.upsert_account("m", "c", None, True)
     s.tracks.upsert_track("v1", "s", "band", None, None)
     s.history.record_play_event(iid, "s|band", "v1", 1.0, source_timezone="UTC")
     V = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
@@ -95,8 +96,9 @@ def test_centroid_tilt_includes_recent_plays():
 
 def test_radio_provenance_plays_produce_no_play_lean(store):
     k = _jazz_track(store, "v1", "RadioSong", artist="RadioBand")
-    iid = store.identities.upsert_identity("main", "c", None, True)
-    store.settings.set_setting("radio_playlist_ytm", "PLRADIO")
+    iid = store.accounts.upsert_account("main", "c", None, True)
+    with store._lock, store.conn:
+        radio_provenance.remember(store.conn, "PLRADIO", iid)
     store.history.record_play_event(iid, k, "v1", 5.0, playlist_ytm_id="PLRADIO")
     assert transient.play_facet_leans(store, now=10.0) == {}
     # And the blended facet_leans view sees no play push either (no other sources are seeded).
@@ -105,8 +107,9 @@ def test_radio_provenance_plays_produce_no_play_lean(store):
 
 def test_organic_plays_still_produce_play_lean(store):
     k = _jazz_track(store, "v1", "OrganicSong", artist="OrganicBand")
-    iid = store.identities.upsert_identity("main", "c", None, True)
-    store.settings.set_setting("radio_playlist_ytm", "PLRADIO")
+    iid = store.accounts.upsert_account("main", "c", None, True)
+    with store._lock, store.conn:
+        radio_provenance.remember(store.conn, "PLRADIO", iid)
     store.history.record_play_event(iid, k, "v1", 5.0, playlist_ytm_id=None)   # no provenance = user-driven
     leans = transient.play_facet_leans(store, now=10.0)
     assert leans.get("artist:OrganicBand", 0.0) > 0
@@ -115,7 +118,7 @@ def test_organic_plays_still_produce_play_lean(store):
 def test_play_exposure_batches_metadata_without_changing_per_track_decay(store, monkeypatch):
     first = _jazz_track(store, 'v1', 'First', artist='Band')
     second = _jazz_track(store, 'v2', 'Second', artist='Other', year='1970')
-    identity = store.identities.upsert_identity('main', 'cred', None, True)
+    identity = store.accounts.upsert_account('main', 'cred', None, True)
     for key, video, at in ((first, 'v1', 5), (second, 'v2', 500), (first, 'v1', 1000)):
         store.history.record_play_event(identity, key, video, at, source_timezone='UTC')
     now = 86410
@@ -128,14 +131,15 @@ def test_play_exposure_batches_metadata_without_changing_per_track_decay(store, 
         for facet in transient.facets_for(store, [key]):
             expected[facet] = expected.get(facet, 0.0) + strength
     calls = {}
+    query_type = type(store.rec_query)
     for name in ('track_genres', 'track_decades', 'track_artists'):
-        original = getattr(store.rec_query, name)
+        original = getattr(query_type, name)
 
-        def capture(keys, _name=name, _original=original):
+        def capture(query, keys, _name=name, _original=original):
             calls.setdefault(_name, []).append(list(keys))
-            return _original(keys)
+            return _original(query, keys)
 
-        monkeypatch.setattr(store.rec_query, name, capture)
+        monkeypatch.setattr(query_type, name, capture)
     assert transient.play_facet_leans(store, now) == expected
     assert all(len(batches) == 1 and set(batches[0]) == {first, second} for batches in calls.values())
     assert len(calls) == 3
@@ -146,8 +150,9 @@ def test_radio_play_lean_stays_zero_after_history_sync_shadow(store):
     # a provenance-free noon-bucket history row the SAME day. The lean must stay zero, or radio
     # plays graduate into permanent weights one sync later.
     k = _jazz_track(store, "v1", "RadioSong", artist="RadioBand")
-    iid = store.identities.upsert_identity("main", "c", None, True)
-    store.settings.set_setting("radio_playlist_ytm", "PLRADIO")
+    iid = store.accounts.upsert_account("main", "c", None, True)
+    with store._lock, store.conn:
+        radio_provenance.remember(store.conn, "PLRADIO", iid)
     day = 100 * 86400
     store.history.record_play_event(iid, k, "v1", day + 61000, playlist_ytm_id="PLRADIO")
     store.history.record_history_plays(iid, day + 70000, [(k, "Today")])

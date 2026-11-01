@@ -5,7 +5,7 @@ from tests import model_support
 
 
 def _model(store, album=None, thumbnail=None):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = [store.tracks.upsert_track(f"a{i}", f"A{i}", "Alpha", album, None, thumbnail=thumbnail) for i in range(8)]
     b = [store.tracks.upsert_track(f"b{i}", f"B{i}", "Beta", album, None, thumbnail=thumbnail) for i in range(8)]
     for track in a:

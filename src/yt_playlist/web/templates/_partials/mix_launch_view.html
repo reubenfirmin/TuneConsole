@@ -1,0 +1,127 @@
+// Shared by the opener and the interstitial, including their asset-free recovery.
+function renderMixLaunch(doc, mix, phase = 'loading') {
+  const terminal = phase !== 'loading';
+  let style = doc.getElementById('mix-launch-style');
+  if (!style) {
+    style = doc.createElement('style'); style.id = 'mix-launch-style';
+    style.textContent = `
+      .mix-launch-view { position:fixed; inset:0; z-index:20; overflow:auto; box-sizing:border-box;
+        padding:clamp(24px,5vw,72px); background:#0d0b20; color:#f3f0ff;
+        font:16px/1.6 system-ui,sans-serif; display:grid; align-content:center; }
+      .mix-launch-inner { width:100%; max-width:780px; margin:auto; }
+      .mix-launch-brand { color:#bcb5d5; font-size:14px; margin:0 0 28px; }
+      .mix-launch-content { display:grid; grid-template-columns:220px minmax(0,1fr); gap:32px; align-items:center; }
+      .mix-launch-art { display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
+        grid-template-rows:repeat(2,minmax(0,1fr)); aspect-ratio:1;
+        overflow:hidden; border-radius:16px; background:#292241; }
+      .mix-launch-art img { display:block; width:100%; height:100%; min-width:0; min-height:0; object-fit:cover; }
+      .mix-launch-view h1 { font-size:clamp(24px,3vw,36px); line-height:1.2; margin:8px 0 20px; overflow-wrap:anywhere; }
+      .mix-launch-label { color:#b7e4d1; margin:0; font-size:14px; }
+      .mix-launch-view[role=status] .mix-launch-label::before { content:''; display:inline-block;
+        width:8px; height:8px; border-radius:50%; background:currentColor; margin-right:10px;
+        animation:mix-launch-pulse 1.4s ease-in-out infinite; }
+      @keyframes mix-launch-pulse { 50% { opacity:.3; transform:scale(.8); } }
+      .mix-launch-message { color:#d6d0e6; margin:0 0 18px; }
+      .mix-launch-songs { list-style:none; padding:0; margin:18px 0; color:#bcb5d5; font-size:14px; }
+      .mix-launch-songs li { overflow-wrap:anywhere; }
+      .mix-launch-actions { display:flex; flex-wrap:wrap; gap:12px; margin-top:24px; }
+      .mix-launch-actions a,.mix-launch-actions button { box-sizing:border-box; border:1px solid #72658e;
+        border-radius:8px; padding:11px 16px; color:inherit; background:#24203a; cursor:pointer;
+        font:inherit; text-decoration:none; text-align:center; }
+      .mix-launch-actions a:first-child { background:#c2ead9; border-color:#c2ead9; color:#10251d; }
+      @media(max-width:560px) { .mix-launch-content { grid-template-columns:minmax(0,1fr); gap:22px; }
+        .mix-launch-art { width:min(200px,65vw); } .mix-launch-brand { margin-bottom:20px; }
+        .mix-launch-actions>* { width:100%; } }
+    `;
+    doc.head.append(style);
+  }
+  const element = (tag, className, text) => {
+    const node = doc.createElement(tag); node.className = className;
+    if (text) node.textContent = text;
+    return node;
+  };
+  const view = element('main', 'mix-launch-view');
+  const oldStage = doc.querySelector('.gen-stage');
+  if (oldStage) oldStage.hidden = true;
+  view.setAttribute('role', terminal ? 'alert' : 'status');
+  const inner = element('div', 'mix-launch-inner');
+  inner.append(element('p', 'mix-launch-brand', 'tuneconsole / Mix Tapes'));
+  const content = element('div', 'mix-launch-content');
+  const artwork = element('div', 'mix-launch-art');
+  artwork.setAttribute('aria-hidden', 'true');
+  const tracks = Array.isArray(mix.tracks) ? mix.tracks : [];
+  for (const track of tracks.slice(0, 4)) {
+    const image = element('img', ''); image.alt = ''; image.referrerPolicy = 'no-referrer';
+    image.src = track.thumbnail || 'https://i.ytimg.com/vi/' + encodeURIComponent(track.video_id) + '/hqdefault.jpg';
+    image.onerror = () => { image.style.visibility = 'hidden'; };
+    artwork.append(image);
+  }
+  const copy = element('div', 'mix-launch-copy');
+  copy.append(element('p', 'mix-launch-label', terminal ? 'Playback needs your attention' : 'Preparing your mix'));
+  copy.append(element('h1', '', mix.title || 'Your Mix Tape'));
+  copy.append(element('p', 'mix-launch-message', terminal
+    ? 'We couldn’t confirm playback. This mix may already be in your YouTube Music library.'
+    : 'Keep YouTube Music open. Your mix will play in that tab.'));
+  const songs = element('ul', 'mix-launch-songs');
+  for (const track of tracks.slice(0, 3)) songs.append(element('li', '', [track.title, track.artist].filter(Boolean).join(' · ')));
+  if (tracks.length > 3) songs.append(element('li', '', 'and ' + (tracks.length - 3) + ' more songs'));
+  copy.append(songs);
+  if (terminal) {
+    const actions = element('div', 'mix-launch-actions');
+    const find = element('a', '', 'Find this mix on YouTube Music');
+    find.href = 'https://music.youtube.com/search?q=' + encodeURIComponent(mix.name || mix.title || '');
+    find.target = '_blank'; find.rel = 'noopener';
+    const back = element('button', '', 'Back to this mix'); back.type = 'button';
+    back.onclick = () => {
+      try {
+        const opener = doc.defaultView.opener;
+        if (opener && !opener.closed) {
+          try { opener.sessionStorage.setItem('tc-mix-return', JSON.stringify(mix)); } catch (_) {}
+          try {
+            if (!opener.genReturnToMix?.(mix.id, mix)) opener.location.assign(mix.returnUrl || '/');
+          } catch (_) { opener.location.assign(mix.returnUrl || '/'); }
+          try { opener.focus(); } catch (_) {}
+          doc.defaultView.close(); return;
+        }
+      } catch (_) {}
+      try { doc.defaultView.sessionStorage.setItem('tc-mix-return', JSON.stringify(mix)); } catch (_) {}
+      doc.defaultView.location.assign(mix.returnUrl || '/');
+    };
+    actions.append(find, back); copy.append(actions);
+    copy.append(element('p', 'mix-launch-songs', 'Your song choices are kept. This attempt won’t create another copy.'));
+  }
+  content.append(artwork, copy); inner.append(content); view.append(inner);
+  doc.querySelector('.mix-launch-view')?.remove();
+  doc.body.append(view);
+  doc.title = (terminal ? 'Return to ' : 'Playing ') + (mix.title || 'your Mix Tape');
+}
+
+// Run inside the recovery document. In particular, do not attach callbacks
+// created by the opener: Chromium discards them when that context goes away.
+function startMixLaunch(mix, token) {
+  let timer;
+  const failed = () => {
+    clearTimeout(timer);
+    try {
+      const key = 'tc-generation:' + mix.id + ':' + JSON.stringify(mix.tracks.map(track => track.video_id).sort());
+      sessionStorage.setItem(key, token);
+    } catch (_) {}
+    renderMixLaunch(document, mix, 'uncertain');
+  };
+  const message = event => {
+    if (event.origin === location.origin && event.source === window.opener &&
+        event.data?.type === 'generation-failed' && event.data.token === token) failed();
+  };
+  window.addEventListener('message', message);
+  let uncertain = false;
+  try { uncertain = !!window.opener?.generationLaunchContext(token)?.uncertain; } catch (_) {}
+  if (uncertain) failed();
+  else {
+    renderMixLaunch(document, mix);
+    timer = setTimeout(failed, 90000);
+  }
+  window.addEventListener('pagehide', () => {
+    clearTimeout(timer);
+    window.removeEventListener('message', message);
+  }, {once:true});
+}

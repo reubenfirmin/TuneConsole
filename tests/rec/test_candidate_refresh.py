@@ -1,6 +1,4 @@
 """Preference refreshes reuse the established models and update saved ranking provenance."""
-import json
-
 import pytest
 
 from tests.rec.test_model_refresh import seed
@@ -13,16 +11,19 @@ def refresh(store, now=2000):
 
 
 def candidate(store, key):
-    pool = store.rec_proposals.get_proposals('mode_bundles') or {}
-    return next((row for row in pool.get('all', {}).get('wheelhouse', []) if row['key'] == key), None)
+    return next((row for row in pool(store, 'wheelhouse') if row['key'] == key), None)
+
+
+def pool(store, lane):
+    return store.recommendations.page('home', 'all', lane)
 
 
 def library(store):
     seed(store)
     refresh(store)
-    pool = store.rec_proposals.get_proposals('mode_bundles')['all']['wheelhouse']
-    assert pool
-    return pool[0]['key']
+    candidates = pool(store, 'wheelhouse')
+    assert candidates
+    return candidates[0]['key']
 
 
 def no_fit(*args, **kwargs):
@@ -35,11 +36,9 @@ def test_projection_upgrade_refreshes_legacy_pools_on_worker_without_refitting(s
 
     library(store)
     vectors = store.rec_model.get_rec_vectors()
-    bundles = store.rec_proposals.get_proposals('mode_bundles')
-    # An older installation can have a valid ordinary pool and a current
-    # preference stamp, without the projection required by the new controls.
-    bundles.pop('_vibes')
-    store.rec_proposals.put_proposals('mode_bundles', bundles, 2000)
+    previous = store.recommendations.head('home')['id']
+    # A published generation and its preference stamp can be current before
+    # an upgrade changes the projection used by the controls.
     assert not candidate_refresh.due(store, 2000)
     module = home_vibe if projection == 'vibe' else musical_character
     monkeypatch.setattr(module, 'VERSION', module.VERSION + '-upgrade')
@@ -47,11 +46,13 @@ def test_projection_upgrade_refreshes_legacy_pools_on_worker_without_refitting(s
     assert candidate_refresh.due(store, 2000)
 
     assert mode_surfaces.prepare_bundles(store, 2000) is not None
-    refreshed = store.rec_proposals.get_proposals('mode_bundles')['_vibes']
-    assert refreshed['version'] == home_vibe.VERSION
-    assert refreshed['profile_version'] == musical_character.VERSION
-    assert set(refreshed['pools']) == set(home_vibe.PRESETS)
-    assert refreshed['pools']['relax']['explore']
+    assert store.recommendations.head('home')['id'] != previous
+    refreshed = store.recommendations.framing('home')
+    assert refreshed['vibe_version'] == home_vibe.VERSION
+    assert refreshed['vibe_profile_version'] == musical_character.VERSION
+    assert {row['surface'] for row in store.recommendations.heads()
+            if row['surface'].startswith('vibe:')} == {'vibe:' + key for key in home_vibe.PRESETS}
+    assert store.recommendations.page('vibe:relax', '', 'explore')
     assert not candidate_refresh.due(store, 2001)
     assert store.rec_model.get_rec_vectors() == vectors
 
@@ -80,12 +81,12 @@ def test_genre_edits_reset_and_restore_update_scores_and_served_provenance(store
     refresh(store)
     assert candidate(store, key)['score'] == original['score']
     store.rec_model.set_weight(axis, 0.5, now=2000)
-    store.rec_model.save_taste_settings('preference-checkpoint', [], 2000)
+    store.rec_model.save_taste_settings('taste_settings_checkpoint_v1', [], 2000)
     refresh(store)
     saved_score = candidate(store, key)['score']
     store.rec_model.set_weight(axis, 1.5, now=2000)
     refresh(store)
-    assert store.rec_model.restore_taste_settings('preference-checkpoint', [])
+    assert store.rec_model.restore_taste_settings('taste_settings_checkpoint_v1', [])
     refresh(store)
     assert candidate(store, key)['score'] == saved_score
 
@@ -125,7 +126,7 @@ def test_taste_controls_rerank_saved_pools_after_edits_resets_and_checkpoint_res
     from tests.taste_support import _client
 
     seed(store)
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     store.history.import_play_events(iid, [
         (store.tracks.identity_key_for_video(f'v{i}'), f'v{i}', 1000 - day * 86400)
         for i in range(8) for day in range(1, 6)])
@@ -144,34 +145,34 @@ def test_taste_controls_rerank_saved_pools_after_edits_resets_and_checkpoint_res
     monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
     vectors = store.rec_model.get_rec_vectors()
 
-    def pool(surface):
-        return store.rec_proposals.get_proposals('mode_bundles')['all'][surface]
+    def served(surface):
+        return pool(store, surface)
 
-    original = pool('wheelhouse')
-    assert pool('comfort')
+    original = served('wheelhouse')
+    assert served('comfort')
     tuning = home_prepared.tuning_key(store, 2000)
     assert client.post('/taste/checkpoint').status_code == 200
     assert client.post('/taste/param', data={'name': 'comfort_min_plays', 'value': 12}).status_code == 200
-    assert pool('comfort') == []
+    assert served('comfort') == []
     assert home_prepared.tuning_key(store, 2000) != tuning
     assert client.post('/taste/reset-param', data={'name': 'comfort_min_plays'}).status_code == 200
-    assert pool('comfort')
+    assert served('comfort')
     assert client.post('/taste/weight', data={'axis': 'lane:deep_cut', 'weight': 3}).status_code == 200
-    changed = pool('wheelhouse')
+    changed = served('wheelhouse')
     assert [r['key'] for r in changed] != [r['key'] for r in original]
     policy = store.rec_ledger.policy_configuration(changed[0]['pool_policy'])
     assert policy['weights']['lane:deep_cut'] == 3
     assert policy['params']['comfort_min_plays'] == 4
     assert client.post('/taste/reset-weights').status_code == 200
-    assert pool('wheelhouse') == original
+    assert served('wheelhouse') == original
     client.post('/taste/param', data={'name': 'comfort_min_plays', 'value': 12})
     client.post('/taste/weight', data={'axis': 'lane:deep_cut', 'weight': 3})
     assert client.post('/taste/checkpoint/restore').status_code == 200
-    assert pool('wheelhouse') == original
-    assert pool('comfort')
+    assert served('wheelhouse') == original
+    assert served('comfort')
     client.post('/taste/param', data={'name': 'comfort_min_plays', 'value': 12})
     assert client.post('/taste/reset-all').status_code == 200
-    assert pool('comfort')
+    assert served('comfort')
     assert len(requests) == 9
     assert store.rec_model.get_rec_vectors() == vectors
     assert not candidate_refresh.due(store, 2000)

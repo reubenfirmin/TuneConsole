@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.conftest import seed_catalog_track
 from yt_playlist.core import db_space, policy_config
 from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, measurement, mode_surfaces, scorecard
@@ -19,6 +20,18 @@ def _publish(store, now=1, rankers=('first', 'second'), body=None):
     return rows, base
 
 
+@pytest.fixture
+def legacy_policy_store(tmp_path):
+    """The genuine SQL-policy predecessor for its retained cleanup contracts."""
+    from tests.core.test_policy_upgrade import _open_legacy
+
+    store = _open_legacy(tmp_path / 'legacy-policies.db')
+    try:
+        yield store
+    finally:
+        store.conn.close()
+
+
 def test_pool_variants_share_large_body_and_preserve_exact_configuration(store, monkeypatch):
     body = {'weights': {'genre:rock': 1.23456789}, 'ranker': 'lane', 'evidence': 'x' * 48000}
     monkeypatch.setattr(measurement, 'serving_policy', lambda *args: ('base', body))
@@ -28,31 +41,54 @@ def test_pool_variants_share_large_body_and_preserve_exact_configuration(store, 
     assert len(policies.bases) == 1
     assert len(policies.rows) == 1008
     assert len({item['pool_policy'] for item in items}) == 1008
-    size = store.conn.execute('SELECT sum(length(configuration)) FROM rec_serving_policies').fetchone()[0]
-    size += store.conn.execute('SELECT sum(byte_size) FROM rec_policy_bases').fetchone()[0]
-    assert size < 220000  # Formerly approximately 48 MB for this one build.
+    size = store.conn.execute('SELECT sum(byte_size) FROM recommendation_policies').fetchone()[0]
+    size += store.conn.execute('SELECT sum(byte_size) FROM recommendation_policy_bodies').fetchone()[0]
+    assert size < 512000  # Includes canonical file wrappers, versus about 48 MB unshared.
     assert store.rec_ledger.policy_configuration(items[-1]['pool_policy']) == {
         **body, 'ranker': 'vibe:lane:family-1007'}
 
 
-def test_repeated_advancing_time_preparation_without_serving_has_bounded_bytes(store, monkeypatch):
+def check_preparation_retention(store, monkeypatch, *, generations, variants, evidence_bytes,
+                                maximum_generations, byte_bound):
     monkeypatch.setattr(measurement, 'serving_policy', lambda reader, now: ('base', {
-        'ranker': 'lane', 'weights': {'decayed': 1 + 1 / now}, 'evidence': 'x' * 48000}))
+        'ranker': 'lane', 'weights': {'decayed': 1 + 1 / now}, 'evidence': 'x' * evidence_bytes}))
     monkeypatch.setattr(candidate_refresh, 'prepared_settings', lambda *args: {})
+    seed_catalog_track(store, 'song', 'Song', 'Artist', video_id='song')
     def calculate(reader, now, policies):
-        return {'pools': [policies.stamp([{'key': 'song'}], f'vibe:lane:family-{n}')[0]
-                          for n in range(1000)]}, []
+        # Publish every policy variant through the actual preparation owner.
+        # One representative pool establishes the latest configuration; this
+        # test's scale contract concerns unused policies, not pool cardinality.
+        for n in range(variants):
+            latest = policies.stamp([{'key': 'song'}], f'vibe:lane:family-{n}')
+        return {'0': {'wheelhouse': latest}}, []
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate)
-    for tick in range(80):
+    for tick in range(generations):
         assert mode_surfaces.prepare_bundles(store, 10000 + 120 * tick) is not None
+        if tick == 0:
+            assert store.conn.execute('SELECT count(*) FROM recommendation_policies').fetchone()[0] == variants + 1
+        # Between preparation cycles the worker also retires the replaced pool.
+        # Complete actual bounded maintenance before checking unused retention.
+        for _ in range(3):
+            if not store.recommendations.cleanup():
+                break
+        else:
+            pytest.fail('Replaced recommendation generations did not finish bounded cleanup')
     assert store.conn.execute('SELECT count(*) FROM rec_served_impressions').fetchone()[0] == 0
-    assert store.conn.execute('SELECT count(*) FROM rec_serving_policies').fetchone()[0] <= 32000
-    assert store.conn.execute('SELECT count(*) FROM rec_policy_bases').fetchone()[0] <= 32
-    stored = store.conn.execute('SELECT sum(length(configuration)) FROM rec_serving_policies').fetchone()[0]
-    stored += store.conn.execute('SELECT sum(byte_size) FROM rec_policy_bases').fetchone()[0]
-    assert stored < 7 * 1024 * 1024  # Unshared payloads would exceed 3.8 GB.
-    latest = store.rec_proposals.get_proposals('mode_bundles')['pools'][0]['pool_policy']
-    assert store.rec_ledger.policy_configuration(latest)['weights']['decayed'] == 1 + 1 / (10000 + 79 * 120)
+    assert store.conn.execute('SELECT count(*) FROM recommendation_policies').fetchone()[0] <= maximum_generations * (variants + 1)
+    assert store.conn.execute('SELECT count(*) FROM recommendation_policy_bodies').fetchone()[0] <= maximum_generations
+    stored = store.conn.execute('SELECT sum(byte_size) FROM recommendation_policies').fetchone()[0]
+    stored += store.conn.execute('SELECT sum(byte_size) FROM recommendation_policy_bodies').fetchone()[0]
+    assert stored < byte_bound
+    latest = store.recommendations.candidate_page('home', '0', 'wheelhouse', limit=1)['tracks'][0]['pool_policy']
+    config = store.rec_ledger.policy_configuration(latest)
+    assert config['weights']['decayed'] == 1 + 1 / (10000 + (generations - 1) * 120)
+    assert config['ranker'] == f'vibe:lane:family-{variants - 1}'
+
+
+def test_repeated_advancing_time_preparation_without_serving_has_bounded_bytes(store, monkeypatch):
+    monkeypatch.setattr(policy_storage, 'GRACE_SECONDS', 240)
+    check_preparation_retention(store, monkeypatch, generations=8, variants=4,
+        evidence_bytes=256, maximum_generations=3, byte_bound=16000)
 
 
 def test_unused_retention_protects_both_impression_paths_proposals_sessions_and_grace(store):
@@ -205,8 +241,10 @@ def test_quota_queries_use_partial_indexes_and_do_not_traverse_served_history(st
     assert any('ix_rec_policy_unused_bases' in line for line in plans), plans
 
 
-def test_legacy_cleanup_limits_payload_work_and_resumes_from_cursor(store):
-    raw = json.dumps({'evidence': 'x' * 1000000})
+def test_legacy_cleanup_limits_payload_work_and_resumes_from_cursor(legacy_policy_store, monkeypatch):
+    store = legacy_policy_store
+    monkeypatch.setattr(policy_storage, 'SCAN_BYTES', 8 * 1024)
+    raw = json.dumps({'evidence': 'x' * 1024})
     with store.conn:
         store.conn.executemany('INSERT INTO rec_serving_policies VALUES (?,?,1)',
                               [(f'legacy-{n:03}', raw) for n in range(12)])
@@ -218,9 +256,11 @@ def test_legacy_cleanup_limits_payload_work_and_resumes_from_cursor(store):
     assert store.conn.execute('SELECT count(*) FROM rec_serving_policies').fetchone()[0] == 0
 
 
-def test_orphan_body_collection_also_limits_payload_work(store):
+def test_orphan_body_collection_also_limits_payload_work(legacy_policy_store, monkeypatch):
+    store = legacy_policy_store
+    monkeypatch.setattr(policy_storage, 'SCAN_BYTES', 8 * 1024)
     for n in range(12):
-        _publish(store, rankers=(), body={'evidence': 'x' * 1000000, 'generation': n})
+        _publish(store, rankers=(), body={'evidence': 'x' * 1024, 'generation': n})
     assert measurement.maintain_storage(store, 10000)
     remaining = store.conn.execute('SELECT count(*) FROM rec_policy_bases').fetchone()[0]
     assert 0 < remaining < 12

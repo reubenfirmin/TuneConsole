@@ -125,14 +125,12 @@ def test_connecting_while_waiting_for_prompt_lock_does_not_spend_a_display(page)
 
 
 def _wait_prompt_locks(page, *, pending, held):
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        locks = page.evaluate("async () => await navigator.locks.query()")
-        queued = sum(lock['name'] == 'tuneconsole-setup-shown' for lock in locks['pending'])
-        owned = any(lock['name'] == 'tuneconsole-setup-shown' for lock in locks['held'])
-        if queued == pending and owned == held:
-            return
-    raise AssertionError(f'Unexpected prompt lock state: {locks}')
+    page.wait_for_function("""async ({pending, held}) => {
+        const locks = await navigator.locks.query();
+        const queued = locks.pending.filter(lock => lock.name === 'tuneconsole-setup-shown').length;
+        const owned = locks.held.some(lock => lock.name === 'tuneconsole-setup-shown');
+        return queued === pending && owned === held;
+    }""", arg={'pending': pending, 'held': held}, timeout=5000)
 
 
 @pytest.mark.parametrize('release_after_grace', [False, True])

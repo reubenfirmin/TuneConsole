@@ -11,7 +11,7 @@ def store():
 
 
 def test_generated_playlist_not_dead_weight(store):
-    ident = store.identities.upsert_identity("main", "ref", None, True)
+    ident = store.accounts.upsert_account("main", "ref", None, True)
     # A never-listened generated playlist (0 listens) must NOT surface as dead weight.
     store.playlists.upsert_playlist(ident, "PLRADIO", "TuneConsole Radio", 0, "", 1.0)
     store.playlists.set_playlist_group("PLRADIO", GENERATED_GROUP)

@@ -33,7 +33,7 @@ const tuneConsole = (() => {
       let result;
       try {
         result = frame.type === "rate" ? await playback.rate(frame.action, frame.videoId, frame.likeStatus, frame.skip, frame.brandId)
-          : frame.type === "next" ? await playback.next(frame.videoId)
+          : frame.type === "next" ? await playback.next(frame.videoId, frame.brandId)
           : frame.type === "pause-for-tv" ? await playback.pauseForTv() : await radio.update(frame);
       } catch (e) { result = {ok: false, error: String(e)}; }
       return {id: frame.id, status: 200, body: JSON.stringify(result)};

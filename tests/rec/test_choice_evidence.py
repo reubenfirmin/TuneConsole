@@ -60,7 +60,7 @@ def test_unknown_menus_wrong_options_and_chronology_are_not_invented(store):
 
 
 def test_mix_playback_resolves_recipe_from_exact_external_queue(store):
-    iid = store.identities.upsert_identity("main", "test", None, True)
+    iid = store.accounts.upsert_account("main", "test", None, True)
     pid = store.playlists.upsert_playlist(iid, "PL-generated", "Generated mix", 1, "h", 1)
     oid = choices.issue(store, "mixes", [{"id": "comfort", "tracks": []}], 100,
                         context={}, opportunity_id="mix")
@@ -251,7 +251,7 @@ def test_bandit_expiry_preempts_periodic_refresh_and_mode_changes_refresh_immedi
     assert not choices.refresh_report(store, expiry)['bandit']['rows']
     choices.refresh_report(store, 104)
     modes(store, flipped=True)
-    assert not choices.refresh_report(store, 105)['bandit']['rows']
+    assert choices.refresh_report(store, 105)['bandit']['rows']
 
 
 def test_unrelated_visibility_does_not_republish_effectively_unchanged_interest(store):

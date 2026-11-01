@@ -2,7 +2,7 @@
 from yt_playlist.util.thumbnails import best_thumb
 
 
-def set_saved(store, client, identity_id, browse_id, album, *, saved, fallback=None):
+def set_saved(store, client, account_id, browse_id, album, *, saved, fallback=None):
     """Publish membership only after the supported YouTube acknowledgement succeeds.
 
     Older clients return None for success; current clients can return a boolean
@@ -19,7 +19,7 @@ def set_saved(store, client, identity_id, browse_id, album, *, saved, fallback=N
         operation = 'save' if saved else 'removal'
         raise ValueError(f'YouTube Music did not confirm the album {operation}')
     if not saved:
-        store.collection.remove_saved_album(browse_id, identity_id=identity_id)
+        store.collection.remove_saved_album(browse_id, account_id=account_id)
         return
     fallback = fallback or {}
     artist = ', '.join(a['name'] for a in (album.get('artists') or []) if a.get('name'))
@@ -29,4 +29,4 @@ def set_saved(store, client, identity_id, browse_id, album, *, saved, fallback=N
         'year': album.get('year') or fallback.get('year'), 'type': album.get('type'),
         'thumbnail': best_thumb(album.get('thumbnails')) or fallback.get('thumbnail'),
         'credits': album.get('artists'),
-    }, identity_id=identity_id)
+    }, account_id=account_id)

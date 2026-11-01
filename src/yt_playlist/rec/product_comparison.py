@@ -17,6 +17,8 @@ import numpy as np
 
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.evidence_ledger import canonical
+from yt_playlist.core import taste_axes
+from yt_playlist.rec import album_feedback_state
 
 DAY = 86400
 SURFACE = 'model_live_comparison'
@@ -34,13 +36,19 @@ def state(store):
 
 def constraints(store):
     """Standing intent is shared by both arms; a change ends the current epoch."""
+    if (not getattr(store, '_read_only', False) and store._db_path is not None
+            and not getattr(store._lock, 'held_by_current_thread', False)):
+        # Serving only needs committed intent. Reuse a preparation snapshot or
+        # an owned transaction, but do not wait on the maintenance writer.
+        with store.read_view() as reader:
+            return constraints(reader)
     with store._lock:
         values = [(row[0], row[1]) for row in store.conn.execute(
             "SELECT key,value FROM settings WHERE key LIKE 'rec_param:%' "
             "OR key IN ('album_feedback','rec_cooc_weighting') ORDER BY key")]
         standing = [tuple(row) for row in store.conn.execute(
-            'SELECT axis,value FROM rec_lean ORDER BY axis')]
-    return hashlib.sha256(canonical([values, standing])).hexdigest()
+            taste_axes.projection(store.conn,'rec_lean','axis,value') + ' ORDER BY axis')]
+    return hashlib.sha256(canonical([values, standing, album_feedback_state.state(store)])).hexdigest()
 
 
 def assignment(store, format, window, now, *, existing=None):

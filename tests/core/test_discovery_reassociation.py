@@ -3,7 +3,7 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core import catalog
+from yt_playlist.core import catalog, legacy_evidence
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.migrations import v028_discovery_representatives as upgrade
@@ -87,9 +87,10 @@ def test_complete_move_merges_counts_and_preserves_source_collision_evidence(sto
     row = s.discovery.get_discovered_tracks()[0]
     assert (row['offered_count'],row['first_shown'],row['last_shown'])==(2,3,4)
     sources = s.discovery.discovery_sources_for_track(newkey)
-    assert len(sources)==1 and sources[0]['found_at']==1 and sources[0]['last_found_at']==2
-    archived = [json.loads(r[0]) for r in s.conn.execute("SELECT payload FROM identity_state_archive WHERE kind='discovery_reassociation'")]
-    assert {r['input_video_id'] for r in archived}=={'a','target'}
+    assert {(r['input_video_id'],r['found_at'],r['last_found_at']) for r in sources}=={('a',1,1),('target',2,2)}
+    archived = [json.loads(legacy_evidence.original(s.conn, 'discovery', 'discovery_reassociation', r[0]))
+                for r in s.conn.execute("SELECT source_id FROM discovery_identity_evidence WHERE kind='discovery_reassociation'")]
+    assert {r['input_video_id'] for r in archived}=={'a'}
     assert s.discovery.remove_discovery_source(newkey,'radio:same')
     assert not s.conn.execute('SELECT * FROM discovery_memberships').fetchall()
 
@@ -107,10 +108,10 @@ def test_same_timestamp_moves_retain_each_original_source_input(store):
     move(s,'a',target,10)
     discover(s,'b','radio:same',5)
     move(s,'b',target,10)
-    archived = [json.loads(r[0]) for r in s.conn.execute(
-        "SELECT payload FROM identity_state_archive WHERE kind='discovery_reassociation'")]
-    assert {row['input_video_id'] for row in archived}=={'a','b','target'}
-    assert len(archived)==4
+    archived = [json.loads(legacy_evidence.original(s.conn, 'discovery', 'discovery_reassociation', r[0]))
+                for r in s.conn.execute("SELECT source_id FROM discovery_identity_evidence WHERE kind='discovery_reassociation'")]
+    assert {row['input_video_id'] for row in archived}=={'a','b'}
+    assert len(archived)==2
     assert len(s.discovery.get_discovered_tracks())==1
     assert s.discovery.get_discovered_tracks()[0]['offered_count']==2
 
@@ -163,7 +164,7 @@ def test_membership_and_entry_guards_reject_inconsistent_writes(store):
 
 def test_playback_consumers_take_metadata_from_one_available_upload(store):
     s = store
-    iid = s.identities.upsert_identity('main','credential',None,True)
+    iid = s.accounts.upsert_account('main','credential',None,True)
     a = s.tracks.upsert_track('a','A title','Artist','A release',100,False,thumbnail='a-cover')
     b = s.tracks.upsert_track('b','Z title','Artist','Z release',300,True,
                               thumbnail='z-cover',album_browse_id='z-release')
@@ -177,7 +178,7 @@ def test_playback_consumers_take_metadata_from_one_available_upload(store):
         assert [(r['label'],r['href'],r['thumbnail']) for r in section['rows']]==[
             ('Z title','/track/b','z-cover')]
     assert library_sample(s)==[{'video_id':'b','title':'Z title','artist':'Artist','album':'Z release',
-                               'thumbnail':'z-cover','key':key}]
+                               'thumbnail':'z-cover','key':key,'duration':300}]
     assert s.charts.top_tracks()==[{'title':'Z title','artist':'Artist','video_id':'b','thumbnail':'z-cover','plays':1}]
     songs = s.charts.artist_songs('Artist')
     assert len(songs)==1
@@ -199,15 +200,16 @@ def test_scoped_representative_filters_artist_release_and_account_before_selecti
     for field,value in [('artist','Second artist'),('album_browse_id','second')]:
         sql = playable_tracks_sql(f'SELECT * FROM tracks WHERE {field}=?')
         assert [r['video_id'] for r in s.conn.execute(sql,(value,))]==['b']
-    iid = s.identities.upsert_identity('main','credential',None,True)
-    other = s.identities.upsert_identity('other','credential',None,False)
+    iid = s.accounts.upsert_account('main','credential',None,True)
+    other = s.accounts.upsert_account('other','credential',None,False)
     for owner,entry in [(iid,a),(other,b)]:
         pid = s.playlists.upsert_playlist(owner,'LM','Liked',1,'hash',1)
         s.playlists.set_playlist_tracks(pid,[entry])
     sql = playable_tracks_sql('SELECT t.* FROM tracks t WHERE EXISTS('
                               'SELECT 1 FROM playlist_tracks pt JOIN playlists p ON p.id=pt.playlist_id '
-                              'WHERE pt.track_id=t.id AND p.identity_id=?)')
+                              'WHERE pt.track_id=t.id AND p.account_id=?)')
     assert [r['video_id'] for r in s.conn.execute(sql,(other,))]==['b']
+    assert [r['video_id'] for r in s.conn.execute(sql,(iid,))]==['a']
 
 
 def seed_installed_mismatch(s):

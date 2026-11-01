@@ -7,7 +7,7 @@ from yt_playlist.util.matching import identity_key
 
 @pytest.fixture
 def artwork_library(store, live_app):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     pid = store.playlists.upsert_playlist(iid, "PLZ", "Shape Mix", 2, "h", 0.0,
                                 thumbnail="/static/nag/intro.png")
     first = store.tracks.upsert_track("v1", "Shape Song", "Shape Artist", "Shape Album", 180,

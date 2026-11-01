@@ -13,11 +13,12 @@ import numpy as np
 
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.library.listen_derive import classify_exit
-from yt_playlist.rec import rec_params, taste_modes
-from yt_playlist.rec.choice_context import learning_context
+from yt_playlist.rec import rec_params
+from yt_playlist.core import mix_choices
+from yt_playlist.util import genre_map
 
 WEIGHTS = ('choice', 'open', 'start', 'completion', 'promotion', 'early_exit')
-POLICY = 'context-response-v1'
+POLICY = 'theme-raw-genre-response-v2'
 
 
 def parameters(store):
@@ -51,12 +52,15 @@ def observations(store, offers, responses, now, excluded):
     """
     params = parameters(store)
     since = now - params['window_d'] * 86400
-    visible, selections, actions, contexts = {}, {}, {}, {}
-    for event in responses:
+    visible, selections, actions = {}, {}, {}
+    withdrawn = {event['details'].get('action_id') for event in responses
+                 if event['kind'] == 'withdraw' and event['observed_at'] <= now and event['at'] <= now}
+    for event in sorted(responses, key=lambda e: (e['at'], e['kind'] != 'visible', e['observed_at'], e['id'])):
         check_cancellable_work()
         offer = offers.get(event['opportunity_id'])
         if (not offer or offer['format'] != 'mixes' or not since < offer['at'] <= now
-                or event['observed_at'] > now or event['at'] > now):
+                or offer['observed_at'] > now or event['observed_at'] > now or event['at'] > now
+                or event['at'] < offer['at'] or event['id'] in withdrawn or event['kind'] == 'withdraw'):
             continue
         oid = offer['id']
         if event['kind'] == 'visible':
@@ -69,24 +73,22 @@ def observations(store, offers, responses, now, excluded):
         if offer['format'] != 'mixes' or not since < offer['at'] <= now:
             continue
         check_cancellable_work()
+        if offer.get('context_at', offer['at']) > offer['at']:
+            excluded['future_context'] += 1
+            continue
         if not seen:
             excluded['unseen'] += 1
             continue
-        context_id = offer['context']
-        if context_id not in contexts:
-            try:
-                contexts[context_id] = learning_context(store, context_id)
-            except ValueError:
-                contexts[context_id] = None
-        if contexts[context_id] is None:
-            excluded['missing_context'] += 1
-            continue
-        if contexts[context_id].get('at', offer['at']) > offer['at']:
-            excluded['future_context'] += 1
-            continue
-        for option in offer['options']:
+        options = [mix_choices.expand(store.conn, option) for option in offer['options']]
+        def signature(option):
+            return (option.get('intent'), option.get('label'), option.get('note'), tuple(option['genres']))
+        chosen_option = next((option for option in options if str(option['id']) == chosen), None)
+        for option in options:
             option_id = str(option['id'])
             if option_id not in seen:
+                continue
+            if not option.get('genres_complete') or not option['genres']:
+                excluded['missing_context'] += 1
                 continue
             events = [event for event in actions.get((oid, option_id), []) if start <= event['at'] < end]
             kinds = {event['kind'] for event in events}
@@ -102,15 +104,16 @@ def observations(store, offers, responses, now, excluded):
                 classification = classify_exit(position, duration)
                 completion |= classification == 'completion'
                 early |= classification == 'skip' and details['kind'] == 'track_exit'
-            selected = chosen == option_id
+            selected = chosen == option_id and chosen in seen
             positive = ((params['choice'] if selected else 0)
                         + params['open'] * ('open' in kinds)
                         + params['start'] * ('start' in kinds)
                         + params['completion'] * completion
                         + params['promotion'] * ('promote' in kinds))
-            negative = params['choice'] * (chosen is not None and not selected) + params['early_exit'] * early
-            yield {'opportunity': oid, 'option': option, 'context': contexts[context_id],
-                   'context_id': context_id, 'positive': positive, 'negative': negative,
+            same_area = chosen_option is not None and signature(chosen_option) == signature(option)
+            negative = params['choice'] * (chosen in seen and not selected and not same_area) + params['early_exit'] * early
+            yield {'opportunity': oid, 'option': option, 'context': {'at': offer['at']},
+                   'context_id': signature(option), 'positive': positive, 'negative': negative,
                    'day': int(at // 86400), 'offer_at': offer['at'],
                    'expires_at': offer['at'] + params['window_d'] * 86400}
 
@@ -120,23 +123,20 @@ def compile(store, offers, responses, now):
     since = now - params['window_d'] * 86400
     current = store.modes.list_modes(active_only=True)
     modes = {mode['mode_id']: mode for mode in current}
-    units, compatibility, expirations = {}, {}, []
+    units, expirations = {}, []
     excluded = {'unseen': 0, 'unmapped_mode': 0, 'drifted_mode': 0,
                 'future_context': 0, 'missing_context': 0}
     for observation in observations(store, offers, responses, now, excluded):
-        mid = observation['option'].get('mode_id')
-        historical = {mode['mode_id']: mode for mode in observation['context'].get('groups', [])}
-        old, live = historical.get(mid), modes.get(mid)
-        if old is None or live is None:
+        families = {genre_map.family(genre, conn=store.conn) for genre in observation['option']['genres']}
+        matches = [mid for mid, mode in modes.items() if families & {
+            genre_map.family(entry[0] if isinstance(entry, (list, tuple)) else entry, conn=store.conn)
+            for entry in mode.get('families') or []}]
+        # Legacy modes have no current raw-genre membership. A unique broad
+        # family match is admissible; ambiguous children get no invented wins.
+        if len(matches) != 1:
             excluded['unmapped_mode'] += 1
             continue
-        pair = (observation['context_id'], mid)
-        if pair not in compatibility:
-            matched, _ = taste_modes.reconcile([old], [live], threshold=params['match_threshold'])
-            compatibility[pair] = matched[0]['mode_id'] == mid
-        if not compatibility[pair]:
-            excluded['drifted_mode'] += 1
-            continue
+        mid = matches[0]
         positive, negative = observation['positive'], observation['negative']
         if positive + negative == 0:
             continue
@@ -173,7 +173,7 @@ def stats(store, now):
     state = store.rec_proposals.get_proposals('choice_bandit')
     if state is None:
         return None  # Before first shared compilation, legacy diagnostics remain compatible.
-    if (state['at'] > now or state['parameters'] != parameters(store)
+    if (state.get('policy') != POLICY or state['at'] > now or state['parameters'] != parameters(store)
             or state['generation'] != generation(store.modes.list_modes(active_only=True))
             or state['expires_at'] is not None and now >= state['expires_at']):
         return {}

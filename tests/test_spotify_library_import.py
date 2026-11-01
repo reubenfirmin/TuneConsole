@@ -62,8 +62,8 @@ class LibraryClient(FakeClient):
 
 
 def test_album_import_membership_and_markers_are_scoped_to_destination(store):
-    first = store.identities.upsert_identity('first','c','brand',False)
-    main = store.identities.upsert_identity('main','c',None,True)
+    first = store.accounts.upsert_account('first','c','brand',False)
+    main = store.accounts.upsert_account('main','c',None,True)
     raw = _zip({'YourLibrary.json':{'albums':[
         {'artist':'Album Artist','album':'Saved Record','uri':'spotify:album:1'}]}})
     a,b = LibraryClient(),LibraryClient()
@@ -71,7 +71,7 @@ def test_album_import_membership_and_markers_are_scoped_to_destination(store):
     assert import_spotify_library(store,raw,b,main,2)['albums_imported']==1
     assert a.album_ratings==b.album_ratings==[('OLAK1','LIKE')]
     assert import_spotify_library(store,raw,b,main,3)['albums_skipped']==1
-    assert {r[0] for r in store.conn.execute('SELECT identity_id FROM album_library_memberships')}=={first,main}
+    assert {r[0] for r in store.conn.execute('SELECT account_id FROM saved_album_memberships')}=={first,main}
 
 
 def test_account_data_parser_reads_playlists_and_albums_and_ignores_episodes():
@@ -91,7 +91,7 @@ def test_technical_log_zip_is_rejected():
 
 def test_library_import_creates_matches_and_is_idempotent():
     store = Store(":memory:"); store.init_schema()
-    identity = store.identities.upsert_identity("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", "bridge", None, True)
     client = LibraryClient()
 
     report = import_spotify_library(store, _account_zip(), client, identity, 1000.0)
@@ -139,7 +139,7 @@ def test_library_import_creates_matches_and_is_idempotent():
 
 def test_same_name_with_different_contents_is_imported():
     store = Store(":memory:"); store.init_schema()
-    identity = store.identities.upsert_identity("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", "bridge", None, True)
     track = store.tracks.upsert_track("existing", "Song", "Artist", "Record", 200)
     playlist = store.playlists.upsert_playlist(identity, "PL_EXISTING", "Road songs", 1, "hash", 1.0)
     store.playlists.set_playlist_tracks(playlist, [track])
@@ -193,20 +193,19 @@ def test_creation_interruption_retains_marker_and_never_recreates_after_restart(
 
     path = tmp_path / "creation.db"
     store = Store(path); store.init_schema()
-    identity = store.identities.upsert_identity("Main", "bridge", None, True)
+    identity = store.accounts.upsert_account("Main", "bridge", None, True)
     client = LostCreation()
     raw = _playlists_zip(("Road songs", ["One", "Two"]))
     with monkeypatch.context() as patch:
         if interruption == "local_publication":
-            save = store.settings.set_setting
+            save = store.settings.save_spotify_transfer
 
-            def fail_id_publication(key, value):
-                if key == f"spotify_library_imported_playlists:{identity}" and any(
-                        transfer.get("ytm_playlist_id") for transfer in json.loads(value).values()):
+            def fail_id_publication(account_id, fingerprint, transfer):
+                if account_id == identity and transfer.get('ytm_playlist_id'):
                     raise OSError("interrupted before destination ID publication")
-                return save(key, value)
+                return save(account_id,fingerprint,transfer)
 
-            patch.setattr(store.settings, "set_setting", fail_id_publication)
+            patch.setattr(store.settings, "save_spotify_transfer", fail_id_publication)
         first = import_spotify_library(store, raw, client, identity, 100)
     assert first["playlists_failed"] == 1
     assert "ytm_playlist_id" not in first["details"]["playlists"][0]
@@ -232,7 +231,7 @@ def test_creation_interruption_retains_marker_and_never_recreates_after_restart(
 
 
 def test_identical_contents_in_destination_are_skipped_even_in_a_different_order(store):
-    identity = store.identities.upsert_identity("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", "bridge", None, True)
     playlist = store.playlists.upsert_playlist(identity, "PL_EXISTING", "Road songs", 2, "hash", 1)
     ids = [store.tracks.upsert_track(title, title, "Artist", "", 200) for title in ("Two", "One")]
     store.playlists.set_playlist_tracks(playlist, ids)
@@ -244,18 +243,18 @@ def test_identical_contents_in_destination_are_skipped_even_in_a_different_order
 
 
 def test_import_fingerprints_are_scoped_to_destination(store):
-    first = store.identities.upsert_identity("first", "first-bridge", None, True)
-    second = store.identities.upsert_identity("second", "second-bridge", None, False)
+    first = store.accounts.upsert_account("first", "first-bridge", None, True)
+    second = store.accounts.upsert_account("second", "second-bridge", None, False)
     raw = _playlists_zip(("Road songs", ["Song"]))
     for identity in (first, second):
         report = import_spotify_library(store, raw, SongClient(), identity, 100)
         assert report["playlists_imported"] == 1
-    assert {p.identity_id for p in store.playlists.get_playlists()} == {first, second}
+    assert {p.account_id for p in store.playlists.get_playlists()} == {first, second}
 
 
 def test_legacy_global_marker_requires_corresponding_destination_contents(store):
     import hashlib
-    identity = store.identities.upsert_identity("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", "bridge", None, True)
     fingerprint = "playlist:" + hashlib.sha256(b"road songs\0song|artist").hexdigest()
     store.settings.set_setting("spotify_library_imported_playlists", json.dumps([fingerprint]))
     raw = _playlists_zip(("Road songs", ["Song"]))
@@ -275,7 +274,7 @@ def test_resume_reconciles_lost_batch_response_after_restart(tmp_path):
 
     path = tmp_path / "state.db"
     store = Store(path); store.init_schema()
-    identity = store.identities.upsert_identity("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", "bridge", None, True)
     client = LostResponse()
     raw = _playlists_zip(("Road songs", ["One", "Two"]))
     assert import_spotify_library(store, raw, client, identity, 100)["playlists_failed"] == 1
@@ -296,7 +295,7 @@ def test_resume_reconciles_lost_batch_response_after_restart(tmp_path):
 def test_large_import_publishes_each_confirmed_suffix_once(store, monkeypatch):
     from yt_playlist.core import catalog
 
-    iid = store.identities.upsert_identity('Main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('Main', 'bridge', None, True)
     client = SongClient()
     titles = [f'Song {i:03}' for i in range(250)]
     upserts, statements, commits = [], [], []
@@ -338,7 +337,7 @@ def test_large_import_publishes_each_confirmed_suffix_once(store, monkeypatch):
 def test_failed_second_batch_rolls_back_locally_and_resumes_same_remote_destination(store, monkeypatch):
     from yt_playlist.core import catalog
 
-    iid = store.identities.upsert_identity('Main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('Main', 'bridge', None, True)
     client = SongClient()
     titles = [f'Song {i:03}' for i in range(250)]
     raw = _playlists_zip(('Large', titles))
@@ -369,7 +368,7 @@ def test_one_failed_playlist_does_not_stop_the_others(store):
                 raise RuntimeError("create rejected")
             return super().create_playlist(title, description)
 
-    identity = store.identities.upsert_identity("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", "bridge", None, True)
     client = FailingClient()
     report = import_spotify_library(store, _playlists_zip(("Broken", ["One"]), ("Good", ["Two"])),
                                     client, identity, 100)
@@ -383,7 +382,7 @@ def test_ambiguous_tracks_are_previewed_and_never_substituted(store):
         def search(self, query, filter="songs"):
             return [_track("studio", "Song", "Artist"), _track("alternate", "Song", "Artist")]
 
-    identity = store.identities.upsert_identity("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", "bridge", None, True)
     raw = _playlists_zip(("Road songs", ["Song"]))
     client = AmbiguousClient()
     prepared = prepare_spotify_library(load_spotify_library(raw), client)
@@ -415,7 +414,7 @@ def test_unavailable_and_duplicate_search_results_are_classified():
 
 
 def test_studio_and_live_rows_have_independent_lookups_and_import_markers(store):
-    identity = store.identities.upsert_identity("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", "bridge", None, True)
     client = SongClient()
     raw = _playlists_zip(("Source", ["Song", "Song (Live)"]))
     prepared = prepare_spotify_library(load_spotify_library(raw), client)
@@ -439,7 +438,7 @@ def test_failed_lookup_can_be_recovered_in_the_same_playlist(store, monkeypatch)
                 raise RuntimeError("lookup failed")
             return super().search(query, filter)
 
-    identity = store.identities.upsert_identity("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", "bridge", None, True)
     raw = _playlists_zip(("Source", ["One", "Two"]))
     client = LookupFailure()
     first = import_spotify_library(store, raw, client, identity, 100)
@@ -463,7 +462,7 @@ def test_album_failure_preserves_playlist_results_and_later_albums(store):
                 raise RuntimeError("save rejected")
             super().rate_playlist(playlist_id, rating)
 
-    identity = store.identities.upsert_identity("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", "bridge", None, True)
     client = AlbumFailure()
     first = import_spotify_library(store, _account_zip(), client, identity, 100)
     assert first["playlists_imported"] == 1
@@ -514,7 +513,7 @@ def test_second_spotify_edition_is_skipped_after_equivalent_album_is_saved():
             return []
 
     store = Store(":memory:"); store.init_schema()
-    identity = store.identities.upsert_identity("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", "bridge", None, True)
     report = import_spotify_library(store, payload, EditionClient(), identity, 1000.0)
 
     assert report["albums_imported"] == 1

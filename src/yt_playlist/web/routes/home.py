@@ -2,11 +2,10 @@
 from fastapi import APIRouter, Request
 
 from yt_playlist.core import updatecheck
-from yt_playlist.rec import actions, home_preferences, home_prepared, onboarding, rec_params, tv
+from yt_playlist.rec import account_growth, actions, artist_start, home_preferences, home_prepared, onboarding, rec_params, tv
 from yt_playlist.rec.home_cards import _epoch
 from yt_playlist.rec.trend_statistics import last_complete_month
-from yt_playlist.web.routes import home_board, home_discovery, home_generation, home_onboarding, home_tuning, home_tv
-from yt_playlist.web.routes.home_onboarding import lastfm_nudge_due, takeout_nag_due
+from yt_playlist.web.routes import home_artist_start, home_board, home_discovery, home_generation, home_growth, home_onboarding, home_tuning, home_tv
 from yt_playlist.web.routes.home_views import HomeViews
 from yt_playlist.web.spotify_import import current_job as current_spotify_import_job
 
@@ -23,14 +22,26 @@ def build(ctx) -> APIRouter:
     router.include_router(home_tuning.build(ctx, views))
     router.include_router(home_discovery.build(ctx, views))
     router.include_router(home_onboarding.build(ctx))
+    router.include_router(home_artist_start.build(ctx))
+    router.include_router(home_growth.build(ctx))
     router.include_router(home_generation.build(ctx))
     router.include_router(home_tv.build(ctx))
 
     @router.get("/")
     def home_page(request: Request):
+        if store.activity_paused and store._db_path is not None:
+            # Compose the complete maintenance response from one committed view.
+            # Rendering should not construct a private connection for each small
+            # setting, eligibility lookup or prepared-card read.
+            with store.read_view() as reader:
+                return render_home(request, reader, HomeViews(ctx, store=reader))
+        return render_home(request, store, views)
+
+    def render_home(request, store, views):
         now = now_fn()
+        artists_required = artist_start.required(store)
         dao = store.rec_ledger
-        for card in (() if getattr(store, 'activity_paused', False) else ROTATING_CARDS):
+        for card in (() if store.activity_paused or getattr(store, '_read_only', False) else ROTATING_CARDS):
             if card == "cards":
                 started = store.modes.epoch_started_at(_epoch(store, card))
                 if started is not None and now - started >= MENU_MAX_AGE_S:
@@ -64,26 +75,28 @@ def build(ctx) -> APIRouter:
         radio_tracks = ctx.radio.history_tracks(radio_state) if radio_state.get('active') else []
         collections = home_prepared.collections(store, views.prepared(now, request), now)
         views.queue_artist_images(collections, now)
-        feed = views.feed_context(request, now)
-        if (not getattr(store, 'activity_paused', False)
-                and store.settings.get_setting('last_sync_at') is None
-                and not store.settings.get_setting('onboard_listening_format')
-                and not store.settings.get_setting('home_format')):
-            store.settings.set_setting('onboard_format_pending', '1')
         albums_ready = onboarding.prepared_albums_ready(store, now)
-        # TV has its own prepared offers and recovery states. A temporary gap in
-        # Mix tapes must not return an existing TV listener to initial setup.
-        has_tv = bool((tv.cached(store) or {}).get('items')) or request.query_params.get('tv_playlist', '').isdecimal()
-        # Imported likes, dismissal and fitted modes are not complete listening offers.
-        # Returning Home during setup must retain the same useful first-run screen.
-        getting_started = (home_preferences.choice_pending(store) or
-                           (not feed['protos'] and not albums_ready and not has_tv and
-                            (onboarding.initial_setup_pending(store, now) or onboarding.onboarding_active(store, now))))
+        mixes_ready = onboarding.prepared_mixes_ready(store, now)
+        growth = account_growth.view(store, now, mixes_ready=mixes_ready,
+                                     albums_ready=albums_ready, radio=radio_bootstrap,
+                                     collections=collections)
+        request.state.account_growth = growth
+        getting_started = (not any(account_growth.has_access(growth, panel)
+                                   for panel in home_preferences.PANELS.values())
+                           and (artists_required or not onboarding.setup_completed(store)))
+        feed = views.feed_context(request, now)
+        default_panel = home_preferences.default_panel(store,
+            albums_ready=growth['ready_formats']['albums'], mixes_ready=growth['ready_formats']['mixes'])
+        preferred = home_preferences.PANELS[home_preferences.default_format(store)]
+        if account_growth.has_access(growth, preferred):
+            default_panel = preferred
+        if not account_growth.has_access(growth, default_panel):
+            default_panel = 'unlocks'
         return templates.TemplateResponse(request, "home.html", {
-            'home_default_panel': home_preferences.default_panel(store,
-                albums_ready=albums_ready, mixes_ready=bool(feed['protos'])),
+            'growth': growth,
+            'home_default_panel': default_panel,
             'onboard_format': store.settings.get_setting('onboard_listening_format'),
-            'onboard_format_pending': home_preferences.choice_pending(store),
+            'onboard_format_pending': False,
             'onboard_welcome_pending': store.settings.get_setting('onboard_welcomed') != '1',
             "radio_bootstrap": radio_bootstrap,
             "tv_max_minutes": tv.max_minutes(store),
@@ -95,24 +108,23 @@ def build(ctx) -> APIRouter:
             **collections,
             "flash": request.query_params.get("flash"),
             "toast": request.query_params.get("toast"),   # transient success (e.g. re-auth w/ auto-sync)
-            # Sparsity nudge: when metadata is genre-thin and no Last.fm key is set, point the user
-            # at adding one (persists once dismissed). The auto-enrich worker handles the rest, so
-            # there is no manual-enrichment nag anymore.
             # Welcome nag shown once the first sync lands (dismissable, persists): sets expectations
             # that the model keeps learning over the next week.
             "show_intro": (store.settings.get_setting("last_sync_at") is not None
                            and store.settings.get_setting("intro_dismissed") != "1"),
-            "show_lastfm_nudge": lastfm_nudge_due(store, now),
-            # Optional history import follows onboarding and retires once an import lands.
-            "show_takeout_nag": takeout_nag_due(store, now),
+            # Optional bonuses live together on the festival map. They don't
+            # belong in Needs attention merely because the user hasn't added one.
+            "show_lastfm_nudge": False,
+            "show_takeout_nag": False,
             "backend_update": backend_update,
             "show_backend_update": backend_update is not None,
             # Once the library has synced and the user still has only the default identity, offer the
             # multi-identity merge (dismissable, persists). Skipped as soon as they add a second one.
             "show_identities_nudge": (store.settings.get_setting("last_sync_at") is not None
-                                      and len(store.identities.get_identities()) <= 1
+                                      and len(store.accounts.get_accounts()) <= 1
                                       and store.settings.get_setting("identities_nudge_dismissed") != "1"),
             "onboarding": getting_started,
+            "onboard_artists_required": artists_required,
             "onboard_library": onboarding.library_size(store) > 0,
             "cleanup_count": onboarding.cleanup_count(store),   # CACHED read, never the O(n^2) scan
             "recap": recap,

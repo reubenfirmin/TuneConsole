@@ -1,4 +1,5 @@
 import pytest
+from tests.visual_support import capture
 from playwright.sync_api import expect
 
 from tests.group_support import publish, recordings
@@ -32,7 +33,7 @@ def test_music_groups_are_prominent_searchable_and_used_by_home(live_app, store,
     expect(section.get_by_role('heading', name='House', exact=True)).to_be_hidden()
     search.fill('')
     expect(section.get_by_role('heading', name='House', exact=True)).to_be_visible()
-    section.screenshot(path=f'/tmp/tuneconsole-139-live-groups-{width}.png')
+    capture(section, path=f'/tmp/tuneconsole-139-live-groups-{width}.png')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.goto(live_app + '/home/cards')
     # The fragment's actual generated recipe contains graph attribution.
@@ -81,7 +82,7 @@ def test_hidden_group_names_keep_visible_ancestor_context(live_app, store, page,
     expect(section.locator('[data-group-version="prog-rock"]')).to_be_visible()
     expect(section.locator('[data-group-version="tech-house"]')).to_be_hidden()
     section.locator('#music-group-search').fill('')
-    section.screenshot(path=f'/tmp/tuneconsole-139-visible-ancestors-{width}.png')
+    capture(section, path=f'/tmp/tuneconsole-139-visible-ancestors-{width}.png')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     assert not errors
 
@@ -107,7 +108,7 @@ def test_fresh_preview_updates_with_continuing_backlog_and_retains_last_good_on_
     section.scroll_into_view_if_needed()
     expect(section.get_by_text('Waiting for the first library recordings to be prepared.')).to_be_visible()
     expect(section.get_by_text('12 artist detail updates', exact=False)).to_be_visible()
-    section.screenshot(path=f'/tmp/tuneconsole-139-startup-{width}.png')
+    capture(section, path=f'/tmp/tuneconsole-139-startup-{width}.png')
     preparation = progressive.Preparation(store, budget=replace(progressive.Budget(), batch=3))
     assert preparation.capture(1000) and preparation.capture(1001)
     assert preparation.groups.step(1002) and group_serving.prepare(store, 1003)
@@ -118,7 +119,7 @@ def test_fresh_preview_updates_with_continuing_backlog_and_retains_last_good_on_
     expect(section.get_by_role('heading', name='Jazz', exact=True)).to_be_visible()
     assert store.prepared_content.has_pending() and store.musical_profiles.pending()
     generation = section.locator('[data-generation]').get_attribute('data-generation')
-    section.screenshot(path=f'/tmp/tuneconsole-139-prepared-{width}.png')
+    capture(section, path=f'/tmp/tuneconsole-139-prepared-{width}.png')
     group_preparation.report(store, 'failed', 1100, reason='preparation-failed')
     page.reload()
     section.scroll_into_view_if_needed()

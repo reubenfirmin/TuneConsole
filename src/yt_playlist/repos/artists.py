@@ -57,7 +57,7 @@ class ArtistRepo(Repo):
     @synchronized
     def track_credits(self, entry_id):
         return [dict(r) for r in self.conn.execute(
-            'SELECT ta.*,a.name,ap.provider_id browse_id FROM track_artists ta '
+            f'SELECT ta.*,a.name,ap.provider_id browse_id FROM {self.entry_artists_table} ta '
             'JOIN artists a ON a.id=ta.artist_id LEFT JOIN artist_provider_ids ap '
             "ON ap.artist_id=a.id AND ap.provider='youtube' WHERE entry_id=? ORDER BY position",
             (entry_id,))]
@@ -69,7 +69,7 @@ class ArtistRepo(Repo):
             return {}
         rows = self.conn.execute(
             'SELECT DISTINCT r.identity_key,ta.artist_id FROM recordings r '
-            'JOIN catalog_entries e ON e.recording_id=r.id JOIN track_artists ta ON ta.entry_id=e.id '+
+            f'JOIN catalog_entries e ON e.recording_id=r.id JOIN {self.entry_artists_table} ta ON ta.entry_id=e.id '+
             ('JOIN library_memberships m ON m.entry_id=e.id ' if library else '') +
             ('WHERE r.identity_key IN (' + ','.join('?' for _ in keys) + ')' if keys is not None else ''), keys or [])
         out = {}

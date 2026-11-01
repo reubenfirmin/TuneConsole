@@ -190,7 +190,8 @@ def test_confirmed_misses_expire_and_close_http_errors(boundary, kind):
     assert not errors and all(body.closed for body in bodies)
 
 
-def test_response_and_invalid_response_caches_are_bounded(boundary):
+def test_response_and_invalid_response_caches_are_bounded(boundary, monkeypatch):
+    monkeypatch.setattr(transport, 'CACHE_SIZE', 8)
     b = boundary(lambda request: oembed(None))
     for index in range(transport.CACHE_SIZE + 5):
         assert spotify.thumbnail(f'https://open.spotify.com/album/a{index}') is None

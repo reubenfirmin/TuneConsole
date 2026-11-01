@@ -1,11 +1,11 @@
-<tbody class="move-row" x-show="from === {{ p.identity_id }}" x-cloak>
+<tbody class="move-row" x-show="from === {{ p.account_id }}" x-cloak>
   <tr :class="{ selrow: sel[{{ p.id }}] }" data-playlist-id="{{ p.id }}">
     <td class="selcell" @click="rowCheck({{ p.id }}, $event)">
       <input type="checkbox" aria-label="Select {{ p.title }}" :checked="!!sel[{{ p.id }}]"
              :disabled="busy" @click.stop="rowCheck({{ p.id }}, $event)">
     </td>
     <td class="move-title">
-      <a href="/playlist/{{ p.id }}" title="YouTube playlist ID: {{ p.ytm_playlist_id }}">{{ p.title }}</a>
+      <a href="/playlist/{{ p.id }}" title="YouTube playlist ID: {{ p.provider_playlist_id }}">{{ p.title }}</a>
       {% if message %}<span class="muted">{{ message }}</span>{% endif %}
       {% if error %}<span class="err">{{ error }}</span>{% endif %}
     </td>

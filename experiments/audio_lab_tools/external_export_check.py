@@ -121,16 +121,27 @@ def check(path, embedding):
             'maximum_absolute_replay_error': maximum_error, 'selected': selected}
 
 
-def evaluate():
+def evaluate(model_paths=None):
     rows = [row for row in json.loads(SNAPSHOT.read_text())['gold'] if len(row.get('embedding_values', [])) == 200]
     embedding = np.array([row['embedding_values'] for row in rows])
-    results = []
+    results, skipped = [], []
     with threadpool_limits(limits=1):
-        for path in sorted((OUT / 'models').glob('*.json')):
+        paths = sorted((OUT / 'models').glob('*.json')) if model_paths is None else model_paths
+        for path in paths:
             if not path.name.startswith(('consensus-', 'vibe-ranking-')):
                 continue
+            artifact = json.loads(path.read_text())
+            if artifact.get('format') not in ('external-research-consensus-2', 'external-research-vibe-ranking-1'):
+                if model_paths is not None:
+                    raise ValueError('Unsupported requested export format: ' + path.name)
+                skipped.append({'model': path.name, 'format': artifact.get('format'),
+                                'reason': 'Historical format does not export every subset'})
+                continue
             results.append(check(path, embedding))
-    report = {'created_at': stamp(), 'models': results, 'script_sha256': digest(__file__),
+    if not results:
+        raise ValueError('No complete exports available to replay')
+    report = {'created_at': stamp(), 'models': results, 'skipped_legacy_exports': skipped,
+              'script_sha256': digest(__file__),
               'validation': 'Deserialize complete exports and independently replay every native head and calibrator on actual saved embeddings. Validate every subset, member index and simplex; replay both selected complete pipelines.',
               'limitations': ['This checks export completeness and numerical inference, not predictive accuracy or product integration. Replayed inputs were also used for final calibration; no training-set quality is reported.']}
     save(OUT / 'export-replay.report.json', report)

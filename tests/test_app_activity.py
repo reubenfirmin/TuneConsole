@@ -222,7 +222,7 @@ def test_shutdown_cannot_restart_workers_after_deferred_startup(store, monkeypat
 
 
 def test_restart_waits_for_a_generated_playlist_save(store, monkeypatch):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     app = create_app(store, lambda: {iid: object()}, background_work=False)
     ctx = app.state.ctx
     started, release = threading.Event(), threading.Event()

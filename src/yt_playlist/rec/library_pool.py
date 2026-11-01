@@ -8,6 +8,38 @@ def prepare(store, now, parameters):
         # A clicked fallback uses the same complete worker inputs as the main
         # menu. Its consumer must not get stuck waiting on an unrelated cache.
         return mode_surfaces.prepare_bundles(store, now)
+    if store._clicked_library_pools:
+        from yt_playlist.core import library_pool_state
+        with store.read_snapshot() as snapshot:
+            reader = snapshot.store
+            tracks = _calculate(reader, now, parameters)
+            policies = measurement.PoolPolicies(reader, now)
+            tracks = policies.stamp(tracks, parameters['lane'])
+            policy = policies.generation_policy()
+            rows, bases = list(policies.rows.values()), list(policies.bases.values())
+            surface = 'home_pool:' + parameters['lane']
+            plan = library_pool_state.prepare(reader.conn, surface,
+                {'parameters': parameters, 'tracks': tracks}, now, policy=policy,
+                input_revision=reader.prepared_content.serial(), pending_policies=rows)
+            snapshot.release_reader()
+            build = store.recommendations.claim(plan, policies=rows, bases=bases)
+            with store._lock, store.conn.atomic():
+                library_pool_state.parameters(store.conn, build.generation_id, parameters, now)
+            store.recommendations.stage(plan, build)
+            return snapshot.publish(lambda: store.recommendations.publish(build, now),
+                                    # Staging creates unpublished generation rows.
+                                    # Viewing the existing menu can also add mode
+                                    # impressions while this explicit build runs.
+                                    # Its captured policy remains attributable;
+                                    # preferences and serving heads stay guarded.
+                                    allow_stale_tables=mode_surfaces.RANKING_CHURN_TABLES | {
+                                        'recommendation_generations', 'rec_mode_impressions'})
+    tracks = _calculate(store, now, parameters)
+    tracks = measurement.stamp_pool(store, tracks, now, parameters['lane'])
+    store.rec_proposals.put_proposals(f"home_pool:{parameters['lane']}", {"parameters": parameters, "tracks": tracks}, now)
+
+
+def _calculate(store, now, parameters):
     lane = parameters["lane"]
     keys = store.rec_query.library_keys()
     if lane == "temporal":
@@ -24,8 +56,7 @@ def prepare(store, now, parameters):
     if not home_vibe.current(store, now):
         tracks = home_themes.matching_genres(store, tracks, include=parameters["include_genres"],
                                             avoid=parameters["avoid_genres"])
-    tracks = measurement.stamp_pool(store, tracks, now, lane)
-    store.rec_proposals.put_proposals(f"home_pool:{lane}", {"parameters": parameters, "tracks": tracks}, now)
+    return tracks
 
 
 def pick(store, now, parameters, exclude_keys=()):
@@ -47,9 +78,9 @@ def pick(store, now, parameters, exclude_keys=()):
                                         avoid=parameters["avoid_genres"])
     tracks = [t for t in tracks if t["key"] in owned and t["key"] not in blocked
               and t["artist"] not in muted
-              and weights.get(f"genre:{genre_map.family(t.get('genre'))}", 1.0) != 0]
+              and weights.get(f"genre:{genre_map.family(t.get('genre'),conn=store.conn)}", 1.0) != 0]
     if parameters["lane"] == "temporal":
-        cuts = (store.rec_proposals.get_proposals("mode_bundles") or {}).get("_meta", {}).get("year_cuts")
+        cuts = mode_surfaces.bundle_metadata(store).get('year_cuts')
         if not cuts:
             return []
         tracks = [t for t in tracks if mode_surfaces._in_band(t.get("year"), parameters["epoch"] % 3,

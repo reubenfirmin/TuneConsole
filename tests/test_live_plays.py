@@ -8,9 +8,9 @@ import pytest
 
 def _store(with_brand=False):
     s = Store(":memory:"); s.init_schema()
-    s.identities.upsert_identity("main", "bridge", None, True)
+    s.accounts.upsert_account("main", "bridge", None, True)
     if with_brand:
-        s.identities.upsert_identity("band", "bridge", "10345", False)
+        s.accounts.upsert_account("band", "bridge", "10345", False)
     return s
 
 
@@ -118,11 +118,11 @@ def test_like_status_feeds_like_channel():
 
 def test_brand_id_selects_matching_identity_and_unknown_reports_are_skipped():
     s = _store(with_brand=True)
-    ids = {i.brand_account_id: i.id for i in s.identities.get_identities()}
+    ids = {i.brand_account_id: i.id for i in s.accounts.get_accounts()}
     live_plays.handle_play_event(_ctx(s), _msg(brandId="10345"), 1000.0)
     assert not live_plays.handle_play_event(_ctx(s), _msg(title="Other", brandId="nope"), 2000.0)
     evs = s.history.play_events_since(0)
-    assert evs[0]["identity_id"] == ids["10345"]
+    assert evs[0]["account_id"] == ids["10345"]
     assert len(evs)==1
 
 
@@ -142,10 +142,10 @@ def test_playlist_provenance_recorded():
 
 def test_main_remote_account_matches_without_a_configured_master():
     s = Store(":memory:"); s.init_schema()
-    s.identities.upsert_identity("only", "bridge", None, False)     # configured, but nothing is master
-    ident = s.identities.get_identities()[0].id
+    s.accounts.upsert_account("only", "bridge", None, False)     # configured, but nothing is master
+    ident = s.accounts.get_accounts()[0].id
     assert live_plays.handle_play_event(_ctx(s), _msg(), 1000.0) is True
-    assert s.history.play_events_since(0)[0]["identity_id"] == ident
+    assert s.history.play_events_since(0)[0]["account_id"] == ident
 
 
 def test_live_play_and_history_backfill_share_browser_date():
@@ -162,27 +162,30 @@ def test_live_play_and_history_backfill_share_browser_date():
 
 
 def test_selected_album_playback_is_context_evidence_not_organic_track_learning():
-    import json
+    from yt_playlist.core import album_playback_context
     from yt_playlist.rec import choice_evidence, layers
 
     s = _store(with_brand=True)
+    s.tracks.upsert_track('v1', 'Song', 'Artist', None, None)
+    s.tracks.upsert_track('v2', 'Next', 'Artist', None, None)
     oid = choice_evidence.issue(s, 'albums', [{'id': 'album', 'keys': ['song|artist']}],
                                 990, context={})
     choice_evidence.respond(s, oid, 'choice', 991, option_id='album', action_id='chosen')
-    s.settings.set_setting('listening_album_pending', json.dumps({'opportunity_id': oid,
-        'browse': 'album', 'playlist': 'OLAK-album', 'videos': ['v1', 'v2'],
-        'at': 991, 'action_id': 'chosen'}))
+    with s.conn:
+        album_playback_context.put(s.conn, {'opportunity_id': oid,
+            'browse': 'album', 'playlist': 'OLAK-album', 'videos': ['v1', 'v2'],
+            'at': 991, 'action_id': 'chosen'})
     assert live_plays.handle_play_event(_ctx(s), _msg(playlist='OLAK-album'), 1000)
     assert s.conn.execute('SELECT is_generated FROM play_events').fetchone()[0] == 1
     assert layers._plays(s, 0) == []
     assert choice_evidence.compile_report(s, 1001)['formats']['albums']['starts'] == 1
     # The first verified account owns the pending queue; another account is not attributed.
-    pending = json.loads(s.settings.get_setting('listening_album_pending'))
-    assert pending['identity_id'] == 1
+    pending = album_playback_context.load(s.conn)
+    assert pending['account_id'] == 1
     assert choice_evidence.album_playback_context(s, _msg(playlist='OLAK-album'), 1001,
-                                                 identity_id=2) is None
+                                                 account_id=2) is None
     assert choice_evidence.album_playback_context(s, _msg(playlist='OLAK-album', videoId='outside'),
-                                                 1001, identity_id=1) is None
+                                                 1001, account_id=1) is None
     # Album continuation stays quarantined even though it contains multiple tracks.
     assert live_plays.handle_play_event(_ctx(s), _msg(playlist='OLAK-album', title='Next', videoId='v2'), 1200)
     assert layers._plays(s, 0) == []

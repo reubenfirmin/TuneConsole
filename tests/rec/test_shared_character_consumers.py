@@ -8,11 +8,16 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.musical_support import prepare_profiles, prepare_vibes
+from tests.recommendation_support import publish_bundles
 from yt_playlist.core import catalog
 from yt_playlist.util import genre_map
 from yt_playlist.rec import (fresh_pool, home_cards, home_prepared, home_vibe, library_pool,
                              mix_tuning, mode_surfaces, musical_character, musical_profiles,
                              surfaces, vibe_pools)
+
+# These are consumer contracts after unlock. Real startup/readiness is covered
+# separately by test_growth_readiness and test_growth_journey.
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
 
 
 @pytest.fixture
@@ -34,7 +39,7 @@ def opportunities(store):
                                                        genre, '2000', None, 1, audio=audio)
             items.append(item)
         pools[lane] = items
-    store.rec_proposals.put_proposals('mode_bundles', {
+    publish_bundles(store, {
         '0': {'wheelhouse': pools['library'][:40], 'fresh': pools['fresh'][:40]},
         'all': {'wheelhouse': pools['library'], 'explore': pools['library'], 'fresh': pools['fresh']},
         '_meta': {'full_pools': True, 'comfort_pool': 0}}, 1000)
@@ -83,7 +88,17 @@ def test_fit_precedes_mode_heads_within_explicit_genres_in_every_cached_fallback
 
 
 def test_prepared_profile_stamp_survives_a_new_profile_until_menu_publication(store, opportunities):
-    before = vibe_pools.pick(store, 1000, 'relax', 'wheelhouse')
+    # Candidate pools resolve current catalog/profile owners (#486). The
+    # immutable output is the published Home menu (#487), not a new pick from
+    # that pool. Exercise the actual publication and serving boundary.
+    payload = home_prepared.prepare(store, 1000)
+    assert payload and payload['menus']
+    service = home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__), genre_options=[])
+    def served():
+        published = home_prepared.peek(store, 1000)
+        return next(p['tracks'] for p in home_prepared.cards(
+            store, published, 1000, service, record=False).protos if p['lane'] == 'wheelhouse')
+    before = served()
     track = before[0]
     tid = store.tracks.track_ids_for_videos([track['video_id']])[track['video_id']]
     with store.conn:
@@ -91,8 +106,13 @@ def test_prepared_profile_stamp_survives_a_new_profile_until_menu_publication(st
     prepare_profiles(store)
     current = musical_character.load(store, [track['key']])[track['key']]
     assert current['digest'] != track['musical']['digest']
-    after = vibe_pools.pick(store, 1000, 'relax', 'wheelhouse')
+    after = served()
     assert after == before
+    assert home_prepared.peek(store, 1000)['built_at'] == payload['built_at']
+    # A newly assembled offer can use the new input; it must report that input,
+    # without retroactively changing the already published menu.
+    live = vibe_pools.candidates(store, 'relax', 'wheelhouse')
+    assert next(t for t in live if t['key'] == track['key'])['musical']['digest'] == current['digest']
     observed = {}
     from yt_playlist.rec import journeys
     def inspect(items, journey, seed, feat):
@@ -102,6 +122,13 @@ def test_prepared_profile_stamp_survives_a_new_profile_until_menu_publication(st
         patch.setattr(journeys, 'journey_order', inspect)
         home_cards._order_by_journey(store, after, 'warm_up', 1)
     assert observed[track['key']] == musical_character.intensity(track)
+    prepare_vibes(store, 1001)
+    replacement = home_prepared.prepare(store, 1001)
+    assert replacement and replacement['generation'] != payload['generation']
+    refreshed = served()
+    assert refreshed != before
+    profiles = musical_character.load(store, [t['key'] for t in refreshed])
+    assert all(t['musical']['digest'] == profiles[t['key']]['digest'] for t in refreshed)
 
 
 def test_selected_genre_has_reserved_candidates_beyond_the_global_vibe_head(store):
@@ -112,7 +139,7 @@ def test_selected_genre_has_reserved_candidates_beyond_the_global_vibe_head(stor
         store.discovery.upsert_discovered_track(key, key, key, f'Artist {i}', '', None, genre,
             None, None, 1, audio={'energy': .04 if genre == 'Techno' else .2, 'mood_relaxed': .95})
         items.append({'key': key, 'video_id': key, 'title': key, 'artist': f'Artist {i}', 'genre': genre})
-    store.rec_proposals.put_proposals('mode_bundles', {'all': {'fresh': items}})
+    publish_bundles(store, {'all': {'fresh': items}})
     prepare_vibes(store)
     assert all(t['genre'] == 'Techno' for t in vibe_pools.candidates(store, 'relax', 'fresh'))
     focused = vibe_pools.pick(store, 1000, 'relax', 'fresh', include_genres=['jazz'])
@@ -142,12 +169,15 @@ def test_live_and_reused_offers_preserve_current_explicit_exclusions(store, oppo
         catalog.choose_field(store.conn, tid, 'duration_s', 100_000)
     tid = store.tracks.track_ids_for_videos([third['video_id']])[third['video_id']]
     store.tracks.set_track_genre(tid, 'Classical')
-    remaining = vibe_pools.pick(store, 1000, 'relax', 'wheelhouse')
+    # A newly assembled cross-genre vibe can use a corrected genre. It becomes
+    # ineligible when an explicit restriction excludes its *current* genre.
+    remaining = vibe_pools.pick(store, 1000, 'relax', 'wheelhouse', avoid_genres=['classical'])
     assert not {first['key'], second['key'], third['key']} & {track['key'] for track in remaining}
     assert all(track['genre'] != 'Metal' for track in remaining)
     protos = home_prepared._eligible_protos(store, [{'lane': 'wheelhouse', 'label': 'Familiar',
                                                    'name': 'Familiar - Test', 'tracks': deepcopy(pool[:24]),
-                                                   'recipe': {'vibe': 'relax'}}], 1000)
+                                                   'recipe': {'vibe': 'relax',
+                                                              'genre_request': {'avoid': ['classical']}}}], 1000)
     assert protos
     assert not {first['key'], second['key'], third['key']} & {t['key'] for p in protos for t in p['tracks']}
     assert all(t['genre'] != 'Metal' for p in protos for t in p['tracks'])

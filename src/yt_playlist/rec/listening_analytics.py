@@ -27,7 +27,7 @@ def document(value):
         return {}
 
 
-def capture_start(store, identity, video, playlist, status, at, *, album=False):
+def capture_start(store, identity, video, playlist, status, at, *, album=False, inline=False):
     """Freeze the first rating readout; later likes must not rewrite 'already liked'.
 
     Serving only offers a small immutable source record. Durable writes and all
@@ -35,6 +35,10 @@ def capture_start(store, identity, video, playlist, status, at, *, album=False):
     """
     from yt_playlist.core.features import listening_charts_enabled
     if not listening_charts_enabled():
+        return
+    if inline:
+        store.player_events.record_player_event(identity, 'listen_start', video, None, None, playlist,
+            json.dumps({'rating': status, 'album': album}), at)
         return
     capture = getattr(store, 'choice_capture', None)
     if capture is not None:
@@ -51,13 +55,16 @@ def calculate(reader, now):
         for row in batch:
             row['artist'] = names.get(str(row['artist_id']), row['artist'])
         metadata.update((row['identity_key'], row) for row in batch)
-    with setting_reads(reader, ('radio_session_playlist_ids', 'listening_timezone')):
-        radio_ids = set(json.loads(reader.settings.get_setting('radio_session_playlist_ids') or '[]'))
+    radio_ids = set(reader.playlists.radio_playlist_ids())
+    with setting_reads(reader, ('listening_timezone',)):
         zone = timezone_name(reader.settings.get_setting('listening_timezone'))
     date_of = lambda at: day(at, zone)
-    mixes = {row['provider_id'] for batch in repo.batches(
-        "SELECT DISTINCT s.provider_id FROM playlist_provenance p JOIN playlist_scopes s ON s.ref=p.ytm "
-        "WHERE p.origin='tuneconsole'") for row in batch}
+    from yt_playlist.core import playlist_scope_state
+    mixes_query = ("SELECT DISTINCT provider_playlist_id FROM playlist_scopes WHERE origin='tuneconsole'"
+                   if playlist_scope_state.available(reader.conn) else
+                   "SELECT DISTINCT s.provider_playlist_id FROM playlist_provenance p JOIN playlist_scopes s ON s.id=p.ytm "
+                   "WHERE p.origin='tuneconsole'")
+    mixes = {row['provider_playlist_id'] for batch in repo.batches(mixes_query) for row in batch}
     videos = {row['video_id']: row['identity_key'] for batch in repo.batches(
         'SELECT y.video_id,r.identity_key FROM youtube_items y JOIN recordings r ON r.id=y.recording_id')
         for row in batch}
@@ -84,7 +91,7 @@ def calculate(reader, now):
     for batch in repo.player(now):
         for event in batch:
             payload = document(event['payload'])
-            identity = (event['identity_id'], event['video_id'], event['playlist_ytm_id'])
+            identity = (event['account_id'], event['video_id'], event['playlist_ytm_id'])
             if event['kind'] == 'listen_start':
                 starts[(*identity, event['at'])] = payload
                 contexts[identity] = payload
@@ -141,7 +148,7 @@ def calculate(reader, now):
     for batch in repo.plays(now):
         for play in batch:
             key, date = play['identity_key'], date_of(play['played_at'])
-            identity = (play['identity_id'], play['video_id'], play['playlist_ytm_id'])
+            identity = (play['account_id'], play['video_id'], play['playlist_ytm_id'])
             # Start captures share the play's timestamp; never borrow a later
             # replay's rating, another account's state or an unrelated playlist.
             start = starts.get((*identity, play['played_at']), {})
@@ -244,15 +251,24 @@ def build(store, now):
         edition = prepare(payload, ListeningAnalyticsRepo(snapshot.store), now)
         prior = ListeningAnalyticsRepo(snapshot.store).prepared() or {}
         chunks, manifest = partition(payload)
+        from yt_playlist.core import listening_outputs
+        plan = (listening_outputs.prepare(chunks, json.dumps(manifest, separators=(',', ':'), allow_nan=False),
+                json.dumps(edition, separators=(',', ':'), allow_nan=False), now,
+                input_revision=snapshot._changes) if store._listening_files else None)
 
         def publish():
             repo = ListeningAnalyticsRepo(store)
-            for key, encoded in chunks.items():
-                repo.publish(encoded, now, 'listening_chunk:' + key)
-            repo.publish(json.dumps(edition, separators=(',', ':'), allow_nan=False), now, 'listening_edition')
-            repo.publish(json.dumps(manifest, separators=(',', ':'), allow_nan=False), now)
+            if plan is not None:
+                listening_outputs.publish(store.conn, plan)
+            else:
+                for key, encoded in chunks.items():
+                    repo.publish(encoded, now, 'listening_chunk:' + key)
+                repo.publish(json.dumps(edition, separators=(',', ':'), allow_nan=False), now, 'listening_edition')
+                repo.publish(json.dumps(manifest, separators=(',', ':'), allow_nan=False), now)
             store.conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES ('listening_timezone',?)",
                                (payload['timezone'],))
+            if plan is not None:
+                return
             active = tuple('listening_chunk:' + key for key in
                            {*chunks, *(item['key'] for item in prior.get('chunks', []))})
             # Publication and retirement share one guarded transaction.

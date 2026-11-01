@@ -186,7 +186,7 @@ def test_bridge_keeps_storyboards_which_get_song_would_strip(monkeypatch):
 
 def test_visual_route_checks_membership_and_uses_the_playlist_account(store, stream, monkeypatch):
     iid, client, playlist, recipe, items = stream
-    other = store.identities.upsert_identity('other', 'cred2', None, False)
+    other = store.accounts.upsert_account('other', 'cred2', None, False)
     calls = []
     def inspect(self, actual_store, actual_client, item, now):
         calls.append((actual_client, item['video_id']))

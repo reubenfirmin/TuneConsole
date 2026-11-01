@@ -2,10 +2,10 @@
 <svg viewBox="0 0 24 24" width="22" height="22" fill="{{ 'currentColor' if saved else 'none' }}" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M5 3h14v19l-7-4-7 4z"/></svg>
 {%- endmacro %}
 {% macro album_unsave_action(browse_id, owner, icons=false, choose=false) %}
-  {% if owner.identity_id is not none %}
+  {% if owner.account_id is not none %}
     <form hx-post="/collection/unsave-album" hx-swap="none" hx-disabled-elt="find button" class="inline">
       <input type="hidden" name="browse_id" value="{{ browse_id }}">
-      <input type="hidden" name="identity_id" value="{{ owner.identity_id }}">
+      <input type="hidden" name="identity_id" value="{{ owner.account_id }}">
       <button type="submit" class="{{ 'head-icon album-library on' if icons else 'btn-ghost btn-sm' }}"
               {% if not owner.active %}disabled{% endif %}
               {% if icons %}aria-label="Remove album from {{ owner.label }}'s library" aria-pressed="true"{% endif %}
@@ -17,7 +17,7 @@
 {% endmacro %}
 {% macro album_save_control(browse_id, saved, owners=[], icons=false, opportunity_id=none) %}
 {% if saved %}
-  {% if owners|length != 1 or owners[0].identity_id is none %}
+  {% if owners|length != 1 or owners[0].account_id is none %}
   <div class="inline" x-data="{}">
     <button type="button" class="{{ 'head-icon album-library on' if icons else 'btn-ghost btn-sm' }}"
             @click="$refs.owners.showModal()" title="Remove album from library"
@@ -33,7 +33,7 @@
     </dialog>
   </div>
   {% else %}
-    {{ album_unsave_action(browse_id, owners[0] if owners else {'identity_id': none}, icons) }}
+    {{ album_unsave_action(browse_id, owners[0] if owners else {'account_id': none}, icons) }}
   {% endif %}
 {% else %}
   <form hx-post="/collection/save-album" hx-swap="none" hx-disabled-elt="find button" class="inline">

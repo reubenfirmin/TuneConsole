@@ -8,6 +8,8 @@ from yt_playlist.rec import home_audit
 from yt_playlist.rec.surfaces import ForYouItem
 from yt_playlist.rec import home_cards as home
 
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
+
 
 @pytest.fixture
 def audit_path(tmp_path):
@@ -47,7 +49,7 @@ def test_audit_snapshots_actual_genres_and_decades_with_unknown_coverage(store, 
     assert card["genres"] == {"jazz": 1, "britpop": 1}
     assert card["decades"] == {"1990": 1, "2000": 1}
     assert card["unknown_genre_count"] == card["unknown_decade_count"] == 1
-    assert card["track_keys"] == ["owned|artist", "new|a", "unknown|b"]
+    assert 'track_keys' not in card and 'recipe' not in card
 
 
 def test_routes_audit_mode_offers_previews_and_refreshes(store, audit_path):
@@ -68,12 +70,11 @@ def test_routes_audit_mode_offers_previews_and_refreshes(store, audit_path):
         for lane in ("wheelhouse", "explore"):
             card = cards[lane]
             assert card["mode_id"] in {1, 2}
-            assert card["recipe"]["model"] == "mode"
-            assert card["recipe"]["mode_id"] == card["mode_id"]
+            assert 'recipe' not in card and 'track_keys' not in card
             assert card["epoch"] == row["menu_epoch"]
         # Fresh comes from the shared pool and keeps its own epoch across menu refreshes.
         assert cards["fresh"]["mode_id"] is None
-        assert cards["fresh"]["recipe"]["model"] == "fresh"
+        assert 'recipe' not in cards['fresh']
         assert cards["fresh"]["epoch"] == 0
         assert all(c["genres"] for c in cards.values())
 

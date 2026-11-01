@@ -100,10 +100,12 @@ def _calculate_arm(reader, rows, setup, now, progress):
     if not bundles.get('_radio', {}).get('members'):
         from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT
         radio_bundles['all'] = {lane: pool[:CLUSTER_POOL_LIMIT] for lane, pool in bundles.get('all', {}).items()}
+    policy = policies.generation_policy()
     return {'_policies': list(policies.rows.values()), '_policy_bases': list(policies.bases.values()),
-            'mixes': {'menus': menus, 'choice_context': context, 'tuning': home_prepared.tuning_key(reader, now)},
-            'albums': {'built_at': now, 'items': albums, 'context': context},
+            'mixes': {'policy_version': policy, 'menus': menus, 'choice_context': context, 'tuning': home_prepared.tuning_key(reader, now)},
+            'albums': {'policy_version': policy, 'built_at': now, 'items': albums, 'context': context},
             'radio': {'bundles': radio_bundles, 'context': context,
+                      'policy_version': policy,
                       'modes': [{**mode, 'centroid': mode['centroid'].tolist()} for mode in reader.modes.list_modes()],
                       'encoding_model': get_setting('rec_content_model')}}
 
@@ -163,11 +165,22 @@ def prepare(store, current, now, checkpoint=None):
                 current = {**current, 'phase': 'observing', 'prepared_at': now, 'last_prepare_attempt': now,
                            'runtime_seconds': time.monotonic() - started}
                 from yt_playlist.rec import comparison_storage
+                from yt_playlist.core import model_projections
                 encoded = {}
                 for arm, formats in pairs.items():
                     for format, data in formats.items():
                         progress(f'{arm}: {format} storage')
                         surface = product_comparison.pair_surface(current['run_id'], arm, format)
+                        if store._model_projections:
+                            prepared = model_projections.prepare(reader.conn, surface,
+                                {'run_id': current['run_id'], 'data': data}, now,
+                                pending_policies=policy_rows, input_revision=reader.prepared_content.serial())
+                            encoded[surface] = prepared
+                            display_bytes = sum(len(part) for part in prepared.parts)
+                            projection_sizes[surface] = {'codec': 'owned-ranked-projection-1',
+                                'expanded_bytes': len(prepared.raw.encode()), 'packed_bytes': display_bytes,
+                                'stored_bytes': display_bytes}
+                            continue
                         value = comparison_storage.encode(current['run_id'], data)
                         envelope = json.loads(value)
                         encoded[surface] = value
@@ -185,14 +198,34 @@ def prepare(store, current, now, checkpoint=None):
                            policy=current['policy'], decision_at=current['decision_at'],
                            runtime_seconds=current['runtime_seconds'], preparation_timings=timings,
                            preparation_bytes={'total': stored_bytes, 'projections': projection_sizes})
+                builds = {}
+                if store._model_projections:
+                    snapshot.release_reader()
+                    for surface, prepared in encoded.items():
+                        if prepared.plan is not None:
+                            build = store.recommendations.claim(prepared.plan, policies=policy_rows, bases=policy_bases)
+                            store.recommendations.stage(prepared.plan, build)
+                            builds[surface] = build
                 def publish():
                     store.rec_ledger.publish_prepared_policies(policy_rows, policy_bases)
                     for surface, value in encoded.items():
-                        store.rec_proposals.publish_prepared_home(value, now, surface=surface)
+                        if store._model_projections:
+                            build = builds.get(surface)
+                            if build is not None:
+                                store.recommendations.publish(build, now)
+                            model_projections.publish(store.conn, value, store=store,
+                                generation=build.generation_id if build is not None else None)
+                        else:
+                            store.rec_proposals.publish_prepared_home(value, now, surface=surface)
                     store.rec_proposals.publish_prepared_home(json.dumps(current), now,
                                                              surface=product_comparison.SURFACE)
                     store.model_selection.publish_selection(current['run_id'], json.dumps(run), None, current['previous'])
-                if not snapshot.publish(publish, allow_stale_tables=mode_surfaces.RANKING_CHURN_TABLES):
+                allowed = mode_surfaces.RANKING_CHURN_TABLES
+                if builds:
+                    # Staging adds unpublished generation rows. Published input
+                    # content is immutable, and its serving heads remain guarded.
+                    allowed = allowed | {'recommendation_generations'}
+                if not snapshot.publish(publish, allow_stale_tables=allowed):
                     raise ValueError('Comparison inputs changed before publication')
                 return True
     except WorkClosing:
@@ -231,8 +264,8 @@ def promote(store, current, run, now):
         if (product_comparison.constraints(reader) != current['constraints']
                 or model_setup.current_setup(reader) != current['previous']):
             raise ValueError('Model or standing preferences changed before promotion')
-        # Invalidate derived projections in the same transaction as the new
-        # model. Existing worker preparation republishes coherent menus.
+        # Refresh ranking inputs while completed, eligibility-filtered menus
+        # remain available until the worker publishes their replacement.
         def publish():
             store.model_selection.publish_selection(current['run_id'], json.dumps(run), rows, current['challenger'])
             store.rec_proposals.publish_prepared_home(json.dumps({key: value for key, value in current.items() if key != 'report'}),
@@ -240,7 +273,9 @@ def promote(store, current, run, now):
             store.rec_proposals.publish_prepared_home(json.dumps(current['report']), now, surface='model_live_report')
             store.rec_proposals.publish_prepared_home(json.dumps(monitor), now, surface=product_comparison.MONITOR)
             store.conn.execute("DELETE FROM rec_proposals WHERE surface IN "
-                "('home_prepared','home_tuned','home_choice','album_prepared','mode_bundles','fresh_pool')")
+                "('home_choice','mode_bundles','fresh_pool')")
+            from yt_playlist.rec.invalidation import clear_model_display
+            clear_model_display(store.conn)
         if not snapshot.publish(publish):
             raise ValueError('Inputs changed before promotion; current model kept')
 

@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 
 from tests.radio_session_support import poc, play
+from tests.recommendation_support import publish_bundles
 from yt_playlist.rec import embedding_vectors as embed, radio_tuning
 from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, GENRE_POOL_LIMIT, RadioCandidates
 from yt_playlist.rec.radio_directions import RadioDirections
@@ -21,18 +22,20 @@ def genre_pools(store):
         angle = index * .01 if index < 6 else (index - 5) * 1.2
         vector = np.array([np.cos(angle), np.sin(angle)], dtype=np.float32)
         modes.append(dict(mode_id=index + 1, label=label, families=[[label, 12]],
-                          centroid=vector, size=12, rep_keys=[]))
+                          centroid=vector, size=12, rep_keys=[], space=embed.content_space_id(store)))
         rows = []
         for i in range(12):
             video = f"genre-{mid}-{i}"
             tid = store.tracks.upsert_track(video, video, f"Artist {video}", "", 200)
+            with store.conn:
+                store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)",(tid,))
             store.tracks.set_track_enrichment(tid, label, "2001")
             key = store.tracks.catalog_subject(tid)["identity_key"]
             rows.append(dict(key=key, video_id=video, title=video, artist=f"Artist {video}", genre=label))
         pools[mid] = rows
         bundles[mid] = {"wheelhouse": rows}
     store.modes.replace_modes(modes, retired_ids=[], now=1)
-    store.rec_proposals.put_proposals("mode_bundles", bundles)
+    publish_bundles(store,bundles,now=1)
     return pools
 
 

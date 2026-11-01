@@ -20,7 +20,7 @@ def seed_songs(store, count=40):
 def client_for(store, busy="idle"):
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     assert home_prepared.prepare(store, 3) is not None
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 3)
     app.state.ctx.rec_worker._model_active = busy == "rebuild"

@@ -32,7 +32,7 @@ def active(poc, prepared, monkeypatch):
         return keys, np.array([vector] * len(keys), dtype=np.float32), {k: i for i, k in enumerate(keys)}
 
     monkeypatch.setattr(embed, "load_content_vectors", vectors)
-    iid = store.identities.get_master_identity().id
+    iid = store.accounts.get_master_account().id
     for i, track in enumerate(preferred):
         store.history.record_play_event(iid, track["key"], track["video_id"], clock[0] - i * 60)
     assert controller.start(prepared[0]["video_id"])["ok"]

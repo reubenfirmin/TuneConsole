@@ -16,7 +16,7 @@ def _post(store, now=1000.0, **data):
 
 
 def test_wrong_vibe_steers_genre_through_the_ledger_not_a_direct_nudge(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     tid = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(tid, "Techno")
     fam = genre_map.family("Techno")
@@ -27,7 +27,7 @@ def test_wrong_vibe_steers_genre_through_the_ledger_not_a_direct_nudge(store):
 
 
 def test_wrong_era_steers_the_decade(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     tid = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_year(tid, "1995")
     _post(store, item="song|band", surface="suggest", scope="7", kind="dismiss", reason="era")
@@ -35,7 +35,7 @@ def test_wrong_era_steers_the_decade(store):
 
 
 def test_not_this_artist_steers_artist_through_the_ledger(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("v1", "Song", "Band", None, None)
     _post(store, item="song|band", surface="suggest", scope="7", kind="dismiss",
           reason="artist", axis="artist:Band")                     # the template sends an explicit axis
@@ -44,7 +44,7 @@ def test_not_this_artist_steers_artist_through_the_ledger(store):
 
 
 def test_already_know_it_suppresses_without_any_taste_steer(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     tid = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(tid, "Techno")
     fam = genre_map.family("Techno")
@@ -54,7 +54,7 @@ def test_already_know_it_suppresses_without_any_taste_steer(store):
 
 
 def test_too_mainstream_steers_pop_only_when_track_is_mainstream(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     thresh = int(rec_params.get_param(store, "pop_mainstream_min"))
     hot = store.tracks.upsert_track("v1", "Hot", "A", None, None)
     store.tracks.set_track_audio(hot, popularity=thresh + 1000)
@@ -68,7 +68,7 @@ def test_too_mainstream_steers_pop_only_when_track_is_mainstream(store):
 
 
 def test_why_chip_axis_routes_through_graduation_not_direct_nudge(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     _post(store, item="x|y", surface="for_you", kind="more", axis="genre:techno")
     assert (store.rec_signals.get_theme("genre:techno") or 0) > 0
     assert store.rec_model.get_weights().get("genre:techno", 1.0) == 1.0     # the §4b leak is closed
@@ -87,7 +87,7 @@ def test_pop_band_scorer_downweights_mainstream_tracks(store):
 
 
 def test_vibe_on_untagged_track_is_a_graceful_noop(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("v1", "Song", "Band", None, None)           # no genre
     r = _post(store, item="song|band", surface="suggest", scope="7", kind="dismiss", reason="vibe")
     assert r.status_code == 200                                    # no axis derived -> no steer, no error

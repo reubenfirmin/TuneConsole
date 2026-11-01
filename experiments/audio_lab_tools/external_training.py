@@ -18,6 +18,31 @@ ALPHAS = (0.1, 1., 10., 100., 1000.)
 SEED = 507
 
 
+def validation_groups(rows):
+    """Bind known collaborators, repeated recordings and encoded duplicates."""
+    from .external_secondary import artist_keys
+    parents, known = {}, {}
+
+    def root(group):
+        parents.setdefault(group, group)
+        if parents[group] != group:
+            parents[group] = root(parents[group])
+        return parents[group]
+
+    for row in rows:
+        group = row['group']
+        keys = [('artist', name) for name in artist_keys(row.get('artist', ''))]
+        keys += [('recording', row['id'])]
+        if row.get('audio_sha256'):
+            keys.append(('audio', row['audio_sha256']))
+        for key in keys:
+            if key in known:
+                left, right = root(group), root(known[key])
+                parents[max(left, right)] = min(left, right)
+            known[key] = group
+    return [root(row['group']) for row in rows]
+
+
 def folds(groups, count=5, seed=SEED):
     """Keep related examples together; balance by group size, independent of y."""
     sizes = Counter(groups)
@@ -98,10 +123,20 @@ def metrics(y, prediction, names, selection=None):
                                'spearman': spearman[i]} for i, name in enumerate(names)}}
 
 
+def excluded_pretrained_heads(rows, results):
+    """A DEAM-trained head cannot supply independent DEAM validation features."""
+    if not any(row['id'].startswith('deam:') for row in rows):
+        return []
+    return sorted({name for result in results
+                   for name, trait in result['prediction']['moods']['traits'].items()
+                   if trait.get('model', '').casefold() == 'deam'})
+
+
 def feature_matrices(rows):
     results = [json.loads(Path(row['feature_file']).read_text()) for row in rows]
     attribute_names = sorted(results[0]['audio_attributes']['values'])
-    mood_names = sorted(results[0]['prediction']['moods']['traits'])
+    excluded = set(excluded_pretrained_heads(rows, results))
+    mood_names = sorted(set(results[0]['prediction']['moods']['traits']) - excluded)
     attributes = np.array([[result['audio_attributes']['values'].get(key, np.nan)
                             for key in attribute_names] for result in results], dtype=float)
     embedding = np.array([result['prediction']['embedding']['values'] for result in results])
@@ -151,7 +186,7 @@ def _evaluate(dataset):
         raise ValueError('Target order differs between rows')
     # Fractional predictions must remain floating-point even for one-hot labels.
     y = np.array([row['targets'] for row in rows], dtype=float)
-    groups = [row['group'] for row in rows]
+    groups = validation_groups(rows)
     outer = folds(groups)
     families, feature_names, moods, mood_names = feature_matrices(rows)
     if not all(np.isfinite(x).all() for name, x in families.items() if name == 'embedding'):
@@ -173,6 +208,7 @@ def _evaluate(dataset):
               'source_sha256': digest(source_path), 'trainer_sha256': digest(__file__),
               'target_names': names, 'selection_targets': [names[i] for i in selection],
               'validation': {'outer_group_folds': 5, 'inner_group_folds': 3, 'seed': SEED,
+                             'groups': 'Source groups connected by every supplied artist credit, recording identity and encoded audio hash.',
                              'alphas': ALPHAS, 'preprocessing': 'train-only median imputation and standardization'},
               'baseline': metrics(y, baseline, names, selection),
               'median_baseline': metrics(y, median_baseline, names, selection), 'families': {},
@@ -181,6 +217,18 @@ def _evaluate(dataset):
                   'Pretrained embedding/head upstream training overlap is not fully known.',
                   'Within-dataset validation is not evidence of transfer to the six product vibes.',
                   'No regular-user vibe labels, product database writes, or active model changes.']}
+    excluded = excluded_pretrained_heads(rows, [json.loads(Path(row['feature_file']).read_text())
+                                               for row in rows])
+    report['pretrained_head_policy'] = {'retained_traits': mood_names, 'excluded_traits': excluded,
+        'reason': 'Exclude DEAM-trained outputs whenever the evaluated cohort contains DEAM recordings.'}
+    if excluded:
+        report['limitations'].append('DEAM-trained valence/arousal outputs are excluded from every feature family and direct pretrained comparison; other upstream audio overlap remains unresolved.')
+    if dataset.startswith('deam'):
+        report['limitations'].append('Most DEAM artist identities are missing. Known artists and identical recordings share groups; remaining recordings cannot establish unseen-artist generalization.')
+    if dataset == 'merp-static':
+        report['limitations'].append('MERP targets average filtered dynamic listener judgments; exact temporal alignment remains unverified. Four DEAM anchor recordings are excluded.')
+    if dataset == 'emotify-plus-strict':
+        report['limitations'].append('Emotify+ reuses Emotify audio. Targets are listener selection frequencies, with missing selections not equivalent to explicit negative judgments. Tracks with conflicting release identity fields are excluded.')
     if dataset == 'soundtracks-all':
         report['limitations'].append('Set 1 pilot labels have fewer raters; unlinked Set 1 films lack identity metadata and cannot be fully film-grouped.')
     if dataset == 'emotify':
@@ -214,6 +262,7 @@ def _evaluate(dataset):
             'format': 'external-research-ridge-1', 'dataset': dataset, 'family': family,
             'target_names': names, 'feature_names': feature_names[family],
             'training_ids': [row['id'] for row in rows], 'source_sha256': digest(source_path),
+            'trainer_sha256': digest(__file__),
             'extractor_signatures': sorted({row['extractor_signature'] for row in rows}),
             **{key: value.tolist() if isinstance(value, np.ndarray) else value for key, value in model.items()}})
         print(json.dumps({'dataset': dataset, 'family': family, 'rows': len(rows),
@@ -227,14 +276,14 @@ def _evaluate(dataset):
             direct[target] = metrics(y[:, i:i+1], moods[:, mood_names.index(key):mood_names.index(key)+1], [target])
             direct[target]['proxy'] = target == 'energy'
     report['direct_pretrained'] = direct
-    save(OUT / f'{dataset}.splits.json', [dict(id=row['id'], group=row['group'], fold=int(fold))
-                                         for row, fold in zip(rows, outer)])
+    save(OUT / f'{dataset}.splits.json', [dict(id=row['id'], group=group, fold=int(fold))
+                                       for row, group, fold in zip(rows, groups, outer)])
     with (OUT / f'{dataset}.oof.csv').open('w', newline='') as stream:
         writer = csv.writer(stream)
         writer.writerow(['id', 'group', 'fold', 'target', 'observed', *predictions])
         for i, row in enumerate(rows):
             for j, target in enumerate(names):
-                writer.writerow([row['id'], row['group'], outer[i], target, y[i, j],
+                writer.writerow([row['id'], groups[i], outer[i], target, y[i, j],
                                  *[value[i, j] for value in predictions.values()]])
     # Main table keeps native labels separate rather than merging unlike tasks.
     save(OUT / f'{dataset}.report.json', report)

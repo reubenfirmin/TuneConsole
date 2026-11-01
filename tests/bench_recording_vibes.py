@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from yt_playlist.core import sample_files
+from yt_playlist.core import sample_files, audio_annotation_files
 from yt_playlist.core.store import Store
 
 
@@ -22,8 +22,12 @@ def test_genuine_recording_vibe_upgrade(tmp_path, request, record_property):
         source.execute('BEGIN')
         assert source.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 60
         samples = list(source.execute('SELECT id,payload,created_at FROM audio_vibe_samples ORDER BY id'))
-        labels = {table: list(source.execute(f'SELECT * FROM {table} ORDER BY run_id')) for table in (
-            'audio_vibe_feedback', 'audio_vibe_labels', 'audio_session_labels', 'audio_vibe_runs')}
+        labels = {}
+        for table in ('audio_vibe_feedback', 'audio_vibe_labels', 'audio_session_labels'):
+            cursor = source.execute(f'SELECT * FROM {table} ORDER BY run_id')
+            fields = [column[0] for column in cursor.description]
+            labels[table] = [dict(zip(fields, row)) for row in cursor]
+        runs = list(source.execute('SELECT * FROM audio_vibe_runs ORDER BY run_id'))
         measured = [(key, vibe, fit['score'], fit['support'], version)
                     for key, raw, version in source.execute('SELECT identity_key,evidence,version FROM rec_vibe_tracks WHERE evidence IS NOT NULL')
                     for vibe, fit in json.loads(raw)['fits'].items()]
@@ -44,8 +48,12 @@ def test_genuine_recording_vibe_upgrade(tmp_path, request, record_property):
                 row = store.conn.execute('SELECT filename,captured_at FROM sample_attributes WHERE id=?', (sid,)).fetchone()
                 assert sample_files.read(row[0]) == json.loads(raw)
                 assert row[1] == captured
+            documents = [audio_annotation_files.read(row[0]) for row in store.conn.execute(
+                'SELECT model_output_filename FROM audio_annotations')]
             for table, rows in labels.items():
-                assert rows == list(map(tuple, store.conn.execute(f'SELECT * FROM {table} ORDER BY run_id')))
+                retained = [document['legacy'] for document in documents if document['legacy_source'] == table]
+                assert sorted(rows, key=repr) == sorted(retained, key=repr)
+            assert runs == list(map(tuple, store.conn.execute('SELECT * FROM audio_vibe_runs ORDER BY run_id')))
             current = {(key, vibe): (score, support, origin) for key, vibe, score, support, origin in store.conn.execute(
                 'SELECT r.identity_key,v.vibe,v.score,v.support,v.source FROM recording_vibes v JOIN recordings r ON r.id=v.recording_id')}
             assert current == served

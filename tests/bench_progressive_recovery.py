@@ -235,8 +235,8 @@ def _measure(path, scenario):
     try:
         if scenario == 'cold-and-growing':
             with store.conn:
-                for table in ('rec_content_vectors', 'rec_discovered_content_vectors',
-                              'rec_prepared_content', 'rec_content_pending'):
+                store.conn.execute("DELETE FROM recording_embeddings WHERE space IN ('content_library','content_discovery')")
+                for table in ('prepared_recording_inputs', 'unresolved_preparation_inputs', 'rec_content_pending'):
                     store.conn.execute(f'DELETE FROM {table}')
                 store.conn.executemany('DELETE FROM settings WHERE key=?', [(key,) for key in (
                     'rec_content_model', 'rec_content_generation', 'rec_content_genre_revision',

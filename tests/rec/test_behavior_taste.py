@@ -25,7 +25,7 @@ def test_populated_contexts_do_not_read_behavior_evidence(monkeypatch, store, so
     V = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
     monkeypatch.setattr(scoring.vectors, "load_vectors", lambda s: (["a|x", "b|y"], V, {"a|x": 0, "b|y": 1}))
     if source == 'playlist':
-        iid = store.identities.upsert_identity('main', 'cred', None, True)
+        iid = store.accounts.upsert_account('main', 'cred', None, True)
         tid = store.tracks.upsert_track('v', 'A', 'X', None, 100)
         pid = store.playlists.upsert_playlist(iid, 'PL', 'Curated', 1, 'hash', 1)
         store.playlists.set_playlist_tracks(pid, [tid])

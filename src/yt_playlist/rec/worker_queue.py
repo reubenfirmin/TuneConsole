@@ -20,6 +20,7 @@ class Job(StrEnum):
     STORIES = "stories"
     MEASUREMENT = "measurement"
     EVIDENCE_STORAGE = "evidence_storage"
+    RETENTION = "retention"
     CHOICES = "choices"
     GROUPS = "groups"
     MODEL_HEALTH = "model_health"
@@ -78,7 +79,7 @@ class PendingJobs:
     @property
     def visible(self):
         """Measurements, summaries and shadow groups do not show a model refresh."""
-        return any(job not in {Job.MEASUREMENT, Job.EVIDENCE_STORAGE, Job.CHOICES, Job.ANALYTICS, Job.GROUPS, Job.TV, Job.MODEL_HEALTH} for job in self.pending)
+        return any(job not in {Job.MEASUREMENT, Job.EVIDENCE_STORAGE, Job.RETENTION, Job.CHOICES, Job.ANALYTICS, Job.GROUPS, Job.TV, Job.MODEL_HEALTH} for job in self.pending)
 
     @property
     def measurements(self):

@@ -18,7 +18,7 @@ def _playlist(s, iid, title, track_ids):
 
 def test_artist_baskets_reduce_to_distinct_artists():
     s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
+    iid = s.accounts.upsert_account("m", "c", None, True)
     a = s.tracks.upsert_track("v1", "S1", "Alpha", None, None)
     b = s.tracks.upsert_track("v2", "S2", "Beta", None, None)
     _playlist(s, iid, "P", [a, b])
@@ -33,7 +33,7 @@ def test_collab_neighbors_relate_co_curated_artists():
     A0's nearest collaborative neighbours are its own cluster-mates."""
     from yt_playlist.util.matching import normalize
     s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
+    iid = s.accounts.upsert_account("m", "c", None, True)
 
     def mk(name):
         return s.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)
@@ -62,7 +62,7 @@ def test_artist_recall_beats_baseline():
     centroid ranks it near the top, well above the random baseline."""
     from yt_playlist.rec import eval_recs
     s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
+    iid = s.accounts.upsert_account("m", "c", None, True)
 
     def mk(name):
         return s.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)
@@ -86,7 +86,7 @@ def test_content_places_out_of_corpus_artist():
     import numpy as np
     from yt_playlist.util import genre_map
     s = _store()
-    s.identities.upsert_identity("m", "c", None, True)
+    s.accounts.upsert_account("m", "c", None, True)
     t = s.tracks.upsert_track("v1", "S1", "Owned", None, None)
     s.tracks.set_track_genre(t, "Techno")
     profiles = artist_model.artist_content_profiles(s)
@@ -100,7 +100,7 @@ def test_content_places_out_of_corpus_artist():
 def test_blend_falls_back_to_collab_when_no_content():
     """With no content vectors built, artist_neighbors still works on §A alone (blend degrades)."""
     s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
+    iid = s.accounts.upsert_account("m", "c", None, True)
 
     def mk(name):
         return s.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)
@@ -120,7 +120,7 @@ def test_edges_connect_out_of_corpus_artist():
     """#28 §C: a cached Last.fm edge to an artist with no §A/§B vector still surfaces it as related."""
     from yt_playlist.util.matching import normalize
     s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
+    iid = s.accounts.upsert_account("m", "c", None, True)
 
     def mk(name):
         return s.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)
@@ -138,7 +138,7 @@ def test_edges_connect_out_of_corpus_artist():
 def test_build_persists_and_loads():
     """#28 Both collaborative and content artist fixtures use the persisted format."""
     s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
+    iid = s.accounts.upsert_account("m", "c", None, True)
     cl = []
     for i in range(12):
         t = s.tracks.upsert_track(f"v{i}", f"S{i}", f"A{i}", None, None)
@@ -158,7 +158,7 @@ def test_related_artists_from_set():
     keeps owned related artists, as 'complete this playlist' needs)."""
     from yt_playlist.util.matching import normalize
     s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
+    iid = s.accounts.upsert_account("m", "c", None, True)
 
     def mk(name):
         return s.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)
@@ -179,7 +179,7 @@ def test_track_candidates_include_out_of_corpus():
     """artist_track_candidates pulls an out-of-corpus discovered track by an edge-related artist."""
     from yt_playlist.util.matching import normalize
     s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
+    iid = s.accounts.upsert_account("m", "c", None, True)
 
     def mk(name):
         return s.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)
@@ -216,7 +216,7 @@ def test_complete_playlist_pulls_out_of_corpus():
     from yt_playlist.rec import surfaces
     from yt_playlist.util.matching import normalize
     s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
+    iid = s.accounts.upsert_account("m", "c", None, True)
 
     def mk(name):
         return s.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)

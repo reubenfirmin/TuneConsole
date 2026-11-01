@@ -8,6 +8,32 @@
 .connection-dot { font-size: 1.5rem; line-height: 1; }
 .connection-copy { margin: .15rem 0 0; }
 
+.setup-home-formats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem; max-width: 56rem; margin: 1rem 0 0; padding: 0; border: 0; min-width: 0; }
+.setup-home-formats legend { margin-bottom: .8rem; color: var(--dim); font-size: var(--type-ui); }
+.setup-home-choice { position: relative; min-width: 0; margin: 0; cursor: pointer; }
+.setup-home-choice input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.setup-home-tile { display: flex; flex-direction: column; height: 100%; overflow: hidden;
+  border: 2px solid var(--border); border-radius: var(--radius); background: var(--surface-subtle);
+  transition: border-color .16s ease, background .16s ease; }
+.setup-home-tile img, .setup-home-last { display: block; width: 100%; aspect-ratio: 3 / 2;
+  height: auto; object-fit: cover; }
+.setup-home-last { display: grid; place-items: center; color: var(--accent-2);
+  background: var(--accent-soft); }
+.setup-home-last svg { width: 70%; max-height: 100%; }
+.setup-home-choice-label { display: flex; align-items: center; justify-content: space-between;
+  gap: .5rem; flex: 1; padding: .85rem; color: var(--text); font-size: var(--type-ui); font-weight: 650; }
+.setup-home-choice-label::after { content: ''; flex: none; width: .8rem; height: .8rem;
+  border: 2px solid var(--border-2); border-radius: 50%; }
+.setup-home-choice:hover .setup-home-tile { border-color: var(--accent-2); }
+.setup-home-choice input:checked + .setup-home-tile { border-color: var(--accent-2); background: var(--accent-soft); }
+.setup-home-choice input:checked + .setup-home-tile .setup-home-choice-label::after {
+  border-color: var(--accent-2); background: var(--accent-2); box-shadow: inset 0 0 0 3px var(--surface); }
+.setup-home-choice input:focus-visible + .setup-home-tile { outline: 2px solid var(--focus-ring); outline-offset: 4px; }
+@media (max-width: 700px) {
+  .setup-home-formats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
+}
+
 .section-flush { margin-top: 0; }
 .advanced-spaced { margin-bottom: .9375rem; }
 .btn-row-spaced { margin-top: .8125rem; }

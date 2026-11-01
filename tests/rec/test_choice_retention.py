@@ -15,8 +15,8 @@ DAY = 86400
 def captured(store, oid='menu', at=100):
     groups = [{**mode, 'centroid': mode['centroid'].tolist()}
               for mode in store.modes.list_modes(active_only=True)]
-    oid = choices.issue(store, 'mixes', [{'id': 'one', 'mode_id': 1, 'score': 1},
-                                        {'id': 'two', 'mode_id': 2, 'score': 0}], at,
+    oid = choices.issue(store, 'mixes', [{'id': 'one', 'genres':['Jazz'], 'score': 1},
+                                        {'id': 'two', 'genres':['House'], 'score': 0}], at,
                         context={'at': at, 'groups': groups, 'layers': {'saved': oid * 40_000}},
                         opportunity_id=oid)
     choices.respond(store, oid, 'visible', at + 1, visible=['one', 'two'])
@@ -44,7 +44,7 @@ def test_compaction_preserves_learning_predictions_withdrawals_and_restart(tmp_p
     assert checkpoint(ledger, original['context'])['watermark'] == before['watermark']
     assert ledger.get('artifact', original['context']) is None
     assert ledger.get('opportunity', original['id']) == original
-    assert learning_context(store, original['context'])['groups']
+    assert learning_context(store, original['context']) == {'at':100,'precision':'theme-raw-genres-v1'}
     assert choices.compile_report(store, 103)['bandit'] == before['bandit']
     assert choices.replay(store, 103) == evaluated
     store.conn.close()
@@ -62,7 +62,7 @@ def test_compaction_preserves_learning_predictions_withdrawals_and_restart(tmp_p
             def observe(self, event):
                 pass
         replay = choices.replay(store, 103, Candidate())['formats']['mixes']
-        assert replay['released_context'] == 1 and replay['scored'] == replay['future_context'] == 0
+        assert replay['unsupported_precision'] == 1 and replay['scored'] == replay['future_context'] == 0
     finally:
         store.conn.close()
 
@@ -95,13 +95,14 @@ def test_optional_context_bytes_are_bounded_during_active_trial_and_held_context
         assert result['optional_context_bytes'] <= ledger.byte_budget * .003
         assert len(ledger.records('checkpoint')) == index + 1
     assert len(ledger.records('opportunity')) == 15
-    assert len(ledger.records('artifact')) < 6
+    # Compact mix timing is cheap enough to retain inside the optional budget.
+    assert sum(len(json.dumps(a)) for a in ledger.records('artifact')) < ledger.byte_budget * .003
     held = captured(store, oid='held', at=16 * DAY)
     store.rec_proposals.put_proposals('home_prepared', {'choice_context': {'artifact': held['context']}}, 16 * DAY)
     age_artifacts(store)
     choices.maintain_storage(store, 100 * DAY)
     assert ledger.get('artifact', held['context'])
-    assert ledger.get('artifact', snapshots[0]) is None
+    assert checkpoint(ledger, snapshots[0])
 
 
 def test_paired_storage_is_lossless_and_enforces_expanded_limit(monkeypatch):

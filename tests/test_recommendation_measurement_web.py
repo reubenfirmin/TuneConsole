@@ -12,7 +12,7 @@ from yt_playlist.web.app import create_app
 
 @pytest.fixture
 def measured(store):
-    iid = store.identities.upsert_identity("Main", "cred", None, True)
+    iid = store.accounts.upsert_account("Main", "cred", None, True)
     ids, vectors = [], []
     for vid, title, xy in [("seed", "Seed", [1., 0.]), ("near", "Near", [.9, .1]),
                            ("far", "Far", [0., 1.])]:

@@ -8,19 +8,19 @@ def _tag(store, iid, n, genre, prefix):
 
 
 def test_narrow_library_has_low_breadth(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     _tag(store, iid, 10, "Techno", "t")          # one family only
     assert taste_analysis.taste_breadth(store)["breadth"] == 0.0
 
 
 def test_eclectic_library_has_high_breadth(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     for g, pfx in [("Techno", "t"), ("Hard Rock", "r"), ("Jazz", "j"), ("Hip Hop", "h")]:
         _tag(store, iid, 5, g, pfx)              # four very different families, even mix
     assert taste_analysis.taste_breadth(store)["breadth"] > 0.9
 
 
 def test_breadth_zero_when_untagged(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("x", "X", "A", None, None)   # no genre
     assert taste_analysis.taste_breadth(store)["breadth"] == 0.0

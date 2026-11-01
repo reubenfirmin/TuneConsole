@@ -1,6 +1,9 @@
 """Home Radio and saved-playlist session endpoints."""
 from fastapi import APIRouter, Request
 
+from yt_playlist.rec import onboarding
+from yt_playlist.web.routes.home_access import guard, state as growth_state
+
 
 def build(ctx):
     router = APIRouter()
@@ -38,8 +41,22 @@ def build(ctx):
             return {"ok": False, "reason": "Choose a playlist to start radio."}
         try:
             intent = ctx.bridge.begin_playback_intent()
-            return await radio.work.to_thread(radio.start, data.get("video_id"), data.get("local_date"),
-                                              data.get("menu_id"), playlist_id=playlist_id, intent=intent)
+
+            def launch():
+                # Bootstrap and access checks read the library too. Keep them in
+                # admitted work so a slow read cannot stop HTTP or bridge replies.
+                # The small first set still requires its current eligible offer.
+                bootstrap = radio.bootstrap()
+                starter = (not onboarding.setup_completed(ctx.store)
+                           and ctx.store.settings.get_setting('onboard_listening_format') == 'radio'
+                           and playlist_id is None and data.get('menu_id') == bootstrap.get('seedMenu')
+                           and any(track.get('video_id') == data.get('video_id') for track in bootstrap['seeds']))
+                if not starter and not bootstrap['state'].get('active'):
+                    guard(ctx, 'radio', radio=bootstrap)(request)
+                return radio.start(data.get("video_id"), data.get("local_date"), data.get("menu_id"),
+                                   playlist_id=playlist_id, intent=intent)
+
+            return await radio.work.to_thread(launch)
         except ValueError as exc:
             return {"ok": False, "reason": str(exc)}
 
@@ -66,7 +83,14 @@ def build(ctx):
     async def tune(request: Request):
         try:
             values = await request.json()
-            return await radio.work.to_thread(radio.tune, values)
+
+            def apply_tuning():
+                if isinstance(values, dict) and values.get('energy', .5) != .5:
+                    if not growth_state(ctx, request)['vibes_ready']:
+                        guard(ctx, 'vibes')(request)
+                return radio.tune(values)
+
+            return await radio.work.to_thread(apply_tuning)
         except (ValueError, TypeError):
             return {"ok": False}
 

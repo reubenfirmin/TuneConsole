@@ -17,9 +17,11 @@ def test_v46_upgrade_preserves_the_mirror_and_observes_older_connection_writes(t
             store.conn.execute("INSERT INTO playlists(id,identity_id,ytm_playlist_id,title,track_count,"
                                "content_hash,first_seen,last_seen,last_changed,scope_ref) "
                                "VALUES (7,1,'PL','Keep me',0,'hash',10,20,10,'PL')")
+            store.conn.execute("INSERT INTO recordings(identity_key) VALUES ('song|artist')")
             store.conn.execute("INSERT INTO rec_vectors VALUES ('song|artist',x'01020304')")
             store.conn.execute("INSERT INTO settings VALUES ('personal-setting','keep')")
         before = tuple(store.conn.execute('SELECT * FROM playlists').fetchone())
+        migrate(store.conn, registry=MIGRATIONS)
         store.init_schema()
         assert tuple(store.conn.execute('SELECT * FROM playlists').fetchone()) == before
         assert store.rec_model.get_rec_vectors() == [('song|artist', b'\x01\x02\x03\x04')]

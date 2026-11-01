@@ -14,7 +14,7 @@ from yt_playlist.util.action_kinds import APPLY_MERGE
 def merged(store, tmp_path, monkeypatch):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     client = RecoveryClient({"SOURCE": ["b"], "KEEP": ["a", "b"]})
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     source = store.playlists.upsert_playlist(iid, "SOURCE", "Source", 1, "", 1)
     store.playlists.upsert_playlist(iid, "KEEP", "Keeper", 2, "", 1)
     backup = playlist_backups.backup_playlist(store, source, 2, client)

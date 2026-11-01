@@ -414,21 +414,36 @@ def test_registry_requires_acceptance_and_confirmed_completion(monkeypatch, stag
     assert len(registry.requests) == stage + 1
 
 
-@pytest.mark.parametrize("location", [
-    "http://ghcr.io/v2/owner/repo/blobs/uploads/disposable",
-    "https://elsewhere.invalid/v2/owner/repo/blobs/uploads/disposable",
-    "/v2/owner/repo/manifests/latest", "/v2/other/repo/blobs/uploads/disposable",
-    "/v2/owner/repo/blobs/uploads/", "/v2/owner/repo/blobs/uploads/disposable#fragment"])
+@pytest.mark.parametrize("location,reason", [
+    ("http://ghcr.io/v2/owner/repo/blobs/uploads/do-not-print-path", "unexpected-scheme"),
+    ("https://do-not-print-host.invalid/v2/owner/repo/blobs/uploads/disposable", "unexpected-authority"),
+    ("/v2/owner/repo/manifests/do-not-print-path", "unexpected-upload-path"),
+    ("/v2/other/do-not-print-repo/blobs/uploads/disposable", "unexpected-repository-path"),
+    ("/v2/owner/repo/blobs/uploads/", "missing-session-path"),
+    ("/v2/owner/repo/blobs/uploads/?opaque=do-not-print-query", "missing-session-path"),
+    ("/v2/owner/repo/blobs/uploads/disposable#do-not-print-fragment", "unexpected-fragment"),
+    ("https://[do-not-print-host/path", "malformed-location"),
+    ("https://do-not-print-host\uff0f.invalid/path", "malformed-location"),
+    (None, "missing-location"), ("", "missing-location")])
 @pytest.mark.parametrize("stage", [1, 2])
-def test_registry_only_targets_the_returned_https_upload(monkeypatch, location, stage):
+def test_registry_only_targets_the_returned_https_upload(monkeypatch, capsys, location, reason, stage):
+    import traceback
+
     registry = Registry(monkeypatch)
     if stage == 1:
         registry.location = location
     else:
         registry.next_location = location
-    with pytest.raises(release_services.RegistryPreflightError, match="location validation"):
+    with pytest.raises(release_services.RegistryPreflightError, match="location validation") as failure:
         release_services.registry_permissions("ghcr.io/owner/repo")
     assert len(registry.requests) == stage + 1
+    output = capsys.readouterr().out + "".join(traceback.format_exception(failure.value))
+    expected_stage = "upload initiation" if stage == 1 else "blob transfer"
+    assert output.splitlines()[stage] == f"GHCR {expected_stage}: HTTP 202"
+    assert f"upload location validation: {reason}" in output
+    if reason not in {"missing-location", "malformed-location"}:
+        assert f"query={'present' if '?' in location else 'absent'}" in output
+    assert "do-not-print" not in output
 
 
 def test_preflight_reports_all_service_failures_and_checks_stable_baseline(monkeypatch, capsys):

@@ -99,6 +99,21 @@ def select_candidate(examples, candidates, folds=5, *, unlabeled_examples=()):
     return max(results, key=lambda name: selection_key(results[name])), results
 
 
+def outer_fold(examples, held_out, *, candidates, inner_folds, unlabeled_examples=()):
+    """Select and fit one outer fold without admitting its held-out song."""
+    training = [row for row in examples if row['video_id'] != held_out['video_id']]
+    pool = {'unlabeled_examples': unlabeled_examples} if unlabeled_examples else {}
+    with threadpool_limits(limits=1):
+        best, inner = select_candidate(training, candidates, inner_folds, **pool)
+        predictions = {}
+        for name in candidates:
+            learned = fit_candidate(training, name, candidates, **pool)
+            predictions[name] = predict(learned, held_out, len(training))
+    return ({**predictions[best], 'selected_candidate': best},
+            {'held_out_video_id': held_out['video_id'], 'selected_candidate': best,
+             'inner_results': inner}, predictions)
+
+
 def train(examples, *, candidates=None, inner_folds=None, progress=None, unlabeled_examples=()):
     validate_examples(examples)
     trainer.validate_unlabeled(examples, unlabeled_examples)
@@ -122,18 +137,14 @@ def train(examples, *, candidates=None, inner_folds=None, progress=None, unlabel
     pool = {'unlabeled_examples': unlabeled_examples} if unlabeled_examples else {}
     with threadpool_limits(limits=1):
         for index, held_out in enumerate(sorted(examples, key=lambda row: row['video_id'])):
-            training = [row for row in examples if row['video_id'] != held_out['video_id']]
-            best, inner = select_candidate(training, candidates, inner_folds, **pool)
-            predictions = {}
-            for name in candidates:
-                learned = fit_candidate(training, name, candidates, **pool)
-                predictions[name] = predict(learned, held_out, len(training))
-                development[name].append(predictions[name])
-            outer.append({**predictions[best], 'selected_candidate': best})
-            selections.append({'held_out_video_id': held_out['video_id'], 'selected_candidate': best,
-                               'inner_results': inner})
+            prediction, selection, predictions = outer_fold(examples, held_out,
+                candidates=candidates, inner_folds=inner_folds, **pool)
+            for name, result in predictions.items():
+                development[name].append(result)
+            outer.append(prediction)
+            selections.append(selection)
             if progress:
-                progress(index + 1, len(examples), best)
+                progress(index + 1, len(examples), selection['selected_candidate'])
         best, selection = select_candidate(examples, candidates, inner_folds, **pool)
         learned = fit_candidate(examples, best, candidates, **pool)
         if learned is None:

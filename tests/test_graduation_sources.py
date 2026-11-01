@@ -13,6 +13,7 @@ def test_source_weights_seeded():
 
 
 from yt_playlist.core.store import Store
+from yt_playlist.core import radio_provenance
 from yt_playlist.rec import graduation, scoring, rec_params
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
@@ -33,7 +34,7 @@ def _store_with_play_history(genre="Techno", n=10, now=1000.0, w_play=0.5):
     would need ~18 days, too slow for a unit test). Returns (store, now, axis)."""
     s = Store(":memory:")
     s.init_schema()
-    iid = s.identities.upsert_identity("me", "cred", None, True)
+    iid = s.accounts.upsert_account("me", "cred", None, True)
     keys = []
     for i in range(n):
         tid = s.tracks.upsert_track(f"v{i}", f"song{i}", "band", None, None)
@@ -126,8 +127,9 @@ def test_radio_only_listening_day_graduates_nothing():
     # day - the slow-burn arm of the feedback loop.
     s = Store(":memory:")
     s.init_schema()
-    iid = s.identities.upsert_identity("me", "cred", None, True)
-    s.settings.set_setting("radio_playlist_ytm", "PLRADIO")
+    iid = s.accounts.upsert_account("me", "cred", None, True)
+    with s.conn:
+        radio_provenance.remember(s.conn,'PLRADIO',iid)
     now = 100 * 86400 + 1000.0
     keys = []
     for i in range(10):

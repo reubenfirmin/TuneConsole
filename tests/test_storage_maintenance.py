@@ -12,26 +12,48 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.core.test_policy_upgrade import _legacy, _state
+from tests.core.test_policy_upgrade import (
+    ExplicitStorageMaintenance, HistoricalPolicyMaintenance, _legacy, _open_legacy, _state,
+)
 from tests.conftest import FakeClient
-from yt_playlist.core import db_space, policy_upgrade
+from yt_playlist.core import account_auth_state, db_space, playback_feedback, policy_upgrade
 from yt_playlist.core.policy_recovery import _counts, _fingerprint, _missing_references, _verify
 from yt_playlist.core.store import Store
 from yt_playlist.core.storage_maintenance import (
-    DEFERRED_MESSAGE, LOW_SPACE_MESSAGE, MESSAGE, StorageCompacting, StorageMaintenance,
+    DEFERRED_MESSAGE, LOW_SPACE_MESSAGE, MESSAGE, StorageCompacting,
 )
 from yt_playlist.library import live_plays, player_events
 from yt_playlist.rec import transient
 from yt_playlist.web import app as web_app
-from yt_playlist.web.context import AUTH_EXPIRED_KEY
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 
 
+@pytest.fixture
+def current_vacuum_store(tmp_path, monkeypatch):
+    """Current UI owners with real compaction, independent of retired SQL policy.
+
+    The job selection is controlled; the SQLite worker, exclusive writer,
+    query-only serving connection, cancellation and resume remain real.
+    """
+    store = Store(tmp_path / 'current.db')
+    store.init_schema()
+    def compact_once(conn, *, progress, on_deferred):
+        progress('compacting')
+        policy_upgrade._compact(conn, store._db_path.parent)
+        return True
+    monkeypatch.setattr(policy_upgrade, 'run_once', compact_once)
+    monkeypatch.setattr(web_app, 'StorageMaintenance', ExplicitStorageMaintenance)
+    try:
+        yield store
+    finally:
+        store.conn.close()
+
+
 @pytest.mark.parametrize('synced', [False, True])
-def test_ui_and_extension_playback_during_actual_vacuum(tmp_path, monkeypatch, synced):
-    path = tmp_path / 'state.db'
-    store, _ = _legacy(path)
-    iid = store.identities.upsert_identity('Main', 'bridge', None, True)
+def test_ui_and_extension_playback_during_actual_vacuum(current_vacuum_store, monkeypatch, synced):
+    store = current_vacuum_store
+    path = store._db_path
+    iid = store.accounts.upsert_account('Main', 'bridge', None, True)
     pool = [{'videoId': f'radio-{i}', 'title': f'Radio song {i}',
              'artists': [{'name': f'Artist {i}'}], 'duration_seconds': 180,
              'setVideoId': f'set-radio-{i}'} for i in range(20)]
@@ -42,11 +64,13 @@ def test_ui_and_extension_playback_during_actual_vacuum(tmp_path, monkeypatch, s
     store.collection.add_saved_album({'browse': 'MPREalbum', 'title': 'Test album', 'artist': 'Artist'})
     if synced:
         store.settings.set_setting('last_sync_at', '1000')
-    store.settings.set_setting(AUTH_EXPIRED_KEY, '{"1":"Main"}')
+    store.settings.set_setting('onboard_listening_format', 'radio')
+    with store.conn:
+        account_auth_state.flag(store.conn, iid, 'Main')
     album = {'title': 'Test album', 'audioPlaylistId': 'PLalbum', 'artists': [{'name': 'Artist'}],
              'tracks': [{'videoId': 'album-song', 'title': 'Album song', 'artists': [{'name': 'Artist'}]}]}
     remote = FakeClient(albums={'MPREalbum': album}, catalog={t['videoId']: t for t in pool})
-    app = web_app.create_app(store, lambda: {iid: remote}, background_work=True)
+    app = web_app.create_app(store, lambda: {iid: remote}, background_work=False)
     ctx = app.state.ctx
     monkeypatch.setattr(ctx.radio, 'prepare', lambda: None)
     monkeypatch.setattr(ctx.radio, '_start_monitor', lambda s: None)
@@ -71,12 +95,29 @@ def test_ui_and_extension_playback_during_actual_vacuum(tmp_path, monkeypatch, s
                 while not release.wait(.01) and not ctx.storage_maintenance._stop.is_set():
                     pass
             return int(ctx.storage_maintenance._stop.is_set())
-        conn.set_progress_handler(progress, 1000)
-        original(conn, directory)
-        conn.set_progress_handler(None, 0)
+        # Current schemas take enough preparation work to invoke a progress
+        # handler before compaction reserves its writer. Hold only the actual
+        # VACUUM statement, after its real guard connection owns that writer.
+        conn.set_trace_callback(lambda sql: conn.set_progress_handler(progress, 1000)
+                                if sql.startswith('VACUUM INTO') else None)
+        try:
+            original(conn, directory)
+        finally:
+            conn.set_trace_callback(None)
+            conn.set_progress_handler(None, 0)
     monkeypatch.setattr(policy_upgrade, '_compact', hold_vacuum)
     try:
-        with TestClient(app, base_url='http://127.0.0.1') as client:
+        # Match the Linux application's loop, including cross-thread worker
+        # wakeups; restricted runners cannot wake the selector socket pair.
+        with TestClient(app, base_url='http://127.0.0.1', backend_options={'use_uvloop':True}) as client:
+            # Prepare through the live route before explicitly selecting this
+            # controlled job. Ordinary startup never selects retired bulk work.
+            assert client.get('/radio/seeds').json()['tracks']
+            seed_impressions = store.conn.execute('SELECT count(*) FROM rec_impressions').fetchone()[0]
+            # This starter fixture has no prepared album recommendations. Its
+            # existing progression guard must remain identical during repair.
+            assert client.get('/home/album-choices').status_code == 409
+            ctx.storage_maintenance.start()
             assert entered.wait(10)
             with closing(sqlite3.connect(path, timeout=0)) as other:
                 with pytest.raises(sqlite3.OperationalError, match='locked'):
@@ -86,18 +127,21 @@ def test_ui_and_extension_playback_during_actual_vacuum(tmp_path, monkeypatch, s
             assert status['active'] and status['message'] == MESSAGE and not status['recording']
             home = client.get('/')
             assert home.status_code == 200
-            assert MESSAGE in home.text.replace('&#39;', "'")
+            assert 'Library updates are paused.' in home.text
+            assert '/static/storage-maintenance.css' in home.text
             assert "authBanner([])" in home.text
             for url in ('/playlists', '/cleanup', '/album?browse=MPREalbum',
                         '/album/inline?browse=MPREalbum', '/radio/status', '/radio/seeds',
-                        '/home/album-choices', '/album/MPREalbum/share.txt'):
+                        '/album/MPREalbum/share.txt'):
                 assert client.get(url).status_code == 200, url
+            assert client.get('/home/album-choices').status_code == 409
             assert client.get('/static/storage-maintenance.js').status_code == 200
             assert client.post('/sync').status_code == 503
             assert client.post('/home/tv/takeover').json()['ok']
             assert client.post('/home/tv/playlist/1/event', data={'kind': 'tick'}).json()['ok']
             event = {'kind': 'state', 'state': 'paused', 'videoId': 'playing'}
-            assert not player_events.handle_player_event(ctx, event, 1000)
+            assert player_events.handle_player_event(ctx, event, 1000)
+            assert playback_feedback.inbox(store).pending() == 1
             # A missed implicit write fails immediately, never holding Store's
             # lock while waiting for the VACUUM writer to finish.
             with pytest.raises(StorageCompacting):
@@ -121,8 +165,10 @@ def test_ui_and_extension_playback_during_actual_vacuum(tmp_path, monkeypatch, s
                 offered = client.get('/radio/seeds').json()
                 assert offered['tracks']
                 before = _counts(store.conn)
-                launched = client.post('/radio/start', json={
-                    'video_id': offered['tracks'][0]['video_id'], 'menu_id': offered['menu_id']}).json()
+                response = client.post('/radio/start', json={
+                    'video_id': offered['tracks'][0]['video_id'], 'menu_id': offered['menu_id']})
+                assert response.status_code == 200, response.text
+                launched = response.json()
                 assert launched['ok'], launched
                 assert launched['playlist_id'] == 'PL_NEW_0' and launched['local_id'] is None
                 assert ws.receive_json()['type'] == 'navigate'
@@ -149,26 +195,34 @@ def test_ui_and_extension_playback_during_actual_vacuum(tmp_path, monkeypatch, s
                 assert ctx.auth_expired == {}
                 # The healthy bridge clears the live warning without saving
                 # anything during repair, and repair stays active throughout.
-                assert store.settings.get_setting(AUTH_EXPIRED_KEY) == '{"1":"Main"}'
+                assert account_auth_state.read(store.conn) == {iid: 'Main'}
                 assert client.get('/storage-maintenance/status').json()['auth_labels'] == []
                 assert ctx.storage_maintenance.active and not ctx.storage_maintenance._stop.is_set()
                 assert store.conn.execute('SELECT count(*) FROM play_events').fetchone()[0] == 0
                 assert store.conn.execute('SELECT count(*) FROM player_events').fetchone()[0] == 0
-                assert store.conn.execute('SELECT count(*) FROM rec_impressions').fetchone()[0] == 0
+                assert store.conn.execute('SELECT count(*) FROM rec_impressions').fetchone()[0] == seed_impressions
             assert time.monotonic() - start < 8
             release.set()
             assert ctx.storage_maintenance.ready.wait(10)
-            assert client.get('/storage-maintenance/status').json()['recording']
-            assert _state(store.conn)['phase'] == 'done'
+            assert ctx.storage_maintenance.phase == 'done'
             assert store.settings.get_setting('radio_current_session') is None
-            # Only a new post-repair play is saved. Its generated provenance
+            # Current receipt owners can replay both retained observations as
+            # soon as the real compaction worker releases the writer.
+            assert playback_feedback.drain(store) == 2
+            assert not playback_feedback.inbox(store).pending()
+            assert client.get('/storage-maintenance/status').json()['recording']
+            assert store.conn.execute('SELECT count(*) FROM play_events').fetchone()[0] == 1
+            assert store.conn.execute("SELECT count(*) FROM player_events WHERE kind='state'").fetchone()[0] == 1
+            # A new post-repair play saves immediately. Its generated provenance
             # survives even though this radio has no persisted playlist/session.
             track = s.tracks[0]
             assert live_plays.handle_play_event(ctx, {'videoId': track['video_id'],
                 'title': track['title'], 'artist': track['artist'], 'playlist': s.playlist}, 1002)
-            saved = store.conn.execute('SELECT * FROM play_events').fetchall()
+            saved = store.conn.execute('SELECT * FROM play_events WHERE video_id=?',
+                                       (track['video_id'],)).fetchall()
             assert len(saved) == 1 and saved[0]['is_generated'] == 1
-            assert not store.history.play_events_since(0, taste_only=True)
+            assert not any(row['video_id'] == track['video_id']
+                           for row in store.history.play_events_since(0, taste_only=True))
             with store.read_snapshot() as snapshot:
                 assert s.playlist in transient.radio_list_ids(snapshot.store)
             reopened = Store(path)
@@ -184,12 +238,11 @@ def test_ui_and_extension_playback_during_actual_vacuum(tmp_path, monkeypatch, s
             finally:
                 reopened.conn.close()
             assert player_events.handle_player_event(ctx, event, 1001)
-            assert store.conn.execute('SELECT count(*) FROM player_events').fetchone()[0] == 1
+            assert store.conn.execute("SELECT count(*) FROM player_events WHERE kind='state'").fetchone()[0] == 2
             store.settings.set_setting('personal-edit', 'works again')
             assert store.settings.get_setting('personal-edit') == 'works again'
     finally:
         release.set()
-        store.conn.close()
 
 
 def test_completed_vacuum_retries_pinned_checkpoint_without_repeating_compaction(tmp_path, monkeypatch):
@@ -206,7 +259,7 @@ def test_completed_vacuum_retries_pinned_checkpoint_without_repeating_compaction
         readers.append(reader)
         compacted.set()
     monkeypatch.setattr(policy_upgrade, '_compact', pin_after_compacting)
-    maintenance = StorageMaintenance(store)
+    maintenance = HistoricalPolicyMaintenance(store)
     maintenance.start()
     try:
         assert compacted.wait(10)
@@ -228,8 +281,8 @@ def test_completed_vacuum_retries_pinned_checkpoint_without_repeating_compaction
 
 
 @pytest.mark.parametrize('failure', ['space_guard', 'sqlite_full', 'os_full', 'interrupted'])
-def test_deferred_compaction_warns_without_pausing_recording(tmp_path, monkeypatch, failure):
-    store, _ = _legacy(tmp_path / 'state.db')
+def test_deferred_compaction_warns_without_pausing_recording(current_vacuum_store, monkeypatch, failure):
+    store = current_vacuum_store
     error = db_space.LowDiskSpace('injected insufficient compaction space')
     if failure == 'os_full':
         error = OSError(errno.ENOSPC, 'injected temporary filesystem full')
@@ -245,7 +298,7 @@ def test_deferred_compaction_warns_without_pausing_recording(tmp_path, monkeypat
     maintenance = app.state.ctx.storage_maintenance
     expected = DEFERRED_MESSAGE if failure == 'interrupted' else LOW_SPACE_MESSAGE
     try:
-        with TestClient(app, base_url='http://127.0.0.1') as client:
+        with TestClient(app, base_url='http://127.0.0.1', backend_options={'use_uvloop':True}) as client:
             maintenance.start()
             maintenance.join(10)
             status = client.get('/storage-maintenance/status').json()
@@ -257,43 +310,54 @@ def test_deferred_compaction_warns_without_pausing_recording(tmp_path, monkeypat
             for _ in range(2):
                 response = client.get('/playlists')
                 assert response.status_code == 200
-                banner = response.text.split('<div id="storage-maintenance"', 1)[1].split('</div>', 1)[0]
-                assert ' hidden' not in banner
-                assert 'data-warning="true"' in banner and 'role="alert"' in banner
-                assert 'aria-live="assertive"' in banner and expected in banner
-                assert MESSAGE not in banner
+                assert status['banner_message'] in response.text
+                assert expected not in response.text
     finally:
         maintenance.stop()
         maintenance.join(5)
-        store.conn.close()
 
 
-def test_banner_tracks_recording_state_without_page_reload():
+def test_polling_preserves_short_warning_and_recording_state_across_disconnects():
     node = shutil.which('node')
     if not node:
-        pytest.skip('Node.js is required to exercise banner polling')
+        pytest.skip('Node.js is required to exercise maintenance polling')
     result = subprocess.run([node, '-e', r"""
 const assert = require('node:assert/strict'), fs = require('node:fs'), vm = require('node:vm');
-const banner = {textContent:'',hidden:true,dataset:{},setAttribute(name,value){this[name]=value;}}, document = {readyState:'complete',
-  getElementById: () => banner, documentElement:{dataset:{}}};
-let refresh, fail=false, state={active:true,message:"Compacting storage - won't record activity until done"};
+let banner = null, textWrites = 0;
+const document = {readyState:'complete', documentElement:{dataset:{}}, getElementById: () => banner};
+const events=[];
+let refresh, fail=false, state={active:true,auth_labels:[],banner_message:'Library updates are paused.'};
 vm.runInNewContext(fs.readFileSync('src/yt_playlist/web/static/storage-maintenance.js','utf8'), {
-  document, window:{setInterval: callback => {refresh=callback;}},
+  document, window:{setInterval: callback => {refresh=callback;},dispatchEvent:event=>events.push(event)},
+  CustomEvent:class {constructor(type,options){this.type=type;this.detail=options.detail;}},
   fetch: async () => {if(fail) throw Error('offline'); return {ok:true,json:async()=>state};}
 });
 const flush = () => new Promise(resolve => setImmediate(resolve));
 (async () => {
-  await flush(); assert(!banner.hidden); assert.equal(banner.textContent,state.message);
-  fail=true; await refresh(); assert(!banner.hidden,'a disconnect must not claim recording resumed');
+  await flush(); assert.equal(document.documentElement.dataset.storageCompacting,'true');
+  assert.equal(events.at(-1).type,'auth-checked'); assert.equal(events.at(-1).detail.labels.length,0);
+  // Polling also works on standalone pages without the notice element.
+  banner = {dataset:{},hidden:true,attributes:{role:'status'},text:'',
+    getAttribute(name){return this.attributes[name];},setAttribute(name,value){this.attributes[name]=value;},
+    get textContent(){return this.text;},set textContent(value){this.text=value;textWrites++;}};
+  await refresh(); assert.equal(banner.textContent,state.banner_message); assert.equal(banner.hidden,false);
+  const writes = textWrites; await refresh(); assert.equal(textWrites,writes,'unchanged polls must not reannounce');
+  fail=true; await refresh();
+  assert.equal(document.documentElement.dataset.storageCompacting,'true','a disconnect must preserve the paused state');
   fail=false; state={active:false,phase:'deferred',recording:true,warning:true,
-    message:'Storage compaction blocked: not enough free disk space. Activity recording has resumed.'}; await refresh();
-  assert(!banner.hidden); assert.equal(document.documentElement.dataset.storageCompacting,'false');
-  assert.equal(banner.textContent,state.message); assert.equal(banner.role,'alert');
-  assert.equal(banner['aria-live'],'assertive'); assert.equal(banner.dataset.warning,'true');
-  fail=true; await refresh(); assert(!banner.hidden); assert.equal(banner.textContent,state.message);
-  fail=false; state={active:false,phase:'done',recording:true,warning:false,message:''}; await refresh();
-  assert(banner.hidden);
-  assert.equal(banner.textContent,''); assert.equal(banner.role,'status');
+    auth_labels:['Main'],message:'Detailed diagnostic text.',banner_message:'Free disk space to finish.'}; await refresh();
+  assert.equal(document.documentElement.dataset.storageCompacting,'false');
+  assert.equal(banner.hidden,false); assert.equal(banner.textContent,state.banner_message);
+  assert.equal(banner.attributes.role,'alert'); assert.equal(banner.attributes['aria-live'],'assertive');
+  assert.equal(events.at(-1).detail.labels[0],'Main');
+  fail=true; await refresh(); assert.equal(document.documentElement.dataset.storageCompacting,'false');
+  assert.equal(banner.textContent,state.banner_message); assert.equal(banner.hidden,false);
+  fail=false; state={active:true,auth_labels:[],banner_message:'Library updates are paused.'}; await refresh();
+  assert.equal(document.documentElement.dataset.storageCompacting,'true');
+  assert.equal(banner.attributes.role,'status'); assert.equal(banner.attributes['aria-live'],'polite');
+  state={active:false,phase:'done',recording:true,warning:false,auth_labels:[]}; await refresh();
+  assert.equal(document.documentElement.dataset.storageCompacting,'false');
+  assert.equal(banner.hidden,true); assert.equal(banner.textContent,'');
 })();
 """], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
@@ -312,9 +376,8 @@ def test_saved_recovery_database_online_compaction(request, tmp_path):
         with closing(sqlite3.connect(path)) as target:
             reader.backup(target)
     path.chmod(0o600)
-    store = Store(path)
-    store.init_schema()
-    maintenance = StorageMaintenance(store)
+    store = _open_legacy(path)
+    maintenance = HistoricalPolicyMaintenance(store)
     try:
         assert not policy_upgrade._has_legacy(store.conn), 'Use the verified shared recovery output as the source'
         before, missing = _counts(store.conn), _missing_references(store.conn)
@@ -367,7 +430,7 @@ def test_shutdown_interrupts_running_repair_and_reenables_recording(tmp_path, mo
                      'SELECT sum(n) FROM work').fetchone()
         original(conn, directory)
     monkeypatch.setattr(policy_upgrade, '_compact', expensive)
-    maintenance = StorageMaintenance(store)
+    maintenance = HistoricalPolicyMaintenance(store)
     maintenance.start()
     try:
         assert entered.wait(10)
@@ -379,7 +442,7 @@ def test_shutdown_interrupts_running_repair_and_reenables_recording(tmp_path, mo
         assert _state(store.conn)['phase'] == 'compacting'
         store.settings.set_setting('after-interruption', 'keep')
         monkeypatch.setattr(policy_upgrade, '_compact', original)
-        resumed = StorageMaintenance(store)
+        resumed = HistoricalPolicyMaintenance(store)
         resumed.start()
         resumed.join(10)
         assert _state(store.conn)['phase'] == 'done'

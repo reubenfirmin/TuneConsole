@@ -76,7 +76,7 @@ def test_small_metadata_lookup_does_not_scan_unrequested_library(store):
 @pytest.mark.parametrize('independent', [False, True])
 def test_indexed_evidence_matches_original_projection(store, generated, independent):
     for account in ('main', 'other'):
-        store.identities.upsert_identity(account, 'bridge', None, account == 'main')
+        store.accounts.upsert_account(account, 'bridge', None, account == 'main')
     ts = 1792497600  # a fixed UTC noon
     for account in (1, 2):
         store.history.import_listening_events(account, [('song', None, ts), ('song', None, ts + 3600)],
@@ -85,7 +85,7 @@ def test_indexed_evidence_matches_original_projection(store, generated, independ
         store.history.record_history_plays(account, ts, [('song', 'Today')], source_timezone='UTC')
         store.history.record_history_plays(account, ts + 86400, [('coarse-only', 'Today')], source_timezone='UTC')
     with store.conn:
-        store.conn.execute('UPDATE play_events SET is_generated=? WHERE identity_id=1', (generated,))
+        store.conn.execute('UPDATE play_events SET is_generated=? WHERE account_id=1', (generated,))
         if independent:
             day = listening.day_at(ts, 'UTC')
             listening.observe_day(store.conn, 1, 'song', day, 'independent', 'UTC', ts)
@@ -105,7 +105,7 @@ def test_indexed_evidence_matches_original_projection(store, generated, independ
 
 
 def test_shared_facets_keep_independent_song_genre_and_song_year_deduplication(store):
-    iid = store.identities.upsert_identity('main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('main', 'bridge', None, True)
     a = store.tracks.upsert_track('a', 'Song', 'Artist', 'First', 200)
     b = store.tracks.upsert_track('b', 'Song', 'Artist', 'Second', 200)
     store.tracks.associate_youtube_item('b', store.tracks.catalog_subject(a)['recording_id'],

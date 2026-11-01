@@ -99,6 +99,25 @@ def test_direct_play_during_read_invalidates_old_handoff_before_send():
     assert bridge.sent == [{"type": "navigate", "url": "direct"}]
 
 
+def test_handoff_deadline_includes_slow_provider_reads(monkeypatch):
+    clock = [0.]
+    monkeypatch.setattr(playlist_navigation.time, 'monotonic', lambda: clock[0])
+    bridge = _Bridge()
+
+    class SlowRead:
+        calls = 0
+
+        def get_playlist(self, *args, **kwargs):
+            self.calls += 1
+            clock[0] += 31
+            return {'tracks': [{'videoId': 'one'}]}
+
+    client = SlowRead()
+    assert not playlist_navigation.navigate_when_ready(client, bridge, 'SAVED', 'url',
+                                                       intent=bridge.begin_playback_intent())
+    assert client.calls == 1 and not bridge.sent
+
+
 def test_home_captures_intent_before_creation_finishes(store, monkeypatch):
     import json
     import threading
@@ -107,7 +126,7 @@ def test_home_captures_intent_before_creation_finishes(store, monkeypatch):
     from tests.conftest import FakeClient
     from yt_playlist.web.app import create_app
 
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = FakeClient()
     app = create_app(store, lambda: {iid: client}, now_fn=lambda: 1)
     bridge = app.state.ctx.bridge

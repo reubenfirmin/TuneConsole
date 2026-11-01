@@ -6,6 +6,7 @@ from playwright.sync_api import expect
 
 from tests.browser.test_song_actions_browser import song_app
 from tests.onboarding_support import publish_personal_mix
+from tests.visual_support import capture
 
 
 def assert_badge_padding(badge, genre, *, clipped=False, full_label=False):
@@ -133,7 +134,7 @@ def test_genre_badge_fits_its_column(song_app, page, monkeypatch, tmp_path, surf
     })""")
     (tmp_path / "genre-geometry.json").write_text(json.dumps(geometry, indent=2))
     table = page.locator(".radio-track-scroll table.track-table" if surface == "radio" else "table.track-table")
-    table.screenshot(
+    capture(table,
         path=tmp_path / f"genre-badges-{surface}-{width}-{root_size}.png")
     for video, genre in genres.items():
         badge = page.locator(f'tr[data-vid="{video}"] .gtag')

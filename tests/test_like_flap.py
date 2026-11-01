@@ -36,7 +36,7 @@ KEY = identity_key("Song", "Band")
 
 
 def test_flap_like_wins_within_a_run_both_orders(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     for order in ("indifferent_last", "like_last"):
         sync.sync_identity(store, iid, _client(order), now=1000.0)
         assert KEY in store.rec_model.recent_liked_keys(), order          # the like held
@@ -44,7 +44,7 @@ def test_flap_like_wins_within_a_run_both_orders(store):
 
 
 def test_flap_graduates_at_most_once_across_three_runs(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     for i, order in enumerate(("indifferent_last", "like_last", "indifferent_last")):
         sync.sync_identity(store, iid, _client(order), now=1000.0 + i)
     # the graduation ledger was fed exactly once, at the low sync-like weight; before the fix each
@@ -54,7 +54,7 @@ def test_flap_graduates_at_most_once_across_three_runs(store):
 
 
 def test_whole_run_indifferent_still_clears(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     sync.sync_identity(store, iid, _client("indifferent_last"), now=1000.0)
     assert KEY in store.rec_model.recent_liked_keys()
     # a genuine un-like: EVERY context now reads INDIFFERENT
@@ -66,7 +66,7 @@ def test_whole_run_indifferent_still_clears(store):
 
 
 def test_dislike_still_beats_like_within_a_run(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     fake = FakeClient(playlists=[{"playlistId": "A", "title": "a", "count": 1},
                                  {"playlistId": "B", "title": "b", "count": 1}],
                       tracks={"A": [_t("DISLIKE")], "B": [_t("LIKE")]})
@@ -77,18 +77,18 @@ def test_dislike_still_beats_like_within_a_run(store):
 
 def _item_rating(store, iid):
     return tuple(store.conn.execute(
-        "SELECT status,observed_at FROM item_ratings WHERE identity_id=? AND video_id='v1'",
+        "SELECT status,observed_at FROM item_ratings WHERE account_id=? AND video_id='v1'",
         (iid,)).fetchone())
 
 
 @pytest.mark.parametrize("status", ["LIKE", "DISLIKE"])
 @pytest.mark.parametrize("order", ["indifferent_last", "like_last"])
 def test_missing_rating_context_preserves_feedback_until_complete_sync(store, monkeypatch, status, order):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     client = _client(order)
     client._tracks["A"] = [_t(status)]
     sync.sync_identity(store, iid, client, now=1000.0)
-    cached = next(p for p in store.playlists.get_playlists() if p.ytm_playlist_id == "A")
+    cached = next(p for p in store.playlists.get_playlists() if p.provider_playlist_id == "A")
     cached_tracks = store.playlists.get_playlist_tracks_with_meta(cached.id)
     fetch = client.get_playlist
 
@@ -120,7 +120,7 @@ def test_missing_rating_context_preserves_feedback_until_complete_sync(store, mo
 
 @pytest.mark.parametrize("status", ["LIKE", "DISLIKE"])
 def test_partial_sync_still_accepts_explicit_ratings(store, monkeypatch, status):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     client = _client("indifferent_last")
     monkeypatch.setattr(sync, "with_retry", lambda fn, **kw: fn())
 
@@ -145,7 +145,7 @@ def test_partial_sync_still_accepts_explicit_ratings(store, monkeypatch, status)
     {"status": "STATUS_FAILED", "tracks": []},
 ])
 def test_incomplete_rating_context_is_unknown(store, monkeypatch, detail):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     client = _client("indifferent_last")
     sync.sync_identity(store, iid, client, now=1000.0)
     fetch = client.get_playlist
@@ -162,7 +162,7 @@ def test_incomplete_rating_context_is_unknown(store, monkeypatch, detail):
 ])
 @pytest.mark.parametrize("status", ["LIKE", "DISLIKE"])
 def test_unread_pages_preserve_ratings_until_complete_recovery(store, monkeypatch, pages, status):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     client = _client("indifferent_last")
     client._tracks["A"] = [_t(status)]
     sync.sync_identity(store, iid, client, now=1000.0)
@@ -203,7 +203,7 @@ def _play_msg(**over):
 
 
 def test_pevent_indifferent_never_clears_a_like(store):
-    store.identities.upsert_identity("main", "bridge", None, True)
+    store.accounts.upsert_account("main", "bridge", None, True)
     store.rec_model.record_like(KEY, 900.0, provenance="action")
     # the player readout shows INDIFFERENT before YTM hydrates the real rating
     live_plays.handle_play_event(_ctx(store), _play_msg(likeStatus="INDIFFERENT"), 1000.0)
@@ -211,14 +211,14 @@ def test_pevent_indifferent_never_clears_a_like(store):
 
 
 def test_pevent_like_records_action_provenance(store):
-    store.identities.upsert_identity("main", "bridge", None, True)
+    store.accounts.upsert_account("main", "bridge", None, True)
     live_plays.handle_play_event(_ctx(store), _play_msg(likeStatus="LIKE"), 1000.0)
     assert store.rec_model.like_provenance(KEY) == "action"
     assert store.rec_model.recent_liked_with_ts() == [(KEY, 1000.0)]     # feeds the transient model
 
 
 def test_rate_removelike_pevent_does_not_clear_a_like(store):
-    store.identities.upsert_identity("main", "bridge", None, True)
+    store.accounts.upsert_account("main", "bridge", None, True)
     store.tracks.upsert_track("v1", "Song", "Band", "", None)
     store.rec_model.record_like(KEY, 900.0, provenance="action")
     body = json.dumps({"target": {"videoId": "v1"}})
@@ -228,7 +228,7 @@ def test_rate_removelike_pevent_does_not_clear_a_like(store):
 
 
 def test_rate_like_pevent_acts_with_action_provenance(store):
-    store.identities.upsert_identity("main", "bridge", None, True)
+    store.accounts.upsert_account("main", "bridge", None, True)
     store.tracks.upsert_track("v1", "Song", "Band", "", None)
     body = json.dumps({"target": {"videoId": "v1"}})
     msg = {"kind": "rate", "url": ".../youtubei/v1/like/like", "body": body, "brandId": "", "brandKnown": True}

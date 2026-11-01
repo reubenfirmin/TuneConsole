@@ -10,7 +10,7 @@ def _s():
 def test_interested_artists_limit():
     s = _s()
     # two artists with different engagement: A (2 plays), B (1 play)
-    iid = s.identities.upsert_identity("m", "c", None, True)
+    iid = s.accounts.upsert_account("m", "c", None, True)
     s.tracks.upsert_track("v1", "S1", "A", None, None)
     s.tracks.upsert_track("v2", "S2", "A", None, None)
     s.tracks.upsert_track("v3", "S3", "B", None, None)
@@ -32,9 +32,11 @@ def test_delete_discovered_albums_and_artist_query():
 def test_prune_orphan_discovered_tracks_keeps_radio_and_live_albums():
     s = _s()
     s.discovery.upsert_discovered_album("alb1", "A", "T", "2000", None, 0.0)
+    s.discovery.upsert_discovered_album("gone", "A", "Gone", None, None, 0)
     s.discovery.upsert_discovered_track("t|1", "v", "T", "A", "Alb", None, None, None, "alb1", 0.0)   # source exists
     s.discovery.upsert_discovered_track("t|2", "v2", "T2", "A", "Alb", None, None, None, "gone", 0.0)  # source gone
     s.discovery.upsert_discovered_track("r|3", "v3", "R", "A", None, None, None, None, "radio:vid", 0.0)  # radio
+    s.discovery.delete_discovered_albums(['gone'])
     s.discovery.prune_orphan_discovered_tracks()
     keys = {r["identity_key"] for r in s.discovery.get_discovered_tracks()}
     assert keys == {"t|1", "r|3"}                         # orphan album-track gone; radio kept

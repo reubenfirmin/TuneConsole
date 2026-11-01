@@ -10,6 +10,7 @@ import threading
 from time import monotonic, thread_time
 
 from yt_playlist.core.work_diagnostics import current_phase
+from yt_playlist.core.db_handles import Connection as HandleConnection, Cursor as HandleCursor
 
 logger = logging.getLogger("yt_playlist.database")
 SLOW_SQL_SECONDS = .25
@@ -189,7 +190,7 @@ class PublicationTimings:
                              for name, times in self.stages.items()})
 
 
-class DiagnosticCursor(sqlite3.Cursor):
+class DiagnosticCursor(HandleCursor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._start("")
@@ -245,7 +246,53 @@ class DiagnosticCursor(sqlite3.Cursor):
         return self._call("iterate", super().__next__)
 
 
-class DiagnosticConnection(sqlite3.Connection):
+class DiagnosticConnection(HandleConnection):
+    @contextmanager
+    def atomic(self, *, join=False):
+        """Commit an admitted unit and its receipt together across repository calls.
+
+        Repository helpers normally finish their own writes. During this explicit
+        outer unit, their commits defer to its owner; any rollback aborts the unit.
+        The caller must hold its connection lock throughout.
+
+        With join=True an existing caller transaction retains commit/rollback
+        ownership. A savepoint rolls back only this unit if it fails.
+        """
+        if getattr(self, '_atomic_unit', False):
+            if not join:
+                raise RuntimeError('An atomic unit requires an idle connection')
+            try:
+                yield
+            except BaseException:
+                self._atomic_failed = True
+                raise
+            return
+        borrowed = self.in_transaction
+        if borrowed and not join:
+            raise RuntimeError('An atomic unit requires an idle connection')
+        self.execute('SAVEPOINT tuneconsole_atomic_unit' if borrowed else 'BEGIN IMMEDIATE')
+        self._atomic_unit = True
+        self._atomic_joined = borrowed
+        self._atomic_failed = False
+        try:
+            yield
+            if self._atomic_failed:
+                raise RuntimeError('A repository rolled back the atomic unit')
+            if borrowed:
+                self.execute('RELEASE SAVEPOINT tuneconsole_atomic_unit')
+            else:
+                self._finish('COMMIT', super().commit)
+        except BaseException:
+            if borrowed:
+                self.execute('ROLLBACK TO SAVEPOINT tuneconsole_atomic_unit')
+                self.execute('RELEASE SAVEPOINT tuneconsole_atomic_unit')
+            else:
+                self._finish('ROLLBACK', super().rollback)
+            raise
+        finally:
+            self._atomic_unit = False
+            self._atomic_joined = False
+
     def cursor(self, factory=DiagnosticCursor):
         return super().cursor(factory)
 
@@ -256,6 +303,8 @@ class DiagnosticConnection(sqlite3.Connection):
         return self.cursor().executemany(sql, parameters)
 
     def executescript(self, sql):
+        if getattr(self, '_atomic_unit', False):
+            raise RuntimeError('Scripts cannot implicitly commit an atomic unit')
         return self.cursor().executescript(sql)
 
     def _finish(self, sql, target, *args):
@@ -272,10 +321,19 @@ class DiagnosticConnection(sqlite3.Connection):
                 _warn_sql(sql, elapsed, "transaction", error)
 
     def commit(self):
+        if getattr(self, '_atomic_unit', False):
+            return
         return self._finish("COMMIT", super().commit)
 
     def rollback(self):
+        if getattr(self, '_atomic_unit', False):
+            self._atomic_failed = True
+            if self._atomic_joined:
+                return
         return self._finish("ROLLBACK", super().rollback)
 
     def __exit__(self, *args):
+        if getattr(self, '_atomic_unit', False):
+            self._atomic_failed |= args[0] is not None
+            return False
         return self._finish("COMMIT" if args[0] is None else "ROLLBACK", super().__exit__, *args)

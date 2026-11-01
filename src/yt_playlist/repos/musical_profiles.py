@@ -3,9 +3,11 @@ from contextlib import ExitStack
 import json
 import hashlib
 
+from yt_playlist.core import metadata_native, metadata_evidence, metadata_runtime
+from yt_playlist.core.preparation import metadata_destinations
 from yt_playlist.core.db_revisions import keyed_reads
 from yt_playlist.core.activity import WorkBudgetExceeded
-from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 
 
 class MusicalProfilesRepo(Repo):
@@ -37,26 +39,86 @@ class MusicalProfilesRepo(Repo):
         return row[0] if row else None
 
     @synchronized
-    def source_input(self, key, limit=32, max_bytes=256 * 1024):
+    def source_dependencies(self, key):
+        """Bound a source publication to its current immutable metadata references."""
+        dependencies = {(table, 'key:' + key) for table in (
+            'rec_musical_pending', 'rec_musical_sources', 'rec_musical_links', 'rec_musical_source_profiles')}
+        if metadata_runtime.active(self.conn):
+            row = self.conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?', (key,)).fetchone()
+            return dependencies, ('runtime', row[0] if row else None)
+        if not metadata_native.available(self.conn):
+            dependencies.update((table, 'key:1') for table in (
+                metadata_destinations.publication.table('head'), metadata_destinations.table('head')))
+            identity = metadata_destinations.selected(self.conn)
+            references = () if identity is None else metadata_destinations.source_references(self.conn,key,identity)
+            if identity is not None:
+                dependencies.add((metadata_destinations.table('native'), 'key:' + key))
+                dependencies.update((metadata_destinations.table('deliveries'), 'key:' + str(row[1]))
+                                    for row in references)
+            return dependencies, (identity, references)
+        dependencies.add(('musical_source_observations', 'key:' + key))
+        references = self.conn.execute(
+            'SELECT o.id,o.delivery_id FROM musical_source_observations s '
+            'JOIN native_metadata_observations o ON o.id=s.observation_id '
+            'WHERE s.source_key=? ORDER BY s.field', (key,)).fetchall()
+        dependencies.update(('native_metadata_observations', 'key:' + str(row[0])) for row in references)
+        dependencies.update(('metadata_deliveries', 'key:' + str(row[1])) for row in references)
+        return dependencies, tuple(row[0] for row in references)
+
+    @synchronized
+    def source_input(self, key, limit=32, max_bytes=256 * 1024, *, observation_ids=None):
         with ExitStack() as guards:
-            for table in ('rec_musical_pending', 'rec_musical_sources', 'rec_musical_links',
-                          'rec_musical_source_profiles'):
+            typed = metadata_native.available(self.conn)
+            tables = ('rec_musical_pending', 'rec_musical_sources', 'rec_musical_links', 'rec_musical_source_profiles')
+            if typed:
+                tables += ('musical_source_observations',)
+            for table in tables:
                 guards.enter_context(keyed_reads(self._store, table, [key]))
             pending = self.conn.execute('SELECT revision,cursor FROM rec_musical_pending WHERE source_key=?',
                                         (key,)).fetchone()
             if not pending:
                 return None
-            size = self.conn.execute('SELECT length(CAST(payload AS BLOB)) FROM rec_musical_sources WHERE source_key=?',
-                                      (key,)).fetchone()[0]
-            if size > max_bytes:
-                raise WorkBudgetExceeded('Source profile input exceeds byte budget')
-            source = self.conn.execute('SELECT * FROM rec_musical_sources WHERE source_key=?', (key,)).fetchone()
+            if typed and observation_ids is not None:
+                if metadata_runtime.active(self.conn):
+                    current = ('runtime', self.conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?',
+                                                            (key,)).fetchone()[0])
+                else:
+                    current = tuple(row[0] for row in self.conn.execute(
+                        'SELECT observation_id FROM musical_source_observations WHERE source_key=? ORDER BY field', (key,)))
+                # References may change between dependency selection and reader
+                # pinning. Retry with their new scope rather than reading outside it.
+                if current != observation_ids:
+                    return None
+            identity = None if typed else metadata_destinations.selected(self.conn,store=self._store)
+            prepared = identity is not None
+            if not typed and observation_ids is not None:
+                # Selection can change after dependency selection, including
+                # the first selection of a previously unprepared source.
+                if identity != observation_ids[0]:
+                    return None
+                references = (metadata_destinations.source_references(self.conn,key,identity,store=self._store)
+                              if prepared else ())
+                if references != observation_ids[1]:
+                    return None
+            if not typed and not prepared:
+                size = self.conn.execute('SELECT length(CAST(payload AS BLOB)) FROM rec_musical_sources WHERE source_key=?',
+                                         (key,)).fetchone()[0]
+                if size > max_bytes:
+                    raise WorkBudgetExceeded('Source profile input exceeds byte budget')
+            source = self.conn.execute('SELECT '+('provider,scope,entity_id' if prepared else '*')+
+                ' FROM rec_musical_sources WHERE source_key=?', (key,)).fetchone()
+            if typed:
+                observations = metadata_native.source_values(self.conn, key, max_bytes, store=self._store)
+            elif prepared:
+                observations = metadata_destinations.source_values(self.conn,key,max_bytes,identity=identity,store=self._store)
+            else:
+                observations = json.loads(source['payload'])
             # Guard another publisher of the same source, including a missing cache row.
             self.conn.execute('SELECT digest FROM rec_musical_source_profiles WHERE source_key=?', (key,)).fetchone()
             ids = [r[0] for r in self.conn.execute('SELECT recording_id FROM rec_musical_links '
                 'WHERE source_key=? AND recording_id>? ORDER BY recording_id LIMIT ?', (key, pending['cursor'], limit))]
             return ({'provider': source['provider'], 'scope': source['scope'], 'entity_id': source['entity_id'],
-                     'observations': json.loads(source['payload'])}, tuple(pending), ids)
+                     'observations': observations}, tuple(pending), ids)
 
     @synchronized
     def publish_source(self, key, pending, ids, payload, version, digest, now, limit=32):
@@ -118,11 +180,22 @@ class MusicalProfilesRepo(Repo):
                 with keyed_reads(self._store, 'catalog_entries', [rid]):
                     entries = [r[0] for r in self.conn.execute('SELECT id FROM catalog_entries WHERE recording_id=?', (rid,))]
                 choices = {}
-                with keyed_reads(self._store, 'entry_field_choices', entries):
+                typed = metadata_evidence.available(self.conn)
+                with ExitStack() as choice_guards:
+                    for table in (('metadata_runtime_choices',) if metadata_runtime.active(self.conn) else
+                                  ('metadata_choice_heads', 'metadata_observations') if typed else ('entry_field_choices',)):
+                        choice_guards.enter_context(keyed_reads(self._store, table, entries))
                     for entry in entries:
-                        for field, value in self.conn.execute('SELECT field,value_json FROM entry_field_choices WHERE entry_id=?',
-                                                               (entry,)):
-                            choices.setdefault(field, set()).add(value)
+                        if typed:
+                            for row in self.conn.execute('SELECT o.* FROM metadata_choice_heads h '
+                                    'JOIN metadata_observations o ON o.id=h.observation_id '
+                                    "WHERE h.entry_id=? AND o.value_kind<>'withdrawn'", (entry,)):
+                                value = metadata_evidence.value_from_row(row).selected()
+                                choices.setdefault(row['field'], set()).add(json.dumps(value))
+                        else:
+                            for field, value in self.conn.execute('SELECT field,value_json FROM entry_field_choices WHERE entry_id=?',
+                                                                  (entry,)):
+                                choices.setdefault(field, set()).add(value)
                 # Conflicting explicit entry choices block inherited fallback.
                 overrides = {field: json.loads(next(iter(values))) if len(values) == 1 else None
                              for field, values in choices.items()}
@@ -151,7 +224,7 @@ class MusicalProfilesRepo(Repo):
         if changed:
             self._store.rec_refresh.publish_notification()
 
-    @synchronized
+    @snapshot_read
     def by_keys(self, keys):
         if len(keys) > 512:
             raise ValueError('Musical profile page exceeds 512 identities')
@@ -161,7 +234,7 @@ class MusicalProfilesRepo(Repo):
                 f'SELECT identity_key,payload FROM rec_musical_profiles WHERE identity_key IN ({qs})', keys)}
         return self._store.vibe_predictions.overlay(result)
 
-    @synchronized
+    @snapshot_read
     def provenance_sources(self, key, digests, *, limit=16, max_bytes=256 * 1024):
         """Read bounded cached evidence actually used by a recording's saved profile.
 

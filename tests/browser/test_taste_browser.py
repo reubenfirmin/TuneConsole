@@ -111,7 +111,7 @@ def test_overview_updates_itself_when_background_genre_repair_finishes(store, pa
     monkeypatch.setattr(RecWorker, "trigger_mode_refresh", lambda self, **kw: None)
     monkeypatch.setattr(RecWorker, "busy", property(lambda self: repairing["busy"]))
     live_app = request.getfixturevalue("live_app")
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     store.settings.set_setting("rec_content_model", json.dumps({"cat": {"fam:techno": 0}, "ncat": 1, "cont": []}))
     keys = []
     for i in range(3):
@@ -142,7 +142,7 @@ def test_populated_overview_leads_with_changes_and_keeps_feedback_compact(store,
 
     monkeypatch.setattr(RecWorker, 'trigger_mode_refresh', lambda self, **kw: None)
     live_app = request.getfixturevalue('live_app')
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     store.modes.replace_modes([{
         'mode_id': 1, 'label': 'Latin', 'families': [['latin', 1]],
         'centroid': np.ones(1, dtype=np.float32), 'size': 3, 'rep_keys': [],
@@ -189,7 +189,7 @@ def test_populated_overview_leads_with_changes_and_keeps_feedback_compact(store,
 
 @pytest.mark.parametrize("width", [1440, 1024, 390, 320])
 def test_playlist_influence_shows_the_whole_blend_and_links_selected_rows(live_app, store, page, width, tmp_path):
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     titles = ['Night drives / broken beats & "other" late discoveries',
               "Sunday slow / piano, soul and a little rain"]
     counts = [34, 22, 14, 10, 6, 5, 4, 2, 2, 1, 0]

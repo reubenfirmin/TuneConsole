@@ -8,7 +8,7 @@ def test_catalog_ranks_under_played_first_weighted_not_filtered(store):
     """Catalog ('explore_for_you') surfaces your under-played catalog FIRST, weighted (not filtered)
     by taste: unplayed tracks rank above played ones, and played tracks are de-ranked but NOT
     excluded (no artist filter)."""
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     # Both sets share an artist and equal taste fit; only play history differs.
     played = [store.tracks.upsert_track(f"p{i}", f"P{i}", "Art", None, None) for i in range(6)]
     unplayed = [store.tracks.upsert_track(f"u{i}", f"U{i}", "Art", None, None) for i in range(6)]
@@ -29,13 +29,13 @@ def test_catalog_ranks_under_played_first_weighted_not_filtered(store):
 
 
 def test_explore_empty_without_vectors(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     assert surfaces.explore_for_you(store, now=1.0) == []
 
 
 @pytest.mark.parametrize("partial_model", [False, True])
 def test_catalog_includes_owned_tracks_without_model_coverage(store, partial_model):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     keys = []
     for i in range(40):
         tid = store.tracks.upsert_track(f"v{i}", f"Song {i}", f"Artist {i}", None, None,

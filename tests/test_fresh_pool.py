@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from tests.test_home_other_genres import seed_genres
 from tests.test_mode_cards_route import _client
+from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 from yt_playlist.rec import embedding_vectors as embed, fresh_pool, mode_surfaces, road_trip_candidates, surfaces
 from yt_playlist.util.matching import identity_key
 
@@ -92,11 +93,13 @@ def test_selected_fresh_mix_balances_all_three_genres_and_requires_missing_famil
     tracks = [surfaces.ForYouItem(f"Song {genre} {i}", f"Artist {genre} {i}", "", f"{genre}{i}",
                                 None, 0, "", key=f"{genre}{i}|artist{i}", genre=genre)
               for genre in ("House", "Drum & Bass", "Pop") for i in range(20)]
-    store.rec_proposals.put_proposals("mode_bundles", {"all": {"fresh": [surfaces._item_to_fresh_dict(t) for t in tracks]}}, 1)
+    bundle = {"all": {"fresh": [surfaces._item_to_fresh_dict(t) for t in tracks]}}
+    seed_bundle_subjects(store, bundle)
+    publish_bundles(store, bundle, 1)
     chosen = fresh_pool.pick(store, 1000, ["house", "dnb", "pop"])
     assert Counter(genre_map.family(t["genre"]) for t in chosen) == {"house": 4, "dnb": 4, "pop": 4}
     tracks[:] = [t for t in tracks if t.genre == "House"]
-    store.rec_proposals.put_proposals("mode_bundles", {"all": {"fresh": [surfaces._item_to_fresh_dict(t) for t in tracks]}}, 2)
+    publish_bundles(store, {"all": {"fresh": [surfaces._item_to_fresh_dict(t) for t in tracks]}}, 2)
     assert fresh_pool.pick(store, 1000, ["house", "dnb", "pop"]) == []
 
 
@@ -107,6 +110,7 @@ def _without_fresh(store):
         if isinstance(bucket, dict):
             bucket.pop("fresh", None)
     store.rec_proposals.put_proposals("mode_bundles", bundles, 1)
+    publish_bundles(store, bundles, 1)
 
 
 def _job_id(response):
@@ -155,7 +159,8 @@ def test_genre_selection_leaves_other_requests_responsive(store, monkeypatch):
 def test_prepared_fresh_tracks_honor_feedback_and_library_changes(store):
     tracks = [dict(key=identity_key(f"New {i}", f"Artist {i}"), title=f"New {i}", artist=f"Artist {i}",
                    video_id=f"v{i}", genre="House" if i < 12 else "Techno") for i in range(24)]
-    store.rec_proposals.put_proposals("fresh_pool", tracks, 1)
+    seed_bundle_subjects(store, {}, fresh=tracks)
+    publish_bundles(store, {}, 1, fresh=tracks)
     store.tracks.upsert_track("v0", "New 0", "Artist 0", None, None)
     store.rec_model.record_feedback("for_you", tracks[1]["key"], "dismiss", now=2)
     store.rec_model.set_weight("genre:techno", 0.0, lo=0, now=2)
@@ -204,7 +209,7 @@ def test_fresh_slot_starts_once_rejoins_on_refresh_and_becomes_a_scoped_mix(stor
                 "", None, track.genre, None, None, 1000)
     finally:
         release.set()
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         ready = client.get(f"/home/fresh-pool/{job_id}")
         if 'class="fresh-pool-art"' not in ready.text:

@@ -46,8 +46,9 @@ class PlaylistOps:
             return None
 
     # --- merge / duplicate resolution ---------------------------------------
-    def apply_merge(self, playlist_ids, result_video_ids, keep) -> dict:
-        return apply_result(self.store, self._clients(), playlist_ids, result_video_ids, keep, self.now_fn())
+    def apply_merge(self, playlist_ids, result_video_ids, keep, *, reviewed_draft=None) -> dict:
+        return apply_result(self.store, self._clients(), playlist_ids, result_video_ids, keep, self.now_fn(),
+                            reviewed_draft=reviewed_draft)
 
     def delete_dupe(self, source, target) -> str:
         """Plan + remote-verified delete of `source` (keeping `target`). Returns the deleted title."""
@@ -57,7 +58,7 @@ class PlaylistOps:
         if src is None or tgt is None:
             raise ValueError("playlist no longer exists (already deleted?)")
         aid = store_plan(self.store, MergePlan(source, target, [], []), "delete",
-                         src.ytm_playlist_id, self.now_fn())
+                         src.provider_playlist_id, self.now_fn())
         execute_planned(self.store, aid, self._clients(), self.now_fn())
         return src.title
 
@@ -68,20 +69,20 @@ class PlaylistOps:
             raise ValueError("kept playlist no longer exists")
         keep_keys = self.store.playlists.get_playlist_track_keys(keep)
         siblings = [p for p in self.store.playlists.get_playlists()
-                    if p.id != keep and p.ytm_playlist_id not in analysis.SYSTEM_PLAYLIST_IDS
+                    if p.id != keep and p.provider_playlist_id not in analysis.SYSTEM_PLAYLIST_IDS
                     and self.store.playlists.get_playlist_track_keys(p.id) == keep_keys]
         deleted, errors = 0, []
         for sib in siblings:
             try:
                 aid = store_plan(self.store, MergePlan(sib.id, keep, [], []), "delete",
-                                 sib.ytm_playlist_id, self.now_fn())
+                                 sib.provider_playlist_id, self.now_fn())
                 execute_planned(self.store, aid, self._clients(), self.now_fn())
                 deleted += 1
             except ValueError as e:
                 errors.append(str(e))
             except Exception:  # noqa: BLE001
-                logger.exception("keep-one delete of %s failed", sib.ytm_playlist_id)
-                errors.append(f"{sib.ytm_playlist_id}: unexpected error")
+                logger.exception("keep-one delete of %s failed", sib.provider_playlist_id)
+                errors.append(f"{sib.provider_playlist_id}: unexpected error")
         return deleted, errors
 
     # --- deletes ------------------------------------------------------------
@@ -112,19 +113,19 @@ class PlaylistOps:
         """Create a new playlist from an album's tracks, under the master account."""
         if not browse_id:
             raise ValueError("no album given")
-        identity_id,client = client_for(self.store,self._clients())
-        return create_playlist_from_album(self.store, browse_id, name, client, self.now_fn(), identity_id)
+        account_id,client = client_for(self.store,self._clients())
+        return create_playlist_from_album(self.store, browse_id, name, client, self.now_fn(), account_id)
 
     # --- shared song actions ------------------------------------------------
     def create_playlist_from_song(self, name, track) -> dict:
-        identity_id,client = client_for(self.store,self._clients())
-        return create_playlist_from_song(self.store, name, track, client, self.now_fn(), identity_id)
+        account_id,client = client_for(self.store,self._clients())
+        return create_playlist_from_song(self.store, name, track, client, self.now_fn(), account_id)
 
     def add_song_to_playlist(self, playlist_id, track) -> dict:
         pl = self.store.playlists.get_playlist(playlist_id)
         if pl is None:
             raise ValueError("That playlist no longer exists.")
-        if pl.ytm_playlist_id in analysis.SYSTEM_PLAYLIST_IDS:
+        if pl.provider_playlist_id in analysis.SYSTEM_PLAYLIST_IDS:
             raise ValueError("Choose a regular playlist.")
         if playlist_id in self.store.playlists.playlist_ids_for_video(track["videoId"]):
             return {"added": 0, "already_present": True}
@@ -186,11 +187,11 @@ class PlaylistOps:
         self.set_rating(video_id, "LIKE" if on else "INDIFFERENT")
         return {"liked": bool(on)}
 
-    def set_rating(self, video_id, status, *, after_confirmed=None) -> dict:
+    def set_rating(self, video_id, status, *, after_confirmed=None, acquisition=None) -> dict:
         """Rate the exact requested video in the main account, including the playing song."""
-        identity_id,client = client_for(self.store,self._clients())
-        native = ratings.set_rating(self.store, identity_id, video_id, status, client, self.now_fn(),
-                                    after_confirmed=after_confirmed)
+        account_id,client = client_for(self.store,self._clients())
+        native = ratings.set_rating(self.store, account_id, video_id, status, client, self.now_fn(),
+                                    after_confirmed=after_confirmed, now_fn=self.now_fn, acquisition=acquisition)
         if self._rating_updated is not None:
             self._rating_updated()
         return {"likeStatus": status, **(native or {})}
@@ -210,7 +211,7 @@ class PlaylistOps:
         pl = self.store.playlists.get_playlist(playlist_id)
         if pl is None:
             raise ValueError("playlist no longer exists")
-        src_client, tgt_client = clients.get(pl.identity_id), clients.get(target_identity)
+        src_client, tgt_client = clients.get(pl.account_id), clients.get(target_identity)
         if src_client is None or tgt_client is None:
             raise ValueError("missing client for an identity")
         return copy_or_move_playlist(self.store, playlist_id, target_identity, src_client, tgt_client,

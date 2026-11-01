@@ -1,4 +1,4 @@
-"""Identity changes cannot strand history behind an already advanced first-play checkpoint."""
+"""Account changes cannot strand history behind an already advanced first-play checkpoint."""
 import pytest
 
 from yt_playlist.core.migrations import migrate
@@ -15,9 +15,10 @@ def _history(store, key, day):
 def _assert_first(store, key, artist, day):
     store.trends.refresh_first_play()
     assert store.trends.first_play_map("track")[key] == day
-    assert store.trends.first_play_map("artist")[artist] == day
+    by_name = {store.trends.artist_labels()[aid]:first for aid,first in store.trends.first_play_map('artist').items()}
+    assert by_name[artist] == day
     assert store.settings.get_setting('trend_first_play_watermark') is None
-    assert store.settings.get_setting('trend_first_play_source') == 'listening_v33'
+    assert store.settings.get_setting('trend_first_play_source') == 'canonical_listening'
 
 
 @pytest.mark.parametrize("old_version", [7, 15])
@@ -25,7 +26,7 @@ def test_upgrade_rebuilds_populated_history_only_checkpoint(tmp_path, old_versio
     path = tmp_path / "history.db"
     store = Store(path)
     migrate(store.conn, registry=MIGRATIONS[:old_version])
-    store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','bridge',1)")
+    store.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'main','bridge',1)")
     if old_version < 8:
         store.conn.execute("INSERT INTO tracks(video_id,title,artist,identity_key) VALUES ('v','Song','Artist','song|artist')")
     else:
@@ -36,9 +37,9 @@ def test_upgrade_rebuilds_populated_history_only_checkpoint(tmp_path, old_versio
         store.conn.execute("INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (1,1,'v')")
         store.conn.execute("INSERT INTO library_memberships(entry_id,origin) VALUES (1,'legacy_library')")
         store.conn.execute("INSERT INTO recording_aliases(alias,recording_id,source) VALUES ('song|artist',1,'legacy_library')")
-    store.conn.execute("INSERT INTO history_snapshots(id,identity_id,taken_at) VALUES (1,1,?)", (10 * DAY,))
+    store.conn.execute("INSERT INTO history_snapshots(id,account_id,taken_at) VALUES (1,1,?)", (10 * DAY,))
     store.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (1,'song|artist')")
-    store.conn.execute("INSERT INTO history_snapshots(id,identity_id,taken_at) VALUES (2,1,?)", (20 * DAY,))
+    store.conn.execute("INSERT INTO history_snapshots(id,account_id,taken_at) VALUES (2,1,?)", (20 * DAY,))
     store.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (2,'song|artist')")
     store.conn.execute("INSERT INTO trend_first_play VALUES ('track','song|artist',10,?,'history')", (10 * DAY,))
     store.conn.execute("INSERT INTO trend_first_play VALUES ('artist','Artist',10,?,'history')", (10 * DAY,))
@@ -56,7 +57,7 @@ def test_upgrade_rebuilds_populated_history_only_checkpoint(tmp_path, old_versio
 
 
 def test_alias_disambiguation_rebuilds_renamed_history(store):
-    store.identities.upsert_identity("main", "bridge", None, True)
+    store.accounts.upsert_account("main", "bridge", None, True)
     first = store.tracks.upsert_track("a", "Song", "Artist", None, 200)
     old = store.tracks.identity_key_for_video("a")
     _history(store, old, 10); _history(store, old, 20)
@@ -71,7 +72,7 @@ def test_alias_disambiguation_rebuilds_renamed_history(store):
 
 
 def test_verified_reassociation_preserves_earliest_history(store):
-    store.identities.upsert_identity("main", "bridge", None, True)
+    store.accounts.upsert_account("main", "bridge", None, True)
     store.tracks.upsert_track("a", "Song", "Artist A", None, 200)
     target = store.tracks.upsert_track("b", "Correct Song", "Artist B", None, 200)
     old, key = store.tracks.identity_key_for_video("a"), store.tracks.identity_key_for_video("b")
@@ -85,7 +86,7 @@ def test_verified_reassociation_preserves_earliest_history(store):
 
 
 def test_interruption_rolls_back_index_and_checkpoint(store, monkeypatch):
-    store.identities.upsert_identity("main", "bridge", None, True)
+    store.accounts.upsert_account("main", "bridge", None, True)
     store.tracks.upsert_track("a", "Song", "Artist", None, 200)
     key = store.tracks.identity_key_for_video("a")
     _history(store, key, 20); _assert_first(store, key, "Artist", 20)
@@ -94,21 +95,21 @@ def test_interruption_rolls_back_index_and_checkpoint(store, monkeypatch):
     assert store.trends.first_play_map("track") == {}
     watermark = store.settings.get_setting("trend_first_play_watermark")
     before = list(map(tuple, store.conn.execute("SELECT * FROM trend_first_play")))
-    original = store.trends._rebuild_artist_first_play
+    original = store.trends._replace_first_play
     def interrupted():
         original()
         raise RuntimeError("interrupted after index writes")
-    monkeypatch.setattr(store.trends, "_rebuild_artist_first_play", interrupted)
+    monkeypatch.setattr(store.trends, "_replace_first_play", interrupted)
     with pytest.raises(RuntimeError, match="interrupted"):
         store.trends.refresh_first_play()
     assert list(map(tuple, store.conn.execute("SELECT * FROM trend_first_play"))) == before
     assert store.settings.get_setting("trend_first_play_watermark") == watermark
-    monkeypatch.setattr(store.trends, "_rebuild_artist_first_play", original)
+    monkeypatch.setattr(store.trends, "_replace_first_play", original)
     _assert_first(store, key, "Artist", 10)
 
 
 def test_exact_ledger_preserves_earlier_coarse_evidence(store):
-    store.identities.upsert_identity("main", "bridge", None, True)
+    store.accounts.upsert_account("main", "bridge", None, True)
     store.tracks.upsert_track("a", "Song", "Artist", None, 200)
     key = store.tracks.identity_key_for_video("a")
     _history(store, key, 10); _assert_first(store, key, "Artist", 10)

@@ -8,6 +8,7 @@ import pytest
 from playwright.sync_api import expect
 
 LAB = Path(__file__).resolve().parents[2] / 'experiments' / 'audio_lab'
+MODEL = Path(__file__).resolve().parents[2] / 'extension/audio_model'
 
 
 def invoke_toolbar(context, worker, page):
@@ -37,20 +38,21 @@ def wait_for_cleanup(worker):
 
 @pytest.fixture
 def audio_lab(playwright, browser_type_launch_args, tmp_path, request):
-    lab = LAB
+    # Stage the production runtime beside the experiment's capture UI. The lab
+    # owns no separate inference source, and no personal research data is copied.
+    lab = tmp_path / 'audio-lab'
     variant = getattr(request, 'param', None)
-    if variant in {'legacy', 'tampered'}:
-        # Installed-extension negative controls preserve the real source bundle.
-        lab = tmp_path / (variant + '-lab')
-        ignored = ['__pycache__'] + (['runtime.json', 'essentia-csp.js'] if variant == 'legacy' else [])
-        shutil.copytree(LAB, lab, ignore=shutil.ignore_patterns(*ignored))
-        if variant == 'tampered':
-            path = lab / 'vendor/runtime.json'
-            if not path.exists():
-                pytest.skip('Build the optional CSP-compatible research runtime first')
-            manifest = json.loads(path.read_text())
-            manifest['files'][0]['sha256'] = '0' * 64
-            path.write_text(json.dumps(manifest))
+    ignored = ['__pycache__', 'local'] + (['runtime.json', 'essentia-csp.js'] if variant == 'legacy' else [])
+    shutil.copytree(LAB, lab, ignore=shutil.ignore_patterns(*ignored))
+    production_ignored = ignored + (['bundle.json'] if variant == 'legacy' else [])
+    shutil.copytree(MODEL, lab, dirs_exist_ok=True, ignore=shutil.ignore_patterns(*production_ignored))
+    if variant == 'tampered':
+        path = lab / 'vendor/runtime.json'
+        if not path.exists():
+            pytest.skip('Build the CSP-compatible audio runtime first')
+        manifest = json.loads(path.read_text())
+        manifest['files'][0]['sha256'] = '0' * 64
+        path.write_text(json.dumps(manifest))
     context = playwright.chromium.launch_persistent_context(
         tmp_path / 'profile', **{**browser_type_launch_args, 'channel': 'chromium'},
         ignore_default_args=['--mute-audio'],

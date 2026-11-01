@@ -5,6 +5,8 @@ from yt_playlist.rec import rec_params
 
 
 def interest_key(row):
+    if row['format'] == 'mixes':
+        return ('mixes', row.get('descriptor_id'))
     return (row["format"], row.get("basis"), row.get("mode_id"), row.get("intent"),
             row["option_id"] if row["format"] == "albums" or row.get("mode_id") is None else None)
 
@@ -14,6 +16,8 @@ def contexts(store, now=None):
     projection = store.rec_proposals.get_proposals("choice_interests") or {}
     result = []
     for latest in projection.get("contexts", []):
+        if latest['format'] == 'mixes' and latest.get('descriptor_id') is None:
+            continue  # Old selected-track projections are not broad descriptor evidence.
         if latest["at"] > now:
             continue
         age = max(0, now - latest["at"])

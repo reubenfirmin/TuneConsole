@@ -11,7 +11,7 @@ from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
@@ -31,7 +31,8 @@ def _modelled_track(store, vid, title, artist, xy):
 
 def test_page_renders_canvas(store):
     c, _ = _client(store)
-    store.rec_model.replace_rec_vectors([("a|b", np.ones(4, dtype=np.float32).tobytes())])   # model built
+    _, row = _modelled_track(store, 'canvas', 'A', 'B', np.ones(4))
+    store.rec_model.replace_rec_vectors([row])   # model built over a real recording
     html = c.get("/clusters").text
     assert "cluster-canvas" in html          # the pan/zoom canvas mount point
 
@@ -74,7 +75,7 @@ def test_expand_empty_without_model(store):
 
 
 def _save_client(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     fc = FakeClient()
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), fc

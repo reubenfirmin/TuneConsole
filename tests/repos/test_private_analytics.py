@@ -16,7 +16,7 @@ from yt_playlist.web.routes import charts as chart_routes
 def library(tmp_path):
     store = Store(tmp_path / 'library.db')
     store.init_schema()
-    account = store.identities.upsert_identity('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', 'cred', None, True)
     entry = store.tracks.upsert_track('video', 'Song', 'Artist', 'Album', 180,
                                      album_browse_id='B', thumbnail='/cover.png')
     playlist = store.playlists.upsert_playlist(account, 'PL', 'Mix', 1, 'h', 0)
@@ -100,7 +100,8 @@ def test_playlist_analytics_in_owned_transaction_see_uncommitted_membership(libr
 
     monkeypatch.setattr(store, '_make_reader', forbidden)
     with store._lock:
-        store.conn.execute('DELETE FROM playlist_tracks WHERE playlist_id=?', (playlist,))
+        store.conn.execute('DELETE FROM playlist_items WHERE playlist_id=?', (playlist,))
+        store.conn.execute('DELETE FROM unresolved_playlist_items WHERE playlist_id=?', (playlist,))
         try:
             assert store.charts.playlist_tracks_detail(playlist) == []
         finally:

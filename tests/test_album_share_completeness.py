@@ -17,7 +17,7 @@ def _album():
 
 
 def _client(store, album=None):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.collection.replace_saved_albums([{"browse": "MPRE", "title": "Album", "artist": "Artist"}])
     client = FakeClient(albums={"MPRE": album}) if album is not None else None
     return TestClient(create_app(store, lambda: {iid: client} if client else {}, now_fn=lambda: 1),
@@ -72,7 +72,7 @@ def test_failed_or_incomplete_live_read_never_downloads_a_partial_file(store, pr
 def test_materialization_boundary_remains_required_even_with_an_ordered_snapshot(store):
     _materialize(store)
     assert store.collection.cached_album_share("MPRE") is not None
-    store.conn.execute("DELETE FROM album_track_links WHERE video_id='v1'")
+    store.conn.execute("DELETE FROM library_memberships WHERE entry_id IN (SELECT id FROM catalog_entries WHERE video_id='v1')")
     store.conn.commit()
     assert _client(store).get("/album/MPRE/share.txt").status_code == 503
 
@@ -92,7 +92,7 @@ def test_upgrade_preserves_denominators_without_inventing_original_order():
     store.conn.execute("INSERT INTO album_tracklists VALUES ('MPRE','Album','Artist',NULL,'[\"first|artist\",\"second|artist\"]')")
     store.conn.commit()
     store.init_schema()
-    assert store.conn.execute("SELECT track_keys FROM album_tracklists").fetchone()[0] == '["first|artist","second|artist"]'
+    assert store.conn.execute("SELECT track_keys FROM album_tracklist_keys").fetchone()[0] == '["first|artist","second|artist"]'
     assert store.conn.execute("SELECT COUNT(*) FROM album_share_snapshots").fetchone()[0] == 0
     store.init_schema()
     assert store.conn.execute("SELECT COUNT(*) FROM album_tracklists").fetchone()[0] == 1

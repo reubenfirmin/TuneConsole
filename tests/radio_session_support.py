@@ -50,7 +50,7 @@ class Playlist:
 @pytest.fixture
 def poc(monkeypatch, store):
     remote, frames, workers = Playlist(), [], []
-    identity = store.identities.upsert_identity("main", "ref", None, True)
+    identity = store.accounts.upsert_account("main", "ref", None, True)
     from yt_playlist.core.bridge import Bridge
     ownership = Bridge()
 
@@ -95,6 +95,7 @@ def poc(monkeypatch, store):
 
     class Candidates:
         def __init__(self, store, now, tuning=None, *, now_source=None, comparison=None):
+            self.store = store
             self.comparison = getattr(now_source, 'comparison', comparison)
             self.tuning = radio_session.radio_tuning.controls(tuning or radio_session.radio_tuning.DEFAULTS)
             self.now_sampled_at = now
@@ -146,7 +147,7 @@ def poc(monkeypatch, store):
 
     def create(store, title, tracks, client, now, identity):
         assert title.startswith("Radio Session · ")
-        assert identity == store.identities.get_master_identity().id
+        assert identity == store.accounts.get_master_account().id
         remote.ids = [t["video_id"] for t in tracks]
         bridge.native_ids = list(remote.ids)
         pid = store.playlists.upsert_playlist(identity, "PLSESSION", title, len(tracks), "", now)
@@ -156,8 +157,12 @@ def poc(monkeypatch, store):
 
     monkeypatch.setattr(playlist_generated, "create_generated_playlist", create)
     yield controller, remote, frames, workers, pool
-    controller.stop()
-    controller.work.stop_executor()
+    # Fixture disposal is not an explicit user Stop. A restart may have
+    # replaced this controller's checkpoint; do not persist its stale session.
+    try:
+        controller.suspend()
+    finally:
+        controller.work.stop_executor()
 
 
 def play(controller, video, playlist="PLSESSION", **extra):

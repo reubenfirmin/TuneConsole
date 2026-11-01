@@ -22,13 +22,19 @@ def test_musical_evidence_opens_with_keyboard_and_fits_narrow_screens(song_app, 
     page.goto(song_app['base'] + '/track/owned-song')
     evidence = page.locator('.track-musical-evidence')
     expect(evidence).not_to_have_attribute('open', '')
-    expect(evidence.locator('.track-musical-signals')).not_to_be_visible()
+    expect(evidence.locator('> .track-musical-signals')).not_to_be_visible()
     evidence.locator('> summary').focus()
     page.keyboard.press('Enter')
     expect(evidence).to_have_attribute('open', '')
     expect(evidence).to_contain_text('Used by On Air and Mix Tapes')
     expect(evidence.locator('[data-musical-signal="relaxed"]')).to_contain_text('Model prediction')
     expect(evidence.locator('[data-musical-signal="tempo"]')).to_contain_text('Unknown')
+    vibes = evidence.locator('.track-vibe-evidence')
+    vibes.locator('> summary').focus()
+    page.keyboard.press('Enter')
+    expect(vibes).to_have_attribute('open', '')
+    expect(vibes.locator('[data-vibe-evidence]')).to_have_count(6)
+    expect(vibes).to_contain_text('not your ratings')
     evidence.locator('.track-musical-sources > summary').click()
     expect(evidence).to_contain_text('relaxed-model-v1')
     expect(evidence).to_contain_text('mood relaxed: 0.8 (probability)')
@@ -101,7 +107,7 @@ def test_populated_track_keeps_memberships_and_precise_ledger_together(song_app,
     memberships = page.locator('[aria-labelledby="track-playlists-title"]').bounding_box()
     assert ledger.bounding_box()['y'] > memberships['y'] + memberships['height']
     assert abs(ledger.bounding_box()['width'] - memberships['width']) < 2
-    for identity in store.identities.get_identities():
+    for identity in store.accounts.get_accounts():
         for section in ['.track-memberships', '.track-ledger']:
             expect(page.locator(section)).not_to_contain_text(identity.label)
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
@@ -113,7 +119,7 @@ def test_native_verified_play_populates_track_history(song_app, page, reload_pag
     from types import SimpleNamespace
     from yt_playlist.library.live_plays import handle_play_event
     store = song_app['store']
-    store.identities.upsert_identity('Native player', 'native-player-cred', 'native-player-brand', False)
+    store.accounts.upsert_account('Native player', 'native-player-cred', 'native-player-brand', False)
     video = 'FDuJmIOtT7I'
     title = "Most Precious Love (DF's Future 3000 Extended Mix) (feat. Barbara Tucker)"
     store.tracks.upsert_track(video, title, 'Blaze', '', 480,

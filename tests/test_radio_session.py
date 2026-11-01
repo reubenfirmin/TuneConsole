@@ -16,7 +16,7 @@ from tests.radio_session_support import poc, play
 def test_radio_session_titles_are_numbered_per_local_day(poc, prior_titles):
     c, *_ = poc
     store = c.ctx.store
-    identity = store.identities.get_master_identity().id
+    identity = store.accounts.get_master_account().id
     for index, title in enumerate([*prior_titles, "Radio Session · 2026-10-21 #9",
                                    "Fresh songs - October 22 2026 #9"]):
         store.playlists.upsert_playlist(identity, f"PLPREVIOUS{index}", title, 0, "", 0)
@@ -99,7 +99,7 @@ def test_explicit_skip_records_one_request_and_stale_retries_do_not_reject_the_n
     rows = c.ctx.store.player_events.player_events_since(0, kind='next')
     assert len(rows) == 1
     assert rows[0]['video_id'] == 'v1' and rows[0]['position'] == 1
-    assert rows[0]['identity_id'] == c.session.identity
+    assert rows[0]['account_id'] == c.session.identity
     assert c.skip('v1') == {'ok': True}
     assert c.ctx.store.player_events.player_events_since(0, kind='next') == rows
 
@@ -110,7 +110,7 @@ def test_cached_seed_suggestions_recheck_skip_breaks_and_return_after_expiry(poc
     offer = c.seeds()
     track = offer['tracks'][0]
     c.ctx.store.player_events.record_player_event(
-        c.ctx.store.identities.get_master_identity().id, 'next', track['video_id'], 1, 200, '', None, 1234)
+        c.ctx.store.accounts.get_master_account().id, 'next', track['video_id'], 1, 200, '', None, 1234)
     if restored:
         c.offer = None
     bootstrap = c.bootstrap()
@@ -258,6 +258,11 @@ def test_restart_with_old_radio_paused_starts_the_chosen_song(poc):
     assert frames[-1]["url"] == "https://music.youtube.com/watch?v=v5&list=PLSESSION"
     assert state["starting"]
     restarted.stop()
+    checkpoint = restarted.persistence.load()
+    with pytest.raises(ValueError, match='changed.*worker'):
+        c.stop()
+    c.suspend()
+    assert restarted.persistence.load() == checkpoint
 
 
 def test_native_observer_confirms_launch_without_a_visible_radio_page(poc):

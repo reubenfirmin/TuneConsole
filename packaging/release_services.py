@@ -30,7 +30,7 @@ def report(message):
 
 
 class RegistryPreflightError(RuntimeError):
-    """Only operation names and numeric statuses may reach the CI log."""
+    """Only fixed operation/reason names and numeric statuses reach the CI log."""
 
     def __init__(self, operation, status=None):
         self.operation = operation
@@ -54,12 +54,32 @@ def registry_response(request, operation, expected_status):
 
 
 def registry_upload_location(request, response, name):
-    location = urllib.parse.urljoin(request.full_url, response.headers["Location"])
-    target = urllib.parse.urlsplit(location)
+    raw = response.headers.get("Location")
+    if not raw:
+        raise RegistryPreflightError("upload location validation: missing-location")
+    try:
+        location = urllib.parse.urljoin(request.full_url, raw)
+        target = urllib.parse.urlsplit(location)
+    except (TypeError, ValueError):
+        # URL parsing errors can include the auth-bearing Location itself.
+        raise RegistryPreflightError("upload location validation: malformed-location") from None
     upload_prefix = f"/v2/{name}/blobs/uploads/"
-    if (target.scheme != "https" or target.netloc != "ghcr.io" or target.fragment
-            or not target.path.startswith(upload_prefix) or target.path == upload_prefix):
-        raise RegistryPreflightError("upload location validation")
+    reason = None
+    if target.scheme != "https":
+        reason = "unexpected-scheme"
+    elif target.netloc != "ghcr.io":
+        reason = "unexpected-authority"
+    elif target.fragment:
+        reason = "unexpected-fragment"
+    elif not target.path.startswith(f"/v2/{name}/"):
+        reason = "unexpected-repository-path"
+    elif not target.path.startswith(upload_prefix):
+        reason = "unexpected-upload-path"
+    elif target.path == upload_prefix:
+        reason = "missing-session-path"
+    if reason:
+        query = "present" if target.query else "absent"
+        raise RegistryPreflightError(f"upload location validation: {reason}; query={query}")
     return location
 
 

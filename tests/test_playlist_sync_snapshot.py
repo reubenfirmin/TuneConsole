@@ -19,7 +19,7 @@ class SnapshotClient(FakeClient):
 @pytest.fixture
 def cached(store, monkeypatch):
     monkeypatch.setattr(sync, "with_retry", lambda fn, **kwargs: fn())
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     tracks = [{**_track(video, video.upper(), "Artist", set_video_id="set-" + video),
                "likeStatus": "INDIFFERENT"} for video in ("b", "a", "c")]
     client = SnapshotClient(playlists=[{"playlistId": "PL", "title": "Mix"}], tracks={"PL": tracks})
@@ -51,7 +51,7 @@ def test_partial_reads_preserve_complete_cache_and_success_timestamp(store, cach
     assert resource["refreshed"] == resource["skipped"] == 0
     assert resource["incomplete"] == 1 and "1 incomplete" in resource["message"]
     assert resource["last_success_at"] == 100 and resource["last_attempt_at"] == 200
-    assert store.settings.get_setting("last_sync_at") == "100"
+    assert float(store.settings.get_setting("last_sync_at")) == 100
     assert not sync_due(store, 201, 86400)
     assert sync_due(store, 500, 86400)
     assert events[-1]["outcome"] == "partial"
@@ -91,13 +91,13 @@ def test_complete_read_after_partial_replaces_order_and_allows_real_removals(sto
     assert after.track_count == len(expected)
     assert after.content_hash == content_hash([] if empty else ["c|artist", "b|artist"])
     assert after.last_changed == after.last_seen == 300
-    assert store.settings.get_setting("last_sync_at") == "300"
+    assert float(store.settings.get_setting("last_sync_at")) == 300
 
 
 @pytest.mark.parametrize("generated", [False, True])
 @pytest.mark.parametrize("empty", [False, True])
 def test_new_partial_playlist_retains_observations_without_inventing_membership(store, generated, empty):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     track = {**_track("new", "New song", "Artist"), "likeStatus": "LIKE"}
     client = SnapshotClient(playlists=[{"playlistId": "NEW", "title": "New mix"}], tracks={"NEW": [track]})
     client.response = {"tracks": [] if empty else [track], "continuation": "next",
@@ -142,7 +142,7 @@ def test_partial_playlist_and_unavailable_neighbor_report_partial_progress(store
 
 def test_partial_neutrals_cannot_erase_ratings_or_independent_history(store, cached):
     iid, client, before, ordered = cached
-    other = store.identities.upsert_identity("Other", "bridge", "other", False)
+    other = store.accounts.upsert_account("Other", "bridge", "other", False)
     ratings.record_confirmed(store, iid, "a", "LIKE", 110)
     ratings.record_confirmed(store, other, "a", "DISLIKE", 111)
     store.history.record_history_plays(other, 100, ["a|artist"], source_timezone="UTC")
@@ -225,7 +225,7 @@ def test_complete_read_cannot_replace_a_newer_confirmed_edit(store, cached, monk
         assert resource['status'] == 'partial' and resource['refreshed'] == 0
         assert resource['items']['PL']['last_success_at'] == 100
         assert resource['items']['PL']['retry_at'] > 200
-        assert store.settings.get_setting('last_sync_at') == '100'
+        assert float(store.settings.get_setting('last_sync_at')) == 100
     assert store.playlists.get_playlists() == changed['playlists']
     assert {p.id: store.playlists.get_playlist_track_ids(p.id) for p in changed['playlists']} == changed['tracks']
     assert store.tracks.identity_key_for_video('observed') == 'observed only|artist'

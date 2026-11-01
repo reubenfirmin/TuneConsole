@@ -25,7 +25,7 @@ def listening_enabled(monkeypatch, store):
 
 
 def seed(store):
-    iid = store.identities.upsert_identity('Listener', 'fixture', None, True)
+    iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
     for key, artist, genre in [('a', 'A', 'Techno'), ('b', 'A', 'Techno'), ('c', 'B', 'Jazz')]:
         seed_catalog_track(store, key, key.upper(), artist, video_id='v'+key, genre=genre)
     return iid
@@ -182,7 +182,7 @@ def test_publication_uses_compact_manifest_and_preserves_inflight_previous_chunk
 
 
 def test_rating_start_is_frozen_queued_and_never_borrowed_from_another_play(store):
-    iid = store.identities.upsert_identity('Listener', 'fixture', None, True)
+    iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
     offers = []
     store.choice_capture = CaptureQueue(lambda capture: offers.append(capture) or True)
     ctx = SimpleNamespace(store=store)
@@ -248,7 +248,7 @@ def test_conflicting_sources_keep_last_good_and_scans_require_private_reader(sto
 def test_snapshot_scans_are_bounded_and_cancellable(store, monkeypatch):
     iid = seed(store)
     with store.conn:
-        store.conn.executemany('INSERT INTO player_events(identity_id,kind,video_id,position,at) VALUES (?,?,?,?,?)',
+        store.conn.executemany('INSERT INTO player_events(account_id,kind,video_id,position,at) VALUES (?,?,?,?,?)',
             [(iid, 'tick', 'va', n, NOW-1000+n) for n in range(600)])
     with store.read_snapshot() as snapshot:
         batches = list(ListeningAnalyticsRepo(snapshot.store).player(NOW))
@@ -285,16 +285,52 @@ def test_snapshot_scans_are_bounded_and_cancellable(store, monkeypatch):
                 assert state['locked']
                 return CheckedCursor(connection.execute(*args))
 
-        repo._lock, repo.conn = Guard(), CheckedConnection()
-        stream = repo.player(NOW)
-        assert len(next(stream)) == 256
-        assert not state['locked']  # Consumer calculation must run outside the guard.
+        repo._lock = Guard()
+        with monkeypatch.context() as instrument:
+            instrument.setattr(snapshot.store, 'conn', CheckedConnection())
+            stream = repo.player(NOW)
+            assert len(next(stream)) == 256
+            assert not state['locked']  # Consumer calculation must run outside the guard.
 
-        def cancelled():
-            raise WorkBudgetExceeded('cancelled between batches')
+            def cancelled():
+                raise WorkBudgetExceeded('cancelled between batches')
 
-        monkeypatch.setattr('yt_playlist.repos.listening_analytics.check_cancellable_work', cancelled)
-        with pytest.raises(WorkBudgetExceeded, match='between batches'):
-            next(stream)
+            instrument.setattr('yt_playlist.repos.listening_analytics.check_cancellable_work', cancelled)
+            with pytest.raises(WorkBudgetExceeded, match='between batches'):
+                next(stream)
         assert state == {'locked': False, 'closed': True, 'fetches': 1}
     assert ('player_events','') not in maintenance.DEPENDENCIES['analytics']
+
+
+def test_catalog_scan_rejects_writer_before_sql_and_guards_schema_discovery(store, monkeypatch):
+    seed(store)
+    repo = ListeningAnalyticsRepo(store)
+
+    class NoSQL:
+        def execute(self, *args):
+            pytest.fail('Writer rejection must happen before schema discovery')
+
+    with monkeypatch.context() as instrument:
+        instrument.setattr(store, 'conn', NoSQL())
+        with pytest.raises(RuntimeError, match='private worker snapshot'):
+            repo.catalog_rows()
+
+    with store.read_snapshot() as snapshot:
+        repo = ListeningAnalyticsRepo(snapshot.store)
+        connection, lock = repo.conn, repo._lock
+        queries = []
+
+        class CheckedConnection:
+            def execute(self, sql, *args):
+                assert lock._is_owned()
+                queries.append(sql)
+                return connection.execute(sql, *args)
+
+        with monkeypatch.context() as instrument:
+            instrument.setattr(snapshot.store, 'conn', CheckedConnection())
+            stream = repo.catalog_rows()
+            rows = next(stream)
+            assert {row['identity_key'] for row in rows} == {'a', 'b', 'c'}
+            assert not lock._is_owned()
+            assert any('sqlite_' in sql for sql in queries)
+            stream.close()

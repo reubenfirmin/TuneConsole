@@ -40,7 +40,7 @@ def test_cached_score_and_build_policy_survive_new_rendering_preferences(store):
 
 
 def test_policy_fingerprint_tracks_playlist_taste_without_vector_rebuild(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.tracks.upsert_track("a", "A", "Artist", None, None)
     b = store.tracks.upsert_track("b", "B", "Artist", None, None)
     pid = store.playlists.upsert_playlist(iid, "PL", "Listening", 1, "h", 0)

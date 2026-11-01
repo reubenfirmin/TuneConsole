@@ -6,7 +6,7 @@ from tests.test_mode_cards_route import prepare_home
 
 
 def _seed(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("v1", "Hit", "Fav", None, None)
     store.tracks.upsert_track("v2", "Bench", "Fav", None, None)   # deep cut -> appears in for_you
     now = 1000.0
@@ -65,7 +65,7 @@ def test_mute_artist_via_chip(store):
 
 
 def test_feedback_axis_routes_through_graduation_and_eventually_moves_weight(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     from fastapi.testclient import TestClient
     from yt_playlist.web.app import create_app
     from tests.conftest import FakeClient

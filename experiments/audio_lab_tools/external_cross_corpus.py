@@ -13,10 +13,10 @@ TARGETS = ['valence', 'arousal']
 
 
 def exclude_overlap(source, target):
-    artists = {key for row in target for key in artist_keys(row.get('artist', '').split('+')[0])}
+    artists = {key for row in target for key in artist_keys(row.get('artist', ''))}
     titles = {identity(row['title']) for row in target if row.get('title')}
     hashes = {row['audio_sha256'] for row in target}
-    return np.array([not (artist_keys(row.get('artist', '').split('+')[0]) & artists
+    return np.array([not (artist_keys(row.get('artist', '')) & artists
                          or identity(row.get('title', '')) in titles
                          or row['audio_sha256'] in hashes) for row in source])
 
@@ -39,7 +39,7 @@ def evaluate(sources=('pmemo', 'deam', 'amg1608-matched', 'ntwicm-matched')):
                                  'Matched AMG/NTWICM subsets are selected by local audio availability and provide weak song-level labels.',
                                  'No developer vibe labels, silver predictions, or product database data enter fitting.']}
         for source, (rows, y, groups, features, provenance) in corpora.items():
-            for target, (test_rows, test_y, _, test_features, test_provenance) in corpora.items():
+            for target, (test_rows, test_y, test_groups, test_features, test_provenance) in corpora.items():
                 if source == target:
                     continue
                 case = source + '__to__' + target
@@ -72,7 +72,7 @@ def evaluate(sources=('pmemo', 'deam', 'amg1608-matched', 'ntwicm-matched')):
                         fitted_values = predict(model, test_features[family]) if family == 'attributes' else prediction(model, test_features[family])
                         values[name] = fitted_values
                         improvement = bootstrap_improvement(test_y, baseline, fitted_values,
-                                                            [row['group'] for row in test_rows], [0, 1])
+                                                            test_groups, [0, 1])
                         improvement['method'] = 'Paired target-group bootstrap of fixed zero-shot predictions; source fit and selection are not repeated.'
                         item['methods'][name] = {**metrics(test_y, fitted_values, TARGETS),
                                                  'versus_source_mean': improvement,

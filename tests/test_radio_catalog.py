@@ -20,10 +20,14 @@ def catalog_track(store, video, label="Downtempo", *, artist=None, duration=200,
 
 @pytest.fixture
 def seed(store):
-    track, _ = catalog_track(store, "seed")
+    from tests.recommendation_support import publish_bundles
+    track, entry = catalog_track(store, "seed")
+    account = store.accounts.upsert_account('Main','credential',None,True)
+    playlist = store.playlists.upsert_playlist(account,'LIBRARY','Library',1,'hash',1)
+    store.playlists.set_playlist_tracks(playlist,[entry])
     store.modes.replace_modes([dict(mode_id=1, label="Electronic", families=[["electro-synth", 1]],
         centroid=np.array([1., 0.], dtype=np.float32), size=1, rep_keys=[track["key"]])], [], 1)
-    store.rec_proposals.put_proposals("mode_bundles", {"1": {"wheelhouse": [track]}})
+    publish_bundles(store,{"1": {"wheelhouse": [track]}},now=1)
     return track
 
 
@@ -34,7 +38,7 @@ def candidates(store, **tuning):
 
 
 def test_prepared_pool_reuses_the_accounts_verified_playable_upload(store, seed):
-    owner = store.identities.upsert_identity('Main', 'credential', None, True)
+    owner = store.accounts.upsert_account('Main', 'credential', None, True)
     actual = {**seed, 'video_id': 'playable', 'duration': 200}
     store.tracks.upsert_track('playable', seed['title'], seed['artist'], '', 200)
     store.tracks.remember_playback_alternate(owner, {**seed, 'duration': 200}, actual,
@@ -46,18 +50,18 @@ def test_prepared_pool_reuses_the_accounts_verified_playable_upload(store, seed)
 
 def test_album_links_survive_prepared_and_catalog_hydration_and_metadata_refresh(store, seed):
     with store.conn:
-        store.conn.execute("UPDATE tracks SET album='Seed album',album_browse_id='MPREseed' WHERE video_id='seed'")
+        store.conn.execute("UPDATE youtube_items SET album='Seed album',album_browse_id='MPREseed' WHERE video_id='seed'")
     c = candidates(store)
     prepared = c._load('1')[0]
     assert (prepared['album'], prepared['album_browse_id']) == ('Seed album', 'MPREseed')
     fresh, _ = catalog_track(store, 'catalog-album')
     with store.conn:
-        store.conn.execute("UPDATE tracks SET album='Catalog album',album_browse_id='MPREcatalog' WHERE video_id='catalog-album'")
+        store.conn.execute("UPDATE youtube_items SET album='Catalog album',album_browse_id='MPREcatalog' WHERE video_id='catalog-album'")
     picked = c.next_track([seed])
     assert picked['video_id'] == fresh['video_id']
     assert (picked['album'], picked['album_browse_id']) == ('Catalog album', 'MPREcatalog')
     with store.conn:
-        store.conn.execute("UPDATE tracks SET album='Enriched album',album_browse_id='MPREenriched' WHERE video_id='catalog-album'")
+        store.conn.execute("UPDATE youtube_items SET album='Enriched album',album_browse_id='MPREenriched' WHERE video_id='catalog-album'")
     assert c.refresh_metadata([picked])
     assert (picked['album'], picked['album_browse_id']) == ('Enriched album', 'MPREenriched')
 

@@ -11,7 +11,7 @@ from threadpoolctl import threadpool_limits
 
 from .external_experiment import DATA, OUT, digest, save, stamp
 from .external_training import (choose_alpha, feature_matrices, fit_path, folds,
-                                metrics, predict)
+                                metrics, predict, validation_groups)
 
 
 def dynamic_annotations(dataset):
@@ -104,7 +104,7 @@ def evaluate(dataset):
         names = rows[0]['target_names']
         y = np.array([row['targets'] for row in rows])
         static = np.array([row['static_targets'] for row in rows])
-        groups = [row['group'] for row in rows]
+        groups = validation_groups(rows)
         split = folds(groups)
         matrices = feature_matrices(rows)[0]
         result, saved_predictions = {}, {}

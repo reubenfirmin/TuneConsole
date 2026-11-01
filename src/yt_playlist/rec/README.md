@@ -68,8 +68,53 @@ from distinct measured recordings with the same canonical artist credit set and
 specific subgenre, then artist-only or subgenre-only evidence. The original
 musical heuristic fills missing evidence. Broad genres never form prediction
 cohorts, and predictions never become measurement evidence. Home uses these
-scores directly; radio's intensity control uses the greater prepared Energize
-or Let off steam fit, so slow forceful music does not masquerade as chill.
+scores directly; radio's intensity control uses the greater prepared shared
+Energize or shared Release fit, preserving comparable scales and their own
+propagation lineage. Slow forceful music can still count as intense.
+
+`audio_vibe_cruise` supplies Cruise suitability from the bundled PMEmo/DEAM
+native arousal/valence heads. It averages native attributes across captured
+excerpts, maps each source to moderate activation and positive valence, then
+averages the two source scores. `audio_vibe_release` averages per-excerpt clipped
+Jamendo aggression predictions. `audio_vibe_relax` averages per-excerpt clipped
+native attributes, applies fixed source mappings and combines Emotify (50%),
+Soundtracks (25%), ManyMusic (12.5%, equal natural/generated experts) and Memo
+(12.5%). Its serving aggregation is explicit; the frozen training used mean
+embeddings. `audio_vibe_uplift` uses the same serving order with separate native
+valence/happiness/joy predictors: Soundtracks 25%; DEAM, PMEmo, Jamendo human,
+Emotify, ManyMusic and Memo 12.5% each. ManyMusic again splits equally between
+natural and generated experts. The user selected this fixed blend while
+accepting the documented generated-music regression; the learned blend is not
+used. `audio_vibe_energize` uses the same per-excerpt clipping/averaging order:
+50% source-balanced arousal (DEAM, PMEmo, ManyMusic and Memo), 25% Soundtracks
+energy and 25% Emotify power. ManyMusic splits equally across natural/generated
+experts. The no-joy export omits joy and the exercise mapping; user adoption
+accepts the research tradeoffs and favors broader labeled-source coverage.
+`audio_vibe_focus` predicts the original CAL500 Reading and Studying fractions
+directly from each excerpt's embedding, clips both outputs, averages across
+excerpts and takes their equal mean. Its frozen heads use 494 labeled songs;
+the internal vibe key remains `concentrate`.
+`audio_vibe_model` retains the shared Emotify model's six-way
+classification and adds a separate `suitability` map for preparation: individual
+Cruise, Release, Relax, Uplift, Energize and Focus. These uncalibrated
+scores rank songs within a selected vibe; they never enter a mixed six-way
+maximum or the banner's classification threshold.
+
+All six specialists default to `active`. Set `YT_PLAYLIST_AUDIO_VIBE_RELAX_MODE`,
+`YT_PLAYLIST_AUDIO_VIBE_RELEASE_MODE`, `YT_PLAYLIST_AUDIO_VIBE_CRUISE_MODE` or
+`YT_PLAYLIST_AUDIO_VIBE_UPLIFT_MODE`, `YT_PLAYLIST_AUDIO_VIBE_ENERGIZE_MODE` or
+`YT_PLAYLIST_AUDIO_VIBE_FOCUS_MODE` to
+`off` for that vibe's rollback. Cruise also retains its existing `shadow`
+diagnostic mode. The corresponding `_MODEL` setting overrides each bundled JSON
+path; an explicit empty path disables it. Environment values take precedence
+over `.env.local`. Missing, invalid or extractor-incompatible optional models
+retain that vibe's shared score and any other working specialists. Disabling
+the shared model also disables the specialists. The bounded preparation version
+includes all artifact hashes, routing modes and policy versions, so changing or
+rolling back a head refreshes existing
+captures and their propagated predictions without audio extraction or fitting.
+Incomplete playbacks retain the existing provider/heuristic fallback until a
+complete capture is available. Raw labels and experiment files are never read.
 
 Seven relations own this data: `sample_attributes` references immutable sample
 JSON files; `measurements` retains model scores, linked through `measurement_samples`;
@@ -152,8 +197,9 @@ queries do not forward historical, eligibility or candidate methods.
 
 Serving persistence has explicit owners too. `repos.rec_ledger` owns rendered
 offers, responses, exposure counters, immutable serving policies and historical
-attribution inputs. Its reserved `home_shown` proposal key only deduplicates
-actual offers. `repos.rec_proposals` owns last-good prepared output;
+attribution inputs. Its typed `home_offer_dedup` and `home_offer_signatures`
+owners atomically deduplicate actual offers independently of prepared output.
+`repos.rec_proposals` still owns the remaining last-good prepared output;
 `repos.playlist_recipes` owns saved recipes and Clusters canvases;
 `repos.rec_signals` owns mood feedback, themes and graduation history; and
 `repos.artist_similarity` owns the Last.fm cache and canonical similarity edges.

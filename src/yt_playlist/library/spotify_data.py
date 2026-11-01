@@ -157,7 +157,7 @@ def load_streaming_history(raw) -> tuple[list[dict], int]:
 
 def resolve_import_identity(store):
     """A local Spotify export belongs to the configured main identity, not a live YTM session."""
-    identities = store.identities.get_identities()
+    identities = store.accounts.get_accounts()
     main = [identity for identity in identities if identity.is_master]
     candidates = main or identities
     return candidates[0].id if len(candidates) == 1 else None

@@ -1,0 +1,30 @@
+{% if proto %}
+<section class="artist-first-set" id="gen-{{ proto.lane }}" data-first-set>
+  <div class="gen-card-body" data-name="{{ proto.name }}">
+    <div class="artist-first-set-copy">
+      <h2>Your first set is ready.</h2>
+      <button class="btn btn-primary artist-start-primary" type="button" data-onboarding-play data-artist-first-play
+              hx-post="/home/generate" hx-target="#gen-{{ proto.lane }}" hx-swap="outerHTML" hx-disabled-elt="this"
+              onclick="genOpenYT('gen-{{ proto.lane }}')"
+              hx-vals='js:{name: genName("gen-{{ proto.lane }}"), tracks: genTracks("gen-{{ proto.lane }}"), recipe: "", artist_start: "1"}'>
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 3.5a1 1 0 0 1 1.5-.86l14 8.5a1 1 0 0 1 0 1.72l-14 8.5A1 1 0 0 1 6 20.5z"/></svg>
+        Play my first set
+      </button>
+    </div>
+    <div class="artist-first-set-art" aria-hidden="true">
+      {% for artist in artists[:4] %}
+      <img src="{{ artist.thumbnail or '/static/onboarding-welcome.webp' }}" alt="" referrerpolicy="no-referrer" onerror="this.onerror=null;this.src='/static/onboarding-welcome.webp'">
+      {% endfor %}
+    </div>
+    <div hidden>
+      {% for track in proto.tracks %}
+      <span class="gen-row" data-key="{{ track.key }}" data-vid="{{ track.video_id }}" data-title="{{ track.title }}"
+            data-artist="{{ track.artist }}" data-album="{{ track.album }}" data-thumb="{{ track.thumbnail or '' }}"></span>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% else %}
+<h2>A little more music first.</h2>
+<p class="artist-start-intro">Choose three artists with songs available on YouTube Music. You can change a pick or try it again.</p>
+{% endif %}

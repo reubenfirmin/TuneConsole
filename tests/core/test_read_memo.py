@@ -3,6 +3,27 @@ import sqlite3
 from yt_playlist.core.store import Store
 
 
+def test_composed_read_reuses_detached_results_only_within_its_pinned_view(store):
+    store.settings.set_setting('input', 'old')
+    calls = []
+    def calculate(reader):
+        def prepare():
+            calls.append(True)
+            return {'items': [reader.settings.get_setting('input')]}
+        return reader.memoized_read('example', prepare)
+    with store.read_view() as reader:
+        first = calculate(reader)
+        first['items'].append('caller mutation')
+        store.settings.set_setting('input', 'new')
+        with reader.read_view() as nested:
+            assert calculate(nested) == {'items': ['old']}
+        assert calculate(reader) == {'items': ['old']}
+        assert len(calls) == 1
+    with store.read_view() as reader:
+        assert calculate(reader) == {'items': ['new']}
+    assert len(calls) == 2
+
+
 def test_cache_hit_keeps_publication_dependencies_and_scopes_settings(store):
     store.settings.set_setting("input", "old")
     calls = []

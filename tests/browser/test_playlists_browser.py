@@ -39,7 +39,7 @@ def live_pl_data(tmp_path, monkeypatch):
 
     s = Store(":memory:")
     s.init_schema()
-    iid = s.identities.upsert_identity("Main", "cred", None, True)
+    iid = s.accounts.upsert_account("Main", "cred", None, True)
     a = s.playlists.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
     b = s.playlists.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
     g = s.playlists.upsert_playlist(iid, "PLG", "Gamma", 1, "h", 1.0)
@@ -149,9 +149,14 @@ def test_actionbar_labels_are_clean(live_pl_app, page):
 
 
 class _SlowDeleteClient(FakeClient):
-    """Each remote delete takes a moment, like real YouTube: gives the in-flight UI a window."""
+    """Hold the actual remote operation until the test has inspected its UI."""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.entered, self.release = threading.Event(), threading.Event()
+
     def delete_playlist(self, playlistId):
-        time.sleep(1.5)
+        self.entered.set()
+        assert self.release.wait(10), 'Delete UI test did not release the provider operation'
         return super().delete_playlist(playlistId)
 
 
@@ -161,7 +166,7 @@ def live_slow_delete_app(tmp_path, monkeypatch):
 
     s = Store(":memory:")
     s.init_schema()
-    iid = s.identities.upsert_identity("Main", "cred", None, True)
+    iid = s.accounts.upsert_account("Main", "cred", None, True)
     a = s.playlists.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
     b = s.playlists.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
     s.playlists.set_playlist_tracks(a, [s.tracks.upsert_track("v1", "SongA", "X", None, None, 1)])
@@ -174,26 +179,36 @@ def live_slow_delete_app(tmp_path, monkeypatch):
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
-    while not server.started:
-        time.sleep(0.02)
-    yield f"http://127.0.0.1:{port}"
-    server.should_exit = True
-    thread.join(timeout=5)
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started:
+            assert thread.is_alive() and time.monotonic() < deadline, 'Delete server did not start'
+            time.sleep(0.02)
+        yield f"http://127.0.0.1:{port}", client
+    finally:
+        client.release.set()
+        server.should_exit = True
+        thread.join(timeout=5)
+        assert not thread.is_alive(), 'Delete server did not stop'
+        s.conn.close()
 
 
 def test_delete_shows_spinner_while_batch_is_in_flight(live_slow_delete_app, page):
     # #72: confirming a batch delete must show progress while the per-playlist remote deletes run,
     # and must not allow a second click. The modal stays up (spinner + disabled buttons) until the
     # server finishes and the page reloads.
-    page.goto(f"{live_slow_delete_app}/playlists")
+    base, client = live_slow_delete_app
+    page.goto(f"{base}/playlists")
     _select(page, "Alpha")
     _select(page, "Beta")
     page.get_by_role("button", name="Delete", exact=True).click()      # actionbar
     confirm = page.get_by_role("button", name="Delete them")
     confirm.click()                                                    # modal confirm -> in flight
+    assert client.entered.wait(5), 'Delete never reached the provider'
     expect(page.locator(".modal .spinner")).to_be_visible()            # spinner while deleting
     expect(page.get_by_role("button", name="Deleting…")).to_be_disabled()   # no double-submit
     expect(page.get_by_role("button", name="Cancel")).to_be_disabled()      # can't cancel mid-flight
+    client.release.set()
     # both remote deletes finish -> HX-Refresh reload -> rows gone
     expect(page.get_by_role("link", name="Alpha")).to_have_count(0, timeout=15000)
     expect(page.get_by_role("link", name="Beta")).to_have_count(0)
@@ -223,7 +238,7 @@ def test_copy_into_appends_songs_to_existing_playlist(live_pl_app, page):
 def test_generated_playlists_sort_by_creation_date_descending(live_app, store, page):
     from datetime import datetime
 
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     for ytm, title, created in [
         ("older", "Zulu - October 19 2026 #1", None),
         ("newer", "Beta - October 20 2026 #1", None),

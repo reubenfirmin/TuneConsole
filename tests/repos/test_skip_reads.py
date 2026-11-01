@@ -10,7 +10,7 @@ from yt_playlist.core.store import Store
 
 def _store():
     s = Store(":memory:"); s.init_schema()
-    s.identities.upsert_identity("main", "bridge", None, True)
+    s.accounts.upsert_account("main", "bridge", None, True)
     return s
 
 

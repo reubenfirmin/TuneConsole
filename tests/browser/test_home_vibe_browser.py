@@ -5,8 +5,10 @@ from html.parser import HTMLParser
 import pytest
 from playwright.sync_api import expect
 
+from tests.home_fixture_support import publish_menu
 from tests.test_home_vibe import seed_sounds
 from tests.test_mode_cards_route import prepare_home
+from tests.visual_support import capture
 from yt_playlist.rec import home_vibe, mix_tuning
 from yt_playlist.util.matching import identity_key
 
@@ -15,7 +17,7 @@ def prepare(store):
     seed_sounds(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     for i, genre in enumerate(["Jazz", "Techno", "Trance", "Indie Rock", "Ambient", "Classical"]):
         tid = store.tracks.upsert_track(f"favorite-{i}", f"Favorite {i}", f"Favorite artist {i}", None, None)
         store.tracks.set_track_genre(tid, genre)
@@ -24,6 +26,19 @@ def prepare(store):
             store.history.record_history_plays(iid, 1 - day * 86400,
                 [identity_key(f"Favorite {i}", f"Favorite artist {i}")], source_timezone="UTC")
     prepare_home(store, 1)
+
+
+def prepare_controls(store):
+    """Render a complete board and dense controls without fitting/preparing music."""
+    payload = publish_menu(store, 1)
+    genres = ['jazz', 'techno', 'trance', 'rock-indie', 'ambient', 'classical']
+    payload['fingerprint'] = {'breadth': {'families': dict.fromkeys(genres, 1 / 6), 'breadth': .8},
+                              'eras': [[str(year), 1 / 6] for year in range(1960, 2020, 10)],
+                              'transient': {}}
+    payload['genre_options'] = [{'family': genre, 'label': genre} for genre in genres]
+    store.rec_proposals.put_proposals('home_prepared', payload, 1)
+    store.settings.set_setting('last_sync_at', '1')
+    store.settings.set_setting('onboard_dismissed', '1')
 
 
 def readiness_fragment(html, *, preparing, notice='', vibe=None):
@@ -300,8 +315,9 @@ def test_vibe_feedback_waits_for_preparation_and_recovers_after_reload(live_app,
 
 
 @pytest.mark.parametrize('width,height', [(1440, 1000), (1024, 600), (390, 850), (320, 640)])
-def test_tuning_launcher_stays_at_mix_board_center_with_preference_notices(live_app, store, page, width, height):
-    prepare(store)
+def test_tuning_launcher_stays_at_mix_board_center_with_preference_notices(
+        live_app, store, page, width, height, unlocked_home_controls):
+    prepare_controls(store)
     page.set_viewport_size({'width': width, 'height': height})
     page.route('https://i.ytimg.com/**', lambda route: route.abort())
     page.goto(live_app)
@@ -322,8 +338,8 @@ def test_tuning_launcher_stays_at_mix_board_center_with_preference_notices(live_
         assert abs(centers['dy']) < 2, centers
 
 
-def test_mix_tabs_fit_desktop_mobile_and_short_windows(live_app, store, page, tmp_path):
-    prepare(store)
+def test_mix_tabs_fit_desktop_mobile_and_short_windows(live_app, store, page, tmp_path, unlocked_home_controls):
+    prepare_controls(store)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(live_app)
     page.get_by_role("button", name="Tune these mixes", exact=True).click()
@@ -358,7 +374,7 @@ def test_mix_tabs_fit_desktop_mobile_and_short_windows(live_app, store, page, tm
                 expect(last).to_be_in_viewport()
                 expect(dialog.get_by_role("button", name="Reset mix adjustments", exact=True)).to_be_in_viewport()
                 expect(dialog.get_by_role("button", name="Close mix controls", exact=True)).to_be_in_viewport()
-            page.screenshot(path=tmp_path / f"tuning-{tab.lower().replace(' ', '-')}-{width}.png")
+            capture(page, path=tmp_path / f"tuning-{tab.lower().replace(' ', '-')}-{width}.png")
         # Native disclosures keep genre adjustments handy and eras out of the initial view.
         genres = dialog.locator("details").filter(has=page.get_by_text("Your genre balance", exact=True))
         eras = dialog.locator("details").filter(has=page.get_by_text("A little time travel", exact=True))
@@ -379,7 +395,7 @@ def test_mix_tabs_fit_desktop_mobile_and_short_windows(live_app, store, page, tm
         panel = dialog.locator('[role="tabpanel"]:visible')
         assert panel.evaluate("el => el.scrollWidth <= el.clientWidth")
         expect(dialog.get_by_role("button", name="Reset mix adjustments", exact=True)).to_be_in_viewport()
-        page.screenshot(path=tmp_path / f"tuning-subgenres-{width}.png")
+        capture(page, path=tmp_path / f"tuning-subgenres-{width}.png")
         toggle.press("Space")
         expect(toggle).to_have_attribute("aria-expanded", "false")
         expect(subgenres).not_to_be_visible()

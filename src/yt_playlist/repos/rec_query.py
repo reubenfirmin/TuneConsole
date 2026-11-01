@@ -5,9 +5,9 @@ RecEligibilityRepo, and ranked library candidates to RecCandidatesRepo. This own
 only projects recorded library metadata; it does not forward those other APIs.
 """
 from collections import Counter
-from yt_playlist.core import artists
+from yt_playlist.core import artists, album_memberships, genre_identity
 
-from yt_playlist.repos.base import LIKED_EXISTS, Repo, synchronized, snapshot_read
+from yt_playlist.repos.base import LIKED_EXISTS, Repo, synchronized, snapshot_read, lookup_read
 from yt_playlist.util import genre_map
 from yt_playlist.util.years import decade as _decade
 
@@ -21,7 +21,7 @@ class RecQueryRepo(Repo):
             "SELECT identity_key FROM tracks WHERE video_id=? LIMIT 1", (video_id,)).fetchone()
         return r["identity_key"] if r else None
 
-    @synchronized
+    @lookup_read
     def track_genres(self, keys) -> dict:
         """{identity_key: genre} for the given keys that have a genre (for labelling clusters)."""
         keys = list(keys)
@@ -31,7 +31,7 @@ class RecQueryRepo(Repo):
         return {r["identity_key"]: r["genre"] for r in self.conn.execute(
             f"SELECT identity_key, genre FROM catalog_tracks WHERE identity_key IN ({qs}) AND genre<>''", keys)}
 
-    @synchronized
+    @lookup_read
     def track_decades(self, keys) -> dict:
         """{identity_key: '1990'} for keys whose mb_year is a 4-digit year (floored to its decade)."""
         keys = list(keys)
@@ -98,7 +98,7 @@ class RecQueryRepo(Repo):
                 out[d] = out.get(d, 0) + r["w"]
         return out
 
-    @synchronized
+    @snapshot_read
     def tracks_total(self) -> int:
         """Total tracks in the library (taste-model coverage denominator)."""
         return self.conn.execute("SELECT COUNT(*) c FROM tracks").fetchone()["c"]
@@ -107,8 +107,8 @@ class RecQueryRepo(Repo):
     def owned_albums(self) -> set:
         """Canonical release IDs represented in the library or saved."""
         rows = self.conn.execute(
-            "SELECT at.album_id a FROM album_tracks at JOIN tracks t ON t.id=at.entry_id "
-            "UNION SELECT album_id FROM album_library_memberships").fetchall()
+            f"SELECT at.album_id a FROM {self.album_tracks_table} at JOIN tracks t ON t.id=at.entry_id "
+            f"UNION SELECT album_id FROM {album_memberships.read_relation(self.conn)}").fetchall()
         return {r["a"] for r in rows if r["a"]}
 
     @synchronized
@@ -122,7 +122,7 @@ class RecQueryRepo(Repo):
         """Normalized artist names already in the library, to exclude from new-artist discovery."""
         from yt_playlist.core import artists
         ids = [r[0] for r in self.conn.execute(
-            'SELECT DISTINCT ta.artist_id FROM track_artists ta JOIN tracks t ON t.id=ta.entry_id')]
+            f'SELECT DISTINCT ta.artist_id FROM {self.entry_artists_table} ta JOIN tracks t ON t.id=ta.entry_id')]
         return set(artists.public_keys(self.conn, ids).values())
 
     @snapshot_read
@@ -145,7 +145,7 @@ class RecQueryRepo(Repo):
             qs = ",".join("?" for _ in batch)
             rows = self.conn.execute(
                 "WITH requested AS MATERIALIZED ("
-                "SELECT DISTINCT e.recording_id FROM track_artists ta "
+                f"SELECT DISTINCT e.recording_id FROM {self.entry_artists_table} ta "
                 "JOIN catalog_entries e ON e.id=ta.entry_id "
                 f"WHERE ta.artist_id IN ({qs})) "
                 "SELECT t.identity_key k,t.title,t.artist,t.album,t.video_id vid,t.thumbnail thumb,t.genre "
@@ -154,7 +154,7 @@ class RecQueryRepo(Repo):
                 "JOIN library_memberships m ON m.entry_id=e.id "
                 "JOIN youtube_items y ON y.video_id=e.video_id "
                 "WHERE COALESCE(y.available,1)<>0 GROUP BY e.recording_id) "
-                "AND EXISTS (SELECT 1 FROM track_artists ta WHERE ta.entry_id=t.id "
+                f"AND EXISTS (SELECT 1 FROM {self.entry_artists_table} ta WHERE ta.entry_id=t.id "
                 f"AND ta.artist_id IN ({qs}))", [*batch, *batch])
             for r in rows:
                 out[r["k"]] = {"key": r["k"], "title": r["title"], "artist": r["artist"],
@@ -200,7 +200,7 @@ class RecQueryRepo(Repo):
         Lets outward discovery tag a new ALBUM by its (owned) artist's known genre, no network."""
         rows = self.conn.execute(
             "SELECT a.id artist_id,a.name artist,t.genre, COUNT(DISTINCT t.identity_key) c "
-            "FROM tracks t JOIN track_artists ta ON ta.entry_id=t.id JOIN artists a ON a.id=ta.artist_id "
+            f"FROM tracks t JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id JOIN artists a ON a.id=ta.artist_id "
             "WHERE t.genre<>'' GROUP BY a.id,t.genre").fetchall()
         best = {}
         for r in rows:
@@ -227,7 +227,7 @@ class RecQueryRepo(Repo):
                 out[r["k"]] = d
         return out
 
-    @synchronized
+    @lookup_read
     def tracks_by_keys(self, keys) -> dict:
         """Display metadata for a set of identity_keys: {key: {title, artist, album, video_id, thumbnail}}."""
         keys = list(dict.fromkeys(keys))
@@ -278,7 +278,7 @@ class RecQueryRepo(Repo):
         for r in self.conn.execute(
                 "SELECT genre, COUNT(DISTINCT identity_key) n FROM tracks "
                 "WHERE genre IS NOT NULL AND genre<>'' GROUP BY genre"):
-            fam = genre_map.family(r["genre"])
+            fam = genre_identity.family(self.conn,r["genre"])
             fams[fam] = fams.get(fam, 0) + r["n"]
         return [{"family": f, "n": n} for f, n in
                 sorted(fams.items(), key=lambda kv: (-kv[1], kv[0]))]
@@ -292,7 +292,7 @@ class RecQueryRepo(Repo):
             return set()
         return {r["k"] for r in self.conn.execute(
             "SELECT DISTINCT identity_key k, genre FROM tracks WHERE genre IS NOT NULL AND genre<>''")
-            if genre_map.family(r["genre"]) in fams}
+            if genre_identity.family(self.conn,r["genre"]) in fams}
 
     @synchronized
     def library_genres(self) -> list[dict]:
@@ -302,7 +302,7 @@ class RecQueryRepo(Repo):
         rows = self.conn.execute(
             "SELECT genre, COUNT(DISTINCT identity_key) n FROM tracks "
             "WHERE genre IS NOT NULL AND genre<>'' GROUP BY genre").fetchall()
-        return [{"genre": r["genre"], "family": genre_map.family(r["genre"]), "n": r["n"]}
+        return [{"genre": r["genre"], "family": genre_identity.family(self.conn,r["genre"]), "n": r["n"]}
                 for r in sorted(rows, key=lambda r: (-r["n"], r["genre"].lower()))]
 
     @synchronized
@@ -311,19 +311,21 @@ class RecQueryRepo(Repo):
         genre family OR a specific genre (sub-genre). A track qualifies if its genre matches a token
         exactly, or its family matches a token. Untagged tracks are never included."""
         toks = {t.strip().lower() for t in tokens if t and t.strip()}
+        genre_keys = {key for token in tokens for key, reason in [genre_identity.resolve(self.conn,token)] if key is not None}
         if not toks:
             return set()
         out = set()
         for r in self.conn.execute(
                 "SELECT DISTINCT identity_key k, genre FROM tracks WHERE genre IS NOT NULL AND genre<>''"):
             g = r["genre"].strip().lower()
-            if g in toks or genre_map.family(r["genre"]).lower() in toks:
+            key, _ = genre_identity.resolve(self.conn,r['genre'])
+            if g in toks or key in genre_keys or genre_identity.family(self.conn,r["genre"]).lower() in toks:
                 out.add(r["k"])
         return out
 
     @snapshot_read
     def top_played_keys(self, limit=10) -> list[str]:
-        """Identity keys of your most-played songs (for seeding taste-neighbourhood recs)."""
+        """Account keys of your most-played songs (for seeding taste-neighbourhood recs)."""
         rows = self.conn.execute(
             "SELECT identity_key k, plays c FROM listening_day_counts "
             "ORDER BY c DESC LIMIT ?", (limit,)).fetchall()
@@ -390,7 +392,7 @@ class RecQueryRepo(Repo):
                         "liked": bool(r["liked"])})
         return out
 
-    @synchronized
+    @lookup_read
     def artist_genre_years_for(self, names, *, per_artist=64):
         """Metadata fallback from a bounded sample of each selected artist's tracks."""
         result = {}
@@ -401,7 +403,7 @@ class RecQueryRepo(Repo):
             if aid is None:
                 continue
             rows = self.conn.execute(
-                'SELECT t.genre,t.mb_year FROM (SELECT entry_id FROM track_artists '
+                f'SELECT t.genre,t.mb_year FROM (SELECT entry_id FROM {self.entry_artists_table} '
                 'WHERE artist_id=? ORDER BY entry_id LIMIT ?) a '
                 'JOIN tracks t ON t.id=a.entry_id', (aid, per_artist)).fetchall()
             genres = Counter(r['genre'] for r in rows if r['genre'])

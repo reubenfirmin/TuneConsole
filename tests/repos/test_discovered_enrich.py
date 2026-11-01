@@ -23,7 +23,7 @@ def test_set_audio_writes_known_columns_and_ignores_extras():
     s.discovery.set_discovered_enrichment("a|x", "techno", "2019")
     s.discovery.set_discovered_audio("a|x", bpm=128.0, energy=0.9, popularity=999, label="ignored")
     row = s.discovery.discovered_tracks_by_keys(["a|x"])["a|x"]
-    assert row["genre"] == "techno" and row["year"] == "2019"
+    assert row["genre"] == "Techno" and row["year"] == "2019"
     assert row["audio"]["bpm"] == 128.0 and row["audio"]["energy"] == 0.9
     assert "popularity" not in row["audio"] and "label" not in row["audio"]
 
@@ -33,7 +33,7 @@ def test_set_enrichment_is_fill_only():
     s.discovery.upsert_discovered_track("a|x", "v1", "A", "X", None, None, "house", "2001", "radio:s", 100.0)
     s.discovery.set_discovered_enrichment("a|x", None, "2002")        # None genre must not wipe existing
     row = s.discovery.discovered_tracks_by_keys(["a|x"])["a|x"]
-    assert row["genre"] == "house" and row["year"] == "2002"
+    assert row["genre"] == "House" and row["year"] == "2002"
 
 
 def test_rediscovery_preserves_enrichment_when_catalog_metadata_is_missing():
@@ -44,7 +44,7 @@ def test_rediscovery_preserves_enrichment_when_catalog_metadata_is_missing():
     s.discovery.mark_discovered_enriched(["a|x"], 200.0)
     s.discovery.upsert_discovered_track("a|x", "v1", "A", "X", "Album", None, None, None, "album", 300.0)
     row = s.discovery.discovered_tracks_by_keys(["a|x"])["a|x"]
-    assert row["genre"] == "techno" and row["year"] == "2020"
+    assert row["genre"] == "Techno" and row["year"] == "2020"
     assert row["audio"] == {"bpm": 128.0, "energy": .8}
     assert s.enrichment_reports.coverage_stats(include_discovery=True)["processed"] == 1
 

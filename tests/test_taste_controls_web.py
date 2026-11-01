@@ -82,7 +82,7 @@ def test_maximum_track_length_setting_controls_generated_playlists(store):
 
 
 def test_taste_page_uses_sliders_not_number_fields(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     html = c.get("/taste/panels/recommendations").text
@@ -94,7 +94,7 @@ def test_taste_page_uses_sliders_not_number_fields(store):
 
 
 def test_taste_page_renders_genre_slider_for_tagged_library(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")

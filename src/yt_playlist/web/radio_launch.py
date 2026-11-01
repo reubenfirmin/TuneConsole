@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from uuid import uuid4
 
+from yt_playlist.core import radio_provenance
 from yt_playlist.library import playlist_generated
 from yt_playlist.library.playlist_metadata import versioned_title
 from yt_playlist.rec.radio_directions import RadioDirections
@@ -44,9 +45,9 @@ class RadioLaunch:
                 return
             for playlist in pending:
                 self.store.playlists.mark_generated_playlist(playlist)
-            settings = self.store.settings
-            known = json.loads(settings.get_setting('radio_session_playlist_ids') or '[]')
-            settings.set_setting('radio_session_playlist_ids', json.dumps(sorted(set(known) | pending)))
+            with self.store.conn:
+                for playlist in pending:
+                    radio_provenance.remember(self.store.conn,playlist)
             self.store.transient_radio_playlists.difference_update(pending)
 
     def checkpoint_view(self, playing):
@@ -145,10 +146,9 @@ class RadioLaunch:
         s.selected = list(seeds)
         choice = s.choices.pop(seed["video_id"])
         s.choices[seeds[0]["video_id"]] = choice
-        settings = self.store.settings
-        known = json.loads(settings.get_setting("radio_session_playlist_ids") or "[]")
         if not getattr(self.store, 'activity_paused', False) and s.local_id is not None:
-            settings.set_setting("radio_session_playlist_ids", json.dumps(list(dict.fromkeys(known + [s.playlist]))))
+            with self.store._lock,self.store.conn:
+                radio_provenance.remember(self.store.conn,s.playlist,s.identity)
         with self.lock:
             s.initial_tracks = seeds
             s.preparation_deadline = time.monotonic() + PREPARATION_TIMEOUT
@@ -203,7 +203,7 @@ class RadioLaunch:
                 accepted.discard(track['video_id'])
             elif track['video_id'] != row['videoId']:
                 substitution = substitutions.substitute(track, row, s.candidates.by_video,
-                                                       identity_id=s.identity, playlist=s.playlist)
+                                                       account_id=s.identity, playlist=s.playlist)
                 actual = substitution.accepted
                 s.candidates.retain([actual])
                 choice = s.choices.pop(track['video_id'], None)
@@ -261,19 +261,19 @@ class RadioLaunch:
     def adopt(self, playing, clients, candidates_factory):
         """Recognize an older already playing session without creating or navigating."""
         playlist = playing.get("playlist_ytm_id")
-        known = json.loads(self.store.settings.get_setting("radio_session_playlist_ids") or "[]")
+        known = self.store.playlists.radio_playlist_ids()
         if not playlist or playlist not in known:
             return None
-        local = next((p for p in self.store.playlists.get_playlists() if p.ytm_playlist_id == playlist), None)
-        if local is None or local.identity_id not in clients:
+        local = next((p for p in self.store.playlists.get_playlists() if p.provider_playlist_id == playlist), None)
+        if local is None or local.account_id not in clients:
             return None
         candidates = candidates_factory(self.store, self.now_fn(), comparison=None)
         candidates.retain([{**t, "key": t["identity_key"]}
                            for t in self.store.charts.playlist_tracks_detail(local.id)])
-        ids = [t["videoId"] for t in self.playlists.read(clients[local.identity_id], playlist)]
+        ids = [t["videoId"] for t in self.playlists.read(clients[local.account_id], playlist)]
         if not ids or any(video not in candidates.by_video for video in ids):
             return None
-        s = Session(clients[local.identity_id], candidates, local.identity_id, local.title)
+        s = Session(clients[local.account_id], candidates, local.account_id, local.title)
         s.playlist, s.local_id, s.tracks = playlist, local.id, [candidates.by_video[video] for video in ids]
         s.selected = list(s.tracks)
         s.position = next((i for i, t in enumerate(s.tracks) if t["video_id"] == playing.get("video_id")), -1)

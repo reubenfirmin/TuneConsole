@@ -8,6 +8,7 @@ import math
 import numpy as np
 from fastapi.testclient import TestClient
 
+from yt_playlist.core import embeddings
 from yt_playlist.rec import embed
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
@@ -15,7 +16,7 @@ from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
@@ -26,24 +27,23 @@ def _unit(deg):
 
 
 def _track(store, title, artist, *, genre="", xy=None):
-    store.tracks.upsert_track(f"v_{title}", title, artist, "", 200, thumbnail="t.jpg")
+    entry = store.tracks.upsert_track(f"v_{title}", title, artist, "", 200, thumbnail="t.jpg")
     k = identity_key(title, artist)
     if genre:
-        store.conn.execute("UPDATE tracks SET genre=? WHERE identity_key=?", (genre, k))
-        store.conn.commit()
+        store.tracks.set_track_enrichment(entry,genre,None)
     if xy is not None:
         v = np.asarray(xy, dtype=np.float32)
         v /= np.linalg.norm(v) + 1e-9
-        store.conn.execute("INSERT OR REPLACE INTO rec_vectors(identity_key, vec) VALUES (?,?)",
-                           (k, v.tobytes()))
-        store.conn.commit()
+        with store.conn:
+            store.conn.execute('BEGIN IMMEDIATE')
+            embeddings.publish(store.conn, 'rec_vectors', [(k, v.tobytes())], model_version='genre-filter-fixture')
     return k
 
 
 # --- keys_in_families / library_genre_families -------------------------------------------------
 
 def test_keys_in_families_filters_by_family_and_drops_untagged(store):
-    store.identities.upsert_identity("m", "c", None, True)
+    store.accounts.upsert_account("m", "c", None, True)
     a = _track(store, "Goa One", "A", genre="goa trance")     # -> trance family
     b = _track(store, "Techno One", "B", genre="acid techno")  # -> techno family
     _track(store, "Untagged", "C")                             # no genre -> never included
@@ -53,7 +53,7 @@ def test_keys_in_families_filters_by_family_and_drops_untagged(store):
 
 
 def test_library_genre_families_lists_present_families_with_counts(store):
-    store.identities.upsert_identity("m", "c", None, True)
+    store.accounts.upsert_account("m", "c", None, True)
     _track(store, "Goa One", "A", genre="goa trance")
     _track(store, "Goa Two", "B", genre="psytrance")
     _track(store, "Techno", "C", genre="acid techno")
@@ -92,12 +92,12 @@ def test_genres_route_lists_subgenres(store):
     _track(store, "Psy", "B", genre="psytrance")
     res = c.get("/clusters/genres").json()
     subs = {g["genre"] for g in res["genres"]}
-    assert "goa trance" in subs and "psytrance" in subs
+    assert "goa trance" in {s.lower() for s in subs} and "psytrance" in {s.lower() for s in subs}
     assert all(g["family"] == "trance" for g in res["genres"])     # carries its family
 
 
 def test_keys_in_genre_selection_matches_genre_or_family(store):
-    store.identities.upsert_identity("m", "c", None, True)
+    store.accounts.upsert_account("m", "c", None, True)
     goa = _track(store, "Goa", "A", genre="goa trance")
     psy = _track(store, "Psy", "B", genre="psytrance")
     tek = _track(store, "Tek", "C", genre="acid techno")

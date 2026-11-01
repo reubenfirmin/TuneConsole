@@ -24,7 +24,7 @@ def add_plays(data, month, *, days=10, per_day=6, source="live", offset=0, ident
         for play in range(per_day):
             key = f"{artist}:{play % variants}"
             at = start + (day + offset) * 86400 + play * 240 + 3600
-            data["plays"].append({"identity_id": identity, "identity_key": key,
+            data["plays"].append({"account_id": identity, "identity_key": key,
                                   "played_at": at, "source": source, "video_id": key})
             data["first"][key] = min(at, data["first"].get(key, at))
             data["meta"][key] = {"title": key, "artist": artist, "genre": genre,
@@ -96,7 +96,7 @@ def test_other_identities_partial_months_and_unknown_sources_suppress_comparison
     for row in data["plays"]:
         if month_bounds("2026-04")[0] <= row["played_at"] < month_bounds("2026-07")[0]:
             if change == "identity":
-                row["identity_id"] = 2
+                row["account_id"] = 2
             elif change == "legacy":
                 row["source"] = ""
     data["spans"][(1, "takeout")] = data["spans"][(1, "live")]
@@ -223,8 +223,17 @@ def test_new_album_metadata_cannot_fabricate_a_change_in_album_listening(data):
     assert not any(f["metric"] == "album_runs" for f in findings(screens(data, "2026-09"), "different"))
 
 
+def _exact(store,account,key,timestamp,playlist=None):
+    from yt_playlist.core import listening
+    with store.conn:
+        listening.calendar(store.conn,account,'UTC')
+        event = listening.append_event(store.conn,account,key,timestamp,playlist_ytm_id=playlist,
+            is_generated=int(bool(playlist) and store.playlists.is_quarantined_playlist(playlist,account_id=account)))
+        listening.project_event(store.conn,event,account,timestamp,timezone='UTC',source='live')
+
+
 def test_repo_excludes_generated_plays_and_requires_real_playlist_dates(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     since, until = month_bounds("2026-09")
     for ytm, date, source, generated in (("real", since, "youtube", False),
                                          ("unknown", None, None, False),
@@ -235,14 +244,11 @@ def test_repo_excludes_generated_plays_and_requires_real_playlist_dates(store):
         if generated:
             store.playlists.set_playlist_group(ytm, "Generated")
             store.playlists.mark_generated_playlist(ytm)
-    store.conn.executemany(
-        "INSERT INTO play_events(identity_id, identity_key, played_at, source, playlist_ytm_id) "
-        "VALUES (1,?,?,?,?)", [("real", since + 1, "live", "real"),
-                              ("generated", since + 2, "live", "generated")])
-    store.conn.commit()
+    _exact(store,1,'real',since+1,'real')
+    _exact(store,1,'generated',since+2,'generated')
     material = RecapRepo(store).snapshot(since, until)
     assert [p["identity_key"] for p in material["plays"]] == ["real"]
-    assert [p["ytm_playlist_id"] for p in material["playlists"]] == ["real"]
+    assert [p["provider_playlist_id"] for p in material["playlists"]] == ["real"]
     beat = build(store, "2026-09")[0]
     assert beat["groups"] == [{"label": "Playlists", "total": 1, "entries": [
         {"title": "real", "detail": "0 songs · 1 play",
@@ -252,16 +258,13 @@ def test_repo_excludes_generated_plays_and_requires_real_playlist_dates(store):
 def test_new_playlist_counts_do_not_multiply_copies_or_attribute_song_matches(store):
     since, until = month_bounds("2026-09")
     for label in ("main", "other"):
-        iid = store.identities.upsert_identity(label, "cred", None, label == "main")
+        iid = store.accounts.upsert_account(label, "cred", None, label == "main")
         store.playlists.upsert_playlist(iid, "real", "New mix", 4, "h", since, created_at=since)
     # The same song can be played from another playlist or with no known playlist.
     # Only the two events attributed to this list during the recap month count.
-    store.conn.executemany(
-        "INSERT INTO play_events(identity_id,identity_key,played_at,source,playlist_ytm_id) "
-        "VALUES (?, 'song', ?, 'live', ?)",
-        [(1, since - 1, "real"), (1, since + 1, "real"), (2, since + 2, "real"),
-         (1, since + 3, "another"), (1, since + 4, None), (1, until, "real")])
-    store.conn.commit()
+    for account,timestamp,playlist in [(1,since-1,'real'),(1,since+1,'real'),(2,since+2,'real'),
+                                       (1,since+3,'another'),(1,since+4,None),(1,until,'real')]:
+        _exact(store,account,'song',timestamp,playlist)
     beat = build(store, "2026-09")[0]
     playlists = next(g for g in beat["groups"] if g["label"] == "Playlists")
     assert playlists["total"] == 1
@@ -271,14 +274,14 @@ def test_new_playlist_counts_do_not_multiply_copies_or_attribute_song_matches(st
 @pytest.mark.parametrize("songs,expected", [(1, "1 song · 0 plays"), (None, "0 plays")])
 def test_new_playlist_distinguishes_unknown_size_from_no_recorded_plays(data, songs, expected):
     since, _ = month_bounds("2026-09")
-    data["playlists"] = [{"title": "New mix", "ytm_playlist_id": "real",
+    data["playlists"] = [{"title": "New mix", "provider_playlist_id": "real",
                           "created_at": since, "track_count": songs}]
     beat = new_this_month(data, "2026-09")
     assert beat["groups"][0]["entries"][0]["detail"] == expected
 
 
 def test_repo_preserves_true_counts_with_video_variants_and_coarse_familiarity(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     key = identity_key("Song", "Artist")
     for video in ("v1", "v2"):
         store.tracks.upsert_track(video, "Song", "Artist", "Release", 100)
@@ -293,7 +296,7 @@ def test_repo_preserves_true_counts_with_video_variants_and_coarse_familiarity(s
 
 def test_worker_bakes_all_three_screens_and_replaces_overlapping_old_beats(store, data):
     from yt_playlist.rec import trend_rollups
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     familiar_months(data)
     add_plays(data, "2026-09", per_day=12, artist="New artist", genre="jazz", album="MPRE")
     for key, card in data["meta"].items():
@@ -301,9 +304,8 @@ def test_worker_bakes_all_three_screens_and_replaces_overlapping_old_beats(store
         seed_catalog_track(store,key,card["title"],card["artist"],genre=card["genre"],album_browse_id=card["album_browse_id"])
     rows = [(p["identity_key"], p["played_at"]) for p in data["plays"]]
     rows += [("old", month_bounds("2026-01")[0]), ("future", month_bounds("2026-10")[0])]
-    store.conn.executemany("INSERT INTO play_events(identity_id,identity_key,played_at,source) "
-                           "VALUES (1,?,?,'live')", rows)
-    store.conn.commit()
+    for key,timestamp in rows:
+        _exact(store,1,key,timestamp)
     store.collection.cache_album_tracklist("MPRE", "Release", "New artist", None,
                                           [f"New artist:{i}" for i in range(6)])
     payload = trend_rollups.build(store, month_bounds("2026-10")[0] + 86400)

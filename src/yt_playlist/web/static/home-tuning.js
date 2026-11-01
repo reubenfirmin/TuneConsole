@@ -379,17 +379,24 @@ function fpPanel() {
     collapsed: localStorage.getItem('fp_collapsed') !== '0',
     tab: ['vibe', 'mixes', 'preferences'].includes(sessionStorage.getItem('fp_tuning_tab')) ? sessionStorage.getItem('fp_tuning_tab') : 'vibe',
     vibe: '',
+    get vibesAvailable() { return this.growth?.vibes_ready === true ||
+      this.growth?.nodes.some(node => node.id === 'vibes' && node.unlocked); },
     init() {
       this.vibe = this.$el.dataset.vibe || '';
+      if (this.tab === 'vibe' && !this.vibesAvailable) this.tab = 'mixes';
+      this.$watch('vibesAvailable', available => {
+        if (!available && this.tab === 'vibe') this.selectTab('mixes');
+      });
       if (!this.collapsed) this.$nextTick(() => this.show());
     },
     selectTab(name, focus = false) {
+      if (name === 'vibe' && !this.vibesAvailable) name = 'mixes';
       this.tab = name;
       sessionStorage.setItem('fp_tuning_tab', name);
       if (focus) this.$nextTick(() => this.$refs[name + 'Tab'].focus());
     },
     moveTab(direction) {
-      const tabs = ['vibe', 'mixes', 'preferences'];
+      const tabs = this.vibesAvailable ? ['vibe', 'mixes', 'preferences'] : ['mixes', 'preferences'];
       this.selectTab(tabs[(tabs.indexOf(this.tab) + direction + tabs.length) % tabs.length], true);
     },
     show() {
@@ -449,7 +456,7 @@ function genrePicker() {
       // Tokenized, order-independent match: every word you type must appear somewhere in the name, so
       // "rock post", "rock-post" and "post rock" all find "post-rock" (a plain substring wouldn't).
       const toks = q.split(/[^a-z0-9]+/).filter(Boolean);
-      return this.opts.filter(o => { const n = o.name.toLowerCase(); return toks.every(t => n.includes(t)); })
+      return this.opts.filter(o => { const n = (o.name + ' ' + (o.label || '')).toLowerCase(); return toks.every(t => n.includes(t)); })
         .slice(0, 10);
     },
     move(d) { const n = this.suggest().length; if (n) this.sel = (this.sel + d + n) % n; },

@@ -2,7 +2,7 @@
 
 
 def _seed(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     a = store.tracks.upsert_track("v1", "Alpha", "Artist A", "Album A", 200)
     b = store.tracks.upsert_track("v2", "Beta", "Artist B", "Album B", 200)
     lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 0, "h", 0.0)
@@ -21,6 +21,7 @@ def test_top_tracks_ranks_by_plays(store):
     top = store.charts.top_tracks()
     assert [t["title"] for t in top] == ["Alpha", "Beta"]
     assert top[0]["plays"] == 2 and top[1]["plays"] == 1
+    assert store.charts.artist_songs("Artist B")[0]["title"] == "Beta"
 
 
 def test_targeted_playlist_recency_preserves_current_history_and_generated_plays(store):
@@ -70,7 +71,7 @@ def test_ticker_artwork_uses_saved_album_cover_and_ignores_empty_thumbnails(stor
 
 
 def test_playlist_ticker_artwork_prefers_cover_and_falls_back_to_track_art(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     track = store.tracks.upsert_track("v1", "Alpha", "Artist A", "Album A", 180, thumbnail="/track.png")
     cover = store.playlists.upsert_playlist(iid, "P1", "With cover", 1, "h", 0.0, thumbnail="/playlist.png")
     fallback = store.playlists.upsert_playlist(iid, "P2", "Track art", 1, "h", 0.0)
@@ -117,7 +118,7 @@ def test_listen_stats_and_artist_songs(store):
 
 
 def test_artist_songs_can_disambiguate_same_name_by_browse_id(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     first = store.tracks.upsert_track("v1", "First act", "Shared Name", "One", 180,
                                artist_browse_id="UC_first")
     second = store.tracks.upsert_track("v2", "Second act", "Shared Name", "Two", 180,
@@ -140,14 +141,8 @@ def test_artist_songs_keeps_unidentified_credit_separate_from_provider_identity(
     assert store.charts.artist_songs("Artist", "UC_unrelated") == []
 
 
-def test_store_binding(store):
-    _seed(store)
-    assert store.charts.top_tracks()[0]["title"] == "Alpha"
-    assert store.charts.artist_songs("Artist B")[0]["title"] == "Beta"
-
-
 def test_playlist_detail_flags_edited_title_artist(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     p = store.playlists.upsert_playlist(iid, "P", "P", 0, "h", 0.0)
     t = store.tracks.upsert_track("v1", "Orig Title", "Orig Artist", "Al", 100)
     store.playlists.set_playlist_tracks(p, [t])
@@ -163,14 +158,12 @@ def test_story_songs_favor_recent_listens_including_spotify_and_collapse_uploads
 
     now = 1_800_000_000
     day = 86400
-    iid = store.identities.upsert_identity('me', 'c', None, True)
+    iid = store.accounts.upsert_account('me', 'c', None, True)
     keys = {}
     for video, title in [('recent', 'Recent'), ('once', 'Once'), ('old', 'Old favorite'),
                          ('unplayed', 'A new song'), ('wrong', 'Wrong genre')]:
         entry = store.tracks.upsert_track(video, title, 'Band', '', 180)
-        with store.conn:
-            store.conn.execute('UPDATE catalog_tracks SET genre=? WHERE id=?',
-                               ('Techno' if video == 'wrong' else 'Shoegaze', entry))
+        store.tracks.set_track_enrichment(entry,'Techno' if video=='wrong' else 'Shoegaze',None)
         keys[video] = entry
     store.tracks.upsert_track('second-upload', 'Recent', 'Band', '', 180)
     recording = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?',
@@ -178,11 +171,12 @@ def test_story_songs_favor_recent_listens_including_spotify_and_collapse_uploads
     store.tracks.associate_youtube_item('second-upload', recording, source='verified',
         evidence={'review': 'same recording'}, now=now)
     keys = {video: store.tracks.identity_key_for_video(video) for video in keys}
-    store.tracks.upsert_track('unavailable', 'Unavailable', 'Band', '', 180, available=False)
+    unavailable = store.tracks.upsert_track('unavailable', 'Unavailable', 'Band', '', 180, available=False)
+    store.tracks.set_track_enrichment(unavailable,'Shoegaze',None)
     with store.conn:
-        store.conn.execute("UPDATE catalog_tracks SET genre='Shoegaze' WHERE video_id='unavailable'")
-        catalog.upsert(store.conn, 'outside', 'Outside library', 'Band', '', 180, library=False)
-        store.conn.execute("UPDATE catalog_tracks SET genre='Shoegaze' WHERE video_id='outside'")
+        from yt_playlist.core import metadata
+        outside = catalog.upsert(store.conn, 'outside', 'Outside library', 'Band', '', 180, library=False)
+        metadata.select(store.conn,outside,'genre','Shoegaze','fixture')
     events = [(keys['recent'], None, now - day), (keys['recent'], None, now - 2 * day),
               (keys['once'], None, now - day), (keys['wrong'], None, now - day)]
     events.extend((keys['old'], None, now - (40 + i) * day) for i in range(10))
@@ -210,7 +204,7 @@ def test_story_artist_songs_follow_structured_collaboration_credits(store):
 
 
 def test_story_examples_deduplicate_displayed_songs_before_limiting(store):
-    iid = store.identities.upsert_identity('me', 'c', None, True)
+    iid = store.accounts.upsert_account('me', 'c', None, True)
     for video, title in [('first', 'Wise One'), ('copy', 'Wise One'),
                          ('remaster', 'Wise One (2020 Remaster)'),
                          ('other', 'Giant Steps'), ('live', 'Wise One (Live)')]:
@@ -221,7 +215,7 @@ def test_story_examples_deduplicate_displayed_songs_before_limiting(store):
         key = store.tracks.identity_key_for_video(video)
         store.history.import_listening_events(iid, [(key, video, 10 * 86400 - index * 86400)])
     recordings = store.conn.execute('SELECT COUNT(*) FROM recordings').fetchone()[0]
-    for selection in ({'artist': 'John Coltrane'}, {'genres': ['Free jazz']}):
+    for selection in ({'artist': 'John Coltrane'}, {'genres': ['Free Jazz']}):
         songs = store.charts.story_tracks(since=0, **selection)
         assert [song['video_id'] for song in songs] == ['first', 'other', 'live']
         assert store.charts.story_tracks(since=0, limit=0, **selection) == []
@@ -231,13 +225,12 @@ def test_story_examples_deduplicate_displayed_songs_before_limiting(store):
 
 def test_story_activity_requires_recent_listening_and_preserves_collaboration_credits(store):
     now, day = 1_800_000_000, 86400
-    iid = store.identities.upsert_identity('me', 'c', None, True)
+    iid = store.accounts.upsert_account('me', 'c', None, True)
     entry = store.tracks.upsert_track('collab', 'Together', 'Band & Guest', '', 180,
         credits=[{'name': 'Band', 'id': 'UC_band'}, {'name': 'Guest', 'id': 'UC_guest'}])
     store.tracks.upsert_track('old', 'Old', 'Old artist', '', 180)
     store.tracks.upsert_track('unplayed', 'Unplayed', 'Unplayed artist', '', 180)
-    with store.conn:
-        store.conn.execute("UPDATE catalog_tracks SET genre='Indie Pop' WHERE id=?", (entry,))
+    store.tracks.set_track_enrichment(entry,'Indie Pop',None)
     playlist = store.playlists.upsert_playlist(iid, 'PL', 'Mix', 1, 'h', now)
     store.playlists.set_playlist_tracks(playlist, [entry])
     key = store.tracks.identity_key_for_video('collab')

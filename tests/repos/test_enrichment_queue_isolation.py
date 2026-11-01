@@ -189,10 +189,8 @@ def test_resweep_rechecks_current_inputs_after_snapshot_selection(database, monk
                     database.conn.execute("INSERT INTO enrichment_provider_jobs VALUES (?,'deezer')",
                                           (first['recording_id'],))
                 elif change == 'metadata':
-                    database.conn.execute('UPDATE recordings SET genre=?,bpm=?,energy=?,danceability=? '
-                        'WHERE id=?', ('House', 120, .5, .5, first['recording_id']))
-                    database.conn.execute("UPDATE youtube_items SET mb_year='2000' WHERE video_id=?",
-                                          (first['video_id'],))
+                    database.tracks.set_track_enrichment(first['id'],'House','2000')
+                    database.tracks.set_track_audio(first['id'],bpm=120,energy=.5,danceability=.5)
 
     monkeypatch.setattr(database, 'read_snapshot', changed_reader)
     result = database.enrichment_queue.resweep_batch(2, 500, providers=['deezer'], now=1000)

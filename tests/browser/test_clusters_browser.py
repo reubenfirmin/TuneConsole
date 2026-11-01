@@ -458,7 +458,7 @@ def _saved_playlist_link(page, store):
     state = page.evaluate(f"{DATA}._stateBlob()")
     state['playlistName'] = 'Saved playlist B'
     state['nodes'][0]['seeds'] = [{'kind': 'artist', 'label': 'Saved B', 'keys': ['saved-b']}]
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     pid = store.playlists.upsert_playlist(iid, 'SAVED', 'Saved playlist B', 0, 'h', 1)
     store.playlists.mark_generated_playlist('SAVED')
     store.playlist_recipes.set_recipe('SAVED', {'model': 'cluster'})

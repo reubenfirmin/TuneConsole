@@ -8,7 +8,7 @@ from yt_playlist.util.matching import identity_key
 
 @pytest.mark.parametrize('source', ['wheelhouse', 'catalog', 'comfort', 'library_pool', 'road_trip'])
 def test_generated_membership_preserves_candidates_and_user_feedback(store, source):
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
     tids = [store.tracks.upsert_track(f'v{i}', f'Song {i}', f'Artist {i}', '', 200)
             for i in range(12)]
     keys = [identity_key(f'Song {i}', f'Artist {i}') for i in range(12)]

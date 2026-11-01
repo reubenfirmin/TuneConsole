@@ -16,7 +16,7 @@ from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 from yt_playlist.core import features
 from yt_playlist.core import audio_vibe_metadata as metadata_features
 from yt_playlist.core import audio_embedding
-from yt_playlist.rec import audio_vibe_external
+from yt_playlist.rec import audio_vibe_cruise, audio_vibe_energize, audio_vibe_external, audio_vibe_focus, audio_vibe_relax, audio_vibe_release, audio_vibe_uplift
 
 SCHEMA = 1
 LEGACY_FEATURE_VERSION = 'audio-vibe-corrections-1'
@@ -247,12 +247,20 @@ def apply(samples, prediction, metadata=None):
         matches = matches or ranking[:1]
         if model['training'].get('objective') in ('acceptable_nll', 'acceptable_libra'):
             matches, method = ranking[:1], 'top_ranked'
-        return {**prediction, 'vibe': matches[0]['vibe'], 'vibes': [row['vibe'] for row in matches],
+        result = {**prediction, 'vibe': matches[0]['vibe'], 'vibes': [row['vibe'] for row in matches],
                 'label': ' · '.join(row['label'] for row in matches), 'ranking': ranking,
                 'selection_method': method, 'score_margin': round(ranking[0]['score'] - ranking[1]['score'], 5),
                 'model': {'sha256': digest, 'feature_version': model['feature_version'],
                           'trained_labels': sorted(trained_labels),
                           'training_songs': model['training']['songs']},
                 'evidence': prediction['evidence'] + [evidence]}
+        if external:
+            result = audio_vibe_cruise.apply(samples, result)
+            result = audio_vibe_release.apply(samples, result)
+            result = audio_vibe_relax.apply(samples, result)
+            result = audio_vibe_uplift.apply(samples, result)
+            result = audio_vibe_energize.apply(samples, result)
+            result = audio_vibe_focus.apply(samples, result)
+        return result
     except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
         return prediction

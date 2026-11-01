@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 from yt_playlist.rec import embed, eval_recs
@@ -7,7 +8,7 @@ from yt_playlist.util.matching import identity_key
 
 
 def test_recall_recovers_held_out_cluster_track(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     # one tight 8-track cluster (one playlist) + a distractor cluster, so the held-out
     # track should rank near the rest of its own playlist.
     A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None, created_at=0) for i in range(8)]
@@ -22,18 +23,23 @@ def test_recall_recovers_held_out_cluster_track(store):
 
 
 def test_recall_none_without_vectors(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     assert eval_recs.recall_at_k(store)["recall_at_k"] is None
 
 
-def _two_cluster_playlists(store):
+def _two_cluster_playlists(store, *, fit=True):
     """Two tight 8-track clusters, one per playlist, so the embedding separates A from B. Returns iid."""
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None, created_at=0) for i in range(8)]
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None, created_at=0) for i in range(8)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 8, "h", 0.0), A)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", 8, "h2", 0.0), B)
-    model_support.build_track_model(store, dim=4)
+    if fit:
+        model_support.build_track_model(store, dim=4)
+    else:
+        store.rec_model.replace_rec_vectors([
+            (identity_key(f'{cluster}{i}', artist), np.eye(4, dtype=np.float32)[column].tobytes())
+            for column, (cluster, artist) in enumerate((('A', 'AB'), ('B', 'BB'))) for i in range(8)])
     return iid
 
 
@@ -60,7 +66,7 @@ def test_temporal_recall_excludes_generated_only_held_plays(store, source):
     # prediction. Keys with organic evidence in the window (mixed, or no play_events rows at all)
     # stay. Independent dated evidence also prevents exclusion.
     from yt_playlist.repos.base import GENERATED_GROUP
-    iid = _two_cluster_playlists(store)
+    iid = _two_cluster_playlists(store, fit=False)
     day, t_recent = 86400, 1_000_000.0
     store.history.record_history_plays(iid, t_recent - 10 * day,
         [identity_key(f"A{i}", "AB") for i in range(4)], source_timezone="UTC")
@@ -90,7 +96,7 @@ def test_temporal_recall_all_held_generated_is_insufficient_not_perfect(store, s
     # When EVERY held-out play is app-caused, the honest answer is "no usable split", never a
     # recall score computed over zero real plays.
     from yt_playlist.repos.base import GENERATED_GROUP
-    iid = _two_cluster_playlists(store)
+    iid = _two_cluster_playlists(store, fit=False)
     day, t_recent = 86400, 1_000_000.0
     store.history.record_history_plays(iid, t_recent - 10 * day,
         [identity_key(f"A{i}", "AB") for i in range(4)], source_timezone="UTC")
@@ -116,12 +122,12 @@ def test_temporal_recall_all_held_generated_is_insufficient_not_perfect(store, s
 
 
 def test_temporal_recall_none_without_vectors(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     assert eval_recs.temporal_recall(store)["recall"] is None
 
 
 def test_temporal_recall_none_without_history(store):
-    _two_cluster_playlists(store)             # vectors exist, but no history snapshots were taken
+    _two_cluster_playlists(store, fit=False)   # vectors exist, but no history snapshots were taken
     assert eval_recs.temporal_recall(store)["recall"] is None
 
 
@@ -144,7 +150,7 @@ def test_rolling_temporal_recall_rebuilds_as_of_cutoff(store):
 
 
 def test_as_of_baskets_ignore_post_cutoff_playlist_changes(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     tracks = [store.tracks.upsert_track(f"v{i}", f"T{i}", "Artist", None, None, created_at=10) for i in range(8)]
     stable = store.playlists.upsert_playlist(iid, "stable", "Stable", 4, "s", 20)
     changed = store.playlists.upsert_playlist(iid, "changed", "Changed", 4, "old", 20)
@@ -162,7 +168,7 @@ def test_as_of_baskets_ignore_post_cutoff_playlist_changes(store):
 def test_projection_recall_breakdown_by_family_and_coverage(store):
     # The scalar projection_recall hides where grounding fails. The breakdown must partition trials by
     # genre family, era, and coverage band so the failure modes are locatable.
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(15)]
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(15)]
     for t in A:

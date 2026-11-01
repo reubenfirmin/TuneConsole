@@ -1,6 +1,7 @@
 """Task 2 (#52): TTL-since-first-shown GC of the discovery pool, with held tracks (live generated
 playlists) kept, and the acquisition prune respecting the same hold."""
 from yt_playlist.core.store import Store
+from tests.recommendation_support import publish_bundles
 
 
 def _s():
@@ -49,23 +50,20 @@ def test_gc_removes_stale_tracks_from_cached_fresh_and_mode_recommendations():
     s = _s()
     for key, found in (("old", 0), ("held", 0), ("recent", 99 * 86400)):
         s.discovery.upsert_discovered_track(key, "v:" + key, key, "Artist", None, None, "House", "2020", "album", found)
-    items = [{"key": key, "title": key} for key in ("old", "held", "recent")]
-    s.rec_proposals.put_proposals("fresh_pool", items, 1)
-    s.rec_proposals.put_proposals("mode_bundles", {"all": {"fresh": items, "wheelhouse": [{"key": "library"}]},
-                                      "123": {"fresh": items}}, 1)
+    items = [{"key": key, "title": key,'artist':'Artist'} for key in ("old", "held", "recent")]
+    publish_bundles(s,{'all':{'fresh':items},'123':{'fresh':items}},1,fresh=items)
     s.enrichment_state.record_enrichment_attempt("old", "musicbrainz", {}, now=1)
     s.discovery.gc_discovery_pool(100 * 86400, 30, {"held"})
-    assert {t["key"] for t in s.rec_proposals.get_proposals("fresh_pool")} == {"held", "recent"}
-    bundles = s.rec_proposals.get_proposals("mode_bundles")
-    assert {t["key"] for t in bundles["all"]["fresh"]} == {"held", "recent"}
-    assert {t["key"] for t in bundles["123"]["fresh"]} == {"held", "recent"}
-    assert bundles["all"]["wheelhouse"] == [{"key": "library"}]
+    for surface,mode in (('fresh','all'),('home','all'),('home','123')):
+        assert {t['key'] for t in s.recommendations.candidate_page(surface,mode,'fresh')['tracks']}=={'held','recent'}
     assert s.settings.get_setting("enrich_attempts:old") is None
 
 
 def test_orphan_cleanup_preserves_tracks_in_generated_playlists():
     s = _s()
+    s.discovery.upsert_discovered_album('gone-album','Artist','Gone',None,None,0)
     for key in ("held", "unheld"):
         s.discovery.upsert_discovered_track(key, "v:" + key, key, "Artist", None, None, None, None, "gone-album", 0)
+    s.discovery.delete_discovered_albums(['gone-album'])
     assert s.discovery.prune_orphan_discovered_tracks(held_keys={"held"}) == 1
     assert set(s.discovery.discovered_tracks_by_keys(["held", "unheld"])) == {"held"}

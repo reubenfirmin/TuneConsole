@@ -23,7 +23,7 @@ def test_axis_weights_none_when_fully_neutral(store):
 
 def test_explore_lane_respects_transient_facet_lean(store):
     from yt_playlist.rec import embed
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     house, jazz = [], []
     for i in range(6):
         h = store.tracks.upsert_track(f"h{i}", f"H{i}", f"DJ{i}", None, None); store.tracks.set_track_genre(h, "deep house"); house.append(h)

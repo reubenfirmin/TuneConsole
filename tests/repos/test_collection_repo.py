@@ -7,8 +7,8 @@ def _album(browse, **kw):
 
 
 def test_playback_source_uses_exact_playlist_and_prefers_master_copy(store):
-    other = store.identities.upsert_identity("other", "c", None, False)
-    master = store.identities.upsert_identity("main", "c", None, True)
+    other = store.accounts.upsert_account("other", "c", None, False)
+    master = store.accounts.upsert_account("main", "c", None, True)
     store.playlists.upsert_playlist(other, "PL1", "Other copy", 1, "h", 0)
     pid = store.playlists.upsert_playlist(master, "PL1", "Playing mix", 1, "h", 0)
     unrelated = store.playlists.upsert_playlist(master, "PL2", "Also contains song", 1, "h", 0)
@@ -22,6 +22,8 @@ def test_playback_source_uses_exact_playlist_and_prefers_master_copy(store):
 
 def test_saved_album_crud(store):
     store.collection.add_saved_album(_album("B1", title="One", artist="Alpha"))
+    assert store.collection.saved_album_ids() == {"B1"}
+    assert store.collection.collection_albums() == []
     store.collection.add_saved_album(_album("B2", title="Two", artist="Beta"))
     assert store.collection.saved_album_ids() == {"B1", "B2"}
     # sorted by artist then title
@@ -32,7 +34,7 @@ def test_saved_album_crud(store):
 
 def test_saved_albums_recency_newest_play_per_album(store):
     from yt_playlist.util.matching import identity_key
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     store.collection.add_saved_album(_album("HOT", title="Hot"))
     store.collection.add_saved_album(_album("COLD", title="Cold"))
     store.collection.add_saved_album(_album("NEVER", title="Never"))
@@ -60,7 +62,7 @@ def test_replace_saved_albums_is_wholesale(store):
 
 
 def test_collection_albums_aggregates_plays_and_playlists(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     p1 = store.playlists.upsert_playlist(iid, "PL1", "List 1", 0, "h", 0.0)
     p2 = store.playlists.upsert_playlist(iid, "PL2", "List 2", 0, "h", 0.0)
     t = store.tracks.upsert_track("v1", "Song", "Artist", "The Album", 200, album_browse_id="B1")
@@ -74,7 +76,7 @@ def test_collection_albums_aggregates_plays_and_playlists(store):
 
 
 def test_legacy_album_label_is_not_counted_as_another_release(store):
-    iid = store.identities.upsert_identity('me', 'c', None, True)
+    iid = store.accounts.upsert_account('me', 'c', None, True)
     playlist = store.playlists.upsert_playlist(iid, 'P', 'Mix', 1, 'h', 0)
     entry = store.tracks.upsert_track('v', 'Song', 'Artist', 'Release', 100, album_browse_id='B1')
     store.playlists.set_playlist_tracks(playlist, [entry])
@@ -86,7 +88,7 @@ def test_legacy_album_label_is_not_counted_as_another_release(store):
             ('Release', 'Artist', '["Release","Artist"]')).lastrowid
         store.conn.execute('INSERT INTO album_artists VALUES (?,0,?,?)',
                            (legacy, store.artists.resolve('Artist'), 'Artist'))
-        store.conn.execute("INSERT INTO album_tracks(album_id,entry_id,is_full,source) VALUES (?,?,0,'youtube')",
+        store.conn.execute("INSERT INTO album_item_observations(album_id,entry_id,provider) VALUES (?,?,'youtube')",
                            (legacy, entry))
     album, = store.collection.artist_albums('Artist')
     assert (album['browse'], album['songs'], album['n_pls'], album['saved']) == ('B1', 1, 1, False)
@@ -106,7 +108,7 @@ def test_unresolved_album_labels_stay_on_tracks_and_are_not_singles(store):
 
 
 def test_collection_artists_includes_saved_album_tracks_without_playlists(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     store.collection.add_saved_album(_album("B1", title="The Album", artist="Artist"))
     store.tracks.upsert_track("v1", "Song", "Artist", "The Album", 200,
                        album_browse_id="B1", thumbnail="/cover.png")
@@ -118,7 +120,7 @@ def test_collection_artists_includes_saved_album_tracks_without_playlists(store)
 
 
 def test_collection_artists_merges_saved_albums_without_double_counting_songs(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     p1 = store.playlists.upsert_playlist(iid, "PL1", "List 1", 0, "h", 0.0)
     p2 = store.playlists.upsert_playlist(iid, "PL2", "List 2", 0, "h", 0.0)
     track = store.tracks.upsert_track("v1", "Song", "Artist", "Original", 200,
@@ -154,7 +156,7 @@ def test_collection_artists_includes_saved_album_metadata_before_tracks_arrive(s
 
 
 def test_collection_artists_excludes_unsaved_album_tracks_and_keeps_playlist_artists(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     playlist = store.playlists.upsert_playlist(iid, "PL1", "Mix", 0, "h", 0.0)
     track = store.tracks.upsert_track("v1", "Song", "Playlist artist", "One", 200, album_browse_id="B1")
     store.playlists.set_playlist_tracks(playlist, [track])
@@ -187,7 +189,7 @@ def test_collection_artists_keeps_same_named_artists_and_releases_distinct(store
 
 
 def test_artist_browse_id_requires_unambiguous_identity(store):
-    store.identities.upsert_identity("me", "c", None, True)
+    store.accounts.upsert_account("me", "c", None, True)
     store.tracks.upsert_track("v1", "S1", "Artist", "Al", 100, artist_browse_id="CH_A")
     store.tracks.upsert_track("v2", "S2", "Artist", "Al", 100, artist_browse_id="CH_A")
     store.tracks.upsert_track("v3", "S3", "Artist", "Al", 100, artist_browse_id="CH_B")
@@ -195,9 +197,3 @@ def test_artist_browse_id_requires_unambiguous_identity(store):
     aid = store.conn.execute("SELECT artist_id FROM artist_provider_ids WHERE provider_id='CH_A'").fetchone()[0]
     assert store.collection.artist_browse_id(aid) == 'CH_A'
     assert store.collection.artist_browse_id("Nobody") is None
-
-
-def test_store_binding(store):
-    store.collection.add_saved_album(_album("B1"))
-    assert store.collection.saved_album_ids() == {"B1"}
-    assert store.collection.collection_albums() == []                     # no playlists → no albums

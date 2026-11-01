@@ -34,7 +34,7 @@ def run_library_sync(ctx, job, *, automatic=False, retry_now=False, max_age_s=86
         accounts = {str(i.id): {"label": i.label, "status": "failed", "resources": {
             name: resource("failed", detail)
             for name in ("playlist_listing", "playlists", "ratings", "history", "saved_albums")}}
-            for i in ctx.store.identities.get_identities()}
+            for i in ctx.store.accounts.get_accounts()}
         job.result = finish_attempt(ctx.store, {"status": "failed", "accounts": accounts,
             "resources": {name: resource("failed", detail)
                           for name in ("saved_album_mirror", "album_tracks")}}, now)

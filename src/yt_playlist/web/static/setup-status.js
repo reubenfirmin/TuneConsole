@@ -30,9 +30,10 @@
 function initialSetup() {
   return {
     complete: false, connected: false, running: false, training: false, imported: false,
-    songs: 0, analyzed: 0, total: 0, modes: 0, mixes_ready: false, listening_format: 'mixes',
+    songs: 0, analyzed: 0, total: 0, modes: 0, mixes_ready: false, listening_format: 'mixes', artists_required: false,
     activity: '', current: null, target: null, step: '', outcome: null, events: [], _logRequest: false,
     get summary() {
+      if (this.artists_required) return 'First sounds';
       if (!this.imported) {
         if (this.running && this.activity && this.current && this.target) {
           return 'Reading ' + (this.activity === 'albums' ? 'album ' : 'playlist ') + this.current + ' of ' + this.target;

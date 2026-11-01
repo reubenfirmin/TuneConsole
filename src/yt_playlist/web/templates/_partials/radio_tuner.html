@@ -7,7 +7,7 @@
     <h2 id="radio-tuning-title">Tune streams</h2>
     <div class="radio-tuning-controls">
       <template x-for="axis in tuningAxes" :key="axis.key">
-        <div class="radio-tuning-axis" :style="'--dial-color:' + axis.color + ';--dial-value:' + tuningDraft[axis.key] + '%;--dial-turn:' + (tuningDraft[axis.key] * .2 - 10) + 'deg'">
+        <div class="radio-tuning-axis" x-show="axis.key !== 'energy' || typeof growth !== 'undefined' && growth.vibes_ready" :style="'--dial-color:' + axis.color + ';--dial-value:' + tuningDraft[axis.key] + '%;--dial-turn:' + (tuningDraft[axis.key] * .2 - 10) + 'deg'">
           <label :for="'radio-tune-' + axis.key"><span x-text="axis.low"></span><span x-text="axis.high"></span></label>
           <div class="radio-tuning-fader">
             <div class="radio-tuning-scale" aria-hidden="true">

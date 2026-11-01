@@ -8,6 +8,7 @@ normalization and regularization as it does to captured audio features.
 import json
 import math
 
+from . import metadata_native
 from yt_playlist.util import genre_catalog
 
 VERSION = 'catalog-audio-2/subgenres-only-1/' + genre_catalog.REVISION
@@ -36,11 +37,15 @@ FEATURES = (tuple('base.' + key for key in NUMERIC)
             + ('base.present.music_scale',))
 
 
-def subgenre(metadata=None):
+def subgenre(metadata=None, *, conn=None):
     """One known specific genre identity; broad/unknown/missing all have no signal."""
     name = (metadata or {}).get('genre')
     if not isinstance(name, str):
         return None
+    if conn is not None:
+        from yt_playlist.core import genre_identity
+        key, _ = genre_identity.resolve(conn,name)
+        return key if key is not None and key not in BROAD_GENRES else None
     label = genre_catalog.catalog()[1].get(genre_catalog.normalize(name))
     return label[0] if label and label[0] not in BROAD_GENRES else None
 
@@ -64,12 +69,20 @@ def read(conn, video_id):
         "SELECT field,value_json FROM entry_field_choices WHERE entry_id=? "
         "AND field IN ('mood_aggressive','mood_party')", (result['entry_id'],))}
     observations = {field: set() for field in fields}
-    for raw, in conn.execute(
+    if metadata_native.available(conn):
+        sources = conn.execute('SELECT s.source_key FROM rec_musical_links l '
+            'JOIN rec_musical_sources s ON s.source_key=l.source_key '
+            "WHERE l.recording_id=? AND s.scope='recording' ORDER BY s.source_key LIMIT 64",
+            (result['recording_id'],)).fetchall()
+        payloads = (metadata_native.source_values(conn, source[0]) for source in sources)
+    else:
+        rows = conn.execute(
             'SELECT s.payload FROM rec_musical_links l JOIN rec_musical_sources s ON s.source_key=l.source_key '
             "WHERE l.recording_id=? AND s.scope='recording' "
             'AND length(CAST(s.payload AS BLOB))<=262144 ORDER BY s.source_key LIMIT 64',
-            (result['recording_id'],)):
-        payload = json.loads(raw)
+            (result['recording_id'],))
+        payloads = (json.loads(row[0]) for row in rows)
+    for payload in payloads:
         for field in fields:
             value = (payload.get(field) or {}).get('value')
             if type(value) in (float, int) and math.isfinite(value) and 0 <= value <= 1:

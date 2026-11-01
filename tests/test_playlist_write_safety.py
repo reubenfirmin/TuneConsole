@@ -15,8 +15,8 @@ def transfer(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     # Keep failing-read scenarios focused on the deletion decision, without retry delays.
     monkeypatch.setattr(executor, "with_retry", lambda fn: fn())
-    source_identity = store.identities.upsert_identity("Source", "bridge", None, True)
-    target_identity = store.identities.upsert_identity("Target", "bridge", None, False)
+    source_identity = store.accounts.upsert_account("Source", "bridge", None, True)
+    target_identity = store.accounts.upsert_account("Target", "bridge", None, False)
     tracks = [_track("v1", "One", "Artist"), _track("v2", "Two", "Artist")]
     tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", None, 200) for t in tracks]
     source = store.playlists.upsert_playlist(source_identity, "SOURCE", "Original", 2, "", 1)
@@ -81,7 +81,7 @@ def test_failed_delivery_never_deletes_source(transfer, monkeypatch, operation, 
             assert t.store.playlists.get_playlist_track_ids(t.keeper) == t.tids[:1]
         else:
             assert undo["new_ytm"] == caught.value.playlist_id == "PL_NEW_0"
-            created = next(p for p in t.store.playlists.get_playlists() if p.ytm_playlist_id == "PL_NEW_0")
+            created = next(p for p in t.store.playlists.get_playlists() if p.provider_playlist_id == "PL_NEW_0")
             assert t.store.playlists.get_playlist_track_ids(created.id) == []
             assert not params["deleted"]
         assert len(attempts) == 1
@@ -97,7 +97,7 @@ def test_failed_delivery_never_deletes_source(transfer, monkeypatch, operation, 
         assert result["skipped"] or result["delete_error"]
         action = t.store.actions.get_actions()[0]
         assert json.loads(action.undo_json)["new_ytm"] == "PL_NEW_0"
-        assert any(p.ytm_playlist_id == "PL_NEW_0" for p in t.store.playlists.get_playlists())
+        assert any(p.provider_playlist_id == "PL_NEW_0" for p in t.store.playlists.get_playlists())
     assert t.source_client.deleted == []
     assert t.store.playlists.get_playlist(t.source) is not None
 

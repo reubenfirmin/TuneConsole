@@ -1,194 +1,100 @@
+"""First-listening summaries derive from evidence rather than writable mixed keys."""
 import pytest
+
 from tests.conftest import seed_catalog_track
-from yt_playlist.core.store import Store
 
 
 @pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    s.identities.upsert_identity("me", "c", None, True)   # identity id=1, referenced by history/play_events FKs
-    return s
+def listener(store):
+    store.accounts.upsert_account('me','c',None,True)
+    from yt_playlist.core import listening
+    with store.conn:
+        listening.calendar(store.conn,1,'UTC')
+    return store
 
 
-def _snap(store, day, keys):
-    """Record independent observations on an explicit UTC calendar date."""
-    store.history.record_history_plays(1, day * 86400.0, keys, source_timezone="UTC")
+def track(store,key,artist):
+    seed_catalog_track(store,key,'T'+key,artist,video_id='v'+key)
 
 
-def _track(store, key, artist, genre=""):
-    seed_catalog_track(store,key,"T"+key,artist,video_id="v"+key,genre=genre)
+def observe(store,day,keys):
+    store.history.record_history_plays(1,day*86400,keys,source_timezone='UTC')
 
 
-def _build(store):
-    """Mirror trend_rollups' incremental fold: history + play_events, then artist derivation."""
-    hist = store.trends.history_track_first()
-    plays = store.trends.play_event_track_first()
-    rows = []
-    for k in set(hist) | set(plays):
-        cands = []
-        if k in hist:
-            cands.append((hist[k][1], hist[k][0], "history"))
-        if k in plays:
-            cands.append((plays[k][1], plays[k][0], "play_event"))
-        ts, day, src = min(cands)
-        rows.append(("track", k, day, ts, src))
-    store.trends.upsert_first_play_min(rows)
-    store.trends.rebuild_artist_first_play()
+def names(store):
+    labels = store.trends.artist_labels()
+    return {labels[aid]:day for aid,day in store.trends.first_play_map('artist').items()}
 
 
-def test_first_play_min_over_history_and_play_events(store):
-    for k, a in [("k1", "A1"), ("k2", "A1"), ("k3", "A2"), ("k4", "A3")]:
-        _track(store, k, a)
-    _snap(store, 2, ["k1", "k3"])          # day 2
-    _snap(store, 5, ["k1", "k2"])          # day 5
-    _snap(store, 9, ["k3", "k4"])          # day 9
-    # play_events: k1 played day 1 (earlier than its day-2 snapshot); k4 played day 8 (earlier than day 9)
-    store.conn.execute("INSERT INTO play_events(identity_id, identity_key, played_at) VALUES (1,'k1',?)",
-                       (1 * 86400.0,))
-    store.conn.execute("INSERT INTO play_events(identity_id, identity_key, played_at) VALUES (1,'k4',?)",
-                       (8 * 86400.0,))
-    store.conn.commit()
-    _build(store)
-    tracks = store.trends.first_play_map("track")
-    # k1 = min(hist day2, play day1) = 1 ; k2 = day5 ; k3 = min(day2, day9) = 2 ; k4 = min(day9, play day8) = 8
-    assert tracks == {"k1": 1, "k2": 5, "k3": 2, "k4": 8}
-    artists = store.trends.first_play_map("artist")
-    # A1 = min(k1=1, k2=5) = 1 ; A2 = k3 = 2 ; A3 = k4 = 8
-    assert artists == {"A1": 1, "A2": 2, "A3": 8}
-    # floor = earliest track evidence = day 1 (k1 via play_events)
-    assert store.trends.first_play_floor_day() == 1
+def test_first_play_combines_precision_without_fabricating_exact_time(listener):
+    s = listener
+    for key,artist in [('k1','A1'),('k2','A1'),('k3','A2'),('k4','A3')]:
+        track(s,key,artist)
+    observe(s,2,['k1','k3'])
+    observe(s,5,['k1','k2'])
+    observe(s,9,['k3','k4'])
+    s.history.import_play_events(1,[('k1',None,86400),('k4',None,8*86400)])
+    s.trends.refresh_first_play()
+    assert s.trends.first_play_map('track')=={'k1':1,'k2':5,'k3':2,'k4':8}
+    assert names(s)=={'A1':1,'A2':2,'A3':8}
+    assert s.trends.first_play_floor_day()==1
+    coarse_only = s.conn.execute('SELECT first_exact_play_at,first_observed_day FROM recording_listening_summary '
+        'WHERE recording_id=(SELECT id FROM recordings WHERE identity_key=?)',('k2',)).fetchone()
+    assert tuple(coarse_only)==(None,'1970-01-06')
 
 
-def test_source_records_winning_model(store):
-    _track(store, "k1", "A1")
-    _snap(store, 5, ["k1"])
-    store.conn.execute("INSERT INTO play_events(identity_id, identity_key, played_at) VALUES (1,'k1',?)",
-                       (2 * 86400.0,))    # play precedes the snapshot -> play_event wins the MIN
-    store.conn.commit()
-    _build(store)
-    row = store.conn.execute(
-        "SELECT first_day, source FROM trend_first_play WHERE kind='track' AND id_key='k1'").fetchone()
-    assert row["first_day"] == 2 and row["source"] == "play_event"
+def test_late_evidence_rebuild_can_move_first_day_in_both_directions(listener):
+    s = listener
+    track(s,'k1','A1')
+    s.history.import_play_events(1,[('k1',None,5*86400)],source='live')
+    s.trends.refresh_first_play()
+    assert s.trends.first_play_map('track')=={'k1':5}
+    s.history.import_play_events(1,[('k1',None,2*86400)],source='takeout')
+    assert not s.trends.first_play_map('track')
+    s.trends.refresh_first_play()
+    assert names(s)=={'A1':2}
+    from yt_playlist.core import listening
+    with s.conn:
+        listening.remove_source(s.conn,'takeout',1)
+    s.trends.refresh_first_play()
+    assert names(s)=={'A1':5}
 
 
-def test_upsert_first_play_min_conflict_keeps_lower_ts(store):
-    """Exercise the ON CONFLICT DO UPDATE CASE/MIN branch directly (not via _build), in both
-    directions, for kind='track'."""
-    # Seed k1 at day 5 (first_ts = 5*86400).
-    store.trends.upsert_first_play_min([("track", "k1", 5, 5 * 86400.0, "history")])
-    assert store.trends.first_play_map("track") == {"k1": 5}
-
-    # Incoming ts = 2*86400 < 5*86400 -> LOWER, so MIN(5*86400, 2*86400) = 2*86400 -> day 2. Must win.
-    store.trends.upsert_first_play_min([("track", "k1", 2, 2 * 86400.0, "play_event")])
-    assert store.trends.first_play_map("track") == {"k1": 2}
-    row = store.conn.execute(
-        "SELECT source FROM trend_first_play WHERE kind='track' AND id_key='k1'").fetchone()
-    assert row["source"] == "play_event"   # source follows the winning (lower-ts) row
-
-    # Incoming ts = 7*86400 > 2*86400 -> HIGHER, so MIN(2*86400, 7*86400) stays 2*86400 -> day 2.
-    # Must NOT overwrite the existing (lower) value or its source.
-    store.trends.upsert_first_play_min([("track", "k1", 7, 7 * 86400.0, "history")])
-    assert store.trends.first_play_map("track") == {"k1": 2}
-    row = store.conn.execute(
-        "SELECT source FROM trend_first_play WHERE kind='track' AND id_key='k1'").fetchone()
-    assert row["source"] == "play_event"
-
-
-def test_upsert_first_play_min_conflict_keeps_lower_ts_artist_kind(store):
-    """Same MIN-preserving conflict path, but for kind='artist' rows. There is no artist-specific
-    upsert primitive (rebuild_artist_first_play does a DELETE + full recompute from the track rows,
-    not a conflict-preserving upsert) - upsert_first_play_min is generic over `kind`, so it is the
-    only primitive that exercises this SQL for artist rows, called directly here."""
-    # Seed A1 at day 5 (first_ts = 5*86400).
-    store.trends.upsert_first_play_min([("artist", "A1", 5, 5 * 86400.0, "history")])
-    assert store.trends.first_play_map("artist") == {"A1": 5}
-
-    # LOWER incoming ts (day 2) must win.
-    store.trends.upsert_first_play_min([("artist", "A1", 2, 2 * 86400.0, "play_event")])
-    assert store.trends.first_play_map("artist") == {"A1": 2}
-
-    # HIGHER incoming ts (day 7) must NOT overwrite.
-    store.trends.upsert_first_play_min([("artist", "A1", 7, 7 * 86400.0, "history")])
-    assert store.trends.first_play_map("artist") == {"A1": 2}
+def test_discard_and_deterministic_rebuild_preserve_evidence(listener):
+    s = listener
+    track(s,'k1','A1')
+    track(s,'k2','A2')
+    observe(s,3,['k1'])
+    observe(s,6,['k2'])
+    s.trends.refresh_first_play()
+    before = {t:list(map(tuple,s.conn.execute('SELECT * FROM '+t+' ORDER BY 1,2'))) for t in
+        ('recording_listening_summary','artist_listening_summary')}
+    evidence = list(map(tuple,s.conn.execute('SELECT * FROM listening_observations')))
+    with s.conn:
+        for table in before:
+            s.conn.execute('DELETE FROM '+table)
+    s.trends.refresh_first_play()
+    assert {t:list(map(tuple,s.conn.execute('SELECT * FROM '+t+' ORDER BY 1,2'))) for t in before}==before
+    assert list(map(tuple,s.conn.execute('SELECT * FROM listening_observations')))==evidence
+    s.trends.clear_first_play()
+    assert not s.trends.first_play_map('track')
+    s.trends.refresh_first_play()
+    assert names(s)=={'A1':3,'A2':6}
 
 
-def test_clear_first_play_empties_table_and_rebuild_is_idempotent(store):
-    for k, a in [("k1", "A1"), ("k2", "A2")]:
-        _track(store, k, a)
-    _snap(store, 3, ["k1"])
-    _snap(store, 6, ["k2"])
-    _build(store)
-
-    tracks_before = store.trends.first_play_map("track")
-    artists_before = store.trends.first_play_map("artist")
-    assert tracks_before == {"k1": 3, "k2": 6}
-    assert artists_before == {"A1": 3, "A2": 6}
-
-    store.trends.clear_first_play()
-    assert store.trends.first_play_map("track") == {}
-    assert store.trends.first_play_map("artist") == {}
-    assert store.conn.execute("SELECT COUNT(*) c FROM trend_first_play").fetchone()["c"] == 0
-
-    # Rebuilding from the same underlying history/play_events must reproduce the same index exactly.
-    _build(store)
-    assert store.trends.first_play_map("track") == tracks_before
-    assert store.trends.first_play_map("artist") == artists_before
+def test_old_checkpoint_cannot_hide_earlier_observations(listener):
+    s = listener
+    observe(s,2,['k1','k2'])
+    observe(s,5,['k3'])
+    s.settings.set_setting('trend_first_play_watermark','999')
+    assert s.trends.history_track_first()['k3']==(5,5*86400+43200)
+    observe(s,1,['k1'])
+    s.trends.refresh_first_play()
+    assert s.trends.first_play_map('track')=={'k1':1,'k2':2,'k3':5}
+    assert s.settings.get_setting('trend_first_play_watermark') is None
 
 
-def test_history_track_first_rescans_evidence_despite_old_snapshot_checkpoint(store):
-    _snap(store, 2, ["k1", "k2"])
-    _snap(store, 5, ["k3"])
-
-    # A checkpoint from the old snapshot model cannot hide earlier daily evidence.
-    store.settings.set_setting('trend_first_play_watermark', '999')
-    first = store.trends.history_track_first()
-    assert set(first) == {"k1","k2","k3"}
-    assert first["k3"] == (5,5*86400.0+43200)
-
-    _snap(store,1,['k1'])
-    assert store.trends.history_track_first()['k1']==(1,86400.0+43200)
-
-
-def test_takeout_backfill_moves_first_play_earlier(store):
-    """End-to-end: build the index on recent-only history, then simulate a Takeout backfill that
-    inserts an OLDER snapshot. clear_first_play + full rebuild must move the first-play EARLIER to
-    match the new, older minimum (an after_id-windowed incremental upsert would miss it, since the
-    backfilled snapshot has a higher id but an older day than what's already indexed)."""
-    _track(store, "k1", "A1")
-
-    # Recent-only history: first evidence is day 10.
-    _snap(store, 10, ["k1"])
-    _build(store)
-    recent = store.trends.first_play_map("track")
-    assert recent == {"k1": 10}
-    assert store.trends.first_play_map("artist") == {"A1": 10}
-
-    # Takeout backfill arrives as a new snapshot (higher id) but for an OLDER day (day 1).
-    _snap(store, 1, ["k1"])
-
-    store.trends.clear_first_play()
-    assert store.trends.first_play_map("track") == {}
-    _build(store)
-
-    backfilled = store.trends.first_play_map("track")
-    # first play moved from day 10 to day 1.
-    assert backfilled == {"k1": 1}
-    assert backfilled["k1"] < recent["k1"]
-    assert store.trends.first_play_map("artist") == {"A1": 1}
-
-
-def test_artist_derivation_reads_track_credits_once_instead_of_once_per_artist(store):
-    for i in range(60):
-        _track(store, f"k{i}", f"Artist {i // 3}")
-    store.trends.upsert_first_play_min(
-        [("track", f"k{i}", i + 1, (i + 1) * 86400, f"source-{i}") for i in range(60)])
-    reads = []
-    store.conn.create_function("observe_credit", 1, lambda artist: (reads.append(artist), artist)[1])
-    store.conn.execute("CREATE TEMP VIEW tracks AS SELECT identity_key,observe_credit(artist) artist "
-                       "FROM main.tracks")
-    store.trends.rebuild_artist_first_play()
-    assert len(reads) <= 60 * 4
-    assert store.trends.first_play_map("artist") == {f"Artist {i}": i * 3 + 1 for i in range(20)}
-    assert store.conn.execute("SELECT source FROM trend_first_play WHERE kind='artist' "
-                              "AND id_key='Artist 2'").fetchone()[0] == "source-6"
+def test_summary_read_projection_cannot_become_an_independent_evidence_writer(listener):
+    import sqlite3
+    with pytest.raises(sqlite3.OperationalError,match='view'):
+        listener.conn.execute("INSERT INTO trend_first_play VALUES ('artist','Name',1,86400,'invented')")

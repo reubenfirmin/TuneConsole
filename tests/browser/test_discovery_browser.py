@@ -1,7 +1,12 @@
 """Discovery counts require exposure, including when tabs, polls, and grid clamps hide tiles."""
 import pytest
 from playwright.sync_api import expect
+from tests.browser_clock_support import discovery_dwell, discovery_interval
+from tests.home_fixture_support import publish_menu
+from tests.visual_support import capture
 from yt_playlist.rec import home_prepared
+
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
 
 
 @pytest.mark.parametrize("width", [1440, 390])
@@ -11,21 +16,23 @@ def test_only_visible_discovery_tiles_count_once_per_visit(live_app, store, page
     for i in range(15):
         store.discovery.upsert_discovered_album(f"album{i}", f"Artist {i}", f"Album {i}", "2026", None, 1.0)
     store.discovery.upsert_discovered_artist("New artist", 1.0, [], [], None, 1.0)
-    assert home_prepared.prepare(store, 1) is not None
+    publish_menu(store, 1)
+    assert home_prepared.prepare_discovery(store, 1) is not None
     requests = []
     page.on("request", lambda request: requests.append(request.url))
     page.set_viewport_size({"width": width, "height": 1000})
+    page.clock.install()
     page.goto(f"{live_app}/")
     expect(page.get_by_role("tab", name="Mix tapes", exact=True)).to_be_visible()
-    page.wait_for_timeout(1100)  # Exceeds the exposure interval while Discover stays hidden.
+    tiles = page.locator("#album-grid > [data-discovery-id]")
+    discovery_interval(page, tiles.first)
     assert not any(url.endswith("/home/discover") for url in requests)
     assert all(a["offered_count"] == 0 for a in store.discovery.get_discovered_albums())
 
     page.get_by_role("tab", name="Discover", exact=True).click()
-    tiles = page.locator("#album-grid > [data-discovery-id]")
     expect(tiles).to_have_count(15)
     tiles.first.scroll_into_view_if_needed()
-    page.wait_for_timeout(1300)
+    discovery_dwell(page, tiles.first)
     shown = {a["browse_id"]: a["offered_count"] for a in store.discovery.get_discovered_albums()}
     assert any(shown.values()) and max(shown.values()) == 1
     hidden_ids = tiles.evaluate_all("tiles => tiles.filter(t => !t.getClientRects().length).map(t => t.dataset.discoveryId)")
@@ -36,12 +43,13 @@ def test_only_visible_discovery_tiles_count_once_per_visit(live_app, store, page
     page.evaluate("""() => htmx.ajax('GET', '/home/discover', {
         target: '#home-discovery > div:first-child', swap: 'innerHTML'})""")
     expect(tiles).to_have_count(15)
-    page.wait_for_timeout(1300)
+    discovery_interval(page, tiles.first)
     assert max(a["offered_count"] for a in store.discovery.get_discovered_albums()) == 1
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-    page.screenshot(path=tmp_path / f"discovery-{width}.png", full_page=True)
-    page.locator("#new-artist-grid [data-discovery-id]").first.scroll_into_view_if_needed()
-    page.wait_for_timeout(1300)
+    capture(page, path=tmp_path / f"discovery-{width}.png", full_page=True)
+    artist = page.locator("#new-artist-grid [data-discovery-id]").first
+    artist.scroll_into_view_if_needed()
+    discovery_dwell(page, artist)
     assert store.discovery.get_discovered_artists()[0]["offered_count"] == 1
 
 
@@ -66,7 +74,7 @@ def test_pool_shows_metadata_charts_above_tracks(live_app, store, page, width, t
     assert overview.bounding_box()["y"] < row.bounding_box()["y"]
     expect(page.get_by_text("Provider details", exact=False)).to_have_count(0)
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-    page.screenshot(path=tmp_path / f"discovery-pool-metadata-{width}.png", full_page=True)
+    capture(page, path=tmp_path / f"discovery-pool-metadata-{width}.png", full_page=True)
     page.get_by_role("button", name="Albums (0)").click()
     expect(overview).to_be_hidden()
 
@@ -82,17 +90,19 @@ def test_prepared_songs_are_ready_when_discover_opens(live_app, store, page, wid
             f"Artist {i}", None, None, "Jazz", "2020", "radio:seed", 1)
     fresh_pool.prepare(store, 2)
     assert home_prepared.prepare(store, 2) is not None
+    publish_menu(store, 1)
     # Opening the tab must not need a lazy fragment or a recommendation request to succeed.
     page.route("**/home/discovery", lambda route: route.abort())
     page.set_viewport_size({"width": width, "height": 1000})
+    page.clock.install()
     page.goto(f"{live_app}/")
     tiles = page.locator("#discovery-track-grid > [data-discovery-id]")
     expect(tiles).to_have_count(10)
     expect(tiles.first).to_be_hidden()
-    page.wait_for_timeout(1100)
+    discovery_interval(page, tiles.first)
     # Some songs also appear in Mix tapes; their existing offers belong to that surface.
     before = {row["identity_key"]: row["offered_count"] for row in store.discovery.get_discovered_tracks()}
-    assert store.conn.execute("SELECT COUNT(*) FROM discovery_visible_impressions WHERE kind='track'").fetchone()[0] == 0
+    assert store.conn.execute("SELECT COUNT(*) FROM discovery_impressions WHERE recording_id IS NOT NULL").fetchone()[0] == 0
 
     page.get_by_role("tab", name="Discover", exact=True).click()
     expect(page.get_by_role("heading", name="Songs to discover")).to_be_visible()
@@ -102,11 +112,11 @@ def test_prepared_songs_are_ready_when_discover_opens(live_app, store, page, wid
     assert title.get_attribute("href").startswith("/track/v0?")
     expect(tiles.first.locator("a.tile-play")).to_have_attribute("href", "https://music.youtube.com/watch?v=v0")
     tiles.first.scroll_into_view_if_needed()
-    page.wait_for_timeout(1300)
+    discovery_dwell(page, tiles.first)
     deltas = [row["offered_count"] - before[row["identity_key"]] for row in store.discovery.get_discovered_tracks()]
     assert max(deltas) == 1
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-    page.screenshot(path=tmp_path / f"discovery-ready-songs-{width}.png", full_page=True)
+    capture(page, path=tmp_path / f"discovery-ready-songs-{width}.png", full_page=True)
 
 
 def test_visible_discovery_survives_a_model_reset_and_background_refresh(live_app, store, page):
@@ -125,7 +135,7 @@ def test_visible_discovery_survives_a_model_reset_and_background_refresh(live_ap
         target: '#home-discovery', swap: 'outerHTML'})""")
     expect(tile).to_be_visible()
     expect(page.get_by_text('Finding new music for you…', exact=True)).to_have_count(0)
-    page.screenshot(path='/tmp/tuneconsole-417-discovery-after-refresh.png', full_page=True)
+    capture(page, path='/tmp/tuneconsole-417-discovery-after-refresh.png', full_page=True)
     page.reload()
     page.get_by_role('tab', name='Discover', exact=True).click()
     expect(tile).to_be_visible()

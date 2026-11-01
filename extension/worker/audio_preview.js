@@ -3,8 +3,8 @@ function createAudioPreview({appOrigin, pickTab}) {
   let active = null;
   let collectionAvailable;
   function hasCollectionModel() {
-    // Public extension archives currently omit the optional research runtime.
-    // Probe local packaged assets before allowing unattended audio capture.
+    // An incomplete installation cannot start capture. Production builds include
+    // the verified model/runtime; all inference stays inside the music tab.
     collectionAvailable ||= (async () => {
       try {
         const response = await fetch(chrome.runtime.getURL('audio_model/vendor/bundle.json'));

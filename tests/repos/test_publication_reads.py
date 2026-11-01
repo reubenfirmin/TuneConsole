@@ -8,17 +8,24 @@ import pytest
 
 from yt_playlist.core.store import Store
 from yt_playlist.core import json_cache
+from yt_playlist.core.db_revisions import Revisions
+from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.rec import content_model, radio_candidates
 from yt_playlist.repos.rec_proposals import encode_proposals
 
 
-@pytest.mark.parametrize('operation', ['setting', 'namespace', 'present', 'bundle', 'groups'])
 @pytest.mark.parametrize('commit', [True, False])
 @pytest.mark.parametrize('staged', [False, True])
 def test_foreground_reads_see_last_good_while_publication_holds_writer(
-        tmp_path, monkeypatch, operation, commit, staged):
+        tmp_path, monkeypatch, commit, staged):
     store = Store(tmp_path / 'publication.db')
-    store.init_schema()
+    # Exercise the retained predecessor cache protocol. Current typed head
+    # publication and its foreground readers are checked independently.
+    migrate(store.conn, registry=registry.MIGRATIONS[:69])
+    store._bind_repositories()
+    # Keep the frozen v69 owner while initializing the revision tracker that
+    # normal init_schema supplies. Calling init_schema here advances the owner.
+    store._snapshot_revisions = Revisions(store.conn)
     old = {'all': {'fresh': [{'key': 'old'}]}, '_meta': {'full_pools': True}}
     new = {'all': {'fresh': [{'key': 'new'}]}, '_meta': {'full_pools': True}}
     store.rec_proposals.put_proposals('mode_bundles', old, 1)
@@ -52,7 +59,7 @@ def test_foreground_reads_see_last_good_while_publication_holds_writer(
             finally:
                 store.conn.rollback()
 
-    def read():
+    def read(operation):
         if operation == 'setting':
             return store.settings.get_setting('config_input')
         if operation == 'namespace':
@@ -64,20 +71,22 @@ def test_foreground_reads_see_last_good_while_publication_holds_writer(
         return store.rec_proposals.get_proposals('mode_bundles')
 
     expected = {'setting': 'old', 'namespace': {'config_input': 'old'},
-                'present': True, 'bundle': old, 'groups': old}[operation]
+                'present': True, 'bundle': old, 'groups': old}
     try:
         with ThreadPoolExecutor(2) as workers:
             writing = workers.submit(publish)
             try:
                 assert entered.wait(5)
-                assert workers.submit(read).result(2) == expected
-                assert not writing.done(), 'Writer did not remain active during the read'
+                for operation, value in expected.items():
+                    assert workers.submit(read, operation).result(2) == value, operation
+                    assert not writing.done(), 'Writer did not remain active during the read'
             finally:
                 release.set()
             writing.result(5)
-        assert len(connections) == 1
-        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
-            connections[0].execute('SELECT 1')
+        assert len(connections) == len(expected)
+        for connection in connections:
+            with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+                connection.execute('SELECT 1')
         assert store.settings.get_setting('config_input') == ('new' if commit else 'old')
         assert store.rec_proposals.get_proposals('mode_bundles') == (new if commit else old)
     finally:

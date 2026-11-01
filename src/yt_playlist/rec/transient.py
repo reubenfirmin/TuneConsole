@@ -1,6 +1,6 @@
 """The transient model: a reactive, persistent read on recent interaction.
 
-Inputs are signed track-key events at a point in recency: mood feedback (rec_mood), recent plays
+Inputs are signed track-key events at a point in recency: mood feedback (mood_events), recent plays
 (history), recent ACTION-provenance likes (rec_feedback kind='like' observed live through the
 extension; sync-discovered likes carry no true action timestamp and are excluded at the repo level,
 see recent_liked_with_ts), recent dislikes (rec_feedback kind='dislike'), recent skips (#84,
@@ -37,10 +37,9 @@ def radio_list_ids(store) -> list[str]:
     Other generated sources also retain their provenance/identity quarantine in the history reader
     and evidence_plays. Deliberate context choices enter through choice learning. Trends/stats keep
     counting plays (descriptive, a different pipeline)."""
-    ids = [store.settings.get_setting(k) for k in _RADIO_SETTING_KEYS]
-    sessions = json.loads(store.settings.get_setting("radio_session_playlist_ids") or "[]")
+    sessions = store.playlists.radio_playlist_ids()
     transient = sorted(store.transient_radio_playlists.copy())
-    return list(dict.fromkeys(i for i in ids + sessions + transient if i))
+    return list(dict.fromkeys(i for i in sessions + transient if i))
 
 
 def evidence_plays(store, limit):
@@ -83,15 +82,18 @@ def facets_for(store, keys) -> dict:
     keys = list(dict.fromkeys(keys))
     if not keys:
         return {}
+    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
+        with store.read_view() as reader:
+            return facets_for(reader, keys)
     dao = store.rec_query
     genres, decades, artists = dao.track_genres(keys), dao.track_decades(keys), dao.track_artists(keys)
     out: dict = {}
     for k in keys:
         if k in genres:
-            fam = genre_map.family(genres[k])
+            fam = genre_map.family(genres[k],conn=store.conn)
             if fam:
                 out.setdefault(f"genre:{fam}", []).append(k)
-            sub = genre_map.subgenre(genres[k])
+            sub = genre_map.subgenre(genres[k],conn=store.conn)
             if sub and sub != fam:
                 out.setdefault(f"genre:{sub}", []).append(k)
         if k in decades:
@@ -156,6 +158,21 @@ def facet_leans(store, now) -> dict:
     # the read only asks the store for skips that could still matter, not the whole history.
     for k, ts in store.player_events.recent_skips_with_ts(now - 4 * skip_hl * 86400):
         add([k], -skip_w * decay_weight(now - ts, skip_hl), drop_artist=True)
+    # Mix choices are broad raw-genre preferences, never synthetic plays or
+    # centroids over whichever recordings happen to match today's catalog.
+    from yt_playlist.core import mix_choices
+    from yt_playlist.rec import choice_learning
+    choice_genres = {}
+    for interest in choice_learning.contexts(store, now):
+        if interest['format'] != 'mixes' or interest.get('descriptor_id') is None:
+            continue
+        descriptor = mix_choices.read_descriptor(store.conn, interest['descriptor_id'])
+        families = {genre_map.family(label, conn=store.conn) for label in descriptor['genres']}
+        for family in families - {None, ''}:
+            axis = 'genre:' + family
+            choice_genres[axis] = max(choice_genres.get(axis, 0.), min(1., interest['weight']) / max(1, len(families)))
+    for axis, strength in choice_genres.items():
+        leans[axis] = leans.get(axis, 0.) + strength
     return leans
 
 

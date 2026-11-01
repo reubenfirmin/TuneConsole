@@ -22,12 +22,15 @@ def test_tune_route_rejects_invalid_controls_without_changing_session(poc, value
 
 def test_routes_use_independent_playlist_session(poc, monkeypatch):
     c, remote, *_ = poc
+    c.ctx.store.settings.set_setting('onboard_listening_format', 'radio')
+    offer = c.seeds()
     c.ctx.templates = Jinja2Templates(directory="src/yt_playlist/web/templates")
     app = FastAPI()
     app.include_router(radio_routes.build(c.ctx))
     with TestClient(app) as client:
         assert client.get("/radio/status").json()["active"] is False
-        assert client.post("/radio/start").json()["ok"]
+        assert client.post("/radio/start", json={
+            'video_id': offer['tracks'][0]['video_id'], 'menu_id': offer['menu_id']}).json()["ok"]
         play(c, "v3")
         assert client.get("/radio/status").json()["ahead"] == 1
         assert client.post("/radio/stop").json()["active"] is False
@@ -79,7 +82,7 @@ def test_status_polls_project_session_without_loading_seed_menu(poc, monkeypatch
 def test_playlist_seed_preserves_source_order_and_continues_in_a_separate_playlist(poc):
     c, remote, frames, _, _ = poc
     store = c.ctx.store
-    iid = store.identities.get_master_identity().id
+    iid = store.accounts.get_master_account().id
     pid = store.playlists.upsert_playlist(iid, "PLSOURCE", "My mix", 4, "", 1)
     videos = ["v8", "v5", "v11", "v16"]
     by_video = store.tracks.track_ids_for_videos(videos)
@@ -103,7 +106,7 @@ def test_explicit_playlist_launch_replaces_active_radio_and_validates_before_sto
     assert not c.start(playlist_id=999)["ok"]
     assert c.session is old and not old.stop.is_set()
     store = c.ctx.store
-    iid = store.identities.get_master_identity().id
+    iid = store.accounts.get_master_account().id
     pid = store.playlists.upsert_playlist(iid, "PLSOURCE", "My mix", 1, "", 1)
     assert not c.start(playlist_id=pid)["ok"]
     assert c.session is old and not old.stop.is_set()
@@ -117,7 +120,7 @@ def test_explicit_playlist_launch_replaces_active_radio_and_validates_before_sto
 def test_playlist_launch_accepts_tracks_outside_prepared_pools_and_skips_unavailable(poc):
     c, remote, *_ = poc
     store = c.ctx.store
-    iid = store.identities.get_master_identity().id
+    iid = store.accounts.get_master_account().id
     pid = store.playlists.upsert_playlist(iid, "PLSOURCE", "My mix", 2, "", 1)
     unavailable = store.tracks.upsert_track("v8", "Song 8", "Artist 8", "", None, available=0)
     outside = store.tracks.upsert_track("v40", "Outside pool", "New artist", "", 200)
@@ -129,7 +132,7 @@ def test_playlist_launch_accepts_tracks_outside_prepared_pools_and_skips_unavail
 def test_playlist_launch_waits_for_accepted_tracks_when_writer_omits_a_song(poc, monkeypatch):
     c, remote, *_ = poc
     store = c.ctx.store
-    iid = store.identities.get_master_identity().id
+    iid = store.accounts.get_master_account().id
     pid = store.playlists.upsert_playlist(iid, "PLSOURCE", "My mix", 4, "", 1)
     videos = ["v8", "v5", "v11", "v16"]
     by_video = store.tracks.track_ids_for_videos(videos)
@@ -157,7 +160,10 @@ def test_playlist_seed_route_rejects_invalid_ids(poc, playlist_id):
 def test_playlist_seed_route_uses_playlist_and_rejects_conflicting_seed(poc):
     c, remote, *_ = poc
     store = c.ctx.store
-    iid = store.identities.get_master_identity().id
+    c.seeds()
+    store.rec_proposals.put_proposals('listening_choices', {
+        'home_format': {'episodes': {'radio': 1}}}, 1000)
+    iid = store.accounts.get_master_account().id
     pid = store.playlists.upsert_playlist(iid, "PLSOURCE", "My mix", 1, "", 1)
     store.playlists.set_playlist_tracks(pid, [store.tracks.track_ids_for_videos(["v8"])["v8"]])
     app = FastAPI()
@@ -173,6 +179,9 @@ def test_radio_page_is_registered_and_assets_are_served(store):
     from tests.onboarding_support import publish_personal_mix
 
     store.settings.set_setting("last_sync_at", "1000")
+    store.settings.set_setting("onboard_dismissed", "1")
+    store.rec_proposals.put_proposals('listening_choices', {'home_format': {
+        'episodes': {'radio': 1}}}, 1000)
     publish_personal_mix(store)
     with TestClient(create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False),
                     base_url="http://127.0.0.1") as client:

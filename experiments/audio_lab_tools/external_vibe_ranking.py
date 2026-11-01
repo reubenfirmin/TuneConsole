@@ -12,6 +12,7 @@ from .external_experiment import OUT, digest, normalize, save, stamp
 from .external_learners import serializable
 from .external_training import SEED, folds
 from .external_transfer import SNAPSHOT, VIBES, external_head_features
+from .research_artifacts import compact_slug
 
 
 def weights(experts, y):
@@ -66,6 +67,12 @@ def choose(candidates, consensus_only=False):
 
 
 def crossfit(features, y, groups):
+    from .external_prediction_cache import crossfit as cached
+    return cached('independent-vibe-ranking', features, y, groups,
+                  lambda: _crossfit(features, y, groups))
+
+
+def _crossfit(features, y, groups):
     split = folds(groups, count=3, seed=SEED + 1)
     values = np.zeros((len(y), len(features), len(VIBES)))
     for fold in range(3):
@@ -76,17 +83,18 @@ def crossfit(features, y, groups):
     return values
 
 
-def evaluate(sources):
+def evaluate(sources, *, identity_exclusions=(), run_name=None):
     with threadpool_limits(limits=1):
-        return _evaluate(sources)
+        return _evaluate(sources, identity_exclusions=identity_exclusions, run_name=run_name)
 
 
-def _evaluate(sources):
+def _evaluate(sources, *, identity_exclusions=(), run_name=None):
     snapshot = json.loads(SNAPSHOT.read_text())
     rows = [row for row in snapshot['gold'] if len(row.get('embedding_values', [])) == 200]
     y = np.array([[int(name in row['labels']) for name in VIBES] for row in rows], dtype=float)
     groups = [normalize(row['artist']) or row['video_id'] for row in rows]
-    qualities, names, exclusions, signatures, heads = external_head_features(sources, rows)
+    qualities, names, exclusions, signatures, heads = external_head_features(
+        sources, rows, identity_exclusions=identity_exclusions)
     features = {'embedding': np.array([row['embedding_values'] for row in rows])}
     for source in sources:
         columns = [i for i, name in enumerate(names) if name.startswith(source + ':')]
@@ -114,10 +122,14 @@ def _evaluate(sources):
         print(json.dumps({'vibe_ranking_outer_fold': fold, 'sources': sources, 'candidates': len(candidates)}), flush=True)
     results = {name: metrics(y, values) for name, values in methods.items()}
     slug = '+'.join(sources)
+    if run_name:
+        slug = run_name + '__' + slug
+    slug = compact_slug(slug)
     report = {'created_at': stamp(), 'sources': sources, 'rows': len(rows), 'methods': results,
               'expert_names': list(features), 'nonempty_subsets': 2 ** len(features) - 1,
               'choices_by_fold': choices, 'script_sha256': digest(__file__), 'snapshot_sha256': digest(SNAPSHOT),
               'external_identity_exclusions': exclusions, 'embedding_signatures': sorted(signatures),
+              'additional_protected_identity_rows': len(identity_exclusions),
               'silver_rows_excluded': len(snapshot['silver']),
               'validation': 'Five artist-group outer folds; three inner meta-folds; calibration regularization selected inside each meta-training fold. Subset selection and per-vibe pooling use outer-training labels only.',
               'target_interpretation': 'Selected acceptable vibes versus unselected vibes, with each vibe scored independently. Original human annotations are unchanged.',

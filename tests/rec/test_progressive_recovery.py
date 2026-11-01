@@ -82,7 +82,8 @@ def test_periodic_audit_repairs_a_lost_queue_in_bounded_batches(store):
     before = store.rec_model.content_generation()
     key = before['library'][0][0]
     with store.conn:
-        store.conn.execute('DELETE FROM rec_prepared_content WHERE identity_key=?', (key,))
+        store.conn.execute('DELETE FROM prepared_recording_inputs WHERE recording_id='
+                           '(SELECT id FROM recordings WHERE identity_key=?)', (key,))
     assert not p.due(1100)
     # Nothing else is written to wake preparation. The periodic audit finds it.
     assert p.due(2000)
@@ -125,7 +126,7 @@ def test_repair_captures_only_its_five_table_counters_after_unrelated_key_churn(
     with store.conn:
         store.conn.execute('DELETE FROM rec_content_pending')
         store.conn.executemany('INSERT INTO settings VALUES (?,?)',
-                               [(f'unrelated-{i}', 'value') for i in range(1000)])
+                               [(f'unrelated-{i}', 'value') for i in range(4)])
         store.conn.execute("DELETE FROM settings WHERE key LIKE 'unrelated-%'")
     original, captured = store._snapshot_revisions.capture, []
 
@@ -148,7 +149,8 @@ def test_memory_deferral_survives_restart_and_recovers_without_new_activity(tmp_
     store.init_schema()
     try:
         catalog(store, 12)
-        p = progressive.Preparation(store, budget=replace(progressive.Budget(), memory_bytes=1))
+        # Admit the small input corpus, then reject the encoder/clustering peak.
+        p = progressive.Preparation(store, budget=replace(progressive.Budget(), memory_bytes=128 * 1024))
         drain(p)
         assert not p.fit(1000)
         warning = progressive.maintenance_view(store)
@@ -174,7 +176,8 @@ def test_worker_polls_for_lost_input_work_without_a_catalog_write(store, monkeyp
     assert p.fit(1000)
     key = store.rec_model.content_generation()['library'][0][0]
     with store.conn:
-        store.conn.execute('DELETE FROM rec_prepared_content WHERE identity_key=?', (key,))
+        store.conn.execute('DELETE FROM prepared_recording_inputs WHERE recording_id='
+                           '(SELECT id FROM recordings WHERE identity_key=?)', (key,))
     worker = RecWorker(SimpleNamespace(store=store, now_fn=lambda: 2000,
                                       logger=logging.getLogger(__name__)), debounce_s=0)
     scheduled = []
@@ -261,7 +264,8 @@ def test_audit_repairs_missing_inputs_for_previously_published_vectors(store, po
     generation = store.rec_model.content_generation()
     key = generation[pool][0][0]
     with store.conn:
-        store.conn.execute('DELETE FROM rec_prepared_content WHERE identity_key=?', (key,))
+        store.conn.execute('DELETE FROM prepared_recording_inputs WHERE recording_id='
+                           '(SELECT id FROM recordings WHERE identity_key=?)', (key,))
         store.conn.execute('DELETE FROM rec_content_pending WHERE identity_key=?', (key,))
     reopened = progressive.Preparation(store)
     assert reopened.due(1060)

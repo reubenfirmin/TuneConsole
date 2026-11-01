@@ -6,7 +6,7 @@ from fastapi.responses import RedirectResponse
 
 from yt_playlist.core.accounts import main_client
 from yt_playlist.providers import lastfm
-from yt_playlist.rec import home_cards, home_preferences, onboarding
+from yt_playlist.rec import account_growth, artist_start, home_cards, home_preferences, onboarding
 from yt_playlist.rec.home_cards import _proto
 
 LASTFM_NUDGE_SNOOZE_S = 30 * 86400
@@ -66,9 +66,10 @@ def build(ctx):
         preference = (await request.form()).get('format')
         if preference not in home_preferences.PANELS:
             return Response('Choose albums, mixes or radio.', status_code=422)
-        store.settings.set_setting('onboard_listening_format', preference)
-        store.settings.set_setting('onboard_welcomed', '1')
-        store.settings.set_setting('onboard_format_pending', '0')
+        state = account_growth.view(store, now_fn(), radio=ctx.radio.bootstrap())
+        if not all(state['ready_formats'].values()):
+            return Response('Wait until all three listening formats are ready.', status_code=409)
+        store.settings.set_setting('home_format', preference)
         return RedirectResponse('/', status_code=303)
 
     @router.post("/onboard/lastfm/dismiss")
@@ -129,6 +130,11 @@ def build(ctx):
 
     @router.get("/home/onboard/start")
     def home_onboard_start(request: Request):
+        if artist_start.required(store):
+            return templates.TemplateResponse(request, 'artist_start.html', {
+                'artist_choices': store.discovery.starter_artists(),
+                'minimum_artists': artist_start.MIN_ARTISTS,
+            })
         preference = home_preferences.default_format(store)
         if preference == 'albums':
             return templates.TemplateResponse(request, '_partials/onboarding_album.html', {

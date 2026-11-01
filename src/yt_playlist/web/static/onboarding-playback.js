@@ -40,7 +40,8 @@
     }
     const matches = data?.connected && playing?.paused === false && playing.video_id
       && (playing.title || playing.artist)
-      && (pending.album ? albumMatches : playing.playlist_ytm_id === pending.playlist);
+      && (pending.album ? albumMatches : playing.playlist_ytm_id === pending.playlist
+          && (!pending.radio || playing.source?.kind === 'radio'));
     if (!matches) {
       if (pending.until) finish();
       return;
@@ -52,6 +53,7 @@
       save();
       document.documentElement.dataset.onboardingPlayed = 'true';
       try { sessionStorage.setItem(PLAYED, '1'); } catch (_) {}
+      window.dispatchEvent(new CustomEvent('onboarding-playback-started'));
     }
     card.classList.add('is-onboarding-cue');
     // Repeated snapshots never restart the eight-second handoff. A full page load
@@ -60,11 +62,21 @@
     timer = setTimeout(finish, pending.until - now);
   }
 
-  document.addEventListener('htmx:beforeRequest', event => {
-    const album = event.detail.elt?.dataset.onboardingAlbum;
+  document.addEventListener('onboarding-album-play', event => {
+    const album = event.target.dataset.onboardingAlbum;
     if (!album) return;
     pending = {album, expires: Date.now() + 10 * 60 * 1000};
     save();
+  });
+  document.addEventListener('radio-session-state', event => {
+    // An accepted session is a handoff target, not proof of audible playback.
+    // Only the starter's exact playlist, confirmed by the bridge, completes it.
+    if (!event.target.closest?.('.onboarding-radio') || !event.detail.active || !event.detail.playlist
+        || document.documentElement.dataset.onboardingPlayed === 'true') return;
+    if (pending?.radio && pending.playlist === event.detail.playlist) return;
+    pending = {radio: true, playlist: event.detail.playlist, expires: Date.now() + 10 * 60 * 1000};
+    save();
+    apply(window.playbackStatus?.snapshot);
   });
   document.addEventListener('htmx:afterRequest', event => {
     if (event.detail.elt?.hasAttribute('data-onboarding-album') && event.detail.failed) finish();

@@ -1,8 +1,13 @@
-"""Installed databases repair automatically, with resumable transactions and WAL."""
+"""The SQL-policy predecessor repairs with resumable transactions and WAL.
+
+Current-schema policy-file migration has separate owner-cutover coverage. These
+fixtures deliberately retain version 69 to exercise the historical VACUUM job.
+"""
 from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
+import threading
 import time
 from types import SimpleNamespace
 
@@ -15,9 +20,67 @@ from yt_playlist.core.storage_maintenance import StorageMaintenance
 from yt_playlist.rec import scorecard
 
 
-def _legacy(path):
+class ExplicitStorageMaintenance(StorageMaintenance):
+    """Select a controlled repair job with the real worker and pause lifecycle."""
+
+    def start(self):
+        assert self.store._db_path is not None and self._thread is None
+        with self.store._lock:
+            self._query_only = self.store.conn.execute('PRAGMA query_only').fetchone()[0]
+            self.store.conn.execute('PRAGMA query_only=ON')
+            self.store.conn._storage_compacting = True
+            self.store.activity_paused = True
+            self.active = True
+            self.phase = 'checking'
+            self.ready.clear()
+        self._thread = threading.Thread(target=self._run, name='historical-policy-repair', daemon=True)
+        try:
+            self._thread.start()
+        except BaseException:
+            self._resume()
+            raise
+
+
+class HistoricalPolicyMaintenance(ExplicitStorageMaintenance):
+    """Select the retired SQL-policy job on genuine v69, outside admission."""
+
+    def start(self):
+        self._history = [tuple(row) for row in self.store.conn.execute(
+            'SELECT * FROM schema_migrations ORDER BY version')]
+        assert len(self._history) == 69
+        assert not self.store.conn.execute(
+            "SELECT 1 FROM sqlite_schema WHERE name='schema_changes'").fetchone()
+        super().start()
+
+    def join(self, timeout=30):
+        super().join(timeout)
+        assert [tuple(row) for row in self.store.conn.execute(
+            'SELECT * FROM schema_migrations ORDER BY version')] == self._history
+        assert not self.store.conn.execute(
+            "SELECT 1 FROM sqlite_schema WHERE name='schema_changes'").fetchone()
+
+
+def _open_legacy(path):
+    """Open the real SQL-policy schema without applying its file-owner successor."""
+    from yt_playlist.core.db_revisions import Revisions
+    from yt_playlist.core.migrations import migrate, registry
+
     store = Store(path)
-    store.init_schema()
+    # Version 69 is the real predecessor retaining SQL policy documents. This
+    # explicit historical harness is outside ordinary supported admission.
+    migrate(store.conn, registry=registry.MIGRATIONS[:69])
+    store._bind_repositories()
+    # Modern private repository readers need predecessor name projections.
+    # The repair connection itself retains unshadowed physical SQL owners for
+    # VACUUM INTO; this changes no owner or migration history.
+    store._schema_compatibility = True
+    store.conn.execute('PRAGMA journal_mode=WAL')
+    store._snapshot_revisions = Revisions(store.conn)
+    return store
+
+
+def _legacy(path):
+    store = _open_legacy(path)
     raw = {'ranker': 'legacy', 'weights': {'decay': 1.23456789}, 'evidence': 'x' * 40000}
     with store.conn:
         store.conn.executemany('INSERT INTO rec_serving_policies VALUES (?,?,?)',
@@ -37,17 +100,16 @@ def _state(conn):
 
 
 @pytest.mark.parametrize('journal', ['wal', 'delete'])
-def test_installed_database_repairs_and_shrinks_on_normal_startup(tmp_path, journal):
+def test_predecessor_database_repairs_and_shrinks_on_restart(tmp_path, journal):
     path = tmp_path / 'state.db'
     old, raw = _legacy(path)
     before = _counts(old.conn)
     old.conn.execute(f'PRAGMA journal_mode={journal}').fetchall()
     old.conn.close()
     size = path.stat().st_size
-    store = Store(path)
-    store.init_schema()
+    store = _open_legacy(path)
     try:
-        maintenance = StorageMaintenance(store)
+        maintenance = HistoricalPolicyMaintenance(store)
         maintenance.start()
         maintenance.join(30)
         assert _state(store.conn) == dict(phase='done', cursor='recent', deleted=296, shared=5)
@@ -117,7 +179,7 @@ def test_batch_failure_rolls_back_progress_and_every_policy_change(tmp_path, mon
     store.conn.close()
 
 
-def test_low_space_defers_then_automatically_retries_compaction_on_next_startup(tmp_path, monkeypatch, caplog):
+def test_low_space_defers_then_retries_compaction_on_predecessor_restart(tmp_path, monkeypatch, caplog):
     path = tmp_path / 'state.db'
     store, raw = _legacy(path)
     size = path.stat().st_size
@@ -132,10 +194,9 @@ def test_low_space_defers_then_automatically_retries_compaction_on_next_startup(
     assert 'will retry next startup' in caplog.text
     store.conn.close()
     monkeypatch.setattr(policy_upgrade, '_compact', original)
-    restarted = Store(path)
-    restarted.init_schema()
+    restarted = _open_legacy(path)
     try:
-        maintenance = StorageMaintenance(restarted)
+        maintenance = HistoricalPolicyMaintenance(restarted)
         maintenance.start()
         maintenance.join(30)
         assert _state(restarted.conn)['phase'] == 'done'
@@ -284,10 +345,9 @@ def test_saved_database_automatic_upgrade(request, tmp_path):
             policies = target.execute('SELECT count(*) FROM rec_serving_policies').fetchone()[0]
     path.chmod(0o600)
     original_bytes = path.stat().st_size
-    store = Store(path)
-    store.init_schema()
+    store = _open_legacy(path)
     try:
-        maintenance = StorageMaintenance(store)
+        maintenance = HistoricalPolicyMaintenance(store)
         maintenance.start()
         maintenance.join(3600)
         state = _state(store.conn)

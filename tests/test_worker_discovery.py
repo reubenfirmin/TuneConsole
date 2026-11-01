@@ -22,7 +22,7 @@ class _ArtistClient(FakeClient):
 
 
 def _ctx(store, client):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     return iid, Ctx(store=store, client_provider=lambda: {iid: client}, now_fn=lambda: 1.0,
                     templates=None, jobs=None)
 
@@ -43,7 +43,7 @@ def test_worker_materializes_proposals(store, monkeypatch):
 
 
 def test_home_discover_serves_cached(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.discovery.upsert_discovered_album("B", "X", "Cached LP", "2024", None, now=1.0)
     assert home_prepared.prepare(store, 1.0) is not None
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),

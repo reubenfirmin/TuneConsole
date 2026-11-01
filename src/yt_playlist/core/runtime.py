@@ -4,7 +4,7 @@ import os
 import threading
 from pathlib import Path
 
-from yt_playlist.core.config import load_identities, validate_identities
+from yt_playlist.core.config import load_accounts, validate_accounts
 from yt_playlist.core.identities import build_client
 from yt_playlist.core.setup import (write_config, prepared_config,
                                     restore_config, BROWSER_CREDENTIAL_FILENAME)
@@ -56,9 +56,9 @@ class Runtime:
             if not self.config_path.exists():
                 return
             try:
-                cfgs = load_identities(self.config_path)
+                cfgs = load_accounts(self.config_path)
                 content = self.config_path.read_bytes()
-                with self.store.identities.reconciled(cfgs) as ids:
+                with self.store.accounts.reconciled(cfgs) as ids:
                     provider = self._prepare_provider(cfgs, ids)
             except Exception as e:
                 if self._last_config is not None:
@@ -83,12 +83,12 @@ class Runtime:
     def apply_setup(self, identities) -> None:
         """Prepare a complete usable candidate, then atomically publish it with reconciliation.
 
-        Raises ValueError on bad input. Identity definition (labels, brand_account_id, master) is
+        Raises ValueError on bad input. Account definition (labels, brand_account_id, master) is
         independent of the credential: the extension bridge is paired separately and live (see
         credentials_present / bridge_paired), so identities can be saved on their own even before
         pairing completes.
         """
-        validate_identities(identities)
+        validate_accounts(identities)
         self.creds_dir.mkdir(parents=True, exist_ok=True)
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
@@ -96,7 +96,7 @@ class Runtime:
             published = False
             try:
                 with prepared_config(identities, self.config_path) as (_, cfgs):
-                    with self.store.identities.reconciled(cfgs) as ids:
+                    with self.store.accounts.reconciled(cfgs) as ids:
                         rows = [{"id": ids[c.label], "label": c.label, "credential_ref": c.credential_ref,
                                  "brand_account_id": c.brand_account_id, "is_master": c.is_master} for c in cfgs]
                         with prepared_config(rows, self.config_path) as (staged, final_cfgs):

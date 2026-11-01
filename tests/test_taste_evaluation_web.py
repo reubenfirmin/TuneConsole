@@ -144,6 +144,7 @@ def test_taste_preview_explains_production_score_trace_in_plain_language(store, 
 
 def test_taste_comparison_keeps_fixed_baseline_and_shows_delta(store, monkeypatch):
     from yt_playlist.rec import surfaces
+    store.tracks.upsert_track('comparison-track', 'Track', 'Artist', None, 180)
     calls = []
 
     def comparison(_store, _now, keys=None, limit=24):
@@ -170,6 +171,8 @@ def test_taste_comparison_keeps_fixed_baseline_and_shows_delta(store, monkeypatc
 
 def test_taste_comparison_labels_entries_exits_and_exclusions(store, monkeypatch):
     from yt_playlist.rec import surfaces
+    store.tracks.upsert_track('comparison-old', 'Old', 'Artist', None, 180)
+    store.tracks.upsert_track('comparison-new', 'New', 'Artist', None, 180)
 
     trace = {"durable": 0.4, "transient_delta": 0.0, "session_delta": 0.0,
              "audio_delta": 0.0, "rank_base": 0.7, "axes": {}, "axis_applied": 1.0}

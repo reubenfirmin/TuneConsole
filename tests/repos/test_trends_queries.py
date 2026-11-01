@@ -6,7 +6,7 @@ from yt_playlist.core.store import Store
 def store():
     s = Store(":memory:")
     s.init_schema()
-    s.identities.upsert_identity("me", "c", None, True)   # identity id=1, referenced by history/playlist FKs
+    s.accounts.upsert_account("me", "c", None, True)   # identity id=1, referenced by history/playlist FKs
     return s
 
 
@@ -31,7 +31,8 @@ def test_play_day_counts_and_meta(store):
     _snap(store, 5, ["k1"])
     # (day, key, count): day2 has k1 and k3 once each; day5 has k1 once
     assert sorted(store.trends.play_day_counts()) == [(2, "k1", 1), (2, "k3", 1), (5, "k1", 1)]
-    assert store.trends.track_meta() == {"k1": ("A1", "house"), "k3": ("A2", "techno")}
+    artists = {row['name']:'@artist:'+str(row['id']) for row in store.conn.execute('SELECT id,name FROM artists')}
+    assert store.trends.track_meta() == {"k1": ((artists['A1'],), "House"), "k3": ((artists['A2'],), "Techno")}
 
 
 def test_never_played_and_last(store):
@@ -68,16 +69,9 @@ def test_dead_playlists_threshold_and_order(store):
     pid_alpha = store.playlists.upsert_playlist(1,'pl_alpha','Alpha',1,'h',0)
     pid_beta = store.playlists.upsert_playlist(1,'pl_beta','Beta',1,'h',0)
 
-    store.conn.execute(
-        "INSERT INTO playlist_tracks(playlist_id, track_id, position) VALUES (?, ?, 0)",
-        (pid_zeta, _track_id(store, "ka")))
-    store.conn.execute(
-        "INSERT INTO playlist_tracks(playlist_id, track_id, position) VALUES (?, ?, 0)",
-        (pid_alpha, _track_id(store, "kb")))
-    store.conn.execute(
-        "INSERT INTO playlist_tracks(playlist_id, track_id, position) VALUES (?, ?, 0)",
-        (pid_beta, _track_id(store, "kc")))
-    store.conn.commit()
+    store.playlists.set_playlist_tracks(pid_zeta,[_track_id(store,'ka')])
+    store.playlists.set_playlist_tracks(pid_alpha,[_track_id(store,'kb')])
+    store.playlists.set_playlist_tracks(pid_beta,[_track_id(store,'kc')])
 
     # kc (Beta's only track) played 3 times: day2, day5, day7. ka/kb (Zeta/Alpha) never played.
     _snap(store, 2, ["kc"])
@@ -100,8 +94,8 @@ def test_dead_playlists_threshold_and_order(store):
 
 def test_track_cards_and_month_track_plays(store):
     _track(store, "k1", "A1", "house")               # ensure the tracks row carries title/thumbnail
-    store.conn.execute("UPDATE tracks SET thumbnail='http://x/1.jpg', album_browse_id='MPRE1' "
-                       "WHERE identity_key='k1'")
+    store.conn.execute("UPDATE youtube_items SET thumbnail='http://x/1.jpg', album_browse_id='MPRE1' "
+                       "WHERE video_id='vk1'")
     store.conn.commit()
     _snap(store, 2, ["k1"]); _snap(store, 5, ["k1"])
     cards = store.trends.track_cards(["k1"])

@@ -5,7 +5,7 @@ import time
 from collections import Counter, OrderedDict
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from yt_playlist.core import artists, catalog, discovery_sources, first_play, listening
+from yt_playlist.core import artists, catalog, discovery_sources, entity_names, first_play, listening, listening_summaries
 from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized, snapshot_read
 
 logger = logging.getLogger(__name__)
@@ -84,16 +84,16 @@ class HistoryRepo(Repo):
         super().__init__(db)
         self._bucket_warnings = OrderedDict()
 
-    def _log_undated_buckets(self, identity_id, skipped):
+    def _log_undated_buckets(self, account_id, skipped):
         if not skipped:
             return
         unexpected = Counter({bucket: count for bucket, count in skipped.items()
                               if bucket and bucket not in _UNDATED_BUCKETS})
         logger.info('history sync: identity=%s skipped_undated=%d expected=%s missing=%d unexpected=%d',
-                    identity_id, sum(skipped.values()),
+                    account_id, sum(skipped.values()),
                     {bucket: skipped[bucket] for bucket in sorted(_UNDATED_BUCKETS) if skipped[bucket]},
                     skipped[''], sum(unexpected.values()))
-        logger.debug('history undated buckets: identity=%s counts=%s', identity_id, dict(skipped))
+        logger.debug('history undated buckets: identity=%s counts=%s', account_id, dict(skipped))
         now = time.monotonic()
         report = Counter()
         for bucket, count in unexpected.items():
@@ -110,20 +110,20 @@ class HistoryRepo(Repo):
             sample = {bucket[:120]: count for bucket, count in report.most_common(_BUCKET_WARNING_SAMPLE_SIZE)}
             logger.warning('history: unexpected played buckets: identity=%s rows=%d buckets=%s '
                            'other_categories=%d; skipped without inventing play dates',
-                           identity_id, sum(report.values()), sample,
+                           account_id, sum(report.values()), sample,
                            max(0, len(report) - _BUCKET_WARNING_SAMPLE_SIZE))
 
     @synchronized
-    def record_history_plays(self, identity_id, taken_at, items, *, source_timezone=None) -> int:
+    def record_history_plays(self, account_id, taken_at, items, *, source_timezone=None) -> int:
         """Retain dated sync evidence, returning newly observed account/recording days.
 
         Tuples contain YouTube date buckets; bare keys are independent coarse
         observations. Neither form creates an exact timestamped event.
         """
         with self.conn:
-            policy = listening.calendar(self.conn,identity_id,source_timezone)
+            policy = listening.calendar(self.conn,account_id,source_timezone)
             zone = source_timezone if listening._zone(source_timezone) else policy
-            before = listening.day_count(self.conn,identity_id)
+            before = listening.day_count(self.conn,account_id)
             parsed, skipped, foreign = {}, Counter(), set()
             for item in items:
                 bare = isinstance(item,str)
@@ -140,30 +140,32 @@ class HistoryRepo(Repo):
                     skipped[bucket] += 1
                     continue
                 day = datetime.datetime.fromtimestamp(stamp,datetime.timezone.utc).date().isoformat()
-                scope = listening.observe_day(self.conn,identity_id,key,day,
+                scope = listening.observe_day(self.conn,account_id,key,day,
                     'independent' if bare else 'ytm_history',zone,taken_at,reconcile=False)
                 if scope is not None:
                     foreign.add(scope)
-            listening.reconcile_foreign_days(self.conn,identity_id,observations=foreign)
+            listening.reconcile_foreign_days(self.conn,account_id,observations=foreign)
             first_play.invalidate(self.conn)
-            added = max(0,listening.day_count(self.conn,identity_id)-before)
-        self._log_undated_buckets(identity_id, skipped)
+            added = max(0,listening.day_count(self.conn,account_id)-before)
+        self._log_undated_buckets(account_id, skipped)
         return added
 
     @synchronized
-    def reset_play_history(self, identity_id=None) -> None:
+    def reset_play_history(self, account_id=None) -> None:
         """Clear coarse captures for a fresh sync, retaining the exact-event ledger.
 
         Scoped to one account, or all when None. Exact plays continue to contribute
         listening days; a history-window reset does not delete timestamped evidence.
         """
         with self.conn:
-            if identity_id is None:
-                self.conn.execute('DELETE FROM listening_observations')
-                self.conn.execute('DELETE FROM listening_capture_receipts')
+            observations = entity_names.owner(self.conn, 'listening_observations')
+            receipts = entity_names.owner(self.conn, 'listening_capture_receipts')
+            if account_id is None:
+                self.conn.execute(f'DELETE FROM {observations.table}')
+                self.conn.execute(f'DELETE FROM {receipts.table}')
             else:
-                self.conn.execute('DELETE FROM listening_observations WHERE identity_id=?',(identity_id,))
-                self.conn.execute('DELETE FROM listening_capture_receipts WHERE identity_id=?', (identity_id,))
+                self.conn.execute(f'DELETE FROM {observations.table} WHERE {observations.column("account_id")}=?',(account_id,))
+                self.conn.execute(f'DELETE FROM {receipts.table} WHERE {receipts.column("account_id")}=?', (account_id,))
             first_play.invalidate(self.conn)
 
     @synchronized
@@ -198,7 +200,7 @@ class HistoryRepo(Repo):
         """Per-key day-model play counts strictly before an evaluation cutoff."""
         rows = self.conn.execute(
             "SELECT identity_key k,COUNT(*) c FROM ("
-            "SELECT DISTINCT identity_id,identity_key,day FROM listening_activity WHERE at<?) "
+            "SELECT DISTINCT account_id,identity_key,day FROM listening_activity WHERE at<?) "
             "GROUP BY identity_key", (ts,)).fetchall()
         return {r["k"]: int(r["c"]) for r in rows}
 
@@ -208,13 +210,13 @@ class HistoryRepo(Repo):
         rows = self.conn.execute(
             "SELECT identity_key k, COUNT(*) c FROM ("
             "  SELECT identity_key FROM listening_activity "
-            "  ORDER BY at DESC,identity_id,identity_key,event_id DESC LIMIT ?"
+            "  ORDER BY at DESC,account_id,identity_key,event_id DESC LIMIT ?"
             ") GROUP BY identity_key", (limit,)).fetchall()
         return {r["k"]: r["c"] for r in rows}
 
     @synchronized
     def recent_keys_ordered(self, since_ts, limit=None) -> list[str]:
-        """Identity keys played at/after since_ts, most recent activity first.
+        """Account keys played at/after since_ts, most recent activity first.
         For the recent-mood centroid, which wants the latest plays, not an arbitrary subset of a set."""
         rows = self.conn.execute(
             "SELECT identity_key k,MAX(at) last FROM listening_activity WHERE at>=? "
@@ -232,8 +234,8 @@ class HistoryRepo(Repo):
         if exclude_list_ids:
             excl = list(exclude_list_ids)
             ph = ",".join("?" * len(excl))
-            q = ("WITH kept AS (SELECT pe.identity_id,pe.identity_key,pe.played_at,c.day "
-                 "FROM play_events pe JOIN play_event_calendar c ON c.event_id=pe.id "
+            q = ("WITH kept AS (SELECT pe.account_id,pe.identity_key,pe.played_at,c.day "
+                 "FROM play_event_subjects pe JOIN play_event_calendar c ON c.event_id=pe.id "
                  f"WHERE COALESCE(pe.is_generated,0)=0 AND (pe.playlist_ytm_id IS NULL OR pe.playlist_ytm_id NOT IN ({ph}))"
                  ") "
                  "SELECT k, MAX(ts) ts FROM ("
@@ -241,11 +243,11 @@ class HistoryRepo(Repo):
                  "  UNION ALL"
                  "  SELECT e.identity_key k,CAST(strftime('%s',e.day||' 12:00:00') AS REAL) ts"
                  "  FROM eligible_listening_evidence e WHERE e.event_id IS NULL"
-                 "  AND NOT EXISTS (SELECT 1 FROM kept k WHERE k.identity_id=e.identity_id "
+                 "  AND NOT EXISTS (SELECT 1 FROM kept k WHERE k.account_id=e.account_id "
                  "    AND k.identity_key=e.identity_key AND k.day=e.day)"
                  "  AND (e.source<>'ytm_history' OR NOT EXISTS ("
-                 "    SELECT 1 FROM play_events pe JOIN play_event_calendar c ON c.event_id=pe.id"
-                 "    WHERE pe.identity_id=e.identity_id AND pe.identity_key=e.identity_key"
+                 "    SELECT 1 FROM play_event_subjects pe JOIN play_event_calendar c ON c.event_id=pe.id"
+                 "    WHERE pe.account_id=e.account_id AND pe.identity_key=e.identity_key"
                  f"    AND pe.playlist_ytm_id IN ({ph})"
                  "    AND c.day=e.day))"
                  ") GROUP BY k ORDER BY ts DESC")
@@ -269,7 +271,7 @@ class HistoryRepo(Repo):
             f"WHERE identity_key IN ({placeholders}) GROUP BY identity_key", keys)}
 
     @synchronized
-    def record_play_event(self, identity_id, identity_key, video_id, played_at,
+    def record_play_event(self, account_id, identity_key, video_id, played_at,
                           playlist_ytm_id=None, like_status=None, *, source_timezone=None,
                           context_choice=False) -> bool:
         """#75 Persist one live now-playing report from the extension. The content script re-reports
@@ -280,20 +282,20 @@ class HistoryRepo(Repo):
         quarantined from organic per-track learning. Returns True when a NEW play was recorded."""
         is_generated = self.conn.execute(
             "SELECT EXISTS(SELECT 1 FROM quarantined_playlists q "
-            "JOIN playlist_scopes s ON s.ref=q.ytm WHERE q.name=? "
-            "AND (s.provider_id=? OR 'RDAMPL' || s.provider_id=?) "
-            "AND (s.identity_id IS NULL OR s.identity_id=?))",
-            (GENERATED_GROUP, playlist_ytm_id, playlist_ytm_id, identity_id)).fetchone()[0]
+            "JOIN playlist_scopes s ON s.id=q.playlist_scope_id WHERE q.name=? "
+            "AND (s.provider_playlist_id=? OR 'RDAMPL' || s.provider_playlist_id=?) "
+            "AND (s.account_id IS NULL OR s.account_id=?))",
+            (GENERATED_GROUP, playlist_ytm_id, playlist_ytm_id, account_id)).fetchone()[0]
         transient_radio = (playlist_ytm_id or '').removeprefix('RDAMPL') in self._store.transient_radio_playlists
         is_generated = int(bool(is_generated or context_choice or transient_radio))
         with self.conn:
-            listening.calendar(self.conn,identity_id,source_timezone)
+            listening.calendar(self.conn,account_id,source_timezone)
             subject = catalog.play_key(self.conn,identity_key,video_id)
-            row = self._matching_event(identity_id,subject,video_id,played_at)
+            row = self._matching_event(account_id,subject,video_id,played_at)
             if row is None:
                 latest = self.conn.execute(
-                    'SELECT * FROM play_events WHERE identity_id=? ORDER BY played_at DESC,id DESC LIMIT 1',
-                    (identity_id,)).fetchone()
+                    'SELECT * FROM play_event_subjects WHERE account_id=? ORDER BY played_at DESC,id DESC LIMIT 1',
+                    (account_id,)).fetchone()
                 if (latest and latest['identity_key']==subject
                         and (not video_id or not latest['video_id'] or video_id==latest['video_id'])
                         and 0 <= played_at-latest['played_at'] < _LIVE_DEDUP_S
@@ -302,30 +304,37 @@ class HistoryRepo(Repo):
                     row = latest
             new = row is None
             if new:
-                event_id = self.conn.execute(
-                    'INSERT INTO play_events(identity_id,identity_key,video_id,played_at,'
-                    "playlist_ytm_id,like_status,is_generated,source) VALUES (?,?,?,?,?,?,?,'live')",
-                    (identity_id,identity_key,video_id,played_at,playlist_ytm_id,like_status,is_generated)).lastrowid
+                event_id = listening.append_event(self.conn,account_id,identity_key,played_at,
+                    video_id=video_id,playlist_ytm_id=playlist_ytm_id,like_status=like_status,is_generated=is_generated)
                 timestamp = played_at
             else:
                 event_id,timestamp = row['id'],row['played_at']
+                typed = listening_summaries.available(self.conn)
+                membership_sql = ('membership_ref_id=CASE WHEN playlist_ytm_id IS NULL AND ? IS NOT NULL '
+                                  'THEN ? ELSE membership_ref_id END,') if typed else ''
+                membership_args = (playlist_ytm_id, listening.membership_reference(
+                    self.conn, account_id, playlist_ytm_id)) if typed else ()
                 self.conn.execute(
-                    'UPDATE play_events SET like_status=COALESCE(?,like_status),'
-                    "video_id=COALESCE(NULLIF(trim(video_id),''),?),"
+                    'UPDATE main.play_events SET like_status=COALESCE(?,like_status),'
+                    "video_id=COALESCE(NULLIF(trim(video_id),''),?)," + membership_sql +
                     'is_generated=CASE WHEN playlist_ytm_id IS NULL AND ? IS NOT NULL '
                     'THEN ? ELSE is_generated END,playlist_ytm_id=COALESCE(playlist_ytm_id,?) WHERE id=?',
-                    (like_status,video_id,playlist_ytm_id,is_generated,playlist_ytm_id,event_id))
-            listening.project_event(self.conn,event_id,identity_id,timestamp,source='live')
-            listening.reconcile_foreign_days(self.conn,identity_id,events={(subject,timestamp)})
+                    (like_status,video_id,*membership_args,playlist_ytm_id,is_generated,playlist_ytm_id,event_id))
+            listening.project_event(self.conn,event_id,account_id,timestamp,source='live')
+            listening.reconcile_foreign_days(self.conn,account_id,events={(subject,timestamp)})
             first_play.invalidate(self.conn)
             return new
 
-    def _matching_event(self, identity_id, subject, video_id, timestamp):
+    def _matching_event(self, account_id, subject, video_id, timestamp):
+        recording = self.conn.execute('SELECT id FROM recordings WHERE identity_key=?',(subject,)).fetchone()
+        subject_column = 'unresolved_subject_key' if listening_summaries.available(self.conn) else 'identity_key'
+        scope,args = ('recording_id=?',(recording[0],)) if recording else (
+            f'recording_id IS NULL AND {subject_column}=?',(subject,))
         return self.conn.execute(
-            'SELECT * FROM play_events WHERE identity_id=? AND identity_key=? '
+            f'SELECT * FROM play_event_subjects WHERE account_id=? AND {scope} '
             "AND (NULLIF(trim(video_id),'') IS NULL OR NULLIF(trim(?),'') IS NULL OR video_id=?) "
             'AND played_at BETWEEN ?-2.0 AND ?+2.0 ORDER BY ABS(played_at-?),id LIMIT 1',
-            (identity_id,subject,video_id,video_id,timestamp,timestamp,timestamp)).fetchone()
+            (account_id,*args,video_id,video_id,timestamp,timestamp,timestamp)).fetchone()
 
     @synchronized
     def listening_comparison_coverage(self, since, until, *, exclude_list_ids=()) -> dict:
@@ -342,7 +351,7 @@ class HistoryRepo(Repo):
         row = self.conn.execute(
             "SELECT COUNT(DISTINCT identity_key) tracks,"
             f"COUNT(DISTINCT CASE WHEN {eligible} THEN identity_key END) eligible_tracks "
-            "FROM play_events WHERE played_at>=? AND played_at<=?",
+            "FROM play_event_subjects WHERE played_at>=? AND played_at<=?",
             [*excluded, since, until]).fetchone()
         # Read the descriptive sources directly. The learning projection excludes some generated
         # listening and performs reconciliation work that this coverage explanation doesn't need.
@@ -366,53 +375,54 @@ class HistoryRepo(Repo):
         # Taste consumers additionally retain generated provenance after a playlist is
         # removed. Descriptive callers keep the complete event stream by default.
         evidence = ("AND COALESCE(is_generated,0)=0 AND NOT EXISTS "
-                    "(SELECT 1 FROM quarantined_playlists q WHERE q.ytm=playlist_ytm_id) "
+                    "(SELECT 1 FROM quarantined_playlists q WHERE q.playlist_scope_id=playlist_ytm_id) "
                     if taste_only else "")
         if exclude_list_ids:
             excl = list(exclude_list_ids)
             placeholders = ",".join("?" * len(excl))
-            q = ("SELECT identity_id, identity_key, video_id, played_at, playlist_ytm_id, like_status "
-                 f"FROM play_events WHERE played_at>=? "
+            q = ("SELECT account_id, identity_key, video_id, played_at, playlist_ytm_id, like_status "
+                 f"FROM play_event_subjects WHERE played_at>=? "
                  f"AND (playlist_ytm_id IS NULL OR playlist_ytm_id NOT IN ({placeholders})) "
                  + evidence + "ORDER BY played_at, id")
             rows = self.conn.execute(q, (since_ts, *excl)).fetchall()
         else:
             rows = self.conn.execute(
-                "SELECT identity_id, identity_key, video_id, played_at, playlist_ytm_id, like_status "
-                "FROM play_events WHERE played_at>=? " + evidence + "ORDER BY played_at, id", (since_ts,)).fetchall()
+                "SELECT account_id, identity_key, video_id, played_at, playlist_ytm_id, like_status "
+                "FROM play_event_subjects WHERE played_at>=? " + evidence + "ORDER BY played_at, id", (since_ts,)).fetchall()
         return [dict(r) for r in rows]
 
     @synchronized
-    def import_plays(self, identity_id, plays, *, source='takeout', source_timezone=None) -> int:
+    def import_plays(self, account_id, plays, *, source='takeout', source_timezone=None) -> int:
         """Compatibility entry point for timestamped imports; return new listening days."""
-        days,_ = self.import_listening_events(identity_id,((k,None,ts) for k,ts in plays),
+        days,_ = self.import_listening_events(account_id,((k,None,ts) for k,ts in plays),
                                                source=source,source_timezone=source_timezone)
         return days
 
     @synchronized
-    def record_takeout_import(self, fingerprint, identity_id, imported_at, parsed, unparsed_dates) -> int:
+    def record_takeout_import(self, fingerprint, account_id, imported_at, parsed, unparsed_dates) -> int:
         """Record each upload's observed extent without claiming verified account-wide coverage.
 
         Watch-history files contain neither account proof nor an authoritative export interval.
         Even a fully parsed file may be filtered or partial; only a separately verified import
         may acquire coverage_start/end, account_verified and complete in a future verification flow.
         """
+        imports = entity_names.owner(self.conn, 'takeout_imports')
         cur = self.conn.execute(
-            "INSERT INTO takeout_imports(identity_id,fingerprint,imported_at,observed_start,"
+            f'INSERT INTO {imports.table}({imports.column("account_id")},fingerprint,imported_at,observed_start,'
             "observed_end,unparsed_dates) VALUES (?,?,?,?,?,?)",
-            (identity_id, fingerprint, imported_at, parsed[0]['ts'] if parsed else None,
+            (account_id, fingerprint, imported_at, parsed[0]['ts'] if parsed else None,
              parsed[-1]['ts'] if parsed else None, unparsed_dates))
         self.conn.commit()
         return cur.lastrowid
 
     @synchronized
-    def import_play_events(self, identity_id, rows, source="takeout") -> int:
+    def import_play_events(self, account_id, rows, source="takeout") -> int:
         """Compatibility entry point returning new exact events, not listening days."""
-        _,events = self.import_listening_events(identity_id,rows,source=source)
+        _,events = self.import_listening_events(account_id,rows,source=source)
         return events
 
     @synchronized
-    def import_listening_events(self, identity_id, rows, *, source='takeout', source_timezone=None):
+    def import_listening_events(self, account_id, rows, *, source='takeout', source_timezone=None):
         """Atomically reconcile [(key, video, timestamp)] and retain every source.
 
         HTML/JSON timestamp rounding and live/import overlap deduplicate within
@@ -420,52 +430,50 @@ class HistoryRepo(Repo):
         Returns (new account/recording days, new exact events).
         """
         with self.conn:
-            listening.calendar(self.conn,identity_id,source_timezone)
-            before = listening.day_count(self.conn,identity_id)
+            listening.calendar(self.conn,account_id,source_timezone)
+            before = listening.day_count(self.conn,account_id)
             added = 0
             affected = set()
             for key,video,timestamp in rows:
                 if not key:
                     continue
                 subject = catalog.play_key(self.conn,key,video)
-                row = self._matching_event(identity_id,subject,video,timestamp)
+                row = self._matching_event(account_id,subject,video,timestamp)
                 if row is None:
-                    event_id = self.conn.execute(
-                        'INSERT INTO play_events(identity_id,identity_key,video_id,played_at,source) '
-                        'VALUES (?,?,?,?,?)',(identity_id,key,video,timestamp,source)).lastrowid
+                    event_id = listening.append_event(self.conn,account_id,key,timestamp,video_id=video)
                     added += 1
                 else:
                     event_id,timestamp = row['id'],row['played_at']
-                    self.conn.execute("UPDATE play_events SET video_id=COALESCE(NULLIF(trim(video_id),''),?) WHERE id=?",
+                    self.conn.execute("UPDATE main.play_events SET video_id=COALESCE(NULLIF(trim(video_id),''),?) WHERE id=?",
                                       (video,event_id))
-                listening.project_event(self.conn,event_id,identity_id,timestamp,source=source)
+                listening.project_event(self.conn,event_id,account_id,timestamp,source=source)
                 affected.add((subject,timestamp))
-            listening.reconcile_foreign_days(self.conn,identity_id,events=affected)
+            listening.reconcile_foreign_days(self.conn,account_id,events=affected)
             first_play.invalidate(self.conn)
-            return max(0,listening.day_count(self.conn,identity_id)-before),added
+            return max(0,listening.day_count(self.conn,account_id)-before),added
 
     @synchronized
-    def listening_day_counts(self, identity_id=None):
+    def listening_day_counts(self, account_id=None):
         """Distinct account/recording/day counts, including independently dated evidence."""
-        where,args = ('',()) if identity_id is None else (' WHERE identity_id=?',(identity_id,))
+        where,args = ('',()) if account_id is None else (' WHERE account_id=?',(account_id,))
         return {r[0]:r[1] for r in self.conn.execute(
             'SELECT identity_key,COUNT(*) FROM listening_days'+where+' GROUP BY identity_key',args)}
 
     @synchronized
-    def event_play_counts(self, identity_id=None):
+    def event_play_counts(self, account_id=None):
         """Actual timestamped, non-generated events; coarse observations are excluded."""
-        where,args = ('',()) if identity_id is None else (' AND identity_id=?',(identity_id,))
+        where,args = ('',()) if account_id is None else (' AND account_id=?',(account_id,))
         return {r[0]:r[1] for r in self.conn.execute(
-            'SELECT identity_key,COUNT(*) FROM play_events WHERE COALESCE(is_generated,0)=0'+where+
+            'SELECT identity_key,COUNT(*) FROM play_event_subjects WHERE COALESCE(is_generated,0)=0'+where+
             ' GROUP BY identity_key',args)}
 
     @synchronized
-    def remove_listening_source(self, source, identity_id=None):
+    def remove_listening_source(self, source, account_id=None):
         with self.conn:
-            listening.remove_source(self.conn,source,identity_id)
+            listening.remove_source(self.conn,source,account_id)
 
     @synchronized
-    def import_spotify_listens(self, identity_id, rows):
+    def import_spotify_listens(self, account_id, rows):
         """Retain stable Spotify occurrence IDs, independent of changing display metadata.
 
         Rows contain (URI, end timestamp, unmatched artist name, matched key).
@@ -473,16 +481,17 @@ class HistoryRepo(Repo):
         they can be matched later if the user adds that music to the library.
         """
         with self.conn:
-            listening.calendar(self.conn,identity_id)
-            before = listening.day_count(self.conn,identity_id)
+            listening.calendar(self.conn,account_id)
+            receipts = entity_names.owner(self.conn, 'spotify_history_listens')
+            before = listening.day_count(self.conn,account_id)
             added = 0
             artist_ids = {}
             listens_added = 0
             affected = set()
             for uri, timestamp, artist, key in rows:
                 receipt = self.conn.execute(
-                    'SELECT event_id FROM spotify_history_listens WHERE identity_id=? AND track_uri=? AND ended_at=?',
-                    (identity_id,uri,timestamp)).fetchone()
+                    'SELECT event_id FROM spotify_history_listens WHERE account_id=? AND track_uri=? AND ended_at=?',
+                    (account_id,uri,timestamp)).fetchone()
                 if receipt and (receipt['event_id'] is not None or not key):
                     continue
                 listens_added += receipt is None
@@ -493,45 +502,44 @@ class HistoryRepo(Repo):
                     aid = artist_ids[artist]
                 if key:
                     subject = catalog.play_key(self.conn,key,None)
-                    event = self._matching_event(identity_id,subject,None,timestamp)
+                    event = self._matching_event(account_id,subject,None,timestamp)
                     if event is None:
-                        event_id = self.conn.execute(
-                            'INSERT INTO play_events(identity_id,identity_key,played_at,source) '
-                            "VALUES (?,?,?,'spotify_export')", (identity_id,key,timestamp)).lastrowid
+                        event_id = listening.append_event(self.conn,account_id,key,timestamp)
                         added += 1
                         event_time = timestamp
                     else:
                         event_id, event_time = event['id'], event['played_at']
-                    listening.project_event(self.conn,event_id,identity_id,event_time,source='spotify_export')
+                    listening.project_event(self.conn,event_id,account_id,event_time,source='spotify_export')
                     affected.add((subject,event_time))
-                self.conn.execute('INSERT INTO spotify_history_listens VALUES (?,?,?,?,?) '
-                    'ON CONFLICT(identity_id,track_uri,ended_at) DO UPDATE SET '
+                self.conn.execute(f'INSERT INTO {receipts.table} VALUES (?,?,?,?,?) '
+                    f'ON CONFLICT({receipts.column("account_id")},track_uri,ended_at) DO UPDATE SET '
                     'event_id=excluded.event_id,artist_id=COALESCE(spotify_history_listens.artist_id,excluded.artist_id)',
-                    (identity_id,uri,timestamp,event_id,aid))
-            listening.reconcile_foreign_days(self.conn,identity_id,events=affected)
+                    (account_id,uri,timestamp,event_id,aid))
+            listening.reconcile_foreign_days(self.conn,account_id,events=affected)
             first_play.invalidate(self.conn)
-            return max(0,listening.day_count(self.conn,identity_id)-before), added, listens_added
+            return max(0,listening.day_count(self.conn,account_id)-before), added, listens_added
 
     @synchronized
-    def spotify_unmatched_artists(self, identity_id):
+    def spotify_unmatched_artists(self, account_id):
         return {r['name']: r['plays'] for r in self.conn.execute(
             'SELECT a.name,COUNT(*) plays FROM spotify_history_listens s JOIN artists a ON a.id=s.artist_id '
-            'WHERE s.identity_id=? AND s.event_id IS NULL GROUP BY a.id', (identity_id,))}
+            'WHERE s.account_id=? AND s.event_id IS NULL GROUP BY a.id', (account_id,))}
 
     @snapshot_read
     def spotify_history_stats(self):
         """Source attribution, counting shared events once rather than claiming ownership."""
         row = self.conn.execute(
             'SELECT COUNT(*) events,COUNT(DISTINCT pe.identity_key) tracks,MIN(pe.played_at) first_at,'
-            'MAX(pe.played_at) last_at FROM play_events pe WHERE EXISTS ('
+            'MAX(pe.played_at) last_at FROM play_event_subjects pe WHERE EXISTS ('
             "SELECT 1 FROM play_event_sources s WHERE s.event_id=pe.id AND s.source IN ('spotify','spotify_export'))"
         ).fetchone()
         days = self.conn.execute(
-            'SELECT COUNT(*) FROM (SELECT DISTINCT identity_id,identity_key,day FROM eligible_listening_evidence '
+            'SELECT COUNT(*) FROM (SELECT DISTINCT account_id,identity_key,day FROM eligible_listening_evidence '
             "WHERE source IN ('spotify','spotify_export'))").fetchone()[0]
         artists = self.conn.execute(
             'SELECT COUNT(DISTINCT d.artist_id) FROM discovered_artists d JOIN discovery_artist_sources s '
-            "ON s.artist_id=d.artist_id WHERE s.source LIKE 'spotify_export:%' OR s.source='spotify_model'").fetchone()[0]
+            "ON s.artist_id=d.artist_id JOIN discovery_origins o ON o.id=s.origin_id "
+            "WHERE o.kind IN ('spotify_export','spotify_model')").fetchone()[0]
         receipts = self.conn.execute('SELECT COUNT(*) FROM spotify_history_listens').fetchone()[0]
         unresolved = self.conn.execute('SELECT COUNT(*) FROM listening_observations '
             "WHERE day IS NULL AND source IN ('spotify','spotify_export')").fetchone()[0]
@@ -548,13 +556,32 @@ class HistoryRepo(Repo):
         """
         with self.conn:
             before = self.spotify_history_stats()
-            self.conn.execute('DELETE FROM spotify_history_listens')
+            self.conn.execute('DELETE FROM main.spotify_history_listens')
             for source in ('spotify_export','spotify'):
                 listening.remove_source(self.conn,source)
             artists_removed = discovery_sources.remove_spotify_artists(self.conn)
-            for table in ('rec_proposals','rec_vectors','rec_artist_vectors','rec_artist_content_vectors',
+            self.conn.execute("DELETE FROM recording_embeddings WHERE space='collaborative'")
+            from yt_playlist.core import group_preparation_state, model_selection_heads, model_state
+            if model_selection_heads.available(self.conn):
+                model_selection_heads.put(self.conn,{key:None for key in model_selection_heads.KEYS})
+            if self._store._model_comparison_state:
+                from yt_playlist.core import model_comparison_state
+                model_comparison_state.clear(self.conn)
+            if self._store._model_projections:
+                from yt_playlist.core import model_projections
+                model_projections.clear(self.conn)
+            from yt_playlist.core import recommendation_setting_outputs
+            if recommendation_setting_outputs.available(self.conn):
+                recommendation_setting_outputs.clear(self.conn)
+            for table in ('rec_proposals','artist_embeddings',
                           'rec_model_previous_vectors','rec_model_forecasts','rec_model_selection_runs'):
                 self.conn.execute(f'DELETE FROM {table}')
+            from yt_playlist.core.recommendation_invalidation import clear_display, clear_findings
+            clear_display(self.conn)
+            clear_findings(self.conn)
+            if model_state.available(self.conn):
+                model_state.put(self.conn,{'rec_artist_content_model':None,'rec_fit_inputs':None,'rec_artist_fit_inputs':None})
+                group_preparation_state.put(self.conn,{'rec_mode_fit_inputs':None})
             self.conn.execute("DELETE FROM settings WHERE key IN ('spotify_imported_at','spotify_import_report',"
                               "'rec_selection_active_run','rec_selection_display_run','rec_selection_restore',"
                               "'rec_artist_content_model','rec_autotune_result','trend_spotlight_review_month',"

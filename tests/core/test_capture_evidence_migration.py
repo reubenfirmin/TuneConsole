@@ -48,7 +48,7 @@ def test_populated_conversion_preserves_originals_precision_receipts_and_project
     store = _predecessor()
     originals = _originals(store.conn)
     days = list(map(tuple, store.conn.execute('SELECT * FROM listening_days ORDER BY identity_id,identity_key')))
-    observations = list(map(tuple, store.conn.execute('SELECT * FROM listening_observations')))
+    observations = [dict(r) for r in store.conn.execute('SELECT * FROM listening_observations')]
     receipts = list(map(tuple, store.conn.execute('SELECT * FROM history_snapshots ORDER BY id')))
     migrate(store.conn, registry=_registry())
     capture.validate(store.conn)
@@ -58,11 +58,12 @@ def test_populated_conversion_preserves_originals_precision_receipts_and_project
     current.validate(store.conn)
     assert list(map(tuple, store.conn.execute(
         'SELECT identity_id,raw_identity_key,identity_key,recording_id,source,last_observed_at,'
-        "capture_id,capture_item_id FROM listening_observations WHERE precision='legacy_unknown' "
+        "capture_id,capture_item_id FROM listening_observation_subjects WHERE precision='legacy_unknown' "
         'ORDER BY capture_item_id'))) == originals
     assert list(map(tuple, store.conn.execute('SELECT * FROM listening_capture_receipts ORDER BY id'))) == receipts
     assert list(map(tuple, store.conn.execute('SELECT * FROM listening_days ORDER BY identity_id,identity_key'))) == days
-    assert tuple(store.conn.execute('SELECT * FROM listening_observations WHERE id=1').fetchone())[:12] == observations[0]
+    converted = store.conn.execute('SELECT * FROM listening_observation_subjects WHERE id=1').fetchone()
+    assert {k:converted[k] for k in observations[0]} == observations[0]
     assert list(map(tuple, store.conn.execute(
         "SELECT DISTINCT precision,timezone FROM listening_observations WHERE capture_id IS NOT NULL"))) == [
             ('legacy_unknown', None)]
@@ -116,13 +117,14 @@ def test_first_confirmed_calendar_preserves_unknown_capture_dates_and_precision(
     with store.conn:
         store.conn.execute("UPDATE listening_calendars SET timezone='UTC',confirmed=0 WHERE identity_id=1")
     migrate(store.conn, registry=_registry())
+    store.init_schema()
     before = list(map(tuple, store.conn.execute(
         "SELECT * FROM listening_observations WHERE precision='legacy_unknown' ORDER BY id")))
     with store.conn:
         listening.calendar(store.conn, 1, 'America/Costa_Rica')
     assert list(map(tuple, store.conn.execute(
         "SELECT * FROM listening_observations WHERE precision='legacy_unknown' ORDER BY id"))) == before
-    capture.validate(store.conn)
+    current.validate(store.conn)
 
 
 def test_converted_capture_removal_and_reset_preserve_other_accounts_and_exact_plays():
@@ -152,7 +154,7 @@ def test_converted_capture_removal_and_reset_preserve_other_accounts_and_exact_p
         'SELECT * FROM listening_capture_receipts WHERE identity_id=2 ORDER BY id'))) == other_receipts
     assert not store.trends.first_play_map('track')
     store.trends.refresh_first_play()
-    assert store.settings.get_setting('trend_first_play_source') == 'listening_v33'
+    assert store.settings.get_setting('trend_first_play_source') == 'canonical_listening'
     assert store.settings.get_setting('trend_first_play_watermark') is None
     store.history.reset_play_history()
     assert not store.conn.execute('SELECT 1 FROM listening_observations').fetchone()
@@ -163,9 +165,22 @@ def test_converted_capture_removal_and_reset_preserve_other_accounts_and_exact_p
 
 def test_converted_capture_reassociation_retains_raw_evidence_and_rolls_back(monkeypatch):
     store = _predecessor()
+    entries = []
+    # Populate the frozen v32 schema without invoking today's catalog writer.
     with store.conn:
-        first = catalog.upsert(store.conn, 'old', 'Old', 'Artist', duration_s=200)
-        target = catalog.upsert(store.conn, 'correct', 'Correct', 'Artist', duration_s=200)
+        for video, title in [('old', 'Old'), ('correct', 'Correct')]:
+            key = f'{video}|artist'
+            recording = store.conn.execute(
+                'INSERT INTO recordings(identity_key,title,artist) VALUES (?,?,?)',
+                (key, title, 'Artist')).lastrowid
+            store.conn.execute(
+                'INSERT INTO youtube_items(video_id,recording_id,title,artist,duration_s) VALUES (?,?,?,?,200)',
+                (video, recording, title, 'Artist'))
+            entries.append(store.conn.execute(
+                'INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,?)',
+                (recording, video)).lastrowid)
+            store.conn.execute('INSERT INTO recording_aliases VALUES (?,?,?)', (key, recording, 'fixture'))
+    first, target = entries
     old_key, new_key = 'old|artist', 'correct|artist'
     receipt_id = legacy_capture(store.conn, 1, 1792540800, [old_key], source='unknown')
     store.init_schema()
@@ -187,7 +202,9 @@ def test_converted_capture_reassociation_retains_raw_evidence_and_rolls_back(mon
     store.tracks.associate_youtube_item('old', recording_id, source='verified', evidence={'same': True}, now=1)
     observed = dict(store.conn.execute(
         'SELECT * FROM listening_observations WHERE capture_id=?', (receipt_id,)).fetchone())
-    assert observed == {**original, 'identity_key': new_key, 'recording_id': recording_id}
+    assert observed == {**original, 'unresolved_subject_key': None, 'recording_id': recording_id}
+    assert store.conn.execute('SELECT identity_key FROM listening_observation_subjects WHERE capture_id=?',
+        (receipt_id,)).fetchone()[0] == new_key
     assert observed['raw_identity_key'] == old_key
     assert store.tracks.catalog_subject(first)['recording_id'] == recording_id
     current.validate(store.conn)
@@ -229,6 +246,7 @@ def test_migrated_repair_backup_restores_complete_capture_evidence(tmp_path):
     # The receipt is retained even after its last observation is repaired away.
     assert list(map(tuple, store.conn.execute('SELECT * FROM listening_capture_receipts ORDER BY id'))) == receipts
     del deleted['captured_at']
+    del deleted['identity_key']  # Read projection; the base owner stores only its unresolved subject.
     with store.conn:
         store.conn.execute('INSERT INTO listening_observations(' + ','.join(deleted) + ') VALUES ('
                            + ','.join('?' for _ in deleted) + ')', list(deleted.values()))

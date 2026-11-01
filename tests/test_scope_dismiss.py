@@ -6,7 +6,7 @@ from tests.conftest import FakeClient
 
 
 def test_playlist_local_dismiss_only_affects_that_playlist(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     anchor = store.tracks.upsert_track("v1", "Anchor", "Band", None, None)
     bonus = store.tracks.upsert_track("v2", "Bonus", "Band", None, None)
     store.tracks.set_track_genre(anchor, "Techno")

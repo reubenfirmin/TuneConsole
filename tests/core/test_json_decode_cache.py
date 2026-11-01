@@ -73,6 +73,42 @@ def test_cache_identity_tracks_payload_and_requested_fields_and_keeps_only_one(m
     assert len(calls) == 5  # A failed parse cannot replace the previous good value.
 
 
+@pytest.mark.parametrize('group_pools', [False, True])
+def test_logical_budget_counts_each_copy_and_keeps_exact_detached_profiles(group_pools):
+    profile = {'captured': ['東京\\\"' * 300], 'provenance': {'source': 'original'}}
+    tracks = [{'key': str(i), 'musical': profile} for i in range(100)]
+    value = {'all': {'wheelhouse': tracks}, 'menus': [{'tracks': tracks[:3]}]}
+    encoded = json_cache.encode(value, group_pools=group_pools)
+    size = len(json.dumps(value, separators=(',', ':')).encode())
+    with pytest.raises(ValueError, match='logical byte budget'):
+        json_cache.decode(encoded, max_bytes=size - 1)
+    restored = json_cache.decode(encoded, max_bytes=size)
+    assert restored == value
+    restored['all']['wheelhouse'][0]['musical']['captured'].append('local edit')
+    assert restored['all']['wheelhouse'][1]['musical'] == profile
+    assert restored['menus'][0]['tracks'][0]['musical'] == profile
+    # A bounded consumer may select rows before reconstructing their evidence.
+    selected = json_cache.decode(encoded, project=lambda body: body['menus'], max_bytes=20000)
+    assert selected == value['menus']
+
+
+def test_profile_reconstruction_is_cancellable_between_copies(monkeypatch):
+    profile = json.dumps({'captured': [1, 2, 3]})
+    body = [{'musical': {'profile': 0}} for _ in range(1000)]
+    calls = 0
+
+    def cancel():
+        nonlocal calls
+        calls += 1
+        if calls == 20:
+            raise WorkClosing('cancel reconstruction')
+
+    monkeypatch.setattr(json_cache, 'check_cancellable_work', cancel)
+    with pytest.raises(WorkClosing, match='cancel reconstruction'):
+        json_cache._restore_profiles(body, [profile])
+    assert calls == 20
+
+
 def test_concurrent_miss_parses_once_and_a_cancelled_waiter_does_not_cancel_owner(monkeypatch):
     cache = json_cache.DecodeCache()
     entered, release, waiting = threading.Event(), threading.Event(), threading.Event()

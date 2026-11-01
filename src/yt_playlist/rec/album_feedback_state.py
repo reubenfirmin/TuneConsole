@@ -1,5 +1,5 @@
 """Read resolved release judgments without depending on evidence-writing policy."""
-import json
+from yt_playlist.core import album_feedback_storage
 
 
 def state(store, browse_ids=None):
@@ -9,7 +9,12 @@ def state(store, browse_ids=None):
     A selection retains the caller's IDs, including unknown/unreconciled releases.
     Reading never changes the original feedback or its opportunity/action IDs.
     """
-    original = json.loads(store.settings.get_setting('album_feedback') or '{}')
+    with store.read_view() as reader:
+        return _state(reader, browse_ids)
+
+
+def _state(store, browse_ids):
+    original = album_feedback_storage.original(store.conn)
     if not original:
         return {}
     requested = None if browse_ids is None else set(browse_ids)

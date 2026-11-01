@@ -24,8 +24,9 @@ def test_takeout_coverage_upgrade_preserves_legacy_rows_without_inventing_author
     store.conn.execute('INSERT INTO history_snapshots(id,identity_id,taken_at) VALUES (1,1,100)')
     store.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (1,'legacy')")
     store.conn.commit()
+    migrate(store.conn, registry=MIGRATIONS)
     store.init_schema()
-    row = store.conn.execute('SELECT identity_key,source FROM listening_observations').fetchone()
+    row = store.conn.execute('SELECT identity_key,source FROM listening_observation_subjects').fetchone()
     assert tuple(row) == ('legacy', 'unknown')
     assert store.conn.execute('SELECT COUNT(*) FROM takeout_imports').fetchone()[0] == 0
     store.init_schema()
@@ -38,6 +39,8 @@ def test_early_fixture_preserves_ids_without_backups(tmp_path):
         conn.executescript((Path(__file__).parents[1] / 'fixtures/migrations/early_core.sql').read_text())
     store = Store(path)
     assert not hasattr(store, 'tracks')
+    from yt_playlist.core.migrations.registry import MIGRATIONS
+    migrate(store.conn, registry=MIGRATIONS)
     store.init_schema()
     assert store.settings.get_setting('user-setting') == 'keep me'
     assert tuple(store.conn.execute('SELECT id,orig_title,orig_artist FROM tracks').fetchone()) == (17, 'Original title', 'Artist')
@@ -145,6 +148,7 @@ def test_frozen_like_repair_preserves_published_entitlement_and_stamp(legacy_sto
     stamp = s.settings.get_setting('like_ratchet_repaired')
     assert '3 once-ever graduation stamp(s)' in stamp
     before = s.rec_model.weight_records()
+    migrate(s.conn, registry=MIGRATIONS)
     s.init_schema();s.init_schema()
     assert s.settings.get_setting('like_ratchet_repaired') == stamp
     assert s.rec_model.weight_records() == before
@@ -248,15 +252,20 @@ def test_installed_catalog_upgrades_with_original_trigger_without_backups(tmp_pa
         conn.execute("INSERT INTO rec_vectors VALUES ('song|artist',x'01020304')")
         conn.commit()
         raw = conn.execute('SELECT id,raw_identity_key,video_id,played_at,source,is_generated FROM play_events ORDER BY id').fetchall()
+        # Historical conversion is an explicit offline operation. Normal
+        # startup retains supported installed owners instead of replaying it.
+        conn.row_factory = sqlite3.Row
+        migrate(conn, registry=MIGRATIONS)
     store = Store(path)
     store.init_schema()
-    assert list(map(tuple, store.conn.execute('SELECT id,raw_identity_key,video_id,played_at,source,is_generated FROM play_events ORDER BY id'))) == raw
-    subjects = list(map(tuple, store.conn.execute('SELECT identity_key,recording_id FROM play_events ORDER BY id')))
+    assert list(map(tuple, store.conn.execute('SELECT p.id,p.raw_identity_key,p.video_id,p.played_at,s.source,p.is_generated FROM play_events p JOIN play_event_sources s ON s.event_id=p.id ORDER BY p.id'))) == raw
+    subjects = list(map(tuple, store.conn.execute('SELECT identity_key,recording_id FROM play_event_subjects ORDER BY id')))
     assert subjects == [('song|artist',1)] * 4 + [('@unresolved-video:unknown',None)]
-    assert tuple(store.conn.execute('SELECT * FROM rec_weights').fetchone()) == ('genre:house',1.4,1)
-    assert not store.conn.execute('SELECT * FROM rec_vectors').fetchall()
+    weights = store.rec_model.weight_records()
+    assert weights['genre:house']['weight']==1.4 and weights['genre:house']['updated_at']==1
+    assert not store.rec_model.get_rec_vectors()
     store.init_schema()
-    assert list(map(tuple, store.conn.execute('SELECT identity_key,recording_id FROM play_events ORDER BY id'))) == subjects
+    assert list(map(tuple, store.conn.execute('SELECT identity_key,recording_id FROM play_event_subjects ORDER BY id'))) == subjects
     assert not (tmp_path / 'backups').exists()
     assert store.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
     store.conn.close()

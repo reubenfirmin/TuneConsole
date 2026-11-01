@@ -1,4 +1,5 @@
 """Function-scoped Radio browser API fixture with strict request assertions."""
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -12,9 +13,22 @@ def radio_ui(live_app, store, page):
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
     publish_personal_mix(store, now=1)
-    tracks = [{"video_id": f"radio{i}", "title": f"Night frequency {i + 1}",
+    tracks = [{"key": f"night frequency {i + 1}|artist {i + 1}",
+               "video_id": f"radio{i}", "title": f"Night frequency {i + 1}",
                "artist": f"Artist {i + 1}", "thumbnail": f"{live_app}/radio-art/{i}.svg"}
               for i in range(16)]
+    # This fixture offers an already prepared Radio menu. Match the observed
+    # readiness used by native Home navigation, as well as the mocked API.
+    with store.conn:
+        store.conn.execute('UPDATE recordings SET first_enriched_at=1')
+    store.settings.set_setting('radio_seed_offer', json.dumps({'tracks': tracks, 'menu_id': 'seeds'}))
+    # This is a returning listener's unlocked launcher. Prepared output alone
+    # does not establish that a fresh account has reached Radio on the journey.
+    store.rec_proposals.put_proposals('listening_choices', {'home_format': {
+        'episodes': {'radio': 1, 'mixes': 1}}}, 1)
+    page.add_init_script('''localStorage.setItem('tc-growth-notices-v1', JSON.stringify({
+      seen: ['listening', 'radio', 'vibes'], later: true,
+    }))''')
     api = SimpleNamespace(state={"active": False}, starts=[], playlists=[], stops=[],
                           hold_playlist=False, errors=[], tracks=tracks)
     api.ready = {"active": True, "starting": False, "can_play_songs": True, "playlist_id": "PLRADIO", "local_id": 1,

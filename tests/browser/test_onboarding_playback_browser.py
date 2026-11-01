@@ -10,7 +10,7 @@ from yt_playlist.library.sync import sync_identity
 
 @pytest.fixture
 def starter_mix(live_app, store, page):
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     sync_identity(store, iid, FakeClient(
         playlists=[{"playlistId": "PL1", "title": "Ready", "count": 1}],
         tracks={"PL1": [_track("ready", "First playable song", "Artist")]}), now=1)
@@ -33,6 +33,16 @@ def test_starter_cue_follows_only_its_playback_and_expires(starter_mix, store, p
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.goto(base)
+    byline = page.locator('.festival-intro-sub')
+    expect(byline).to_have_text('Your first set is ready')
+    # Any live playback still explores First sounds, but only the offered set
+    # can change this first-set-specific byline.
+    store.tracks.observe_track_entry('unrelated', 'Other music', 'Other artist', now=2)
+    store.history.record_play_event(store.accounts.get_accounts()[0].id,
+        store.tracks.identity_key_for_video('unrelated'), 'unrelated', 2, playlist_ytm_id='UNRELATED')
+    page.reload()
+    expect(byline).to_have_text('Your first set is ready')
+    assert page.request.get(base + '/home/growth').json()['nodes'][0]['state'] == 'explored'
     play = page.get_by_role("button", name="Save and play this mix")
     expect(play).to_be_visible()
     assert play.evaluate("el => getComputedStyle(el, '::after').animationName") == "onboarding-orbit, onboarding-breathe"
@@ -48,7 +58,7 @@ def test_starter_cue_follows_only_its_playback_and_expires(starter_mix, store, p
     play.click()
     page.wait_for_url(re.compile(r"/playlist/\d+$"))
     pid = int(page.url.rsplit("/", 1)[1])
-    playlist = store.playlists.get_playlist(pid).ytm_playlist_id
+    playlist = store.playlists.get_playlist(pid).provider_playlist_id
     header = page.locator('.pl-actions .playlist-play')
     expect(header).to_have_attribute('aria-label', 'Play on YouTube Music')
     assert page.evaluate("JSON.parse(sessionStorage.getItem('tc-onboarding-playback')).playlist") == playlist
@@ -90,6 +100,9 @@ def test_starter_cue_follows_only_its_playback_and_expires(starter_mix, store, p
 
     page.goto(base)
     expect(play).to_be_visible()
+    expect(byline).to_have_text('Enjoy your first set while we prepare your account')
+    page.reload()
+    expect(byline).to_have_text('Enjoy your first set while we prepare your account')
     assert play.evaluate("el => getComputedStyle(el, '::after').animationName") == "none"
     assert errors == []
 
@@ -109,8 +122,54 @@ def test_unsaved_starter_does_not_advance_cue(starter_mix, page, failure):
     if failure == "friendly":
         expect(page.locator(".gen-done")).to_contain_text("Couldn't save")
     else:
-        expect(page.get_by_role("button", name="Save and play this mix")).to_be_enabled()
+        expect(page.get_by_role("button", name="Save and play this mix")).to_be_disabled()
+        expect(page.locator('[data-generation-error]')).to_contain_text('couldn’t confirm playback')
     page.evaluate("window.playbackStatus.refresh()")
     expect(page.locator(".global-now-playing")).not_to_have_class(re.compile("is-onboarding-cue"))
     assert page.evaluate("sessionStorage.getItem('tc-onboarding-playback')") is None
     assert page.evaluate("sessionStorage.getItem('tc-onboarding-played')") is None
+
+
+@pytest.mark.parametrize('width', [390, 1280])
+def test_long_mix_discovered_at_play_time_recovers_into_artist_choices(live_app, store, page,
+                                                                      monkeypatch, tmp_path, width):
+    from yt_playlist.library import playlist_generated
+
+    iid = store.accounts.get_accounts()[0].id
+    sync_identity(store, iid, FakeClient(
+        playlists=[{'playlistId': 'PL1', 'title': 'Imported music', 'count': 2}],
+        tracks={'PL1': [_track('known-mix', 'Known long DJ mix', 'Artist', dur=9000),
+                        _track('unknown-mix', 'Length not imported yet', 'Artist', dur=None)]}), now=1)
+    store.settings.set_setting('last_sync_at', '1')
+    # YouTube supplies this length only when the user starts the proposed set.
+    lookups = []
+
+    def song_duration(client, video):
+        lookups.append(video)
+        return 9000
+
+    monkeypatch.setattr(playlist_generated, 'fetch_song_duration', song_duration)
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.route('**/bridge/status', lambda route: route.fulfill(json={'connected': True, 'now_playing': None}))
+    page.route('https://i.ytimg.com/**', lambda route: route.abort())
+    page.add_init_script('window.open = () => null')
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto(live_app)
+    expect(page.locator('.starter-tracks .gen-title')).to_have_text('Length not imported yet')
+    page.get_by_role('button', name='Save and play this mix').click()
+    result = page.locator('.gen-done')
+    expect(result).to_contain_text('20-minute maximum track length set in Taste Model')
+    expect(result).not_to_contain_text('unexpected response')
+    expect(result.get_by_role('link', name='Change track-length limit')).to_have_attribute(
+        'href', '/taste#recommendations/features')
+    assert lookups == ['unknown-mix']
+    assert store.tracks.duration_for_video('unknown-mix') == 9000
+    assert store.actions.get_actions() == []
+    assert page.evaluate("sessionStorage.getItem('tc-onboarding-playback')") is None
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / f'track-length-error-{width}.png'), full_page=True)
+
+    result.get_by_role('link', name='Find another set').click()
+    expect(page.get_by_role('heading', name='Pick 3 artists you love.')).to_be_visible()
+    assert errors == []

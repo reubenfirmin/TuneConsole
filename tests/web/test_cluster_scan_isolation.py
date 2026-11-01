@@ -22,7 +22,7 @@ from yt_playlist.web.routes import bridge, clusters
 def database(request, tmp_path):
     store = Store(':memory:' if request.param == 'memory' else tmp_path / 'clusters.db')
     store.init_schema()
-    store.identities.upsert_identity('Listener', 'fixture', None, True)
+    store.accounts.upsert_account('Listener', 'fixture', None, True)
     keys = []
     for i in range(3):
         store.tracks.upsert_track(f'v{i}', f'Track {i}', f'Artist {i}', '', 200)

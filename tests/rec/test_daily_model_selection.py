@@ -14,7 +14,7 @@ from yt_playlist.util.matching import identity_key
 @pytest.fixture
 def library(store, monkeypatch):
     now = 200 * daily.DAY
-    account = store.identities.upsert_identity('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', 'cred', None, True)
     entries = [store.tracks.upsert_track(str(i), f'Song{i:03d}', 'Artist', None, None,
                created_at=-200 * daily.DAY) for i in range(160)]
     keys = [store.tracks.identity_key_for_video(str(i)) for i in range(160)]
@@ -26,7 +26,7 @@ def library(store, monkeypatch):
         store.history.record_play_event(account, key, videos[key], -100 * daily.DAY)
     for index, key in enumerate(keys[20:80]):
         store.history.record_play_event(account, key, videos[key], now - 30 * daily.DAY + (index // 2) * daily.DAY + 100)
-    assert set(map(tuple, store.conn.execute('SELECT identity_key,video_id FROM play_events'))) == {
+    assert set(map(tuple, store.conn.execute('SELECT identity_key,video_id FROM play_event_subjects'))) == {
         (key, videos[key]) for key in keys[:80]}
     original = [(key, np.array([1., 0.], dtype=np.float32).tobytes()) for key in keys]
     store.rec_model.replace_rec_vectors(original)
@@ -114,7 +114,7 @@ def test_insufficient_activity_skips_all_fits(library):
 def test_initial_insufficient_attempt_does_not_require_another_30_plays(
         store, monkeypatch, initial_targets, new_targets, expected):
     now = 200 * daily.DAY
-    account = store.identities.upsert_identity('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', 'cred', None, True)
     entries = [store.tracks.upsert_track(str(i), f'Song{i:03d}', 'Artist', None, None,
                created_at=-200 * daily.DAY) for i in range(160)]
     keys = [store.tracks.identity_key_for_video(str(i)) for i in range(160)]
@@ -455,7 +455,7 @@ def test_legacy_gate_ends_but_held_projections_survive(library):
     current = dict(run_id=run_id, phase='observing')
     store.rec_proposals.put_proposals(product_comparison.SURFACE, current, now)
     surface = product_comparison.pair_surface(run_id, 'incumbent', 'mixes')
-    held = {'retained': 'frozen held projection'}
+    held = {'run_id':run_id,'data':{'retained':'frozen held projection'}}
     store.rec_proposals.put_proposals(surface, held, now)
     store.settings.set_setting('rec_selection_live_run', str(run_id))
     daily.maintain(store, now)

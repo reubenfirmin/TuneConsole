@@ -39,6 +39,16 @@ class PoolPolicies:
         self.rows = {}
         self.bases = {}
 
+    def generation_policy(self):
+        """Name the actual captured inputs even when preparation produced no songs."""
+        if self._configuration is None:
+            _, self._configuration = serving_policy(self.store, self.now)
+            base = policy_config.base_record(self._configuration, self.now)
+            self.bases[base[0]] = base
+        row = policy_config.variant_record(next(iter(self.bases)), {'ranker': 'prepared-bundle'}, self.now)
+        self.rows[row[0]] = row
+        return row[0]
+
     def stamp(self, items, ranker):
         if not items:
             return items
@@ -255,7 +265,7 @@ def _prepare_impressions(store, items, now, *, lane="", mode_id=None, ranker="la
         year = details.get("year") or inputs.get("year")
         candidate = {
             "artist": normalize(details.get("artist") or ""),
-            "genre": genre_map.family(genre) if genre else None,
+            "genre": genre_map.family(genre,conn=store.conn) if genre else None,
             "coverage": {"genre": bool(genre), "year": bool(year),
                          "audio": bool(details.get("audio") or inputs.get("audio") or
                                        any(details.get(c) not in (None, "") for c in store.rec_query.AUDIO_COLS))},
@@ -299,6 +309,7 @@ def maintain_storage(store, now):
     Read the large prepared/session JSON off the serving connection. Publication
     checks those roots for changes, and rechecks impression references at delete.
     """
+    store.rec_ledger.maintain_impressions(now)
     with store.read_snapshot() as snapshot:
         versions, cursor = policy_storage.retention_candidates(snapshot.store.conn, now)
         stats = {}

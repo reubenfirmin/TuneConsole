@@ -22,7 +22,10 @@ from yt_playlist.repos import group_publication
 @pytest.fixture
 def database(tmp_path):
     store = Store(tmp_path / 'group-publication.db')
-    store.init_schema()
+    # These checks exercise the predecessor's hidden-row protocol and SQL
+    # protections. The compact protocol has its own current-schema tests.
+    migrate(store.conn, registry=MIGRATIONS[:69])
+    store._bind_repositories()
     yield store
     store.conn.close()
 

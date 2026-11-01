@@ -15,7 +15,7 @@ from tests.model_support import build_content_model
 
 @pytest.fixture
 def library(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     tracks = []
     for genre in ("Techno", "Jazz", "Rock"):
         for i in range(60):

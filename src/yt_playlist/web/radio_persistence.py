@@ -3,6 +3,8 @@ import json
 import threading
 import time
 
+from yt_playlist.core import radio_checkpoint, radio_storage
+
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.web.radio_edits import AppendOperation, PlaylistOperation
 from yt_playlist.web.radio_playlist_io import PendingWrite, PlaylistEdit
@@ -15,26 +17,8 @@ PREPARATION_TIMEOUT = 60
 
 def migrate(state: dict) -> dict:
     """v1 used overlapping flags; v2 stores one explicit lifecycle phase."""
-    state = dict(state)
-    if state.get("version") == 1:
-        if state.get("stopped"):
-            phase = Phase.STOPPED
-        elif state.get("halted"):
-            phase = Phase.CONFLICT
-        elif state.get("initial_tracks"):
-            phase = Phase.PREPARING
-        elif state.get("pending"):
-            phase = Phase.APPENDING
-        elif state.get("replacement") or state.get("requested_direction"):
-            phase = Phase.REPLACING
-        else:
-            phase = Phase.PLAYING
-        state.update(version=2, phase=phase.value)
-    if state.get("version") != 2:
-        raise ValueError("Unsupported radio checkpoint version")
+    state = radio_checkpoint.normalize(state)
     state["phase"] = Phase(state["phase"])
-    state["stopped"] = state["phase"] in {Phase.STOPPING, Phase.STOPPED}
-    state["halted"] = state["phase"] == Phase.CONFLICT
     return state
 
 
@@ -140,9 +124,30 @@ class RadioPersistence:
         self.transient = None
         self.last_saved = None
         self.lock = threading.RLock()
+        self.revision = None
+        self.legacy_checkpoint = None
+        store = getattr(settings,'_store',None)
+        if store is not None:
+            with store._lock:
+                if radio_storage.available(store.conn):
+                    _,self.revision = radio_storage.load(store.conn)
+                    return
+        raw = settings.get_setting(SESSION_KEY)
+        self.legacy_checkpoint = json.loads(raw) if raw else None
 
     def load(self) -> dict | None:
+        store = getattr(self.settings,'_store',None)
+        if self.transient is None and store is not None:
+            with store._lock:
+                # The schema probe also uses the shared writer connection. It
+                # must be serialized with seed preparation and snapshot copies.
+                if radio_storage.available(store.conn):
+                    state,self.revision = radio_storage.load(store.conn)
+                    self.legacy_checkpoint = None
+                    return migrate(state) if state else None
         raw = self.transient if self.transient is not None else self.settings.get_setting(SESSION_KEY)
+        if self.transient is None:
+            self.legacy_checkpoint = json.loads(raw) if raw else None
         return migrate(json.loads(raw)) if raw else None
 
     def save(self, session: Session):
@@ -165,7 +170,33 @@ class RadioPersistence:
         if self.paused() or ('local_id' in state and state['local_id'] is None):
             self.transient = encoded
             return
+        store = getattr(self.settings,'_store',None)
+        with store._lock if store is not None else self.lock:
+            if store is not None and radio_storage.available(store.conn):
+                self._write_current(store, encoded, state)
+            elif encoded != self.last_saved:
+                self.settings.set_setting(SESSION_KEY, encoded)
+                self.legacy_checkpoint = state
         if encoded != self.last_saved:
-            self.settings.set_setting(SESSION_KEY, encoded)
             self.last_saved = encoded
         self.transient = None
+
+    def _write_current(self, store, encoded, state):
+        with store.conn:
+            # Serialize the cutover handoff with other checkpoint writers.
+            # Only the untouched import of our observed predecessor may
+            # replace its old revision-less token. Never rebase a newer
+            # save or Stop, even if it belongs to the same episode.
+            if self.revision is None and self.legacy_checkpoint is not None:
+                store.conn.execute('UPDATE radio_session_head SET session_id=session_id WHERE 0')
+                # Account corrections can change the read projection
+                # without another Radio save. Compare the published
+                # predecessor, keeping its exact upload and journal data.
+                imported,revision = radio_storage.load_published(store.conn)
+                if (revision == (self.legacy_checkpoint.get('episode_id'), 1)
+                        and imported is not None
+                        and radio_checkpoint.normalize(imported) == radio_checkpoint.normalize(self.legacy_checkpoint)):
+                    self.revision = revision
+            if encoded != self.last_saved or self.transient is not None:
+                self.revision = radio_storage.save(store.conn,state,expected=self.revision)
+                self.legacy_checkpoint = None

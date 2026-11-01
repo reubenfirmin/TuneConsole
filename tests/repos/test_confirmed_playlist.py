@@ -12,7 +12,7 @@ def _track(i, **extra):
 
 
 def _playlist(store):
-    identity = store.identities.upsert_identity("main", "ref", None, True)
+    identity = store.accounts.upsert_account("main", "ref", None, True)
     pid = store.playlists.upsert_playlist(identity, "RADIO", "Radio", 0, "", 1)
     store.playlists.mark_generated_playlist("RADIO")
     return pid

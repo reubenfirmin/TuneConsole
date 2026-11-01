@@ -14,7 +14,7 @@ def source(store, tmp_path, monkeypatch):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     monkeypatch.setattr(executor, "with_retry", lambda read: read())
     monkeypatch.setattr(playlist_backups, "with_retry", lambda read: read())
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     pid = store.playlists.upsert_playlist(iid, "SOURCE", "Cached title", 1, "", 1)
     tid = store.tracks.upsert_track("one", "Cached song", "Artist", None, 200)
     store.playlists.set_playlist_tracks(pid, [tid])
@@ -39,7 +39,7 @@ def test_every_deletion_path_backs_up_current_order_and_occurrences(store, sourc
         new = store.tracks.upsert_track("new", "Added remotely", "Artist", None, 200)
         one = store.tracks.upsert_track("one", "Cached song", "Artist", None, 200)
         store.playlists.set_playlist_tracks(pid, [one, new])
-        target = store.identities.upsert_identity("Other", "bridge", None, False)
+        target = store.accounts.upsert_account("Other", "bridge", None, False)
         destination = FakeClient(catalog=client._catalog)
         result = executor.copy_or_move_playlist(store, pid, target, client, destination,
                                                 1000000, delete_source=True)
@@ -52,7 +52,7 @@ def test_every_deletion_path_backs_up_current_order_and_occurrences(store, sourc
             aid = executor.store_plan(store, executor.MergePlan(pid, keep, [], []),
                                       "delete", "SOURCE", 1)
             executor.execute_planned(store, aid, {iid: client}, 1000000)
-    backup, = (tmp_path / "backups").glob("*.json")
+    backup, = (tmp_path / "backups").glob("SOURCE_*.json")
     saved = json.loads(backup.read_text())
     assert [t["video_id"] for t in saved["tracks"]] == ["new", "one", "new"]
     assert [t["set_video_id"] for t in saved["tracks"]] == ["new-first", "one", "new-second"]

@@ -6,7 +6,7 @@ direct title matches on songs and playlists get their own sections.
 
 
 def _seed(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     # Ritmo: 3 tracks across 2 albums; Mogwai: 1 track. One track titled "Ritmo Caliente".
     r1 = store.tracks.upsert_track("r1", "Spektrum", "Ritmo", "Ritmo LP", None,
                             album_browse_id="MPREb_ritmolp", thumbnail="http://t/r1.jpg")
@@ -98,7 +98,7 @@ def _section(result, kind):
 
 
 def test_same_name_artists_keep_distinct_links_and_primary_pivots(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     entries = []
     for video, title, provider in [("one", "First song", "channel1"),
                                    ("two", "Second song", "channel2"),
@@ -129,7 +129,7 @@ def test_same_name_artists_keep_distinct_links_and_primary_pivots(store):
 
 
 def test_collaboration_is_found_under_each_ordered_artist_credit(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     tid = store.tracks.upsert_track("duet", "Together", "Alpha & Beta", "Joint album", 200,
         album_browse_id="joint", credits=[{"name": "Alpha", "id": "a"}, {"name": "Beta", "id": "b"}])
     pid = store.playlists.upsert_playlist(iid, "joint-playlist", "Duets", 1, "h", 0)
@@ -218,7 +218,7 @@ def test_generated_playlists_excluded(store):
 
 
 def test_like_wildcards_are_escaped(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("x1", "100%", "Sleaford Mods", "", None)
     store.tracks.upsert_track("x2", "anything", "Other", "", None)
     res = store.search.omni_search("100%")        # the % must be literal, not "match-all"
@@ -229,7 +229,7 @@ def test_like_wildcards_are_escaped(store):
 
 def test_cross_section_dedup(store):
     """Tracks and playlists shown under the artist pivot must not reappear in direct-match sections."""
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
 
     # "Zola" is the primary artist (most tracks => pivot artist).
     # Track "zola anthem" by Zola: matches the query "zola" both as artist AND by title.

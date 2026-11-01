@@ -12,7 +12,7 @@ def stamp(local, timezone='UTC'):
 
 
 def account(store, timezone='UTC'):
-    iid = store.identities.upsert_identity('main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('main', 'bridge', None, True)
     with store.conn:
         listening.calendar(store.conn, iid, timezone)
     return iid
@@ -98,8 +98,8 @@ def test_exact_ingestion_revisits_only_affected_recording_and_source_date(store,
 
     record(at)
     assert visited == [('song', '2026-10-21')]
-    assert store.conn.execute("SELECT day FROM listening_observations WHERE identity_key='song' "
-                              "AND source_day='2026-10-21'").fetchone()[0] == '2026-10-20'
+    assert store.conn.execute("SELECT day FROM listening_observations WHERE account_id=? AND raw_identity_key='song' "
+                              "AND source_day='2026-10-21'",(iid,)).fetchone()[0] == '2026-10-20'
     visited.clear()
     record(at + 7200)
     assert visited == [('song', '2026-10-21')]
@@ -142,9 +142,39 @@ def test_observation_scope_plan_uses_account_recording_source_date_index(store):
         store.conn.set_trace_callback(None)
     query = next(statement for statement in sql if statement.startswith('WITH affected'))
     plan = [row[3] for row in store.conn.execute('EXPLAIN QUERY PLAN ' + query)]
-    assert any('SEARCH o USING INDEX ix_listening_observation_source_scope' in detail
-               and 'identity_key=?' in detail and 'source_day=?' in detail and 'timezone=?' in detail
-               for detail in plan)
+    for index,subject in [('ix_listening_observation_canonical_scope','recording_id'),
+                          ('ix_listening_observation_unresolved_scope','unresolved_subject_key')]:
+        assert any('SEARCH o USING INDEX '+index in detail
+                   and all(field+'=?' in detail for field in ('account_id',subject,'source_day','timezone'))
+                   for detail in plan),'\n'.join(plan)
+
+
+def test_resolved_and_unresolved_contributions_share_a_key_without_losing_ambiguity_or_scope(store):
+    iid = account(store,'America/Costa_Rica')
+    at = stamp('2026-10-21T05:30:00')
+    with store.conn:
+        listening.observe_day(store.conn,iid,'shared','2026-10-21','captured','UTC',at,reconcile=False)
+    store.history.record_play_event(iid,'shared',None,at)
+    # A recording can be admitted while an older capture still awaits explicit
+    # subject resolution. Both interpretations remain independent evidence.
+    with store.conn:
+        recording = store.conn.execute("INSERT INTO recordings(identity_key) VALUES ('shared')").lastrowid
+        listening.observe_day(store.conn,iid,'shared','2026-10-21','independent','UTC',at,reconcile=False)
+    sql = []
+    store.conn.set_trace_callback(sql.append)
+    try:
+        store.history.record_play_event(iid,'shared',None,at+7200)
+    finally:
+        store.conn.set_trace_callback(None)
+    rows = list(store.conn.execute("SELECT raw_identity_key,recording_id,day,source FROM listening_observations ORDER BY id"))
+    assert [tuple(row) for row in rows]==[('shared',None,None,'captured'),('shared',recording,None,'independent')]
+    assert store.history.listening_day_counts(iid)=={'shared':2}
+    query = next(statement for statement in sql if statement.startswith('SELECT pe.played_at,c.day'))
+    plan = [row[3] for row in store.conn.execute('EXPLAIN QUERY PLAN '+query)]
+    for index,subject in [('ix_play_event_account_subject_time','recording_id'),
+                          ('ix_play_event_account_unresolved_time','unresolved_subject_key')]:
+        assert any(index in detail and 'account_id=?' in detail and subject+'=?' in detail
+                   and 'played_at>?' in detail and 'played_at<?' in detail for detail in plan),'\n'.join(plan)
 
 
 @pytest.mark.parametrize('unrelated', [10, 60])
@@ -179,7 +209,7 @@ def test_alias_collisions_do_not_reproject_unrelated_foreign_history(store, monk
 
 @pytest.mark.parametrize('partial', [False, True])
 def test_recording_association_scopes_accounts_sources_dst_and_ambiguity(store, monkeypatch, partial):
-    iids = [store.identities.upsert_identity(name, name, None, True) for name in ('a', 'b')]
+    iids = [store.accounts.upsert_account(name, name, None, index==0) for index,name in enumerate(('a', 'b'))]
     for iid in iids:
         with store.conn:
             listening.calendar(store.conn, iid, 'UTC')

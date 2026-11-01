@@ -7,7 +7,7 @@ def test_concurrent_adoption_does_not_change_a_pinned_training_generation(tmp_pa
     store = Store(tmp_path / 'library.db')
     store.init_schema()
     try:
-        iid = store.identities.upsert_identity('me', 'credential', None, True)
+        iid = store.accounts.upsert_account('me', 'credential', None, True)
         pid = store.playlists.upsert_playlist(iid, 'PLGEN', 'Generated mix', 2, 'h', 1)
         tids = [store.tracks.upsert_track(f'v{i}', f'Song {i}', 'Artist', None, None, 1)
                 for i in range(2)]

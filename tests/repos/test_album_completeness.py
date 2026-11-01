@@ -2,6 +2,7 @@
 import pytest
 
 from yt_playlist.library.album_catalog import remember_album
+from yt_playlist.core import album_tracklists
 
 
 def _cache_album(store, browse_id):
@@ -20,19 +21,24 @@ def test_scoped_completeness_preserves_full_occurrence_and_membership_rules(stor
     album_id = store.collection.album_id("target")
     with store.conn:
         if damage == "fetch-state":
-            store.conn.execute("UPDATE album_fetch_state SET complete=0 WHERE album_id=?", (album_id,))
+            store.conn.execute("UPDATE albums SET current_tracklist_id=NULL WHERE id=?", (album_id,))
         elif damage == "empty":
-            store.conn.execute("DELETE FROM album_tracks WHERE album_id=?", (album_id,))
-            store.conn.execute("UPDATE album_fetch_state SET expected_track_count=0 WHERE album_id=?", (album_id,))
+            store.conn.execute("UPDATE albums SET current_tracklist_id=NULL WHERE id=?", (album_id,))
+            tracklist = album_tracklists.begin(store.conn,album_id,'target',expected_count=0)
+            album_tracklists.finish(store.conn,tracklist,complete=False)
         elif damage == "count":
-            store.conn.execute("DELETE FROM album_tracks WHERE album_id=? AND position=1", (album_id,))
+            tracklist = album_tracklists.begin(store.conn,album_id,'target',expected_count=2)
+            album_tracklists.occurrence(store.conn,tracklist,entry_id=entry,position=0)
+            album_tracklists.finish(store.conn,tracklist,complete=False)
         elif damage == "membership":
             store.conn.execute("DELETE FROM library_memberships WHERE entry_id=?", (entry,))
         elif damage == "unresolved":
-            store.conn.execute("UPDATE album_tracks SET entry_id=NULL,legacy_track_key='unknown|artist' "
-                               "WHERE album_id=? AND position=1", (album_id,))
+            tracklist = album_tracklists.begin(store.conn,album_id,'target',expected_count=2)
+            album_tracklists.occurrence(store.conn,tracklist,entry_id=entry,position=0)
+            album_tracklists.occurrence(store.conn,tracklist,raw_identity_key='unknown|artist',position=1)
+            album_tracklists.finish(store.conn,tracklist,complete=True)
 
-    complete = damage is None
+    complete = damage in (None,'count')
     assert store.collection.is_album_tracklist_complete("target") is complete
     assert store.collection.is_album_tracklist_complete("unrelated")
     assert not store.collection.is_album_tracklist_complete("absent")

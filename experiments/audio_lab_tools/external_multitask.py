@@ -18,9 +18,9 @@ GRID = [(hidden, penalty, strength) for hidden, penalty, strength in
         itertools.product((32, 64), (.0001, .001), (0., .1))]
 
 
-def load(sources):
-    gold = json.loads(SNAPSHOT.read_text())['gold']
-    artists = {key for row in gold for key in artist_keys(row.get('artist', '').split('+')[0])}
+def load(sources, *, identity_exclusions=()):
+    gold = [*json.loads(SNAPSHOT.read_text())['gold'], *identity_exclusions]
+    artists = {key for row in gold for key in artist_keys(row.get('artist', ''))}
     titles = {identity(row['title']) for row in gold if row.get('title')}
     pair_data = json.loads((OUT / 'unlabeled-consistency/pairs.json').read_text())['pairs']
     pair_split = json.loads((OUT / 'unlabeled-consistency/pair-split.json').read_text())
@@ -33,7 +33,7 @@ def load(sources):
 
     def song_keys(row):
         title = identity(row.get('title', ''))
-        return {(artist, title) for artist in artist_keys(row.get('artist', '').split('+')[0]) if title}
+        return {(artist, title) for artist in artist_keys(row.get('artist', '')) if title}
 
     heldout_keys, unlabeled_keys = set(), set()
     for pair in pair_data:
@@ -45,7 +45,7 @@ def load(sources):
         path = OUT / f'{source}.features.json'
         source_hashes[source] = digest(path)
         values = json.loads(path.read_text())['rows']
-        excluded = [row['id'] for row in values if artist_keys(row.get('artist', '').split('+')[0]) & artists
+        excluded = [row['id'] for row in values if artist_keys(row.get('artist', '')) & artists
                     or identity(row.get('title', '')) in titles]
         exclusions[source] = excluded
         values = [row for row in values if row['id'] not in set(excluded)]
@@ -74,6 +74,7 @@ def load(sources):
     if x.shape[1] != 200 or not np.isfinite(x).all():
         raise ValueError('Shared model needs compatible finite audio embeddings')
     return rows, x, y, offsets, names, {'source_features_sha256': source_hashes,
+         'additional_protected_identity_rows': len(identity_exclusions),
          'gold_identity_exclusions': exclusions, 'robustness_identity_exclusions': robustness_exclusions,
          'native_labels_withheld_ids': [row['id'] for row in rows if row['native_label_withheld']],
          'unlabeled_recordings': len(unlabeled_hashes), 'robustness_recordings': len(heldout_hashes),
@@ -91,8 +92,9 @@ def connected_groups(rows):
 
     known = {}
     for i, row in enumerate(rows):
-        keys = [('source_group', row['task'], row['group']), ('audio', row['audio_sha256'])]
-        keys += [('artist', name) for name in artist_keys(row.get('artist', '').split('+')[0])]
+        keys = [('source_group', row['task'], row['group']), ('audio', row['audio_sha256']),
+                ('recording', row['id'])]
+        keys += [('artist', name) for name in artist_keys(row.get('artist', ''))]
         for key in keys:
             if key in known:
                 parents[root(i)] = root(known[key])
@@ -217,7 +219,7 @@ def training_pairs(rows):
     return list(unique.values())
 
 
-def fit(x, y, rows, offsets, hidden, penalty, strength):
+def fit(x, y, rows, offsets, hidden, penalty, strength, *, task_weights=None):
     z, medians, mean, scale = standardize(x)
     rng = np.random.default_rng(SEED)
     parameters = {'shared_weights': rng.normal(0, np.sqrt(2 / x.shape[1]), (x.shape[1], hidden)),
@@ -228,6 +230,11 @@ def fit(x, y, rows, offsets, hidden, penalty, strength):
               for name in offsets}
     if any(len(indices) == 0 for indices in blocks.values()):
         raise ValueError('A native task has no training examples in this global fold')
+    importance = dict.fromkeys(blocks, 1.) if task_weights is None else task_weights
+    if (set(importance) != set(blocks) or any(not np.isfinite(value) or value <= 0
+                                             for value in importance.values())):
+        raise ValueError('Each fitted task requires a positive finite loss weight')
+    block_rng = {name: np.random.default_rng(SEED + i + 1) for i, name in enumerate(blocks)}
     for name, indices in blocks.items():
         start, end = offsets[name]
         parameters['output_bias'][start:end] = y[indices, start:end].mean(0)
@@ -237,11 +244,12 @@ def fit(x, y, rows, offsets, hidden, penalty, strength):
     first_moment, second_moment = [{key: np.zeros_like(value) for key, value in parameters.items()} for _ in range(2)]
     trace = []
     for step in range(1, STEPS + 1):
-        indices = np.concatenate([rng.choice(block, 32, replace=len(block) < 32) for block in blocks.values()])
+        indices = np.concatenate([(rng if task_weights is None else block_rng[name]).choice(
+            block, 32, replace=len(block) < 32) for name, block in blocks.items()])
         weight = np.zeros((len(indices), y.shape[1]))
         for i, name in enumerate(blocks):
             start, end = offsets[name]
-            weight[32 * i:32 * (i + 1), start:end] = 1 / (len(blocks) * 32 * (end - start))
+            weight[32 * i:32 * (i + 1), start:end] = importance[name] / (sum(importance.values()) * 32 * (end - start))
         pair_indices = rng.choice(len(pairs), min(32, len(pairs)), replace=False) if pairs else []
         loss, gradient = loss_gradient(parameters, z[indices], y[indices], weight,
                                        clean[pair_indices] if pairs else None,
@@ -349,9 +357,9 @@ def gold_diagnostic(model, names, provenance, variant):
     return results
 
 
-def evaluate(sources):
+def evaluate(sources, *, identity_exclusions=()):
     with threadpool_limits(limits=1):
-        rows, x, y, offsets, names, provenance = load(sources)
+        rows, x, y, offsets, names, provenance = load(sources, identity_exclusions=identity_exclusions)
         groups = connected_groups(rows)
         split = balanced_folds(rows, groups)
         fold_audit = audit_folds(rows, groups, split)

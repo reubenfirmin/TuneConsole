@@ -28,7 +28,7 @@ def live_cleanup_app(monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     s = Store(":memory:")
     s.init_schema()
-    iid = s.identities.upsert_identity("Main", "c1", None, True)
+    iid = s.accounts.upsert_account("Main", "c1", None, True)
     s.playlists.upsert_playlist(iid, "PLE", "Empty One", 0, "h", 1.0)   # no tracks -> an empty playlist
     # two identical playlists -> an exact-duplicate group
     dup_tracks = [s.tracks.upsert_track(f"d{i}", f"D{i}", "X", None, None, 1) for i in range(2)]

@@ -22,7 +22,7 @@ def _ctx(store):
 
 
 def test_new_artists_taste_pinned_and_cached(store, monkeypatch):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     band = [store.tracks.upsert_track(f"c{i}", f"C{i}", "CoreBand", None, None) for i in range(10)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PC", "Core Mix", 10, "h", 0.0), band)
     for _ in range(5):
@@ -51,5 +51,5 @@ def test_new_artists_taste_pinned_and_cached(store, monkeypatch):
 
 
 def test_new_artists_empty_without_key(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     assert discover.new_artists(_ctx(store)) == []

@@ -7,6 +7,8 @@ function mountNowPlayingDock() {
   const target = !standalone && window.matchMedia('(min-width: 65rem)').matches ? slot : origin;
   if (card.parentElement !== target) target.appendChild(card);
   const measure = () => {
+    document.body.style.setProperty('--app-topbar-height',
+      (document.querySelector('.topbar')?.getBoundingClientRect().height || 0) + 'px');
     const height = document.body.classList.contains('app-standalone') && card.getClientRects().length
       ? origin.getBoundingClientRect().height : 0;
     document.body.style.setProperty('--playback-dock-height', height + 'px');
@@ -16,7 +18,10 @@ function mountNowPlayingDock() {
     window.__homeDockBound = true;
     window.addEventListener('resize', mountNowPlayingDock);
     window.addEventListener('app-page-changed', mountNowPlayingDock);
-    new ResizeObserver(measure).observe(card);
+    const observer = new ResizeObserver(measure);
+    observer.observe(card);
+    const topbar = document.querySelector('.topbar');
+    if (topbar) observer.observe(topbar);
   }
 }
 

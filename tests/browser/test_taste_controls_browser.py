@@ -16,7 +16,7 @@ def test_taste_topics_show_one_group_at_a_time(store, page, monkeypatch, request
     # Keep the synthetic layout fixture stable; startup group repair is tested separately.
     monkeypatch.setattr(RecWorker, "trigger_mode_refresh", lambda self, **kw: None)
     live_app = request.getfixturevalue("live_app")
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     styles = ["Warehouse techno", "Late-night jazz", "Guitar music"] + [f"Listening style {i}" for i in range(4, 15)]
     vectors = np.eye(len(styles), dtype=np.float32)
     mode_rows = []
@@ -450,7 +450,7 @@ def test_recent_influence_percentages_save_and_reset(live_app, store, page, name
 
 
 def test_taste_controls_survive_topic_switches_and_reload(live_app, store, page):
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     track = store.tracks.upsert_track("genre-test", "Genre test", "Test artist", None, None)
     store.tracks.set_track_genre(track, "Techno")
     store.history.record_history_plays(iid, 1.0, ["genre test|test artist"], source_timezone="UTC")

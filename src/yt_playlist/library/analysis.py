@@ -48,7 +48,7 @@ class DupeFinding(OverlapFinding):
 SYSTEM_PLAYLIST_IDS = {"LM", "SE"}
 
 def _manageable(p) -> bool:
-    return p.ytm_playlist_id not in SYSTEM_PLAYLIST_IDS
+    return p.provider_playlist_id not in SYSTEM_PLAYLIST_IDS
 
 class CleanupAnalysis:
     """Pure, operation-scoped analysis of detached membership/preferences.
@@ -150,7 +150,7 @@ def merge_signature(ytms) -> str:
 
 
 def _group_sig(playlists) -> str:
-    return merge_signature(p.scope_ref for p in playlists)
+    return merge_signature(p.playlist_scope_id for p in playlists)
 
 
 def find_identical_groups(store, ignored_sigs=None):
@@ -228,7 +228,7 @@ def find_empty_playlists(store, ignored=None):
     `ignored`: ytm ids dismissed from the Empty category."""
     ignored = ignored or set()
     state = _analysis(store)
-    return sorted((p for p in state.playlists if p.scope_ref not in ignored
+    return sorted((p for p in state.playlists if p.playlist_scope_id not in ignored
                    and not state.memberships.keys[p.id]),
                   key=lambda p: p.title.lower())
 
@@ -239,7 +239,7 @@ def find_tiny_playlists(store, max_tracks=3, ignored=None):
     state = _analysis(store)
     out = []
     for p in state.playlists:
-        if p.scope_ref in ignored:
+        if p.playlist_scope_id in ignored:
             continue
         n = len(state.memberships.keys[p.id])
         if 1 <= n <= max_tracks:
@@ -255,13 +255,13 @@ def find_dupes(store, threshold=0.70):
     return _analysis(store).relationships(threshold)[0]
 
 def _overlap_visible(pa, pb, suppressed, ignored_ytm, kept):
-    pair = frozenset((pa.scope_ref, pb.scope_ref))
+    pair = frozenset((pa.playlist_scope_id, pb.playlist_scope_id))
     if suppressed and pair in suppressed:
         return False
     if kept and pair in kept:
         return True
-    return not ignored_ytm or (pa.scope_ref not in ignored_ytm
-                               and pb.scope_ref not in ignored_ytm)
+    return not ignored_ytm or (pa.playlist_scope_id not in ignored_ytm
+                               and pb.playlist_scope_id not in ignored_ytm)
 
 def near_duplicate_pairs(store, groups, suppressed=None, ignored_ytm=None, kept=None,
                          threshold=0.70):

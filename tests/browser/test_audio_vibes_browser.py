@@ -159,12 +159,12 @@ def test_normal_collection_predicts_and_propagates_without_rating_ui(live_app, p
     assert {fit['source'] for fit in fits(store, measured).values()} == {'audio_measurement'}
     assert {fit['source'] for fit in fits(store, neighbour).values()} == {'artist_genre'}
     assert all(fit['recordings'] == 1 for fit in fits(store, neighbour).values())
-    assert not store.conn.execute('SELECT 1 FROM audio_session_labels').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM audio_annotations').fetchone()
     assert not any(url.endswith('/audio-vibes/feedback') or '/audio-vibe-cards.js' in url
                    or '/audio-vibe-banner.js' in url for url in urls)
 
 
-@pytest.mark.parametrize('preview_browser', ['natural_sampling'], indirect=True)
+@pytest.mark.parametrize('preview_browser', ['natural_sampling', 'packaged_sampling'], indirect=True)
 def test_installed_extension_collects_native_embedding_with_ratings_disabled(
         preview_browser, live_app, store, monkeypatch, tmp_path):
     monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
@@ -191,7 +191,7 @@ def test_installed_extension_collects_native_embedding_with_ratings_disabled(
     assert len(value['tags']) == 50 and len(value['audio_attributes']['values']) == 27
     assert value['audio_transferred_to_app'] is False and value['raw_audio_retained'] is False
     expect(page.locator('[data-audio-vibe-banner]')).to_have_count(0)
-    assert not store.conn.execute('SELECT 1 FROM audio_session_labels').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM audio_annotations').fetchone()
     assert not any('/audio-vibe-banner.js' in url or '/audio-vibe-cards.js' in url
                    or url.endswith('/audio-vibes/feedback') for url in loaded)
     # Finish the test before another sampling point; cancellation releases the
@@ -255,13 +255,14 @@ def test_retained_card_waits_for_saved_answer_and_retries_after_reconnect(
     offline = True
 
     def load(route):
-        attempts.append(time.monotonic())
+        attempts.append(page.evaluate('Date.now()') / 1000)
         if offline:
             route.fulfill(status=503, json={'detail': 'Temporary connection failure'})
         else:
             route.continue_()
 
     page.route('**/audio-vibes/runs/' + first['run_id'] + '**', load)
+    page.clock.install()
     page.goto(live_app + '/playlists')
     card = visible_card(page)
     expect(card.locator('[data-vibe-track]')).to_have_text(first['title'])
@@ -272,17 +273,22 @@ def test_retained_card_waits_for_saved_answer_and_retries_after_reconnect(
     assert store.audio_vibes.feedback(first['run_id']) == frozen
     # Normal ticks retry a retained earlier song, even with no current playback,
     # new sample, navigation or event from another tab. Failures back off.
-    page.wait_for_timeout(6500)
+    # Run every normal tick while checking backoff; skipping interval callbacks
+    # here could conceal an overly frequent retry loop.
+    page.clock.run_for(6500)
     assert 2 <= len(attempts) <= 3
     assert all(later - earlier >= 1.9 for earlier, later in zip(attempts, attempts[1:]))
     offline = False
+    with page.expect_response(lambda response: '/audio-vibes/runs/' + first['run_id'] in response.url
+                              and response.ok):
+        page.clock.fast_forward(10000)
     expect(card.locator('[data-vibe-checks] [data-complete="true"]')).to_have_count(3, timeout=12000)
     expect(card.get_by_role('button', name=DESCRIPTIONS['cruise'], exact=True)).to_have_attribute('aria-pressed', 'true')
     expect(card.get_by_role('button', name=DESCRIPTIONS['cruise'], exact=True)).to_be_enabled()
     expect(card.locator('[data-vibe-feedback-status]')).to_have_text('Saved')
     assert store.audio_vibes.feedback(first['run_id']) == frozen
     restored_attempts = len(attempts)
-    page.wait_for_timeout(4500)
+    page.clock.run_for(4500)
     assert len(attempts) == restored_attempts
 
 
@@ -879,7 +885,7 @@ def test_automatic_app_reload_waits_for_card_interaction(vibes_enabled, live_app
         page.evaluate('Alpine.$data(document.querySelector("#update-nudge")).refresh()')
 
 
-@pytest.mark.parametrize('preview_browser', ['natural_sampling', 'natural_offset'], indirect=True)
+@pytest.mark.parametrize('preview_browser', ['packaged_sampling', 'natural_offset'], indirect=True)
 def test_three_real_tab_local_samples_on_normal_app_share_one_owner(vibe_browser, live_app, store, tmp_path):
     context, _, source, source_cdp, isolated = vibe_browser
     assert _evaluate(source_cdp, 'previewStreams.length', isolated) == 0

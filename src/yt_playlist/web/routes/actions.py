@@ -86,10 +86,10 @@ def build(ctx) -> APIRouter:
             return action.kind
         src = store.playlists.get_playlist(pe.plan.source_playlist_id)
         tgt = store.playlists.get_playlist(pe.plan.target_playlist_id)
-        src_name = params.get("source_title") or (src.title if src else None) or pe.source_ytm_playlist_id
+        src_name = params.get("source_title") or (src.title if src else None) or pe.source_provider_playlist_id
         tgt_name = params.get("target_title") or (tgt.title if tgt else None) or "target"
         if pe.mode == "delete":
-            return f"delete “{src_name}” ({pe.source_ytm_playlist_id})"
+            return f"delete “{src_name}” ({pe.source_provider_playlist_id})"
         if pe.mode == "move":
             return f"move “{src_name}” into “{tgt_name}”, delete source"
         return f"merge “{src_name}” into “{tgt_name}”"
@@ -138,10 +138,10 @@ def build(ctx) -> APIRouter:
             raise HTTPException(404, "Saved deletion not found")
         entry = entries[entry_index]
         try:
-            identity_id, client = client_for(store, ctx.client_provider(), identity_id=entry["identity"])
+            account_id, client = client_for(store, ctx.client_provider(), account_id=entry["identity"])
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
-        return JSONResponse({"identity_id": identity_id, "action_id": action_id,
+        return JSONResponse({"account_id": account_id, "action_id": action_id,
                              "entry_index": entry_index,
                              "reads": playlist_read_report(client, entry["ytm"])},
                             headers={"Cache-Control": "no-store"})

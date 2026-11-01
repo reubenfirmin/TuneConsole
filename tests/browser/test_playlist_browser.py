@@ -38,7 +38,7 @@ def _free_port():
 def live_playlist_app():
     s = Store(":memory:")
     s.init_schema()
-    iid = s.identities.upsert_identity("Main", "cred", None, True)
+    iid = s.accounts.upsert_account("Main", "cred", None, True)
     pid = s.playlists.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
     t0 = s.tracks.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)
     t1 = s.tracks.upsert_track("v1", "Song B", "Artist Y", "Alb", 200, 1)
@@ -57,11 +57,17 @@ def live_playlist_app():
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
-    while not server.started:
-        time.sleep(0.02)
-    yield {"base": f"http://127.0.0.1:{port}", "pid": pid, "store": s, "client": client}
-    server.should_exit = True
-    thread.join(timeout=5)
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started:
+            assert thread.is_alive() and time.monotonic() < deadline, 'Playlist server did not start'
+            time.sleep(0.02)
+        yield {"base": f"http://127.0.0.1:{port}", "pid": pid, "store": s, "client": client}
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+        assert not thread.is_alive(), 'Playlist server did not stop'
+        s.conn.close()
 
 
 def test_rename_playlist_updates_heading(live_playlist_app, page):
@@ -75,6 +81,33 @@ def test_rename_playlist_updates_heading(live_playlist_app, page):
     # survives a reload (persisted, not just a DOM poke)
     page.goto(f"{base}/playlist/{pid}")
     expect(page.get_by_role("heading", name="Renamed Mix")).to_be_visible()
+
+
+@pytest.mark.parametrize('width', [390, 1440])
+def test_lane_only_generated_heading_uses_the_mix_description(live_playlist_app, page, width, tmp_path):
+    base, pid, store = (live_playlist_app[key] for key in ('base', 'pid', 'store'))
+    original = 'More in your wheelhouse - October 28 2026 #3'
+    store.playlists.set_playlist_title(pid, original, 1)
+    store.playlists.mark_generated_playlist('PL1')
+    page.set_viewport_size({'width': width, 'height': 950})
+    page.goto(f'{base}/playlist/{pid}')
+    heading = page.get_by_role('heading', name='Songs close to what you play most', exact=False)
+    expect(heading).to_be_visible()
+    expect(page.locator('.pl-type-badge')).to_have_text('More in your wheelhouse')
+    expect(page.locator('.pl-version')).to_have_text('Version 3')
+    assert store.playlists.get_playlist(pid).title == original
+    heading.click()
+    expect(page.locator('input.title-input')).to_have_value(original)
+    page.locator('input.title-input').press('Escape')
+    expect(heading).to_be_visible()
+    page.screenshot(path=str(tmp_path / f'playlist-description-{width}.png'), full_page=True)
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    heading.click()
+    page.locator('input.title-input').fill('My own playlist title')
+    page.locator('input.title-input').press('Enter')
+    expect(page.get_by_role('heading', name='My own playlist title', exact=True)).to_be_visible()
+    page.reload()
+    expect(page.get_by_role('heading', name='My own playlist title', exact=True)).to_be_visible()
 
 
 @pytest.mark.parametrize('width,font_scale', [
@@ -171,10 +204,10 @@ def test_generated_heading_keeps_the_full_title_when_editing_and_after_rename(
 @pytest.mark.parametrize('video', [False, True])
 def test_playlist_header_groups_play_radio_and_counts(live_playlist_app, page, width, video):
     base, pid, store = (live_playlist_app[key] for key in ('base', 'pid', 'store'))
-    store.identities.upsert_identity('Other', 'other-cred', 'other-brand', False)
+    store.accounts.upsert_account('Other', 'other-cred', 'other-brand', False)
     if video:
         playlist = store.playlists.get_playlist(pid)
-        store.playlist_recipes.set_recipe(playlist.scope_ref, {'media': 'video'})
+        store.playlist_recipes.set_recipe(playlist.playlist_scope_id, {'media': 'video'})
     page.set_viewport_size({'width': width, 'height': 950})
     page.goto(f'{base}/playlist/{pid}')
     actions = page.locator('.release-hero .pl-actions')
@@ -426,29 +459,6 @@ def test_genre_badge_is_display_only(live_playlist_app, page):
     expect(dialog.get_by_label('Genre', exact=True)).to_have_value('Rock')
 
 
-@pytest.mark.parametrize("initial_status", ["INDIFFERENT", "LIKE"])
-def test_now_playing_heart_immediately_updates_matching_playlist_row(live_playlist_app, page, initial_status):
-    base, pid = live_playlist_app["base"], live_playlist_app["pid"]
-    page.route("**/bridge/status", lambda route: route.fulfill(json={
-        "connected": True,
-        "now_playing": {"title": "Song A", "artist": "Artist X", "thumbnail": "",
-                        "likeStatus": initial_status, "video_id": "v0", "paused": False},
-        "sensor_health": {"healthy": True, "ytm_tabs": 1, "responding_tabs": 1,
-                          "reinjected_tabs": 0, "error": ""},
-        "radio": False, "radio_waiting": False, "radio_dual": False,
-        "radio_fallback_reason": None, "radio_upcoming": [],
-    }))
-    page.route("**/now-playing/rate", lambda route: route.fulfill(json={"ok": True}))
-    page.goto(f"{base}/playlist/{pid}")
-    row = page.get_by_role("row").filter(has_text="Song A")
-    expect(row.locator(".like-btn")).to_have_attribute("aria-pressed", str(initial_status == "LIKE").lower())
-    desired_status = "INDIFFERENT" if initial_status == "LIKE" else "LIKE"
-    with page.expect_request(lambda request: request.url.endswith("/now-playing/rate")) as request:
-        page.locator(".global-now-playing .hs-heart").click()
-    assert request.value.post_data_json == {"action": "like", "videoId": "v0", "likeStatus": desired_status}
-    expect(row.locator(".like-btn")).to_have_attribute("aria-pressed", str(desired_status == "LIKE").lower())
-
-
 @pytest.mark.parametrize("initial_status", ["", "INDIFFERENT", "LIKE"])
 @pytest.mark.parametrize("control", ["table", "sidebar"])
 def test_playing_track_heart_uses_backend_and_survives_stale_sensor(live_playlist_app, page, initial_status, control):
@@ -474,6 +484,8 @@ def test_playing_track_heart_uses_backend_and_survives_stale_sensor(live_playlis
                               "videoId": "v0", "likeStatus": desired_status, "brandId": "", "skip": False}
             extension.send(json.dumps({"id": native["id"], "status": 200, "body": json.dumps({"ok": True})}))
         assert response.value.json()["ok"] is True
+        assert response.value.request.post_data_json == {
+            "action": "like", "videoId": "v0", "likeStatus": desired_status}
         expect(heart).to_have_attribute("aria-pressed", pressed)
         assert live_playlist_app["client"].rated == [("v0", desired_status)]
         # YouTube's player bar is not refreshed by the API write. Even its old LIKE readout

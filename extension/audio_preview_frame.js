@@ -17,7 +17,7 @@
         channel.postMessage(data);
         stop();
       };
-      worker.onerror = () => { channel.postMessage({id, error: 'The tab-local model failed. Prepare the optional model and reload the extension.'}); stop(); };
+      worker.onerror = () => { channel.postMessage({id, error: 'The audio model could not load. Reinstall the TuneConsole extension and reload this page.'}); stop(); };
       let started = false;
       channel.onmessage = ({data}) => {
         if (started || data?.id !== id || data.rate !== 16000

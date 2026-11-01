@@ -67,13 +67,16 @@ def mix_choices(store, now=None):
 
 def generated_playlists(store, now):
     """Generation facts from prepared pools and saved settings; never rebuild a Home mix."""
-    bundles = store.rec_proposals.get_proposals("mode_bundles") or {}
-    blocked = store.rec_model.suppressed_keys("for_you", now)
-    muted = store.rec_model.muted_artists()
-    examples = {}
-    for source in ("wheelhouse", "explore", "fresh", "comfort"):
-        examples[source] = next((t for t in bundles.get("all", {}).get(source, [])
-                                 if t.get("key") not in blocked and t.get("artist") not in muted), None)
+    if getattr(store, '_recommendation_files', False):
+        examples = _stored_examples(store, now)
+    else:
+        bundles = store.rec_proposals.get_proposals("mode_bundles") or {}
+        blocked = store.rec_model.suppressed_keys("for_you", now)
+        muted = store.rec_model.muted_artists()
+        examples = {}
+        for source in ("wheelhouse", "explore", "fresh", "comfort"):
+            examples[source] = next((t for t in bundles.get("all", {}).get(source, [])
+                                     if t.get("key") not in blocked and t.get("artist") not in muted), None)
     gp = rec_params.get_param
     return {"choices": mix_choices(store, now), "examples": examples,
             "taste_rank_ready": bool(surfaces.playlist_taste(store)),
@@ -83,6 +86,34 @@ def generated_playlists(store, now):
             "artist_cap": gp(store, "modes_artist_cap"),
             "album_cap": gp(store, "modes_album_cap"),
             "fresh_artist_cap": gp(store, "fresh_artist_cap")}
+
+
+def _stored_examples(store, now):
+    from yt_playlist.core.activity import check_cancellable_work
+    from yt_playlist.rec.eligibility import home_exclusions
+    if not getattr(store, '_read_only', False):
+        with store.read_view() as reader:
+            return _stored_examples(reader, now)
+    head = store.recommendations.head('home')
+    examples = dict.fromkeys(('wheelhouse', 'explore', 'fresh', 'comfort'))
+    if head is None:
+        return examples
+    muted = store.rec_model.muted_artists()
+    for source in examples:
+        after = -1
+        while True:
+            check_cancellable_work()
+            page = store.recommendations.candidate_page('home', 'all', source,
+                generation=head['id'], after=after, limit=128)
+            blocked = home_exclusions(store, [track['key'] for track in page['tracks']], now)
+            example = next((track for track in page['tracks'] if track['key'] not in blocked
+                            and track.get('artist') not in muted), None)
+            if example is not None:
+                examples[source] = example
+            after = page['after']
+            if example is not None or page['exhausted']:
+                break
+    return examples
 
 
 def source_weights(store, now):
@@ -123,6 +154,9 @@ def _graduation_change(entry):
 
 def overview(store, now, profiles=None):
     """Only the three Overview readings; no training baskets, pools, or ranking diagnostics."""
+    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
+        with store.read_view() as reader:
+            return overview(reader, now, profiles=profiles)
     bd = taste_analysis.taste_breadth(store)
     from yt_playlist.rec import group_viz
     preview = group_viz.prepared(store)
@@ -336,6 +370,10 @@ def model_transparency(store, now) -> dict:
     era decade / artist), the modes axis at all three timescales it exists on, lanes, breadth,
     sources, and the graduation funnel. Expensive panels (embedding/recall, playlist contexts,
     centroid tilt) are separate (playlist_influence_panel / centroid_tilt_panel), htmx-lazy on the page."""
+    mix_tuning.expire(store, now)
+    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
+        with store.read_view() as reader:
+            return model_transparency(reader, now)
     sources = source_weights(store, now)
     weights = store.rec_model.get_weights(now=now, revert_halflife_d=sources["lane_weight_halflife_days"])
     standing = store.rec_model.get_leans()
@@ -398,6 +436,9 @@ def playlist_influence_panel(store, top=8) -> dict:
     Keep the denominator across ALL contexts: a shortened ranking must still describe the whole
     blend. Zero-weight playlists don't contribute, and the behavior-only fallback isn't a playlist.
     """
+    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
+        with store.read_view() as reader:
+            return playlist_influence_panel(reader, top=top)
     from collections import Counter
 
     def share_label(weight):
@@ -425,7 +466,7 @@ def playlist_influence_panel(store, top=8) -> dict:
     offset = 0.0
     for i in order[:top]:
         pid, weight = pids[i], float(pt.weights[i])
-        families = (Counter(genre_map.family(g) for g in store.rec_query.playlist_track_genres(pid) if g)
+        families = (Counter(genre_map.family(g,conn=store.conn) for g in store.rec_query.playlist_track_genres(pid) if g)
                     if pid is not None else Counter())
         genres = [name for name, _ in sorted(families.items(), key=lambda row: (-row[1], row[0]))[:2]]
         context = {"pid": pid, "title": pt.titles[i], "weight": weight,
@@ -456,7 +497,7 @@ def _family_centroids(store, keys, V, idx) -> dict:
     tg = store.rec_query.track_genres(list(keys))
     for k in keys:
         if k in tg:
-            fam = genre_map.family(tg[k])
+            fam = genre_map.family(tg[k],conn=store.conn)
             if fam:
                 fam_keys.setdefault(fam, []).append(k)
     out = {}
@@ -481,6 +522,9 @@ def centroid_tilt_panel(store, now, top=6) -> dict:
     embedding space without whiplash, so the NOW layer is categorical over taste modes instead (see
     layers.py); it appears in `mode_layers`, not here.
     """
+    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
+        with store.read_view() as reader:
+            return centroid_tilt_panel(reader, now, top=top)
     # The half-lives ride along unconditionally: the template names them in its explanatory copy,
     # which it renders whether or not either layer currently has a direction.
     panel = {"families": [], "has_session": False, "has_transient": False,

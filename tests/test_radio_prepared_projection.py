@@ -5,9 +5,12 @@ import json
 
 import pytest
 
-from tests.test_radio_catalog import seed  # noqa: F401 - real prepared-mode fixture
+from tests.conftest import seed_catalog_track
+from tests.recommendation_support import publish_bundles
+from tests.test_radio_catalog import catalog_track, seed  # noqa: F401 - real prepared-mode fixture
 from yt_playlist.core import json_cache
-from yt_playlist.rec import musical_character, musical_profiles, radio_candidates, radio_tuning
+from yt_playlist.rec import embedding_vectors, musical_character, musical_profiles, radio_candidates, radio_tuning
+from yt_playlist.rec.stored_radio import PreparedRadio
 from yt_playlist.repos.rec_proposals import encode_proposals
 
 
@@ -112,37 +115,80 @@ def test_empty_mode_keeps_indexed_refill_or_the_complete_cold_fallback(catalog):
 @pytest.mark.parametrize('comfort', [0, .5, 1])
 def test_real_constructor_preserves_full_session_state_and_stored_pools(store, seed, monkeypatch, comfort):
     bundles = _bundles()
+    tracks = {track['key']: track for bucket in bundles.values() if isinstance(bucket, dict)
+              for items in bucket.values() if isinstance(items, list)
+              for track in items if isinstance(track, dict)}
+    for track in tracks.values():
+        track['title'] = track['key']
+        track.pop('description')
+        seed_catalog_track(store, track['key'], track['title'], track['artist'], video_id=track['video_id'])
     profile = musical_character.compact(musical_profiles.resolve([], overrides={'energy': .7}))
     for track in bundles['all']['wheelhouse']:
         track['musical'] = profile
-    store.rec_proposals.put_proposals('mode_bundles', bundles, 1000)
+    bundles['_radio'].update(space=embedding_vectors.content_space_id(store),
+                              generation=store.settings.get_setting('rec_content_generation'))
+    publish_bundles(store, bundles, 1000)
+    head = store.recommendations.head('home')
+    ranks = list(map(tuple, store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY pool_id,rank')))
     tuning = {**radio_tuning.DEFAULTS, 'comfort': comfort}
     projected = radio_candidates.RadioCandidates(store, 1000, tuning, comparison=False)
-    monkeypatch.setattr(radio_candidates, '_initial_projection', lambda value, *args: value)
+    inputs = PreparedRadio.inputs
+
+    def unprojected(self, reader, modes, space, generation, blocked, muted, comfort):
+        result = inputs(self, reader, modes, space, generation, blocked, muted, comfort)
+        for mode in modes:
+            bucket = {}
+            for lane in ('wheelhouse', 'explore', 'comfort', 'temporal', 'fresh'):
+                rows, after = [], -1
+                while True:
+                    page = reader.recommendations.candidate_page('home', mode, lane,
+                        generation=self.generation, after=after, limit=128)
+                    rows.extend(page['tracks'])
+                    after = page['after']
+                    if page['exhausted']:
+                        break
+                bucket[lane] = rows
+            result[mode] = bucket
+        return result
+
+    monkeypatch.setattr(PreparedRadio, 'inputs', unprojected)
     original = radio_candidates.RadioCandidates(store, 1000, tuning, comparison=False)
-    for field in ('pools', 'prior', 'by_key', 'by_video', 'membership', 'energies',
-                  'fingerprint', 'cluster_members', 'now_posterior', 'now_gain'):
-        assert getattr(projected, field) == getattr(original, field), field
-    assert projected.pools['1']
-    assert store.rec_proposals.get_proposals('mode_bundles') == bundles
+    try:
+        for field in ('pools', 'prior', 'by_key', 'by_video', 'membership', 'energies',
+                      'fingerprint', 'cluster_members', 'now_posterior', 'now_gain'):
+            assert getattr(projected, field) == getattr(original, field), field
+        assert projected.pools['1']
+        assert store.recommendations.head('home') == head
+        assert list(map(tuple, store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY pool_id,rank'))) == ranks
+    finally:
+        projected.close()
+        original.close()
 
 
 @pytest.mark.parametrize('value', [None, {}, []])
-def test_missing_prepared_values_still_reach_the_real_catalog_fallback(store, seed, value):
-    store.rec_proposals.put_proposals('mode_bundles', value, 1000)
+def test_missing_prepared_values_still_reach_the_real_catalog_fallback(store, value):
+    assert json_cache.decode(encode_proposals('mode_bundles', value)) == value
+    seed, entry = catalog_track(store, 'seed')
+    account = store.accounts.upsert_account('Main', 'credential', None, True)
+    playlist = store.playlists.upsert_playlist(account, 'LIBRARY', 'Library', 1, 'hash', 1)
+    store.playlists.set_playlist_tracks(playlist, [entry])
+    assert store.recommendations.head('home') is None
     candidates = radio_candidates.RadioCandidates(store, 1000, comparison=False)
-    assert candidates.pools['local']
-    assert seed['video_id'] in candidates.by_video
+    try:
+        assert candidates.pools['local']
+        assert seed['video_id'] in candidates.by_video
+    finally:
+        candidates.close()
 
 
-def test_input_reuse_reprojects_current_exclusions_and_refreshes_on_publication(store, seed):
+def test_input_reuse_reprojects_current_exclusions_and_refreshes_on_publication():
     bundles = _bundles()
-    store.rec_proposals.put_proposals('mode_bundles', bundles, 1000)
+    encoded = encode_proposals('mode_bundles', bundles)
+    cache = json_cache.DecodeCache()
 
     def inputs(blocked):
-        return radio_candidates._prepared_inputs(store,
-            project=lambda value, modes, space, generation: radio_candidates._initial_projection(
-                value, {'1': {}}, 'space', 'basis', blocked, set(), .5))[-1]
+        return cache.decode(encoded, project=lambda value: radio_candidates._initial_projection(
+            value, {'1': {}}, 'space', 'basis', blocked, set(), .5))
 
     first = inputs(set())
     key = first['1']['_radio_pool'][0]['key']
@@ -151,7 +197,7 @@ def test_input_reuse_reprojects_current_exclusions_and_refreshes_on_publication(
     first['1']['_radio_pool'][0]['musical']['provenance'][1]['recording'] = 'changed'
     assert inputs(set())['1']['_radio_pool'][0]['musical']['provenance'][1]['recording'] != 'changed'
     bundles['_meta']['musical_generation'] = 'replacement'
-    store.rec_proposals.put_proposals('mode_bundles', bundles, 1001)
+    encoded = encode_proposals('mode_bundles', bundles)
     assert inputs(set())['_meta']['musical_generation'] == 'replacement'
 
 
@@ -160,5 +206,9 @@ def test_owned_transaction_does_not_wait_for_a_shared_input_decode(store, seed, 
         pytest.fail('A serving-lock owner must not wait for a shared decoder')
 
     monkeypatch.setattr(radio_candidates, '_input_cache', forbidden)
-    with store._lock:
-        assert radio_candidates._prepared_inputs(store)[-1]
+    prepared = PreparedRadio(store, 1000)
+    try:
+        with store._lock:
+            assert radio_candidates._prepared_inputs(store, prepared=prepared)[-1]
+    finally:
+        prepared.close()

@@ -172,7 +172,7 @@ class PlaylistRadio:
 
     def seeds(self):
         with self.operation:
-            if self.offer is None:
+            if not self._eligible_seeds(self.offer):
                 candidates = RadioCandidates(self.ctx.store, self.ctx.now_fn())
                 self.offer, self.offer_id = self.listening.seed_offer(candidates)
             return {"tracks": self._eligible_seeds(self.offer), "menu_id": self.offer_id}
@@ -479,6 +479,14 @@ class PlaylistRadio:
             day = date.fromisoformat(local_date) if local_date else datetime.fromtimestamp(self.ctx.now_fn()).date()
             with self.lock:
                 if playlist_id is None and self._is_current(self.session):
+                    s = self.session
+                    # A joined request may have superseded the first request's
+                    # intent before its handoff. Adopt that intent only while
+                    # delivery is still known not to have happened. Navigation
+                    # remains subject to any newer independent Play.
+                    if not s.launch_sent and not s.playback_confirmed:
+                        s.playback_intent = max(s.playback_intent or 0, intent)
+                        self._handoff_start(s)
                     return {"ok": True, "joined": True, **self.status()}
                 try:
                     identity, client = client_for(self.ctx.store, self.ctx.client_provider())
@@ -532,10 +540,30 @@ class PlaylistRadio:
         prepared = self.launch.confirm(s)
         with self.lock:
             self.launch.accept(s, prepared)
-            self.listening.update(s)
             self._persist(s)
-            if not s.stop.is_set() and s.playback_intent is not None:
-                self.playback.navigate(s.playlist, prepared.tracks[0]['video_id'], intent=s.playback_intent)
+            self._handoff_start(s)
+        # Playback needs the confirmed initial queue, not the four future
+        # branches. Build those privately so status and Stop remain available.
+        self.listening.initial_directions(s)
+        with self.lock:
+            self._persist(s)
+
+    def _handoff_start(self, s):
+        """Send the confirmed initial queue once; only a rejected intent may retry.
+
+        Called under the session lock. A queued or uncertain delivery must never
+        be repeated by a joining request, preparation retry or restored session.
+        """
+        if (s is not self.session or s.stop.is_set() or s.launch_sent
+                or s.playback_confirmed or s.playback_intent is None
+                or s.initial_tracks or not s.tracks):
+            return
+        s.launch_sent = True
+        sent = self.playback.navigate(s.playlist, s.tracks[0]['video_id'], intent=s.playback_intent)
+        if sent is False:
+            # Bridge rejection establishes that no frame was queued. An error
+            # or an uncertain response does not establish that fact.
+            s.launch_sent = False
 
     def _recover(self, s):
         """Reconcile our in-flight write without discarding unrelated saved edits."""
@@ -559,7 +587,7 @@ class PlaylistRadio:
                 pass
         return False
 
-    def skip(self, video_id):
+    def skip(self, video_id, *, brand_id=None):
         """Repair radio's saved future, then advance exactly the displayed song.
 
         A disabled/stale native Next control falls back to the confirmed saved
@@ -592,14 +620,17 @@ class PlaylistRadio:
                             continue
                         if player["video_id"] != video_id:
                             return {"ok": True}
+                        if brand_id is not None and (not player.get('brand_known')
+                                or (player.get('brand_id') or '') != brand_id):
+                            return {'ok': False, 'error': 'Player account is unavailable or different'}
                         if not recorded_request:
                             # This is explicit intent, including immediate/late
                             # skips and the saved-successor fallback. It is not
                             # a dislike or an inferred early-exit judgment.
-                            if not getattr(self.ctx.store, 'activity_paused', False):
-                                self.ctx.store.player_events.record_player_event(
-                                    s.identity, 'next', video_id, player.get('position'),
-                                    player.get('duration'), s.playlist, None, self.ctx.now_fn())
+                            from yt_playlist.core import playback_feedback
+                            playback_feedback.record_next(self.ctx.store,
+                                s.identity, video_id, player.get('position'),
+                                player.get('duration'), s.playlist, self.ctx.now_fn())
                             recorded_request = True
                         if s.halted and not self._recover(s):
                             # An unrelated edit can still contain a usable next
@@ -620,14 +651,19 @@ class PlaylistRadio:
                             successor = ids[index + 1]
                             status, result = 0, {"error": "Native queue is still refreshing"}
                             if s.browser.get("playback_synced"):
-                                status, result = self.playback.next(video_id)
+                                options = {'brand_id': brand_id} if brand_id is not None else {}
+                                status, result = self.playback.next(video_id, **options)
                             if (status == 200 and result.get("ok")
                                     and self._wait_for_skip(s, video_id, min(deadline, time.monotonic() + 3))):
                                 return {"ok": True}
                             # Refresh/navigation can race the native button. Get
                             # a fresh identity before using the saved successor.
                             self.listening.observe(s)
-                            current = (s.browser.get("player") or {}).get("video_id")
+                            fresh_player = s.browser.get("player") or {}
+                            if brand_id is not None and (not fresh_player.get('brand_known')
+                                    or (fresh_player.get('brand_id') or '') != brand_id):
+                                return {'ok': False, 'error': 'Player account is unavailable or different'}
+                            current = fresh_player.get("video_id")
                             if current and current != video_id:
                                 return {"ok": True}
                             logger.info("Radio skip selecting saved successor: playlist=%s from=%s to=%s reason=%s",

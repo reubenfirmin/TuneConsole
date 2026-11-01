@@ -1,0 +1,199 @@
+"""Normal retained-format mutations preserve other owners' committed choices."""
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+import json
+import threading
+
+import pytest
+
+from tests.core.test_predecessor_writes import installed
+from tests.core.test_collection_feedback_publication import prepare
+from tests.repos.test_album_aliases import release
+from yt_playlist.core import album_feedback_storage, albums
+from yt_playlist.core.preparation import collection_feedback_publication
+from yt_playlist.core.store import Store
+from yt_playlist.rec import album_feedback, choice_evidence
+from yt_playlist.repos.collection import CollectionRepo
+from yt_playlist.repos.settings import SettingsRepo
+from yt_playlist.web.context import Ctx
+
+
+def context(store):
+    return Ctx(store=store, client_provider=lambda: {}, now_fn=lambda: 1, templates=None, jobs=None)
+
+
+def select(store, key):
+    owner = collection_feedback_publication.SOURCES[key]
+    owner.publish(store.conn, revision=prepare(store.conn, owner))
+
+
+FORMATS = [(version, state) for version in (79, 93) for state in ('source-only', 'partial', 'selected')]
+FORMATS.append((107, 'native'))
+
+
+def prepare_owner(store, key, state):
+    if state == 'selected':
+        select(store, key)
+    elif state == 'partial':
+        owner = collection_feedback_publication.SOURCES[key]
+        owner.worker.install(store.conn)
+        owner.worker.step(store.conn, batch_size=1)
+        assert owner.selected(store.conn) is None
+        assert owner.worker.progress(store.conn).prepared_revision is None
+
+
+@pytest.mark.parametrize('installed,state', FORMATS, indirect=['installed'])
+@pytest.mark.parametrize('operation', ['flag', 'clear'])
+def test_existing_context_updates_keep_other_accounts(installed, operation, state):
+    store, version = installed
+    first = store.accounts.upsert_account('First', 'first.json', None, True)
+    second = store.accounts.upsert_account('Second', 'second.json', None, False)
+    if operation == 'clear':
+        context(store).flag_auth_expired(first, 'First')
+    baseline = {}
+    if operation == 'flag' and state == 'partial':
+        baseline = {999: 'Historical account'}
+        store.settings.set_setting('auth_expired_identities', json.dumps({'999': baseline[999]}))
+    prepare_owner(store, 'auth_expired_identities', state)
+    other = Store(store._db_path)
+    try:
+        other.init_schema(defer_metadata=True)
+        earlier, later = context(store), context(other)
+        if operation == 'flag':
+            earlier.flag_auth_expired(first, 'First')
+            assert context(other).auth_expired == {**baseline, first: 'First'}
+            later.flag_auth_expired(second, 'Second')
+            expected = {**baseline, first: 'First', second: 'Second'}
+        else:
+            later.flag_auth_expired(second, 'Second')
+            assert context(store).auth_expired == {first: 'First', second: 'Second'}
+            earlier.clear_auth_expired(first)
+            expected = {second: 'Second'}
+        assert context(store).auth_expired == expected
+        assert context(other).auth_expired == expected
+        assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+    finally:
+        other.conn.close()
+
+
+@pytest.mark.parametrize('installed,state', FORMATS, indirect=['installed'])
+def test_overlapping_normal_feedback_writers_keep_each_release(installed, state, monkeypatch):
+    store, version = installed
+    store.accounts.upsert_account('Main', 'main.json', None, True)
+    for browse in ('baseline-release', 'first-release', 'second-release'):
+        document = deepcopy(release())
+        document['title'] = browse
+        document['tracks'][0]['videoId'] = browse
+        store.collection.observe_album_representation(browse, document)
+        choice_evidence.issue(store, 'albums', [{'id': browse}], 0, context={}, opportunity_id=browse)
+    album_feedback.set_feedback(store, 'baseline-release', 'reject', 1, 'baseline-release')
+    prepare_owner(store, 'album_feedback', state)
+    other = Store(store._db_path)
+    other.init_schema(defer_metadata=True)
+    assert not other.activity_paused
+    assert other.rec_ledger.evidence().get('opportunity', 'second-release') is not None
+    entered, resume, second_started = threading.Event(), threading.Event(), threading.Event()
+    original = CollectionRepo.preferred_album_ids
+    original_observe = albums.observe
+    held = False
+
+    def hold_first(repo, values):
+        nonlocal held
+        if repo._store is store and not held:
+            held = True
+            entered.set()
+            assert resume.wait(5), 'Coordinator did not release the first normal writer'
+        return original(repo, values)
+
+    def second():
+        second_started.set()
+        album_feedback.set_feedback(other, 'second-release', 'known', 2, 'second-release')
+
+    def hold_native(connection, browse, **kwargs):
+        if connection is store.conn:
+            hold_first(store.collection, [browse])
+        return original_observe(connection, browse, **kwargs)
+
+    monkeypatch.setattr(CollectionRepo, 'preferred_album_ids', hold_first)
+    if version == 107:
+        monkeypatch.setattr(albums, 'observe', hold_native)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            first = workers.submit(album_feedback.set_feedback, store, 'first-release', 'more', 3, 'first-release')
+            try:
+                assert entered.wait(5)
+                later = workers.submit(second)
+                assert second_started.wait(5)
+                # Before repair the second commits here, while the first still
+                # holds a stale map. With admission it waits outside ServingLock.
+                try:
+                    later.result(timeout=.15)
+                except TimeoutError:
+                    pass
+            finally:
+                resume.set()
+            first.result(timeout=5)
+            later.result(timeout=5)
+        actual = {key: value['kind'] for key, value in album_feedback_storage.original(store.conn).items()}
+        assert actual == {'baseline-release': 'reject', 'first-release': 'more', 'second-release': 'known'}
+        responses = store.rec_ledger.evidence().records('response')
+        assert sorted((row['opportunity_id'], row['kind']) for row in responses) == [
+            ('baseline-release', 'feedback'), ('first-release', 'feedback'), ('second-release', 'feedback')], {
+                'responses': responses, 'other_responses': other.rec_ledger.evidence().records('response'),
+                'group_files': getattr(other, '_compact_group_files', None),
+                'paused': other.activity_paused}
+        assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+    finally:
+        resume.set()
+        other.conn.close()
+
+
+@pytest.mark.parametrize('installed', [79, 93, 107], indirect=True)
+def test_failed_feedback_sql_does_not_emit_response_and_retry_keeps_withdrawals_unique(installed, monkeypatch):
+    store, version = installed
+    store.accounts.upsert_account('Main', 'main.json', None, True)
+    choice_evidence.issue(store, 'albums', [{'id': 'release'}], 0, context={}, opportunity_id='offer')
+    album_feedback.set_feedback(store, 'release', 'more', 1, 'offer')
+    before = album_feedback_storage.original(store.conn)
+    responses = store.rec_ledger.evidence().records('response')
+    with monkeypatch.context() as patch:
+        if version < 96:
+            original = SettingsRepo.set_setting
+            def fail(repo, key, value):
+                original(repo, key, value)
+                if key == 'album_feedback':
+                    raise OSError('controlled feedback SQL failure')
+            patch.setattr(SettingsRepo, 'set_setting', fail)
+        else:
+            original = album_feedback_storage.replace
+            def fail(*args, **kwargs):
+                original(*args, **kwargs)
+                raise OSError('controlled feedback SQL failure')
+            patch.setattr(album_feedback_storage, 'replace', fail)
+        with pytest.raises(OSError, match='controlled feedback SQL failure'):
+            album_feedback.set_feedback(store, 'release', 'known', 2, 'offer')
+    assert album_feedback_storage.original(store.conn) == before
+    assert store.rec_ledger.evidence().records('response') == responses
+    album_feedback.set_feedback(store, 'release', 'known', 2, 'offer')
+    album_feedback.set_feedback(store, 'release', 'clear', 3)
+    album_feedback.set_feedback(store, 'release', 'clear', 4)
+    assert not album_feedback_storage.original(store.conn)
+    responses = store.rec_ledger.evidence().records('response')
+    feedback = [row for row in responses if row['kind'] == 'feedback']
+    withdrawn = [row for row in responses if row['kind'] == 'withdraw']
+    assert len(feedback) == len(withdrawn) == 2
+    assert {row['details']['action_id'] for row in withdrawn} == {row['id'] for row in feedback}
+
+
+@pytest.mark.parametrize('installed', [79, 93], indirect=True)
+@pytest.mark.parametrize('state', ['source-only', 'selected'])
+def test_clearing_alias_keeps_unattributed_minimal_legacy_judgments(installed, state):
+    store, _ = installed
+    for browse in ('legacy-alias', 'current-alias'):
+        store.collection.observe_album_representation(browse, release())
+    unrelated = {'kind': 'known', 'at': 9}
+    store.settings.set_setting('album_feedback', json.dumps({
+        'legacy-alias': {'kind': 'reject', 'at': 10}, 'unrelated': unrelated}))
+    prepare_owner(store, 'album_feedback', state)
+    album_feedback.set_feedback(store, 'current-alias', 'clear', 11)
+    assert album_feedback_storage.original(store.conn) == {'unrelated': unrelated}

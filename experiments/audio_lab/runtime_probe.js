@@ -3,7 +3,7 @@ importScripts('runtime_loader.js');
 let ready;
 self.onmessage = async ({data}) => {
   try {
-    const model = await (ready ||= loadResearchRuntime());
+    const model = await (ready ||= loadAudioRuntime());
     const bands = data.frames.map(samples => {
       const frame = new model.runtime.VectorFloat();
       let result;

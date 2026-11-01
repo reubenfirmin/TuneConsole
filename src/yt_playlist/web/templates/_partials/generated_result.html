@@ -1,16 +1,32 @@
 {# Swapped in for a proto-playlist card after "Save & play": success or a friendly failure. #}
-<section class="gen-card card gen-done"{% if not error and ytm %} data-generated-playlist="{{ ytm }}"{% endif %}>
+<section class="gen-card card gen-done{% if save_uncertain %} gen-recovery{% endif %}"{% if not error and ytm %} data-generated-playlist="{{ ytm }}"{% endif %}>
   {% if error %}
-  <header class="gen-head"><span class="status-label status-label--error">{% if partial_ytm %}Partially saved{% else %}Couldn't save{% endif %}</span>
+  <header class="gen-head"><span class="status-label status-label--error">{% if partial_ytm %}Partially saved{% elif save_uncertain %}Playback unconfirmed{% else %}Couldn't save{% endif %}</span>
     <h2 class="gen-name">{{ name }}</h2></header>
   <p class="section-note">{{ error }}</p>
+  {% if save_uncertain %}
+  {% if selected_tracks %}
+  <ol class="gen-recovery-tracks" aria-label="Your selected songs">
+    {% for track in selected_tracks %}
+    <li>
+      <span class="gen-th"><img src="{{ track.thumbnail or ('https://i.ytimg.com/vi/' ~ (track.video_id|urlencode) ~ '/hqdefault.jpg') }}" alt="" referrerpolicy="no-referrer" onerror="this.hidden=true"></span>
+      <span class="gen-meta"><a class="gen-title" href="https://music.youtube.com/watch?v={{ track.video_id|urlencode }}" target="_blank" rel="noopener">{{ track.title }}</a><span class="gen-artist">{{ track.artist }}</span></span>
+    </li>
+    {% endfor %}
+  </ol>
+  {% endif %}
+  <p class="section-note">This mix may already be in your YouTube Music library. Check there before creating another copy.</p>
+  <div class="gen-foot"><a href="https://music.youtube.com/search?q={{ name|urlencode }}" target="_blank" rel="noopener">Find this mix on YouTube Music</a></div>
+  {% endif %}
+  {% if track_length_limited %}
+  <div class="gen-foot"><a href="/">Find another set</a><a href="/taste#recommendations/features">Change track-length limit</a></div>
+  {% endif %}
   {% if partial_ytm %}<p class="section-note">The partial playlist and confirmed progress are saved. Review it before saving again, which creates another playlist.</p>
     <div class="gen-foot"><a href="https://music.youtube.com/playlist?list={{ partial_ytm|urlencode }}" target="_blank" rel="noopener">Review partial playlist</a> · <a href="/actions">Action Log and recovery</a></div>
   {% endif %}
   {# Close the loading window we opened on click, otherwise it spins forever on a failure (e.g. no
      YouTube Music tab open to run the request). #}
-  <script>(function () { var t = window.__ytTab; window.__ytTab = null;
-    if (t && !t.closed) { try { t.close(); } catch (e) {} } })();</script>
+  <script>genComplete({{ launch_id|default('')|tojson }}, null, true, {{ save_uncertain|default(false)|tojson }});</script>
   {% else %}
   <header class="gen-head"><span class="status-label status-label--success">Saved ✓. Opening in your YouTube Music tab…</span>
     <h2 class="gen-name">{{ name }}</h2></header>
@@ -27,8 +43,7 @@
      off, the "Open on YouTube Music" link above is the manual way. Send THIS tab to the playlist page
      in our own UI. #}
   <script>(function () {
-    var tab = window.__ytTab; window.__ytTab = null;
-    if (tab && !tab.closed) { try { tab.close(); } catch (e) {} }
+    genComplete({{ launch_id|default('')|tojson }}, {{ ytm|tojson }}, false, false, {{ (pid is defined and pid is not none)|tojson }});
     {% if pid %}window.location.assign("/playlist/{{ pid }}");{% endif %}
   })();</script>
   {% endif %}

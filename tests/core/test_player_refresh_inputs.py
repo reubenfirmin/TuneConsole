@@ -9,12 +9,12 @@ from tests.core.test_snapshot_revisions import database
 
 @pytest.fixture
 def player_store(database):
-    database.identities.upsert_identity('Telemetry fixture', 'fixture', None, True)
+    database.accounts.upsert_account('Telemetry fixture', 'fixture', None, True)
     return database
 
 
 def event(store, kind):
-    identity = store.identities.get_identities()[0].id
+    identity = store.accounts.get_accounts()[0].id
     return store.player_events.record_player_event(identity, kind, 'video', 10, 200, None, '{}', 100)
 
 

@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 
 from yt_playlist.core.store import Store
+from yt_playlist.core.db_revisions import Revisions
 
 
 @pytest.fixture(params=['memory', 'file'])
@@ -135,3 +136,60 @@ def test_external_write_still_invalidates_memo_and_publication(tmp_path):
             assert snapshot.store.memoized_read('external', lambda: snapshot.store.settings.get_setting('input')) == 'new'
     finally:
         store.conn.close()
+
+
+def test_revision_rebind_after_an_external_migration_retires_a_table(tmp_path):
+    """Background schema cutover must release old counters and restore writes."""
+    path = tmp_path / 'external-schema.db'
+    reader = sqlite3.connect(path)
+    try:
+        reader.execute('PRAGMA journal_mode=WAL')
+        reader.execute('CREATE TABLE genre_whitelist(name TEXT PRIMARY KEY)')
+        reader.execute('CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)')
+        Revisions(reader)
+        with sqlite3.connect(path) as writer:
+            writer.execute('DROP TABLE genre_whitelist')
+
+        Revisions.unbind(reader)
+        current = Revisions(reader)
+        assert 'genre_whitelist' not in current.tables
+        before = current.capture({('settings', 'key:after-upgrade')})
+        with reader:
+            reader.execute("INSERT INTO settings VALUES ('after-upgrade','saved')")
+        assert current.capture({('settings', 'key:after-upgrade')}) != before
+        assert reader.execute('SELECT value FROM settings').fetchone() == ('saved',)
+    finally:
+        reader.close()
+
+
+def test_revision_unbind_tolerates_a_trigger_retired_after_enumeration():
+    """A controlled stale catalog entry must not prevent real SQLite cleanup."""
+    from types import SimpleNamespace
+
+    conn = sqlite3.connect(':memory:')
+    try:
+        conn.execute('CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)')
+        Revisions(conn)
+        conn.execute('CREATE TEMP TRIGGER unrelated AFTER INSERT ON main.settings BEGIN SELECT 1; END')
+
+        class StaleTriggerEnumeration:
+            def execute(self, sql):
+                result = conn.execute(sql)
+                if sql.startswith('SELECT name FROM sqlite_temp_schema'):
+                    rows = [('snapshot_revision_retired_insert',), *result.fetchall()]
+                    return SimpleNamespace(fetchall=lambda: rows)
+                return result
+
+        # Only enumeration is controlled. Every DROP runs against real SQLite,
+        # including the missing trigger followed by the surviving real triggers.
+        Revisions.unbind(StaleTriggerEnumeration())
+        assert list(conn.execute("SELECT name FROM sqlite_temp_schema WHERE type='trigger'")) == [('unrelated',)]
+        assert conn.execute("SELECT 1 FROM sqlite_temp_schema WHERE name='snapshot_revisions'").fetchone() is None
+        rebound = Revisions(conn)
+        before = rebound.capture({('settings', 'key:after-upgrade')})
+        with conn:
+            conn.execute("INSERT INTO settings VALUES ('after-upgrade','saved')")
+        assert rebound.capture({('settings', 'key:after-upgrade')}) != before
+        assert conn.execute('SELECT value FROM settings').fetchone() == ('saved',)
+    finally:
+        conn.close()

@@ -9,6 +9,8 @@ import hashlib
 import json
 import math
 
+from . import metadata_native
+
 SCHEMA = 1
 SCOPES = frozenset({'recording', 'release', 'artist', 'genre', 'item'})
 KINDS = frozenset({'reported', 'measurement', 'prediction', 'curated', 'inherited', 'derived'})
@@ -67,6 +69,11 @@ def record(conn, entry_id, provider, observations, *, run_id, now, expected_reco
         raise ValueError('Unknown observation catalog entry')
     if expected_recording_id is not None and subject[0] != expected_recording_id:
         raise SubjectChanged('Observation catalog subject changed during lookup')
+    if metadata_native.available(conn):
+        if not conn.in_transaction:
+            conn.execute('BEGIN IMMEDIATE')
+        metadata_native.record(conn, entry_id, provider, observations, run_id=run_id, now=now, recording_id=subject[0])
+        return
     rows = []
     for observation in observations:
         payload = observation.payload()

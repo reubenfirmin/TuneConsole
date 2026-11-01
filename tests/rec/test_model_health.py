@@ -98,13 +98,13 @@ def test_worker_failure_retries_with_backoff(store, monkeypatch):
 
 
 def test_health_generation_tracks_enrichment_listening_and_model_settings(store):
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
     track = store.tracks.upsert_track('v', 'Song', 'Artist', None, 180)
     mutations = [
         lambda: store.tracks.set_track_audio(track, energy=0.8),
         lambda: store.history.record_history_plays(iid, 1000, ['song'], source_timezone='UTC'),
         lambda: store.settings.set_setting('rec_cooc_weighting', '1'),
-        lambda: store.rec_model.replace_rec_vectors([('song', b'\0\0\0\0')]),
+        lambda: store.rec_model.replace_rec_vectors([('song|artist', b'\0\0\0\0')]),
     ]
     for mutate in mutations:
         before = model_health.input_key(store, 1000)

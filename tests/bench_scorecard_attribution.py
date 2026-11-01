@@ -30,7 +30,7 @@ FOREGROUND_BUDGET_SECONDS = 1.0
 
 def _seed(store, exit_count, exit_videos):
     """Model repeated opportunities across nine active days in a 30-day window."""
-    iid = store.identities.upsert_identity('profile', 'fixture', None, True)
+    iid = store.accounts.upsert_account('profile', 'fixture', None, True)
     impressions, plays, responses = [], [], []
     times = []
     for index in range(IMPRESSIONS):
@@ -72,9 +72,10 @@ def _seed(store, exit_count, exit_videos):
         store.conn.executemany(
             'INSERT INTO rec_served_impressions(request_id,surface,lane,mode_id,identity_key,'
             'rank,score,model_version,provenance,served_at) VALUES (?,?,?,?,?,?,?,?,?,?)', impressions)
-        store.conn.executemany(
-            'INSERT INTO play_events(identity_id,identity_key,video_id,played_at,is_generated,source) '
-            'VALUES (?,?,?,?,?,?)', plays)
+        from yt_playlist.core import listening
+        for identity,key,video,at,generated,source in plays:
+            event = listening.append_event(store.conn,identity,key,at,video_id=video,is_generated=generated)
+            listening.project_event(store.conn,event,identity,at,source=source,timezone='UTC')
         store.conn.executemany(
             'INSERT INTO rec_response_events(event_id,kind,identity_key,at,is_generated) VALUES (?,?,?,?,?)',
             responses)

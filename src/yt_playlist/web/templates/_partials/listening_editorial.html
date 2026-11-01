@@ -12,6 +12,29 @@
       </div>
       <figure class="le-figure">
         <div class="le-composition" x-html="composition({{ loop.index0 }})"></div>
+        {% if story.visual == 'rating_actions' and story.rating_tracks %}
+        <div class="le-rating-songs">
+          <p class="le-rating-caption">{% if story.rating_track_count > story.rating_tracks|length %}Latest {{ story.rating_tracks|length }} of {{ story.rating_track_count }} songs{% else %}{{ story.rating_track_count }} songs{% endif %}</p>
+          <table aria-label="Songs with confirmed rating changes">
+            <thead><tr><th scope="col">Song</th><th scope="col">Hearts</th><th scope="col">Skulls</th><th scope="col">Clears</th></tr></thead>
+            <tbody>
+            {% for song in story.rating_tracks %}
+              <tr>
+                <th scope="row">
+                  {% if song.video_id %}<a href="https://music.youtube.com/watch?v={{ song.video_id|urlencode }}" target="_blank" rel="noopener">{{ song.name }}</a>{% else %}{{ song.name }}{% endif %}
+                  <span class="le-rating-artist">{{ song.artist }}</span>
+                  <time datetime="{{ song.last_day }}">{{ song.last_day }}</time>
+                </th>
+                <td>{{ song.hearts }}</td><td>{{ song.skulls }}</td><td>{{ song.clears }}</td>
+              </tr>
+            {% endfor %}
+            {% if story.rating_track_count > story.rating_tracks|length %}
+              <tr class="le-rating-other"><th scope="row">{{ story.rating_track_count - story.rating_tracks|length }} other songs</th><td>{{ story.rating_other_counts.hearts }}</td><td>{{ story.rating_other_counts.skulls }}</td><td>{{ story.rating_other_counts.clears }}</td></tr>
+            {% endif %}
+            </tbody>
+          </table>
+        </div>
+        {% endif %}
       </figure>
     </article>
   {% endfor %}

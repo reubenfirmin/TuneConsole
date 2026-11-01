@@ -15,7 +15,7 @@ def test_last_complete_month(now, expected):
 
 
 def test_build_only_publishes_live_recap_and_preserves_first_play(store, monkeypatch):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     store.tracks.upsert_track("video", "Song", "Artist", None, 200)
     key = store.tracks.identity_key_for_video("video")
     for day in (0, 1, 2, 31):
@@ -40,7 +40,7 @@ def test_build_only_publishes_live_recap_and_preserves_first_play(store, monkeyp
 
 
 def test_backfill_and_reset_still_rebuild_first_play(store):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     store.history.record_history_plays(iid, 5 * 86400, ["song"], source_timezone="UTC")
     trend_rollups.build(store, 6 * 86400)
     assert store.trends.first_play_map("track")["song"] == 5

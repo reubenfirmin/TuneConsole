@@ -20,7 +20,7 @@ def song(store, iid, name, *, plays=0, age=40, liked=False):
 
 
 def test_pool_needs_like_or_repeat_and_obeys_month_and_heavy_rotation_rest(store):
-    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
     song(store, iid, 'never')
     song(store, iid, 'liked-unheard', liked=True)
     song(store, iid, 'one', plays=1)
@@ -34,7 +34,7 @@ def test_pool_needs_like_or_repeat_and_obeys_month_and_heavy_rotation_rest(store
 
 
 def test_generated_membership_is_eligible_but_a_real_recent_generated_play_counts_as_heard(store):
-    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
     key = song(store, iid, 'favorite', plays=2, age=60)
     pid = store.playlists.upsert_playlist(iid, 'GEN', 'Generated', 1, None, NOW)
     tid = store.conn.execute('SELECT id FROM tracks WHERE video_id=?', ('v-favorite',)).fetchone()[0]
@@ -46,7 +46,7 @@ def test_generated_membership_is_eligible_but_a_real_recent_generated_play_count
 
 
 def test_current_rating_availability_and_new_play_revalidate_prepared_song_pool(store):
-    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
     seed(store)
     keys = [song(store, iid, f'song{i}', plays=2, age=60) for i in range(20)]
     prepared = home_prepared.prepare(store, NOW)
@@ -61,14 +61,14 @@ def test_current_rating_availability_and_new_play_revalidate_prepared_song_pool(
     ratings.record_confirmed(store, iid, 'v-song0', 'DISLIKE', NOW)
     store.history.record_play_event(iid, 'song1', 'v-song1', NOW, source_timezone='UTC')
     with store.conn:
-        store.conn.execute('UPDATE catalog_tracks SET available=0 WHERE video_id=?', ('v-song2',))
+        store.conn.execute('UPDATE youtube_items SET available=0 WHERE video_id=?', ('v-song2',))
     current = home_prepared.collections(store, prepared, NOW)['rediscover_tracks']
     assert not {'song0', 'song1', 'song2'} & {r['key'] for r in current}
     assert {r['key'] for r in current} <= set(keys)
 
 
 def test_albums_never_claim_unheard_saved_collection_is_a_memory(store):
-    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
     _seed_album(store, iid, 'unheard', 'Andre Sobota Collection', NOW)
     assert surfaces.rediscover_albums(store, NOW) == []
     _seed_album(store, iid, 'heard', 'Old favorite', NOW, played_at=NOW-60*DAY)

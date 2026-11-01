@@ -64,8 +64,8 @@ def test_older_reports_and_ties_keep_the_stated_preference(store):
 
 
 @pytest.mark.parametrize('override', ['albums', 'mixes', 'radio', 'both', 'auto'])
-def test_explicit_settings_choice_resolves_an_old_pending_picker(store, override):
+def test_legacy_pending_picker_does_not_change_home_preferences(store, override):
     store.settings.set_setting('onboard_format_pending', '1')
-    assert home_preferences.choice_pending(store)
+    assert home_preferences.default_format(store) == 'mixes'
     store.settings.set_setting('home_format', override)
-    assert not home_preferences.choice_pending(store)
+    assert home_preferences.default_format(store) == (override if override in home_preferences.PANELS else 'mixes')

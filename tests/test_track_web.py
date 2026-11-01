@@ -50,9 +50,9 @@ def test_musical_evidence_distinguishes_legacy_hints_corrections_and_unknowns(so
     from yt_playlist.core import catalog
     store = songs['store']
     tid = store.tracks.track_ids_for_videos(['owned-song'])['owned-song']
+    store.tracks.set_track_genre(tid, 'Ambient')
+    store.tracks.set_track_audio(tid, danceability=.8)
     with store.conn:
-        store.conn.execute("UPDATE recordings SET genre='Ambient',danceability=.8 WHERE id=("
-                           'SELECT recording_id FROM catalog_entries WHERE id=?)', (tid,))
         catalog.choose_field(store.conn, tid, 'energy', .9)
         catalog.choose_field(store.conn, tid, 'mood_happy', None)
     prepare_profiles(store)
@@ -65,6 +65,63 @@ def test_musical_evidence_distinguishes_legacy_hints_corrections_and_unknowns(so
     assert 'Legacy metadata' in groove and 'Limited evidence' in groove
     assert 'Genre hint' in relaxed and 'Limited evidence' in relaxed
     assert 'Unavailable after corrections' in happiness and 'Your correction' in happiness
+
+
+def test_vibe_estimates_explain_audio_inheritance_and_unknowns_without_inference(songs, monkeypatch):
+    import json
+    from tests.musical_support import prepare_profiles
+    from yt_playlist.core.audio_vibe_contract import PREDICTION_VERSION
+    from yt_playlist.rec import musical_profiles
+    store = songs['store']
+    prepare_profiles(store)
+    key = store.tracks.identity_key_for_video('owned-song')
+    profile = musical_profiles.resolve([])
+    contributors = []
+    for i in range(3):
+        store.tracks.upsert_track(f'contributor-{i}', f'Contributor {i}', 'Artist & Friends', '', 180)
+        contributors.append(store.tracks.identity_key_for_video(f'contributor-{i}'))
+    artist = json.dumps([store.conn.execute('SELECT id FROM artists WHERE name=?', ('Artist & Friends',)).fetchone()[0]])
+    # Controlled scores travel through the real normalized serving repository,
+    # including three distinct original contributors for the inherited estimate.
+    def measured(vibe, score, source):
+        return {'version': 'audio-specialist-v2', 'artist': artist, 'genre': None,
+                'evidence': {'input_digest': 'fixture-input', 'source': source,
+                             'fits': {vibe: {'score': score, 'support': 1}}}}
+    tracks = {k: measured('relax', .63, 'provider_measurement') for k in contributors}
+    tracks[key] = measured('cruise', .72, 'audio_measurement')
+    resolved = {k: {'relax': {'score': .63, 'support': 1, 'source': 'provider_measurement'}} for k in contributors}
+    resolved[key] = {'cruise': {'score': .72, 'support': 1, 'source': 'audio_measurement'},
+                     'relax': {'score': .63, 'support': .2, 'source': 'artist', 'recordings': 3,
+                               'variance': 0, 'inputs': {k: None for k in contributors}},
+                     'release': {'score': .5, 'support': 0, 'source': 'heuristic'}}
+    with store.conn:
+        store.conn.execute('UPDATE rec_musical_profiles SET payload=? WHERE identity_key=?',
+                           (json.dumps(profile), key))
+        store.vibe_predictions.publish(tracks, resolved, [], 1000)
+    monkeypatch.setattr(musical_profiles, 'resolve', lambda *a, **kw: pytest.fail('Serving must not infer'))
+    before = store.conn.total_changes
+    body = songs['http'].get('/track/owned-song').text
+    cruise = body.split('data-vibe-evidence="cruise"')[1].split('</dd>')[0]
+    inherited = body.split('data-vibe-evidence="relax"')[1].split('</dd>')[0]
+    unknown = body.split('data-vibe-evidence="release"')[1].split('</dd>')[0]
+    assert '72/100' in cruise and 'Audio model estimate' in cruise
+    assert '63/100' in inherited and 'Artist estimate' in inherited and '3 other recordings' in inherited
+    assert 'Unknown' in unknown and '50/100' not in unknown
+    assert 'audio-specialist-v2' in body and PREDICTION_VERSION in body
+    assert 'not your ratings' in body and store.conn.total_changes == before
+
+
+@pytest.mark.parametrize('dimension,support,expected', [
+    ('tempo', 1, 'Unknown'), ('intensity', 0, 'Unknown'), ('intensity', 1, '50/100')])
+def test_vibe_fallback_needs_relevant_supported_attributes(dimension, support, expected):
+    from yt_playlist.rec import musical_profiles
+    from yt_playlist.web.musical_evidence import describe
+
+    profile = musical_profiles.resolve([])
+    profile['dimensions'][dimension].update(value=.5, support=support)
+    profile['vibes'] = {'fits': {'energize': {'score': .5, 'support': 0, 'source': 'heuristic'}}}
+    rows = describe(profile)['vibes']
+    assert next(row for row in rows if row['name'] == 'energize')['description'] == expected
 
 
 def test_musical_source_details_are_bounded(songs):
@@ -180,9 +237,9 @@ def test_ledger_keeps_unknown_history_precision_and_paginates(songs):
     assert second.count('<strong>Played</strong>') == 1 and 'Newer entries' in second
     assert 'Older entries' not in second
     with store.conn:
-        capture = store.conn.execute('INSERT INTO listening_capture_receipts(identity_id,captured_at) '
+        capture = store.conn.execute('INSERT INTO listening_capture_receipts(account_id,captured_at) '
                                      'VALUES (?,?)', (songs['main_id'], 1800000000)).lastrowid
-        store.conn.execute('INSERT INTO listening_observations(identity_id,identity_key,recording_id,'
+        store.conn.execute('INSERT INTO listening_observations(account_id,raw_identity_key,recording_id,'
             'source_day,day,source,precision,first_observed_at,last_observed_at,capture_id,capture_item_id) '
             "VALUES (?,?,?,'2026-10-23','2026-10-23','youtube_history','legacy_unknown',?,?,?,?)",
             (songs['main_id'], track['identity_key'], track['recording_id'], 1800000000, 1800000000, capture, 1))

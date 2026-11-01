@@ -95,6 +95,7 @@ sockets[0].readyState = Socket.OPEN;
   assert.equal(report.respondingTabs, failed ? 0 : 1);
   assert.equal(report.reinjectedTabs, current || failed || scenario === 'upgrade_unavailable' ? 0 : 1);
   assert.equal(frames.at(-1).type, 'sensor-health');
+  assert.equal(frames.at(-1).accountBoundNext, true);
   assert.equal(frames.at(-1).healthy, report.healthy);
   assert.equal(report.versions[0].mainRevision, scenario === 'newer_main_revision' ? currentMain + 1 : currentMain);
   assert.equal(report.versions[0].receiverRevision,

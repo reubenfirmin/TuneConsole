@@ -11,7 +11,7 @@ def cold_library(store, monkeypatch):
     # The separate genre overlay can reorder these same candidates, masking a broken vector
     # tilt. Hold that overlay neutral; projection, taste and both tilt producers stay real.
     monkeypatch.setattr(surfaces, "discovery_facet_weight", lambda *args: 1.0)
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     tids, rows, keys = [], [], []
     for genre, direction in (("Techno", [1, 0]), ("Folk", [0, 1])):
         for i in range(10):

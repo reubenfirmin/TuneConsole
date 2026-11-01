@@ -7,7 +7,9 @@ from playwright.sync_api import expect
 import pytest
 
 from tests.conftest import seed_catalog_track
-from tests.test_mode_cards_route import prepare_home
+from tests.home_fixture_support import publish_menu
+from tests.visual_support import capture
+from yt_playlist.core import radio_provenance
 from yt_playlist.rec import listening_analytics
 from yt_playlist.library import ratings
 
@@ -29,7 +31,8 @@ def prepare(store):
             seed_catalog_track(store, f'song-{i}-{song}', f'Song {song}', artist,
                 video_id=f'video-{i}-{song}', genre='Jazz' if i%3 == 1 else 'Techno')
     store.playlists.mark_generated_playlist('PLZ')
-    store.settings.set_setting('radio_session_playlist_ids', '["radio"]')
+    with store.conn:
+        radio_provenance.remember(store.conn, 'radio')
     for ago in range(84):
         for i in range(len(artists)):
             count = max(0,round(2 + 2*math.sin(ago/(4+i%5) + i) - (ago%7 == 0)))
@@ -48,9 +51,6 @@ def prepare(store):
     assert listening_analytics.build(store,NOW+60)
     store.settings.set_setting('last_sync_at','1')
     store.settings.set_setting('onboard_dismissed','1')
-    prepare_home(store,1)
-    from tests.onboarding_support import publish_personal_mix
-    publish_personal_mix(store,1)
 
 
 @pytest.mark.parametrize('width', [1440,390])
@@ -83,10 +83,40 @@ def test_charts_home_and_analytics_filtering_and_shared_styles(live_app,store,pa
     page.evaluate('document.fonts.ready')
     icon=play.locator('.le-play-icon, svg')
     expect(icon).to_have_css('opacity','0')
-    # The app scrolls smoothly. Finish positioning before measuring hover so
-    # the link cannot scroll away from the stationary pointer mid-transition.
+    # Locator hover retries can start a new smooth scroll after checking stability.
+    # Position once, then hit-test a settled center before moving the real mouse.
     play.evaluate("el => el.scrollIntoView({behavior: 'instant', block: 'center'})")
-    play.hover()
+    point = play.evaluate('''el => new Promise((resolve, reject) => {
+        let previous, stableFrames = 0, frame;
+        const samples = [];
+        const timeout = setTimeout(() => {
+            cancelAnimationFrame(frame);
+            reject(new Error('Play link did not settle at a hit-tested center: ' +
+                JSON.stringify(samples)));
+        }, 5000);
+        const sample = at => {
+            const rect = el.getBoundingClientRect();
+            const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+            const hit = document.elementFromPoint(x, y);
+            const onLink = hit !== null && (hit === el || el.contains(hit));
+            const position = [rect.x, rect.y, rect.width, rect.height, scrollX, scrollY];
+            const unchanged = previous && position.every((value, i) => value === previous[i]);
+            const ready = el.isConnected && rect.width > 0 && rect.height > 0 && onLink;
+            stableFrames = ready ? (unchanged ? stableFrames + 1 : 1) : 0;
+            samples.push({at, position, connected: el.isConnected, onLink,
+                hit: hit && {tag: hit.tagName, class: hit.getAttribute('class')}});
+            if (samples.length > 6) samples.shift();
+            previous = position;
+            if (stableFrames === 3) {
+                clearTimeout(timeout);
+                resolve({x, y});
+            } else {
+                frame = requestAnimationFrame(sample);
+            }
+        };
+        frame = requestAnimationFrame(sample);
+    })''')
+    page.mouse.move(point['x'], point['y'])
     expect(icon).to_have_css('opacity','1')
     page.mouse.move(0,0)
     expect(icon).to_have_css('opacity','0')
@@ -96,7 +126,7 @@ def test_charts_home_and_analytics_filtering_and_shared_styles(live_app,store,pa
         const box=sleeve.getBBox();
         return Math.abs(box.y+box.height-trace.y-trace.height)<.1 && box.x+box.width<trace.x;
     })''')
-    panel.screenshot(path=f'/tmp/tuneconsole-listening-editorial-{width}.png',animations='disabled')
+    capture(panel, path=f'/tmp/tuneconsole-listening-editorial-{width}.png',animations='disabled')
     page.locator('.chart-views').get_by_role('button',name='Listening analytics',exact=True).click()
     charts = page.locator('[data-listening-analytics]')
     expect(charts.locator('.lp-summary')).to_be_visible()
@@ -127,7 +157,7 @@ def test_charts_home_and_analytics_filtering_and_shared_styles(live_app,store,pa
     assert exported.value.suggested_filename.startswith('listening-')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), page.locator('body *').evaluate_all(
         'els => els.filter(e => e.getBoundingClientRect().right > innerWidth + 1).slice(0,8).map(e => e.className)')
-    charts.screenshot(path=f'/tmp/tuneconsole-listening-charts-{width}.png')
+    capture(charts, path=f'/tmp/tuneconsole-listening-charts-{width}.png')
     page.get_by_role('button',name='Top songs',exact=True).click()
     expect(page.locator('.chart-panel:visible table')).to_be_visible()
     expect(page.locator('.chart-window a.on')).to_have_text('7d')
@@ -280,21 +310,33 @@ def test_preparing_retry_and_empty_state(live_app,page):
     expect(charts.locator('.lp-summary')).to_contain_text('0 recorded plays')
 
 
-def test_home_has_no_journal_and_hidden_charts_stories_do_not_count(live_app,store,page):
+def test_home_has_no_journal_and_hidden_charts_stories_do_not_count(live_app,store,page,unlocked_home_controls):
     prepare(store)
+    publish_menu(store,1)
     requests=[]
     page.on('request',lambda req: requests.append(req.url))
+    page.clock.install()
     page.goto(live_app + '/#directions')
     expect(page.get_by_role('tab',name='Charts',exact=True)).to_have_count(0)
     expect(page.locator('[data-listening-edition]')).to_have_count(0)
-    page.wait_for_timeout(1700)
+    page.clock.fast_forward(1700)
     assert not any('/charts/listening-' in url for url in requests)
     page.goto(live_app+'/charts?view=songs')
-    page.wait_for_timeout(1700)
+    page.wait_for_function("""() => {
+        const edition = document.querySelector('[data-listening-edition]');
+        return edition && Alpine.$data(edition).observer;
+    }""")
+    page.clock.run_for(50)
+    page.clock.fast_forward(1700)
     assert not any('/charts/listening-' in url for url in requests)
     page.locator('.chart-views').get_by_role('button',name='Home',exact=True).click()
     expect(page.locator('.le-lead')).to_be_visible()
-    page.wait_for_timeout(1800)
+    page.wait_for_function("""() => {
+        const edition = document.querySelector('[data-listening-edition]');
+        return edition && Alpine.$data(edition).timers.size > 0;
+    }""")
+    with page.expect_response('**/charts/listening-impressions'):
+        page.clock.fast_forward(1800)
     assert any('/charts/listening-impressions' in url for url in requests)
     assert not any('/charts/listening-data' in url or '/charts/listening-chunk' in url for url in requests)
     page.locator('.chart-views').get_by_role('button',name='Listening analytics',exact=True).click()
@@ -309,9 +351,6 @@ def test_sparse_history_hides_charts_home_and_sightings_do_not_create_filler(liv
     assert listening_analytics.build(store,NOW)
     store.settings.set_setting('last_sync_at','1')
     store.settings.set_setting('onboard_dismissed','1')
-    prepare_home(store,1)
-    from tests.onboarding_support import publish_personal_mix
-    publish_personal_mix(store,1)
     page.goto(live_app + '/charts')
     expect(page.locator('.chart-views').get_by_role('button',name='Home',exact=True)).to_have_count(0)
     expect(page.locator('[data-listening-edition]')).to_have_count(0)

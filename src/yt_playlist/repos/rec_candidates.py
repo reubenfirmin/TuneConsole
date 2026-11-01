@@ -3,12 +3,12 @@
 These queries preserve SQL ordering and bounded limits. Surface composition,
 personalized scoring and lane selection remain in rec.surfaces above persistence.
 """
-from yt_playlist.repos.base import LIKED_EXISTS, Repo, synchronized
+from yt_playlist.repos.base import LIKED_EXISTS, Repo, snapshot_read
 from yt_playlist.repos.rec_eligibility import exclude_ids
 
 
 class RecCandidatesRepo(Repo):
-    @synchronized
+    @snapshot_read
     def revisit_candidates(self, now, *, keys=None, limit=90):
         """Quiet liked/repeated songs, including actual generated-source listening.
 
@@ -34,11 +34,11 @@ class RecCandidatesRepo(Repo):
             'FROM playable_library_tracks t WHERE t.video_id IS NOT NULL AND t.video_id<>\'\' '
             f'AND {self._store.rec_eligibility.track_length_clause("t.duration_s")}{restriction} '
             'GROUP BY t.identity_key), heard AS ('
-            'SELECT pe.identity_key,pe.played_at at FROM play_events pe JOIN names n ON n.key=pe.identity_key '
+            'SELECT pe.identity_key,pe.played_at at FROM play_event_subjects pe JOIN names n ON n.key=pe.identity_key '
             'UNION ALL SELECT d.identity_key,d.day_ts+86400 FROM listening_days d '
             'JOIN names n ON n.key=d.identity_key WHERE NOT EXISTS ('
-            'SELECT 1 FROM play_events pe JOIN play_event_calendar c ON c.event_id=pe.id '
-            'WHERE pe.identity_key=d.identity_key AND pe.identity_id=d.identity_id AND c.day=d.day)), '
+            'SELECT 1 FROM play_event_subjects pe JOIN play_event_calendar c ON c.event_id=pe.id '
+            'WHERE pe.identity_key=d.identity_key AND pe.account_id=d.account_id AND c.day=d.day)), '
             'totals AS (SELECT identity_key,COUNT(*) plays,MAX(at) last_played FROM heard GROUP BY identity_key) '
             'SELECT n.*,COALESCE(h.plays,0) plays,h.last_played FROM names n '
             'LEFT JOIN totals h ON h.identity_key=n.key '
@@ -47,7 +47,7 @@ class RecCandidatesRepo(Repo):
             'ORDER BY COALESCE(h.plays,0),h.last_played,n.key LIMIT :limit', params).fetchall()
         return [dict(row) for row in rows]
 
-    @synchronized
+    @snapshot_read
     def comfort_candidates(self, now, min_plays=4, recency_full_days=30, limit=50) -> list[dict]:
         """High-rotation favorites, demoted by how recently they were heard."""
         full_secs = max(1.0, recency_full_days * 86400.0)
@@ -68,7 +68,7 @@ class RecCandidatesRepo(Repo):
                  "video_id": r["vid"], "thumbnail": r["thumb"], "plays": r["plays"],
                  "last_played": r["last"]} for r in rows]
 
-    @synchronized
+    @snapshot_read
     def more_like_rotation(self, seed_limit=40, limit=40) -> list[dict]:
         """Barely played co-members of playlists containing the most-played seeds."""
         excl = self._store.rec_eligibility.excluded_playlist_ids()
@@ -95,7 +95,7 @@ class RecCandidatesRepo(Repo):
                  "video_id": r["vid"], "thumbnail": r["thumb"], "plays": r["plays"],
                  "shared_playlists": r["sp"]} for r in rows]
 
-    @synchronized
+    @snapshot_read
     def deep_cuts(self, limit=40) -> list[dict]:
         """Each heavily played artist's least-played track, ordered by affinity."""
         rows = self.conn.execute(
@@ -117,7 +117,7 @@ class RecCandidatesRepo(Repo):
                  "video_id": r["vid"], "thumbnail": r["thumb"], "plays": r["plays"],
                  "artist_plays": r["atot"]} for r in rows]
 
-    @synchronized
+    @snapshot_read
     def complete_playlist(self, playlist_id, limit=20) -> list[dict]:
         """Owned tracks fitting a playlist, ranked by artist and co-occurrence."""
         rows = self.conn.execute(

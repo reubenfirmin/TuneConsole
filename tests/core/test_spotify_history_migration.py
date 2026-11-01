@@ -12,7 +12,7 @@ def _predecessor(path):
     store = Store(path)
     migrate(store.conn, registry=MIGRATIONS[:30])
     store._bind_repositories()
-    iid = store.identities.upsert_identity('main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('main', 'bridge', None, True)
     store.history.import_listening_events(iid, [('old-song',None,1700000000)], source='spotify')
     store.history.import_listening_events(iid, [('old-song',None,1700000000)], source='takeout')
     store.discovery.upsert_discovered_artist('Independent', 4, [], [], None, 100)
@@ -66,7 +66,7 @@ def test_daily_only_spotify_history_marks_unknown_legacy_influence():
     store = Store(':memory:')
     migrate(store.conn, registry=MIGRATIONS[:30])
     store._bind_repositories()
-    iid = store.identities.upsert_identity('main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('main', 'bridge', None, True)
     with store.conn:
         listening.calendar(store.conn, iid, 'America/Costa_Rica')
         listening.observe_day(store.conn, iid, 'old-song', '2024-01-01', 'spotify', 'UTC', 100)

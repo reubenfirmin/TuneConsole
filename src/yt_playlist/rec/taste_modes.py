@@ -134,7 +134,7 @@ def discover_modes(store, *, k=None, min_members=None, n_rep=6, seed=_SEED, snap
             g = genres.get(mk)
             if not g:
                 continue
-            fam = genre_map.family(g) or g
+            fam = genre_map.family(g,conn=store.conn) or g
             fam_counts[fam] = fam_counts.get(fam, 0) + 1
         families = sorted(fam_counts.items(), key=lambda x: -x[1])[:4]
         # representative tracks: members nearest the centroid by cosine (rows are unit norm)

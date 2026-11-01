@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
 from yt_playlist.rec import embed, rec_params
+from yt_playlist.core import embeddings
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 
@@ -17,13 +18,15 @@ def _track(store, title, artist, angle=0, album="", genre=""):
     if genre:
         store.tracks.set_track_genre(tid, genre)
     v = np.array([math.cos(math.radians(angle)), math.sin(math.radians(angle))], dtype=np.float32)
-    store.conn.execute("INSERT INTO rec_vectors(identity_key, vec) VALUES (?,?)", (key, v.tobytes()))
-    store.conn.commit()
+    with store.conn:
+        store.conn.execute('UPDATE settings SET value=value WHERE 0')
+        embeddings.publish(store.conn, 'rec_vectors', [(key, v.tobytes())],
+                           model_version='test-ring')
     return key
 
 
 def _client(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                       base_url="http://127.0.0.1")
 

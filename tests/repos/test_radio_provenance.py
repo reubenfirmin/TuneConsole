@@ -10,7 +10,7 @@ def store():
 
 
 def _ident(store):
-    return store.identities.upsert_identity("main", "ref", None, True)
+    return store.accounts.upsert_account("main", "ref", None, True)
 
 
 def test_radio_playlist_play_is_quarantined_by_real_list_id(store):

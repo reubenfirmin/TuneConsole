@@ -37,8 +37,10 @@ def connection_reasons(evidence: ConnectionEvidence, *, max_artists=3) -> list[d
                     'text': f'From the album “{evidence.album.title}”, with {evidence.album.artist}.'})
     if evidence.same_day:
         out.append({'kind': 'session', 'text': 'You played them on the same day.'})
-    family = genre_map.family(evidence.genre) if evidence.genre else None
-    if family and any(genre_map.family(g) == family for g in evidence.path_genres):
+    family = evidence.family if evidence.family is not None else genre_map.family(evidence.genre)
+    path_families = (evidence.path_families if evidence.path_families is not None
+                     else tuple(genre_map.family(g) for g in evidence.path_genres))
+    if family and family in path_families:
         label = family.split('other:', 1)[-1] if family.startswith('other:') else family
         out.append({'kind': 'genre', 'text': f'Both in your {label} family.'})
     year_decade = decade(evidence.year)

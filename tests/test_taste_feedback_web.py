@@ -80,8 +80,8 @@ def test_unban_survives_retained_ratings_sync_and_restart_then_accepts_new_disli
     path = tmp_path / 'unban.db'
     store = Store(path)
     store.init_schema()
-    main = store.identities.upsert_identity('main', 'cred', None, True)
-    other = store.identities.upsert_identity('Other', 'cred', 'other', False)
+    main = store.accounts.upsert_account('main', 'cred', None, True)
+    other = store.accounts.upsert_account('Other', 'cred', 'other', False)
     store.tracks.upsert_track('banned', 'Banned', 'Artist', '', None)
     store.tracks.upsert_track('unrelated', 'Unrelated', 'Artist', '', None)
     key = store.tracks.identity_key_for_video('banned')

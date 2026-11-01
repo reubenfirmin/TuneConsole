@@ -1,4 +1,4 @@
-<div id="onboarding-feed" class="setup-home"{% if not onboard_format_pending %} x-data="onboardingArrival()"{% endif %}>
+<div id="onboarding-feed" class="setup-home"{% if not onboard_format_pending %} x-data="onboardingArrival({{ onboard_artists_required|default(false)|tojson }})"{% endif %}>
   {% if onboard_format_pending %}
   {% if onboard_welcome_pending %}
   {% include "_partials/onboarding_welcome.html" %}
@@ -7,16 +7,10 @@
   {% endif %}
   {% else %}
   {% include "_partials/onboarding_arrival.html" %}
-  <div class="setup-listening" x-show="connected" x-cloak>
-    {% if onboard_library or onboard_format in ['albums', 'radio'] %}
+  <div class="setup-listening" x-show="connected || generationStarted || artists_required" x-cloak>
     <div hx-get="/home/onboard/start" hx-trigger="load" hx-swap="outerHTML">
       <span class="sr-only">Finding something to listen to</span>
     </div>
-    {% else %}
-    <div hx-get="/home/onboard/radio" hx-trigger="load" hx-swap="outerHTML">
-      <span class="sr-only">Finding something to listen to</span>
-    </div>
-    {% endif %}
   </div>
   {% endif %}
 </div>

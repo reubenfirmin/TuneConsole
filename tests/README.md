@@ -1,5 +1,47 @@
 # Focused test ownership
 
+The [#534 runtime disposition ledger](runtime-review.md) records
+consolidated coverage, retained integrations, benchmark ownership and targeted
+verification gaps.
+
+Test fixtures are disposable. `tmp_path` and `tmp_path_factory` data is removed
+after passing and failing runs; an explicit `--basetemp` is also removed after
+the session. Put reports that must survive in a separate output directory, not
+inside the temporary tree. Collection-only runs leave an unused `--basetemp`
+untouched.
+
+Historical comparisons, provider pilots and manual saved-library reports live in
+`experiments/investigations/`. Run one explicitly through the research runner,
+which loads the shared pytest fixtures without selecting the ordinary suite:
+
+```sh
+./experiments/run.py investigate bench_taste_groups.py -s
+./experiments/run.py investigate bench_fair_queue.py -s
+./experiments/run.py check --syntax-only
+```
+
+Files named `tests/bench_*.py` remain opt-in recurring acceptance checks. In
+particular, `bench_taste_groups.py` retains the selected engine's production
+budgets and lineage (requires the documented frozen input); `bench_svd_background.py`
+retains real full-generation and foreground-availability checks. Policy retention
+at production defaults lives in `bench_policy_retention.py`; the 96-recording
+throughput/index contract lives in `bench_musical_preparation.py`. Select those
+paths explicitly with `uv run pytest`; ordinary discovery does not run them.
+
+Diagnostic screenshots in Home controls, genre badges, Radio motion and adaptive
+groups are opt-in. Set `TUNECONSOLE_VISUAL_REVIEW=1` in the calling environment
+before running a focused browser check to retain those captures. Browser failure
+artifacts and tests that assert image pixels keep their existing behavior.
+
+Keep `.pytest_cache` for pytest's own cache entries. For experiments that need
+database copies across several commands, wrap the whole experiment in a
+`tempfile.TemporaryDirectory` context. Use a disk-backed location when needed
+and clean the workspace on success and failure. If an experiment requires the
+workspace under `.pytest_cache` for its isolation checks, it must still use that
+context and remove the workspace on exit. Do not keep dated database or source
+copies between runs. A killed process cannot run cleanup; remove its abandoned
+workspace after its processes stop. Retain the small report separately.
+
 Full local runs use up to four pytest-xdist worker processes by default, bounded
 by available CPUs. `uv run pytest` runs the full unit suite; `uv run pytest -m ''`
 includes browser tests, and `uv run pytest -m browser` runs the full browser suite.
@@ -12,11 +54,10 @@ debugging, live/package acceptance and CI shards stay serial. CI keeps its isola
 runner sharding. `pytest-xdist` starts separate worker processes; a fork per test
 would add process startup cost without providing this parallel execution.
 
-Use the shared pytest lock described in the repository's `AGENTS.md`. A busy lock
-belongs to the reported session; use a bounded wait or continue editing. Workers
-join their coordinator's ownership, and keep a lifetime lock until they finish,
-including after coordinator failure. Do not launch separate browser and unit
-sessions concurrently.
+Only global-suite runs use the shared pytest lock described in `AGENTS.md`.
+Focused checks use `uv run pytest <paths>` directly and stay serial; they do not
+acquire or wait for that lock. Global workers join their coordinator's ownership
+and keep a lifetime lock until they finish, including after coordinator failure.
 
 The former large feature modules retain their main topic. Related behavior now
 has explicit owners, so selecting only the old file no longer selects every
@@ -36,13 +77,13 @@ For example, validate Radio write settlement with
 `uv run pytest tests/test_radio_writes.py tests/test_radio_recovery.py`.
 Validate Taste control interactions separately with
 `uv run pytest -m browser tests/browser/test_taste_controls_browser.py`.
-Use `--test-lock-wait=60` if waiting for the current owner is useful.
+Use `--test-lock-wait=60` only for a global-suite run.
 
 Storage repair acceptance uses temporary file databases; the saved multi-gigabyte
 recovery rehearsal remains opt-in. Run the server and browser checks together:
 
 ```sh
-uv run pytest --test-lock-wait=60 -m '' \
+uv run pytest -m '' \
   tests/test_storage_maintenance.py tests/browser/test_storage_maintenance_browser.py
 ```
 
@@ -75,7 +116,7 @@ in this order: an opt-in Flatpak skip, a live browser, then an asyncio unit test
 It requires no Flatpak build:
 
 ```sh
-uv run pytest --test-lock-wait=60 -m '' \
+uv run pytest -m '' \
   tests/test_flatpak_packaged.py::test_signed_packaged_update_restarts_same_tab_and_preserves_library \
   tests/browser/test_home_vibe_browser.py::test_open_vibe_tab_resets_when_tuning_expires \
   tests/test_job_retention.py::test_sse_reconnect_replays_only_unseen_events_and_signals_expiry

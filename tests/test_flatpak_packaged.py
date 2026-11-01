@@ -201,7 +201,7 @@ from yt_playlist.core import updatecheck
 from yt_playlist.core.store import Store
 from yt_playlist.core.setup import write_config, BROWSER_CREDENTIAL_FILENAME
 store=Store(paths.db_path()); store.init_schema()
-iid=store.identities.upsert_identity('main', BROWSER_CREDENTIAL_FILENAME, None, True)
+iid=store.accounts.upsert_account('main', BROWSER_CREDENTIAL_FILENAME, None, True)
 store.playlists.upsert_playlist(iid, 'PL-PRESERVED', 'Preserved update library', 0, 'hash', 0)
 write_config([{'id':iid, 'label':'main', 'is_master':True,
                'credential_ref':BROWSER_CREDENTIAL_FILENAME}], paths.config_path())

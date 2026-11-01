@@ -1,6 +1,4 @@
 from collections import deque
-from statistics import median
-from time import perf_counter
 
 from yt_playlist.rec.surfaces import _weighted_fair_queue
 
@@ -36,19 +34,11 @@ def test_overlaps_suppression_muting_and_traces_preserve_selection():
     assert [q[4] for q in queues] == [2, 2]
 
 
-def test_full_library_drain_keeps_smaller_lane_and_scales_linearly():
-    timings = {}
-    for size in (8000, 32000):
-        elapsed = []
-        for _ in range(3):
-            queues = [_lane([_row(str(i)) for i in range(size)], "large", 3),
-                      _lane([_row(str(i)) for i in range(size // 2)] + [_row("small-only")], "small")]
-            hard = {str(i) for i in range(0, size, 2)}
-            start = perf_counter()
-            out = _weighted_fair_queue(queues, size * 2, hard, set())
-            elapsed.append(perf_counter() - start)
-            assert {item.key for item in out} == {str(i) for i in range(1, size, 2)} | {"small-only"}
-            assert not any(q[0] for q in queues)
-        timings[size] = median(elapsed)
-    # Report scaling without a machine-speed-dependent timing assertion.
-    print(f"Fair queue full drains (median seconds): {timings}; 4x input ratio: {timings[32000] / timings[8000]:.2f}")
+def test_full_drain_keeps_the_unique_small_lane_item_and_exhausts_blocked_rows():
+    size = 32
+    queues = [_lane([_row(str(i)) for i in range(size)], "large", 3),
+              _lane([_row(str(i)) for i in range(size // 2)] + [_row("small-only")], "small")]
+    hard = {str(i) for i in range(0, size, 2)}
+    out = _weighted_fair_queue(queues, size * 2, hard, set())
+    assert {item.key for item in out} == {str(i) for i in range(1, size, 2)} | {"small-only"}
+    assert not any(q[0] for q in queues)

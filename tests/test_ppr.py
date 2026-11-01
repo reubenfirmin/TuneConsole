@@ -8,7 +8,10 @@ from yt_playlist.rec import ppr
 def store():
     s = Store(":memory:")
     s.init_schema()
-    return s
+    try:
+        yield s
+    finally:
+        s.conn.close()
 
 
 def test_ppr_rank_favors_seed_neighbors():

@@ -9,7 +9,8 @@ import json
 from urllib.parse import urlsplit
 
 from yt_playlist.library.live_plays import resolve_identity
-from yt_playlist.library import ratings
+from yt_playlist.library import rating_projection as ratings
+from yt_playlist.core import playback_inbox as playback_feedback
 from yt_playlist.util.curation import confirmed_rate
 
 PLAYBACK_KINDS = {"track_exit", "ended", "state", "tick", "volume", "bye", "next"}
@@ -63,8 +64,6 @@ def _curation_fields(kind, msg):
 
 def handle_player_event(ctx, msg, now) -> bool:
     """Persist one pevent frame. Returns True when a row was recorded."""
-    if getattr(ctx.store, 'activity_paused', False):
-        return False
     kind = (msg.get("kind") or "").strip()
     if kind not in PLAYBACK_KINDS and kind not in CURATION_KINDS:
         return False
@@ -76,6 +75,16 @@ def handle_player_event(ctx, msg, now) -> bool:
     ident = resolve_identity(store, (msg.get("brandId") or "").strip())
     if ident is None:
         return False
+    if playback_feedback.deferred(store):
+        playback_feedback.capture(store, 'player', ident, msg, now)
+        return True
+    return persist_player_event(ctx, msg, now, ident)
+
+
+def persist_player_event(ctx, msg, now, ident):
+    """Persist an admitted observation with its original verified account."""
+    store = ctx.store
+    kind = (msg.get('kind') or '').strip()
     if kind in PLAYBACK_KINDS:
         video_id = msg.get("videoId") or None
         playlist = msg.get("playlist") or None

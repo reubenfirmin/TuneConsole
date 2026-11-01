@@ -4,6 +4,8 @@ from itertools import chain
 
 from yt_playlist.core.policy_config import BASE_FIELD
 from yt_playlist.core.db_space import require_database_space
+from yt_playlist.core import policy_documents
+from yt_playlist.core.evidence_ledger import canonical
 
 # Bound disposable preparation independently of the 90-day served ledger. A full
 # hour protects ordinary readers; pinned offer readers can restore an older body.
@@ -25,6 +27,48 @@ class PolicyStorageFull(RuntimeError):
     pass
 
 
+def typed(conn):
+    return conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='recommendation_policies'").fetchone() is not None
+
+
+def _typed_protection(conn):
+    """The concrete policy owners, in addition to immutable impressions."""
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
+    owners = ('album_description_requests', 'group_generations', 'group_versions',
+              'recommendation_generations', 'recommendation_pools', 'home_display_policies', 'model_pair_policies',
+              'radio_session_policies', 'radio_seed_policies')
+    return ' AND '.join(['NOT EXISTS(SELECT 1 FROM recommendation_impression_policies i '
+                        'WHERE i.policy_version=p.version)'] + [
+        f'NOT EXISTS(SELECT 1 FROM {table} r WHERE r.policy_version=p.version)'
+        for table in owners if table in tables])
+
+
+def _publish_typed(conn, rows, bases, enforce_budget):
+    # Serialize the budget decision with installation, including callers which
+    # have not yet made their first SQL mutation in a surrounding context.
+    if not conn.in_transaction:
+        conn.execute('BEGIN IMMEDIATE')
+    if enforce_budget:
+        batch_size = sum(len(row[1].encode()) for row in rows) + sum(row[2] for row in bases)
+        if batch_size > MAX_BATCH_BYTES or max(len(rows), len(bases)) > MAX_BATCH_VARIANTS:
+            raise PolicyStorageFull('Prepared policy batch exceeds its storage budget; retaining published pools')
+        new_rows = _new_records(conn, 'recommendation_policies', 'version', rows)
+        new_bases = _new_records(conn, 'recommendation_policy_bodies', 'version', bases)
+        # Account for the actual canonical file records, including their format
+        # wrapper. Raw compact messages undercount small variants significantly.
+        size = sum(len(canonical({'format': policy_documents.FORMAT, 'configuration': json.loads(row[1])}))
+                   for row in chain(new_rows, new_bases))
+        count, variants = conn.execute('SELECT count(*),COALESCE(sum(byte_size),0) '
+                                      'FROM recommendation_policies WHERE served=0').fetchone()
+        bodies = conn.execute('SELECT COALESCE(sum(byte_size),0) FROM recommendation_policy_bodies '
+                              'WHERE served=0').fetchone()[0]
+        if count + len(new_rows) > MAX_UNUSED_VARIANTS or bodies + variants + size > MAX_UNUSED_BYTES:
+            raise PolicyStorageFull('Unused recommendation policies reached their storage budget; retaining published pools')
+    # Match the original storage boundary: publication opens a transaction when
+    # necessary, while its caller owns commit/rollback with the associated work.
+    policy_documents.install(conn, rows, bases)
+
+
 def _new_records(conn, table, key, rows):
     pending = {row[0]: row for row in rows}
     keys = list(pending)
@@ -42,6 +86,8 @@ def refresh_references(conn, versions):
     Partial indexes keep quota checks independent of the retained served history.
     Deletion still checks actual references rather than trusting accounting flags.
     """
+    if typed(conn):
+        return  # The typed impression link triggers maintain exact accounting.
     versions = list(set(versions) - {None})
     bases = set()
     for start in range(0, len(versions), 256):
@@ -62,6 +108,8 @@ def refresh_references(conn, versions):
 
 def publish(conn, rows, bases=(), *, enforce_budget=False):
     rows, bases = list(rows), list(bases)
+    if typed(conn):
+        return _publish_typed(conn, rows, bases, enforce_budget)
     if rows or bases:
         require_database_space(conn, 2 * (sum(len(row[1].encode()) for row in rows) + sum(row[2] for row in bases)))
     if enforce_budget:
@@ -92,6 +140,8 @@ def publish(conn, rows, bases=(), *, enforce_budget=False):
 
 
 def configuration(conn, version):
+    if typed(conn):
+        return policy_documents.configuration(conn, version)
     row = conn.execute('SELECT configuration FROM rec_serving_policies WHERE model_version=?',
                        (version,)).fetchone()
     if row is None:
@@ -112,6 +162,8 @@ def captured(conn, versions):
     An old prepared pool may disappear while its queued offer is being measured.
     Republish its immutable policy with the impression in a single transaction.
     """
+    if typed(conn):
+        return policy_documents.captured(conn, versions)
     rows, bases = [], {}
     for version in set(versions) - {None}:
         row = conn.execute('SELECT * FROM rec_serving_policies WHERE model_version=?', (version,)).fetchone()
@@ -129,22 +181,77 @@ def captured(conn, versions):
 
 
 def references(value):
-    """Conservatively keep policy IDs anywhere in persisted JSON, including sessions."""
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if key in ('pool_policy', 'model_version') and isinstance(child, (str, int)):
-                yield str(child)
-            yield from references(child)
-    elif isinstance(value, list):
-        for child in value:
-            yield from references(child)
-    elif isinstance(value, str) and len(value) == 16:
-        yield value
+    """Finite legacy serving-message paths, used only before owner conversion.
+
+    Arbitrary keys and sixteen-character strings are not policy evidence.
+    Current publications retain relational roots instead of scanning messages.
+    """
+    from yt_playlist.core.home_outputs import policy_references
+    def capture(item):
+        if not isinstance(item, dict):
+            return
+        for field in ('model_version', 'pool_policy'):
+            version = item.get(field)
+            if type(version) in (str, int) and str(version):
+                result.add(str(version))
+    def track(item):
+        capture(item)
+        if isinstance(item, dict):
+            capture(item.get('serving_context'))
+            capture(item.get('provenance'))
+    result = set()
+    if isinstance(value, list):
+        for item in value:
+            track(item)
+        yield from sorted(result)
+        return
+    if not isinstance(value, dict):
+        return
+    documents = [value]
+    if isinstance(value.get('data'), dict):
+        documents.append(value['data'])
+    for document in documents:
+        result.update(policy_references(document))
+        capture(document)
+        if type(document.get('policy_version')) is str and document['policy_version']:
+            result.add(document['policy_version'])
+        for item in document.get('policies', []):
+            capture(item)
+        bundle = document.get('bundles', document)
+        if not isinstance(bundle, dict):
+            continue
+        for mode, lanes in bundle.items():
+            if not mode.startswith('_') and isinstance(lanes, dict):
+                for pool in lanes.values():
+                    if isinstance(pool, list):
+                        for item in pool:
+                            track(item)
+        vibes = bundle.get('_vibes', {})
+        if isinstance(vibes, dict):
+            for lanes in vibes.get('pools', {}).values():
+                pools = [lanes] if isinstance(lanes, list) else lanes.values() if isinstance(lanes, dict) else []
+                for pool in pools:
+                    if isinstance(pool, list):
+                        for item in pool:
+                            track(item)
+            for lanes in vibes.get('genres', {}).values():
+                if isinstance(lanes, dict):
+                    for genres in lanes.values():
+                        if isinstance(genres, dict):
+                            for pool in genres.values():
+                                if isinstance(pool, list):
+                                    for item in pool:
+                                        track(item)
+    yield from sorted(result)
 
 
 def protected_references(conn):
     from yt_playlist.repos.proposal_cache import logical_rows
 
+    if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='model_pair_heads'").fetchone():
+        # All current serving roots are relational. Old schemas alone need the
+        # compatibility inventory while their one-time conversion is pending.
+        return set()
     protected = set()
     values = (row['payload'] for row in logical_rows(conn))
     for raw in chain(values, (row[0] for row in conn.execute('SELECT value FROM settings'))):
@@ -165,12 +272,15 @@ def retention_candidates(conn, now, *, limit=SCAN_LIMIT, cursor_key=CURSOR):
             cursor = None
     except (ValueError, TypeError):
         cursor = None
-    after = ' AND (created_at,model_version)>(?,?)' if cursor else ''
+    modern = typed(conn)
+    table, key, size_column = (('recommendation_policies', 'version', 'byte_size') if modern else
+                               ('rec_serving_policies', 'model_version', 'length(CAST(configuration AS BLOB))'))
+    after = f' AND (created_at,{key})>(?,?)' if cursor else ''
+    protection = ' AND ' + _typed_protection(conn) if modern else ''
     rows, size = [], 0
     for created_at, version, byte_size in conn.execute(
-            'SELECT created_at,model_version,length(CAST(configuration AS BLOB)) '
-            'FROM rec_serving_policies WHERE created_at<?' + after +
-            ' ORDER BY created_at,model_version LIMIT ?', (now - GRACE_SECONDS, *(cursor or ()), limit)):
+            f'SELECT created_at,{key},{size_column} FROM {table} p WHERE created_at<?' + after + protection +
+            f' ORDER BY created_at,{key} LIMIT ?', (now - GRACE_SECONDS, *(cursor or ()), limit)):
         rows.append((created_at, version))
         size += byte_size
         if size >= SCAN_BYTES:
@@ -183,21 +293,27 @@ def retention_candidates(conn, now, *, limit=SCAN_LIMIT, cursor_key=CURSOR):
 def prune(conn, versions, cursor, *, cursor_key=CURSOR):
     # Recheck both impression paths at the write boundary, after any concurrent
     # offer was inserted. Prepared/settings roots are guarded by snapshot.publish.
+    modern = typed(conn)
+    table, key = ('recommendation_policies', 'version') if modern else ('rec_serving_policies', 'model_version')
+    protection = _typed_protection(conn) if modern else UNSERVED
     deleted = 0
     for start in range(0, len(versions), 256):
         batch = versions[start:start + 256]
         marks = ','.join('?' for _ in batch)
-        deleted += conn.execute(f'DELETE FROM rec_serving_policies AS p WHERE model_version IN ({marks}) AND ' +
-                                UNSERVED, batch).rowcount
+        deleted += conn.execute(f'DELETE FROM {table} AS p WHERE {key} IN ({marks}) AND ' +
+                                protection, batch).rowcount
     if cursor:
         conn.execute('INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                      (cursor_key, json.dumps(cursor)))
     else:
         conn.execute('DELETE FROM settings WHERE key=?', (cursor_key,))
     bodies, size = [], 0
+    body_query = ('SELECT b.version,b.byte_size FROM recommendation_policy_bodies b WHERE b.served=0 '
+                  'AND NOT EXISTS(SELECT 1 FROM recommendation_policies p WHERE p.base_version=b.version) LIMIT ?'
+                  if modern else 'SELECT b.base_version,b.byte_size FROM rec_policy_bases b WHERE b.served=0 '
+                  'AND NOT EXISTS(SELECT 1 FROM rec_policy_variants v WHERE v.base_version=b.base_version) LIMIT ?')
     for version, byte_size in conn.execute(
-            'SELECT b.base_version,b.byte_size FROM rec_policy_bases b WHERE b.served=0 AND NOT EXISTS ('
-            'SELECT 1 FROM rec_policy_variants v WHERE v.base_version=b.base_version) LIMIT ?', (SCAN_LIMIT,)):
+            body_query, (SCAN_LIMIT,)):
         bodies.append(version)
         size += byte_size
         if size >= SCAN_BYTES:
@@ -205,5 +321,6 @@ def prune(conn, versions, cursor, *, cursor_key=CURSOR):
     for start in range(0, len(bodies), 256):
         batch = bodies[start:start + 256]
         marks = ','.join('?' for _ in batch)
-        conn.execute(f'DELETE FROM rec_policy_bases WHERE base_version IN ({marks})', batch)
+        body_table, body_key = ('recommendation_policy_bodies', 'version') if modern else ('rec_policy_bases', 'base_version')
+        conn.execute(f'DELETE FROM {body_table} WHERE {body_key} IN ({marks})', batch)
     return {'policies_deleted': deleted, 'bodies_deleted': len(bodies)}

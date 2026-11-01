@@ -14,7 +14,7 @@ def _client(store):
 
 
 def _heard(store, *videos):
-    listener = store.identities.upsert_identity('story-listener', 'channel', None, True)
+    listener = store.accounts.upsert_account('story-listener', 'channel', None, True)
     events = [(store.tracks.identity_key_for_video(video), None, NOW - 86400) for video in videos]
     store.history.import_listening_events(listener, events, source='spotify_export', source_timezone='UTC')
 
@@ -102,8 +102,7 @@ def test_worker_connects_genre_and_artist_articles_using_recorded_credits(store,
         ('artist', 'Tin Man'), ('genre', 'shoegaze')]]
     entry = store.tracks.upsert_track('collab', 'Together', 'Rrose & Guest', '', 180,
         credits=[{'name': 'Rrose', 'id': 'UC_rrose'}, {'name': 'Guest', 'id': 'UC_guest'}])
-    with store.conn:
-        store.conn.execute("UPDATE catalog_tracks SET genre='Minimal' WHERE id=?", (entry,))
+    store.tracks.set_track_enrichment(entry,'Minimal',None)
     seed_catalog_track(store, 'slow|slowdive', 'Slow', 'Slowdive', video_id='slow', genre='Shoegaze')
     seed_catalog_track(store, 'acid|tinman', 'Acid', 'Tin Man', video_id='acid', genre='Acid')
     _heard(store, 'collab', 'slow', 'acid')
@@ -132,7 +131,7 @@ def test_common_or_familiar_genre_supports_an_artist_instead_of_leading(store, m
     seed_catalog_track(store, 'song|band', 'Song', 'Band', video_id='song', genre=genre)
     _heard(store, 'song')
     if historical:
-        identity = store.identities.upsert_identity('listener', 'channel', None, True)
+        identity = store.accounts.upsert_account('listener', 'channel', None, True)
         events = [('song|band', None, NOW - (100 + i) * 86400) for i in range(12)]
         store.history.import_listening_events(identity, events, source='spotify_export', source_timezone='UTC')
     subjects = [{'kind': 'genre', 'subject': f'genre:{genre.lower()}', 'display': genre},

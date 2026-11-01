@@ -120,7 +120,7 @@ def pool_facets(store, items, min_tracks=3):
     for it in items:
         genre = _field(it, "genre") or ""
         if genre:
-            fams[genre_map.family(genre)] += 1
+            fams[genre_map.family(genre,conn=store.conn)] += 1
         year = _field(it, "year")
         if year:
             eras[str(int(year) // 10 * 10)] += 1
@@ -201,6 +201,9 @@ def cluster_recipe(store, keep_keys, seed_labels=(), allow_families=(), journey=
     `journey` is the user's DJ-Journey pick from the save bar; 'auto' (or anything unknown) ⇒ the
     'energy_arc' default. Unlike Home recipes this isn't theme-rolled. It just records what the
     cluster IS. Returns (recipe, ordered_keys); ordering is deterministic so a re-save lands the same."""
+    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
+        with store.read_view() as reader:
+            return cluster_recipe(reader, keep_keys, seed_labels, allow_families, journey=journey)
     journey = journey if journey in journeys.JOURNEYS else "energy_arc"
     keys = [k for k in dict.fromkeys(keep_keys) if k]
     dao = store.rec_query
@@ -211,7 +214,7 @@ def cluster_recipe(store, keep_keys, seed_labels=(), allow_families=(), journey=
     fam_count, era_count = {}, {}
     for k in keys:
         if k in genres:
-            fam = genre_map.family(genres[k])
+            fam = genre_map.family(genres[k],conn=store.conn)
             fam_count[fam] = fam_count.get(fam, 0) + 1
         if k in decades:
             era_count[decades[k]] = era_count.get(decades[k], 0) + 1
@@ -230,6 +233,7 @@ def cluster_recipe(store, keep_keys, seed_labels=(), allow_families=(), journey=
     def feat(k):
         g = genres.get(k, "")
         return {"artist": (meta.get(k) or {}).get("artist", ""), "genre": g,
+                "family": genre_map.family(g,conn=store.conn),
                 "energy": arc.get(k, .5), "decade": decades.get(k),
                 "plays": plays.get(k, 0), "recency": lastp.get(k, 0.0)}
 
@@ -261,7 +265,7 @@ def theme_filter(store, items, facets, limit=None):
         genre = (_field(i, "genre") or "") or genres.get(key, "")
         year = _field(i, "year")
         decade = (str(int(year) // 10 * 10) if year else None) or decades.get(key)
-        return (genre_map.family(genre) if genre else None), decade
+        return (genre_map.family(genre,conn=store.conn) if genre else None), decade
 
     def matches(i):
         fam, decade = facets_of(i)

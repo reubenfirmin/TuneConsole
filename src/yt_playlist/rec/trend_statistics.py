@@ -33,7 +33,7 @@ def longest_streak(days):
     return best
 
 
-def compute_months(day_counts, meta, artist_first, catalog_artists=frozenset()):
+def compute_months(day_counts, meta, artist_first, catalog_artists=frozenset(), *, genre_axes=None):
     """Calendar months with catalog-relative discovery and month-scoped streaks."""
     months = {}
     for day, key, cnt in day_counts:
@@ -43,13 +43,14 @@ def compute_months(day_counts, meta, artist_first, catalog_artists=frozenset()):
                                         "new_artists": set(), "families": {}, "days": set()})
         row["plays"] += cnt
         row["days"].add(day)
-        if artist:
-            row["artists"].add(artist)
-            if artist not in catalog_artists and month_of(artist_first.get(artist, day)) == month:
-                row["new_artist_plays"] += cnt
-                row["new_artists"].add(artist)
+        credited = artist if isinstance(artist,(tuple,list,set)) else (artist,) if artist else ()
+        new = {a for a in credited if a not in catalog_artists and month_of(artist_first.get(a,day))==month}
+        row['artists'].update(credited)
+        if new:
+            row["new_artist_plays"] += cnt
+            row["new_artists"].update(new)
         if genre:
-            family = genre_map.family(genre)
+            family = genre_axes[genre][0] if genre_axes is not None else genre_map.family(genre)
             row["families"][family] = row["families"].get(family, 0) + cnt
     return [{"month": month, "plays": row["plays"], "distinct_artists": len(row["artists"]),
              "new_artist_plays": row["new_artist_plays"], "new_artists": len(row["new_artists"]),
@@ -76,7 +77,7 @@ def month_peak_day(day_counts, meta, month):
             continue
         totals[day] = totals.get(day, 0) + cnt
         artist = meta.get(key, ("", None))[0]
-        if artist:
+        for artist in (artist if isinstance(artist,(tuple,list,set)) else (artist,) if artist else ()):
             counts = artists.setdefault(day, {})
             counts[artist] = counts.get(artist, 0) + cnt
     if not totals:

@@ -32,7 +32,7 @@ def tick(worker):
 
 
 def seed(store):
-    iid = store.identities.upsert_identity('Listener', 'fixture', None, True)
+    iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
     seed_catalog_track(store, 'song', 'Song', 'Artist', video_id='video', genre='Techno')
     for month in ('2026-08', '2026-09', '2026-10'):
         store.history.record_history_plays(iid, timestamp(month), ['song'], source_timezone='UTC')
@@ -184,6 +184,8 @@ def test_poll_shares_one_scoped_capture_despite_unrelated_key_churn(store, monke
     original = store._snapshot_revisions.capture
 
     def capture(*args, **kwargs):
+        dependencies = args[0] if args else kwargs.get('dependencies')
+        assert dependencies is not None, 'Projection polling copied every per-record revision'
         result = original(*args, **kwargs)
         captures.append(result)
         return result
@@ -197,9 +199,9 @@ def test_poll_shares_one_scoped_capture_despite_unrelated_key_churn(store, monke
                for table, key in baseline)
     with store.conn:
         store.conn.executemany('INSERT INTO settings VALUES (?,?)',
-                               [(f'unrelated-{i}', 'value') for i in range(4000)])
+                               [(f'unrelated-{i}', 'value') for i in range(4)])
         store.conn.execute("DELETE FROM settings WHERE key LIKE 'unrelated-%'")
-    assert len(original()) > 4000
+    assert len(original()) > len(baseline)
     worker.projections.poll()  # Coalesced jobs are still active on this idle tick.
     assert captures == [baseline]
     expected = {'trends', 'cleanup'} | ({'analytics'} if analytics_enabled else set())

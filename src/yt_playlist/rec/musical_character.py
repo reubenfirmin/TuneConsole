@@ -47,9 +47,13 @@ def _intensity_fit(item):
     if (isinstance(correction, dict) and correction.get('override') is True
             and dimension(item, 'intensity')[0] is not None):
         return None
-    fits = ((item.get('musical') or {}).get('vibes') or {}).get('fits') or {}
+    vibes = (item.get('musical') or {}).get('vibes') or {}
+    fits = vibes.get('fits') or {}
     if not isinstance(fits, dict):
         return None
+    # Independent Energize/Release suitability has different scales. Their
+    # separately prepared shared scores retain intensity behavior and lineage.
+    fits = {**fits, **(vibes.get('intensity_fits') or {})}
     available = [(name, fit) for name in ('energize', 'release') if isinstance(fit := fits.get(name), dict)
                  and fit.get('source') != 'heuristic' and type(fit.get('score')) in (int, float)
                  and math.isfinite(fit['score']) and 0 <= fit['score'] <= 1]

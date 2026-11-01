@@ -89,8 +89,8 @@ def test_uncertain_new_playlist_keeps_confirmed_membership_and_undo(store, monke
     from tests.conftest import FakeClient, _track
     from yt_playlist.library import executor
 
-    source_identity = store.identities.upsert_identity("Source", "cred", None, True)
-    target_identity = store.identities.upsert_identity("Target", "cred", None, False)
+    source_identity = store.accounts.upsert_account("Source", "cred", None, True)
+    target_identity = store.accounts.upsert_account("Target", "cred", None, False)
     tracks = [_track("v1", "One", "Artist"), _track("v2", "Two", "Artist")]
     tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", None, 200)
             for t in tracks]
@@ -119,7 +119,7 @@ def test_uncertain_new_playlist_keeps_confirmed_membership_and_undo(store, monke
     assert not source_client.deleted
     assert store.playlists.get_playlist(source) is not None
     created = next((p for p in store.playlists.get_playlists()
-                    if p.ytm_playlist_id == failure.value.playlist_id), None)
+                    if p.provider_playlist_id == failure.value.playlist_id), None)
     assert created is not None, "The partially populated remote playlist must stay visible locally"
     assert store.playlists.get_playlist_track_ids(created.id) == tids[:1]
     assert store.actions.get_actions(), "The new remote playlist must retain an Undo/recovery action"
@@ -145,7 +145,7 @@ def test_partial_merge_does_not_claim_a_concurrent_addition_for_undo(store, monk
     from tests.conftest import FakeClient, _track
     from yt_playlist.library import executor, playlist_undo
 
-    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
     keeper = store.playlists.upsert_playlist(iid, 'KEEP', 'Keeper', 1, '', 1)
     source = store.playlists.upsert_playlist(iid, 'SOURCE', 'Source', 2, '', 1)
     tracks = {v: _track(v, v, 'Artist') for v in ('a', 'b', 'c', 'd')}
@@ -183,7 +183,7 @@ def test_other_mutation_boundaries_retain_partial_progress(store, monkeypatch, o
     from tests.conftest import FakeClient, _track
     from yt_playlist.library import executor
 
-    identity = store.identities.upsert_identity("Main", "cred", None, True)
+    identity = store.accounts.upsert_account("Main", "cred", None, True)
     tracks = [_track("v1", "One", "Artist"), _track("v2", "Two", "Artist")]
     tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", None, 200) for t in tracks]
     source = store.playlists.upsert_playlist(identity, "SOURCE", "Source", 2, "", 1)
@@ -205,7 +205,7 @@ def test_other_mutation_boundaries_retain_partial_progress(store, monkeypatch, o
         if operation == "generated":
             playlist_generated.create_generated_playlist(store, "Generated", [
                 {"video_id": t["videoId"], "title": t["title"], "artist": "Artist", "duration": 200}
-                for t in tracks], destination, 10, identity_id=identity)
+                for t in tracks], destination, 10, account_id=identity)
         elif operation == "album":
             playlist_creation.create_playlist_from_album(store, "ALBUM", "Album", destination, 10, identity)
         elif operation == "copy_into":
@@ -218,7 +218,7 @@ def test_other_mutation_boundaries_retain_partial_progress(store, monkeypatch, o
                 for t in tracks], destination, 10)
     assert calls == [["v1", "v2"]]
     retained = next(p for p in store.playlists.get_playlists()
-                    if p.ytm_playlist_id == failure.value.playlist_id)
+                    if p.provider_playlist_id == failure.value.playlist_id)
     assert store.playlists.get_playlist_track_ids(retained.id) == tids[:1]
     action = store.actions.get_actions()[0]
     assert json.loads(action.params_json)["added"] == 1
@@ -226,7 +226,7 @@ def test_other_mutation_boundaries_retain_partial_progress(store, monkeypatch, o
     addition = undo["restored"][0]["addition"] if operation == "merge" else undo["addition"]
     assert addition["uncertain"] == ["v2"]
     if operation == "generated":
-        assert store.playlists.is_quarantined_playlist(retained.scope_ref)
+        assert store.playlists.is_quarantined_playlist(retained.playlist_scope_id)
 
 
 @pytest.mark.parametrize("operation", ["copy", "generated"])
@@ -236,7 +236,7 @@ def test_http_result_exposes_partial_destination_and_recovery(store, monkeypatch
     from tests.conftest import FakeClient, _track
     from yt_playlist.web.app import create_app
 
-    identity = store.identities.upsert_identity("Main", "cred", None, True)
+    identity = store.accounts.upsert_account("Main", "cred", None, True)
     tracks = [_track("v1", "One", "Artist"), _track("v2", "Two", "Artist")]
     tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", None, 200) for t in tracks]
     source = store.playlists.upsert_playlist(identity, "SOURCE", "Source", 2, "", 1)

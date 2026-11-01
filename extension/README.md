@@ -11,6 +11,14 @@ cookie, and asks the content script running on the `music.youtube.com` page to m
 fetch. Because the fetch runs in the page, it is visible in the normal DevTools Network tab, no
 extension-specific inspector needed. No cookie paste, no OAuth, no Google Cloud project.
 
+## Permissions and privacy
+
+The extension uses site-specific access to find YouTube Music, the TuneConsole website,
+and the local player at `127.0.0.1` or `localhost`. It does not request the broad `tabs`
+or `history` permissions. Chrome hides unrelated tabs' URLs and titles from the extension.
+The remaining permissions provide signed-in YouTube Music cookies (`cookies`), bridge
+reconnection checks (`alarms`), and installation of the page controls (`scripting`).
+
 ## Connect the extension to the backend
 
 Pairing is seamless: there is nothing to paste. The backend recognizes the extension by its
@@ -57,14 +65,14 @@ WebSocket only from that `chrome-extension://` origin, which a web page cannot f
   The badge follows the local bridge connection automatically. Only
   the connection status is exposed in the page; no library or playback data is shared with the site.
 
-## Experimental direct audio access check (#406)
+## Audio sampling and vibe measurements
 
 The normal app's **Tools > Audio analysis preview** now connects to this bridge
-automatically. With the optional local research model installed, leave YouTube
+automatically. The production extension includes the required audio models. Leave YouTube
 Music playing and open `/audio-preview`: it captures one ten-second excerpt per
 playing song and displays mood predictions without a capture click or
 sharing picker. **Stop analysis** cancels the job; **Analyse again** is an optional
-retry. Reload the unpacked extension and restart the app after updating these files.
+retry. Reload the extension and app page after updating the extension.
 
 The app page opens a Chrome runtime port. The worker accepts only a top-level
 app page on the configured local app origin (including its localhost
@@ -90,11 +98,10 @@ General music tags remain available under a disclosure. Nothing is adopted into
 On Air or Mix Tapes recommendations.
 
 Normal app pages collect automatic ten-second samples at 30 seconds, halfway and
-two-thirds through ordinary playback when the installed extension includes the
-optional analysis model. The separate `tc-audio-collection` connection checks the
-local model manifest before permitting capture. Public archives exclude these
-research assets, so automatic collection remains idle there. An unavailable model
-causes a quiet one-minute retry rather than repeated recordings and failures.
+two-thirds through ordinary playback. The separate `tc-audio-collection` connection
+checks the packaged model manifest before permitting capture. Production builds
+include the complete runtime and model weights. An incomplete installation reports
+that audio checks are unavailable and retries once per minute.
 
 The opt-in `YT_PLAYLIST_AUDIO_VIBES=1` app flag adds only the developer
 prediction/feedback banner. Collection and sample APIs work with this flag off;
@@ -198,18 +205,18 @@ heads. Production catalog profiles can additionally supply instrumentalness and
 density. Listening judgments are needed to validate these distinctions; measurements
 do not prove that a track supports concentration or delivers catharsis.
 
-Prepare the optional local research files after fetching models/building the
-runtime as described in `experiments/audio_lab/README.md`:
+Runtime source lives in `extension/audio_model/`, and asset build tools live in
+`scripts/audio_model/`. See `scripts/audio_model/README.md` for preparing a fresh
+checkout, then build the distribution:
 
 ```sh
-python3 experiments/audio_lab_tools/prepare_extension.py
+scripts/build-extension.sh
 ```
 
-Then reload the normal unpacked extension and the normal app page. Re-run
-preparation after changing worker source or artifacts. `extension/audio_model/`
-is ignored and explicitly excluded from Web Store ZIPs; this POC does not authorize
-distribution of the research models. The normal bridge otherwise keeps its
-permissions unchanged; its CSP allows packaged WebAssembly without JavaScript eval.
+Every production ZIP includes the verified models, libraries, runtime, and licenses.
+Packaging fails if a required artifact is missing or its hash differs. Only downloaded
+vendor assets are ignored by Git; production worker source is tracked. The extension's
+CSP allows packaged WebAssembly without JavaScript eval.
 
 ### Access-only diagnostic
 

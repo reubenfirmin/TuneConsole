@@ -45,8 +45,26 @@ def disable_periodic_library_sync(monkeypatch):
 @pytest.fixture
 def store():
     s = Store(":memory:")
-    s.init_schema()
-    return s
+    try:
+        s.init_schema()
+        yield s
+    finally:
+        s.conn.close()
+
+
+@pytest.fixture
+def unlocked_home_controls(monkeypatch):
+    """Isolate existing post-unlock feature tests from onboarding preparation.
+
+    Growth readiness and journey tests deliberately do not use this fixture.
+    """
+    from yt_playlist.rec import account_growth
+
+    monkeypatch.setattr(account_growth, 'view', lambda *_args, **_kwargs: {
+        'nodes': [], 'achievements': [], 'health': {'total': 0, 'processed': 0},
+        'vibes_ready': True, 'ready_areas': {'directions': True, 'discover': True, 'recent': True},
+        'ready_formats': {'mixes': True, 'albums': False, 'radio': False},
+        'home_choice_available': False})
 
 
 @pytest.fixture
@@ -88,8 +106,9 @@ def seed_catalog_track(store, key, title, artist, *, video_id=None, track_id=Non
         if metadata:
             columns = {r[1] for r in store.conn.execute('PRAGMA table_info(catalog_tracks)')}
             assert metadata.keys() <= columns
-            store.conn.execute('UPDATE catalog_tracks SET '+','.join(f'{field}=?' for field in metadata)+' WHERE id=?',
-                               [*metadata.values(),rid])
+            from yt_playlist.core import metadata as metadata_owner
+            for field,value in metadata.items():
+                metadata_owner.select(store.conn,rid,field,value,'fixture')
         from yt_playlist.core import artists
         artists.observe(store.conn,rid,artist,browse_id=metadata.get('artist_browse_id'))
     return rid

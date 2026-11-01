@@ -1,10 +1,13 @@
 import json
+import hashlib
 from dataclasses import replace
 
 import pytest
 
 from tests.group_support import recordings
 from yt_playlist.core.activity import WorkClosing
+from yt_playlist.core import prepared_inputs
+from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import group_discovery, group_preparation, musical_profiles
 
 
@@ -13,13 +16,22 @@ def seed(store, tracks):
         for i, track in enumerate(tracks):
             library = {'genre': track.genre, 'year': str(track.year or ''), 'audio': {}}
             payload = json.dumps({'library': library, 'discovered': None})
-            store.conn.execute('INSERT OR REPLACE INTO rec_prepared_content VALUES (?,?,?,?,?)',
-                               (track.key, payload, str(i), 1, i + 1))
+            store.conn.execute('INSERT INTO recordings(identity_key) VALUES (?) '
+                               'ON CONFLICT(identity_key) DO NOTHING', (track.key,))
+            prepared_inputs.upsert(store.conn, track.key, json.loads(payload),
+                                   hashlib.sha256(payload.encode()).hexdigest(), 1, i + 1)
             profile = {'schema': 1, 'version': musical_profiles.VERSION, 'dimensions': {
                 name: {'value': value, 'support': support, 'evidence': [{'kind': 'explicit'}]}
                 for name, value, support in zip(musical_profiles.DIMENSIONS, track.values, track.support)}}
             store.conn.execute('INSERT OR REPLACE INTO rec_musical_profiles VALUES (?,?,?,?,?)',
                                (track.key, json.dumps(profile), musical_profiles.VERSION, str(i), 1))
+
+
+def observe_artist(store, track_id, artist, genre):
+    store.enrichment_state.record_metadata_observations(
+        track_id, 'fixture', [MetadataObservation(
+            'tags', [{'name': genre, 'count': 10}], 'artist', artist, 'reported')],
+        run_id='group-preparation', now=10)
 
 
 def test_background_shadow_is_coalesced_and_does_not_replace_live_modes(store):
@@ -126,17 +138,21 @@ def test_member_that_loses_all_support_becomes_unknown_without_stale_assignment(
     assert worker.step(1900)
     current = store.taste_groups.head(members=True)
     assert all(changed.key not in g['members'] for g in current['groups'])
-    assert store.conn.execute('SELECT 1 FROM rec_group_unknown WHERE generation=? AND identity_key=?',
-                              (current['generation'], changed.key)).fetchone()
+    unknown = store.conn.execute(
+        'SELECT u.reason FROM group_unknown u '
+        'JOIN group_generations g ON g.id=u.generation_id '
+        'JOIN recordings r ON r.id=u.recording_id '
+        'WHERE g.external_key=? AND r.identity_key=?',
+        (current['generation'], changed.key)).fetchone()
+    assert unknown and unknown[0] == 'insufficient-shared-evidence'
     assert store.taste_groups.definitions(original['generation'], members=True) == original['groups']
 
 
 def test_initial_three_track_graph_splits_and_rejoins_while_backlog_continues(store):
     tracks = recordings([('House', 3, .1)])
     seed(store, tracks)
-    with store.conn:
-        store.conn.execute("INSERT INTO rec_content_pending(identity_key) VALUES ('not-captured-yet')")
-        store.conn.execute("INSERT INTO rec_musical_sources VALUES ('artist-source','test','artist','artist','{}',1)")
+    pending = store.tracks.upsert_track('pending-source', 'Pending', 'Other Artist', '', 200)
+    observe_artist(store, pending, 'other-artist', 'Jazz')
     worker = group_preparation.Preparation(store)
     assert worker.step(1000)
     first = store.taste_groups.head(members=True)
@@ -162,11 +178,11 @@ def test_fresh_library_publishes_from_real_capture_before_either_queue_drains(st
     from yt_playlist.rec import group_serving, progressive
 
     for i in range(12):
-        seed_catalog_track(store, f'fresh {i}|artist {i}', f'Fresh {i}', f'Artist {i}',
-                           video_id=f'fresh{i}', genre=('House', 'House', 'Jazz')[i % 3])
-    with store.conn:
-        store.conn.executemany('INSERT INTO rec_musical_sources VALUES (?,?,?,?,?,1)',
-            [(f'source{i}', 'test', 'artist', f'artist{i}', '{}') for i in range(12)])
+        genre = ('House', 'House', 'Jazz')[i % 3]
+        track_id = seed_catalog_track(
+            store, f'fresh {i}|artist {i}', f'Fresh {i}', f'Artist {i}',
+            video_id=f'fresh{i}', genre=genre)
+        observe_artist(store, track_id, f'artist{i}', genre)
     preparation = progressive.Preparation(store, budget=replace(progressive.Budget(), batch=3))
     assert preparation.capture(1000)  # First cached source batch.
     assert preparation.capture(1001)  # First three recordings, without a full-corpus fit.

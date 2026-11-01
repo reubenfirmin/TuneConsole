@@ -3,7 +3,8 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core.migrations import Migration, MigrationError, current, migrate, registry
+from yt_playlist.core.migrations import Migration, MigrationError, migrate, registry
+from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.migrations import v039_background_refresh as refresh_migration
 
 
@@ -24,8 +25,10 @@ def predecessor(path):
 
 def test_upgrade_preserves_original_models_sources_and_caches_and_coalesces_changes(tmp_path):
     with predecessor(tmp_path / 'state.db') as conn:
-        migrate(conn)
-        current.validate(conn)
+        # Verify this historical retirement before later conversions replace
+        # the very model/cache owners whose preservation is asserted here.
+        migrate(conn, registry=registry.MIGRATIONS[:39])
+        validate_version(conn, 39)
         assert tuple(conn.execute('SELECT * FROM rec_vectors').fetchone()) == ('saved', bytes.fromhex('0000803F'))
         assert conn.execute("SELECT value FROM settings WHERE key='rec_content_model'").fetchone()[0] == 'saved model'
         assert conn.execute("SELECT value FROM settings WHERE key='rec_selection_active_run'").fetchone()[0] == '42'
@@ -41,7 +44,7 @@ def test_upgrade_preserves_original_models_sources_and_caches_and_coalesces_chan
         conn.rollback()
         assert conn.execute('SELECT revision FROM rec_change_queue').fetchone()[0] == revision
         before = list(conn.iterdump())
-        migrate(conn)
+        migrate(conn, registry=registry.MIGRATIONS[:39])
         assert list(conn.iterdump()) == before
 
 
@@ -55,11 +58,11 @@ def test_interrupted_retirement_rolls_back_schema_and_models(tmp_path, monkeypat
         monkeypatch.setattr(registry, 'MIGRATIONS', (*original[:38], Migration(
             39, original[38].name, interrupted)))
         with pytest.raises(MigrationError, match='interrupted refresh upgrade'):
-            migrate(conn)
+            migrate(conn, registry=registry.MIGRATIONS)
         assert list(conn.iterdump()) == before
         monkeypatch.setattr(registry, 'MIGRATIONS', original)
-        migrate(conn)
-        current.validate(conn)
+        migrate(conn, registry=registry.MIGRATIONS[:39])
+        validate_version(conn, 39)
 
 
 def test_upgrade_retires_hashed_encoder_and_surrogate_selection_without_dropping_saved_results(tmp_path):
@@ -68,8 +71,8 @@ def test_upgrade_retires_hashed_encoder_and_surrogate_selection_without_dropping
                      ('{"cat":{},"ncat":128,"cont":[],"hash_bins":128}',))
         conn.execute("UPDATE settings SET value='progressive' WHERE key='rec_selection_active_run'")
         conn.commit()
-        migrate(conn)
-        current.validate(conn)
+        migrate(conn, registry=registry.MIGRATIONS[:39])
+        validate_version(conn, 39)
         assert not conn.execute("SELECT 1 FROM settings WHERE key IN "
                                 "('rec_content_model','rec_selection_active_run')").fetchone()
         assert tuple(conn.execute('SELECT * FROM rec_vectors').fetchone()) == ('saved', bytes.fromhex('0000803F'))

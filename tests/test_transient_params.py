@@ -8,7 +8,7 @@ def _store_with_play_history(genre="Techno", n=10, now=1000.0):
     History dedupes by key, so distinctness (not repeats) is what builds a facet's play lean."""
     s = Store(":memory:")
     s.init_schema()
-    iid = s.identities.upsert_identity("me", "cred", None, True)
+    iid = s.accounts.upsert_account("me", "cred", None, True)
     keys = []
     for i in range(n):
         tid = s.tracks.upsert_track(f"v{i}", f"song{i}", "band", None, None)

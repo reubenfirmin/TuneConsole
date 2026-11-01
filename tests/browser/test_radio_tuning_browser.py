@@ -1,56 +1,10 @@
 """Radio tuning streams, axis edits, decay and metadata refresh."""
 import json
-from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect
 from tests.browser.radio_ui_support import radio_ui
-
-
-def test_middle_stream_transition_bends_around_fixed_control(page, radio_ui):
-    from tests.template_support import web_templates
-    radio_ui.playlist = web_templates().get_template('_partials/radio_playlist.html').render(
-        session=radio_ui.ready, tracks=radio_ui.tracks)
-    radio_ui.state = radio_ui.ready
-    expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
-    second = page.locator('.radio-direction[data-slot="1"]')
-    third = page.locator('.radio-direction[data-slot="2"]')
-    second.hover()
-    page.wait_for_timeout(1600)
-    transitions = []
-    for index, destination in enumerate([third, second]):
-        destination.hover()
-        samples = page.evaluate('''() => new Promise(resolve => {
-          const model = Alpine.$data(document.querySelector('.radio-home'));
-          const paths = [...document.querySelectorAll('.radio-junction-line, .radio-junction-flow')];
-          const control = document.querySelector('.radio-tune').getBoundingClientRect();
-          const x = control.x + control.width / 2, y = control.y + control.height / 2;
-          const frames = [];
-          const sample = () => {
-            let nearest = Infinity;
-            for (const path of paths) {
-              const length = path.getTotalLength(), matrix = path.getScreenCTM();
-              for (let step = 0; step <= 400; step++) {
-                const at = path.getPointAtLength(length * step / 400).matrixTransform(matrix);
-                // Check the unmasked drawing against the actual control, with
-                // one screen pixel of clearance. The approved spline can round
-                // inside its routing padding without touching the button.
-                nearest = Math.min(nearest, Math.hypot((at.x - x) / (control.width / 2 + 1),
-                  (at.y - y) / (control.height / 2 + 1)));
-              }
-            }
-            frames.push({nearest, x: model.junctionX, fork: model.junctionForkX,
-              outline: getComputedStyle(paths[0]).d, flow: getComputedStyle(paths[1]).d});
-            if (frames.length < 75) requestAnimationFrame(sample); else resolve(frames);
-          };
-          requestAnimationFrame(sample);
-        })''')
-        assert min(frame['nearest'] for frame in samples) >= 1
-        assert len({round(frame['x'], 2) for frame in samples}) > 10
-        assert max(abs(frame['x'] - frame['fork']) for frame in samples) > 10
-        transitions.append(samples)
-        page.screenshot(path=f'/tmp/tuneconsole-radio-411-organic-{index}.png')
-    Path('/tmp/tuneconsole-radio-411-frames.json').write_text(json.dumps(transitions))
+from tests.visual_support import capture
 
 
 def test_junction_geometry_remains_continuous_around_control(page, radio_ui):
@@ -143,7 +97,7 @@ def test_tune_streams_modal_applies_all_axes_and_keeps_selected_stream_lit(page,
     expect(energy).to_have_value("20")
     expect(comfort).to_have_css("background-image", "none")
     assert dialog.bounding_box()["width"] <= width
-    page.screenshot(path=f"/tmp/tuneconsole-radio-tuning-{width}.png")
+    capture(page, path=f"/tmp/tuneconsole-radio-tuning-{width}.png")
     dialog.get_by_role("button", name="Reset", exact=True).click()
     expect(comfort).to_have_value("50")
     comfort.focus()

@@ -7,7 +7,7 @@ DAY = 86400.0
 
 def _store_with_span(days):
     s = Store(":memory:"); s.init_schema()
-    s.identities.upsert_identity("main", "bridge", None, True)
+    s.accounts.upsert_account("main", "bridge", None, True)
     s.history.record_history_plays(1, 100 * DAY + 50000, ["a|x"])
     if days:
         s.history.record_history_plays(1, (100 + days) * DAY + 50000, ["b|y"])

@@ -1,0 +1,55 @@
+"""Short maintenance notices preserve the detailed API and write admission."""
+import re
+
+from fastapi.testclient import TestClient
+import pytest
+
+from yt_playlist.core import db_space, playback_feedback
+from yt_playlist.web.app import create_app
+
+
+@pytest.mark.parametrize('state,expected,active,warning', [
+    ('idle', '', False, False),
+    ('compacting', 'Library updates are paused.', True, False),
+    ('evidence', 'Library updates are paused.', True, False),
+    ('retrying', 'Library updates need attention.', True, True),
+    ('feedback', 'Catching up on your listening.', True, False),
+    ('low_space', 'Free disk space to finish.', False, True),
+    ('deferred', 'Library update will retry.', False, True),
+    ('schema_retry', 'Library update needs a retry.', False, True),
+])
+def test_notice_matches_status_without_javascript(store, state, expected, active, warning):
+    app = create_app(store, lambda: {}, background_work=False)
+    maintenance = app.state.ctx.storage_maintenance
+    if state == 'compacting':
+        maintenance.active = True
+    elif state in ('evidence', 'retrying'):
+        store._evidence_recovery_pending = True
+        store._evidence_recovery_failed = state == 'retrying'
+    elif state == 'feedback':
+        identity = store.accounts.upsert_account('Main', 'credential', None, True)
+        playback_feedback.capture(store, 'player', identity, {'kind': 'state', 'state': 'paused'}, 1)
+    elif state in ('low_space', 'deferred'):
+        maintenance.phase = 'deferred'
+        maintenance._deferred(db_space.LowDiskSpace('full') if state == 'low_space' else RuntimeError('stopped'))
+    elif state == 'schema_retry':
+        maintenance.phase = state
+    with TestClient(app, base_url='http://127.0.0.1') as client:
+        status = client.get('/storage-maintenance/status').json()
+        assert (status['active'], status['warning'], status['recording']) == (active, warning, not active)
+        assert status['banner_message'] == expected
+        html = client.get('/playlists').text
+        notice = re.search(r'<div id="storage-maintenance"(.*?)>(.*?)</div>', html, re.S)
+        assert notice is not None
+        assert notice[2] == expected
+        assert (' hidden' in notice[1]) == (not expected)
+        assert f'role="{"alert" if warning else "status"}"' in notice[1]
+        if expected:
+            assert '\n' not in expected and expected.count('.') == 1
+            assert status['message'] != expected
+            assert status['message'] not in notice[2]
+        if active:
+            response = client.post('/sync')
+            assert response.status_code == 503
+            assert response.text == status['message']
+

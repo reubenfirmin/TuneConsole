@@ -109,18 +109,21 @@ def test_full_run_executes_every_case_once_on_parallel_file_workers(mini_suite):
     assert json.loads(lock_path.read_text())["pid"] not in {record["pid"] for record in records.values()}
 
 
-@pytest.mark.parametrize("args,env,count", [
-    (("tests/test_one.py",), {}, 2),
-    (("-n", "0"), {}, 4),
-    ((), {"CI": "true"}, 4),
+@pytest.mark.parametrize("args,env,count,locked", [
+    (("tests/test_one.py",), {}, 2, False),
+    (("-n", "0"), {}, 4, True),
+    ((), {"CI": "true"}, 4, True),
 ])
-def test_focused_override_and_ci_runs_remain_serial(mini_suite, args, env, count):
+def test_focused_override_and_ci_runs_remain_serial(mini_suite, args, env, count, locked):
     root, lock_path, run = mini_suite
     result = run(*args, **env)
     assert result.returncode == 0, result.stdout + result.stderr
     pids = [json.loads(path.read_text())["pid"] for path in root.glob("*-*.json")]
     assert len(pids) == count
-    assert set(pids) == {json.loads(lock_path.read_text())["pid"]}
+    assert len(set(pids)) == 1
+    assert lock_path.exists() is locked
+    if locked:
+        assert set(pids) == {json.loads(lock_path.read_text())["pid"]}
 
 
 def test_explicit_workers_cannot_parallelize_a_focused_check(mini_suite):
@@ -136,6 +139,21 @@ def test_worker_failures_fail_the_session(mini_suite):
     result = run(FAIL_PROBE="1")
     assert result.returncode == 1, result.stdout + result.stderr
     assert "4 failed" in result.stdout
+
+
+def test_parallel_workers_remove_explicit_basetemp(mini_suite):
+    root, _, run = mini_suite
+    (root / "tests" / "test_temp.py").write_text(
+        "def test_temp(tmp_path, tmp_path_factory):\n"
+        "    (tmp_path / 'fixture.db').write_bytes(b'disposable')\n"
+        "    shared = tmp_path_factory.mktemp('shared')\n"
+        "    (shared / 'fixture.db').write_bytes(b'disposable')\n"
+    )
+    basetemp = root / "temp"
+    result = run("--basetemp", str(basetemp))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "5 passed" in result.stdout
+    assert not basetemp.exists()
 
 
 def test_lingering_worker_barrier_blocks_admission_before_collection(mini_suite):

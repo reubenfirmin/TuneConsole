@@ -4,11 +4,32 @@ Selection changes span vectors and settings in one transaction. They live here s
 selection/report consumers do not depend on taste feedback or embedding storage.
 """
 import json
+from contextlib import nullcontext
 
-from yt_playlist.repos.base import Repo, synchronized, snapshot_read
+from yt_playlist.core import embeddings, recommendation_work
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
 
 
 class ModelSelectionRepo(Repo):
+    @lookup_read
+    def next_daily_at(self):
+        state = (recommendation_work.read(self.conn, 'daily_model_schedule')
+                 if recommendation_work.available(self.conn) else
+                 self._store.rec_proposals.get_proposals('daily_model_schedule'))
+        return (state or {}).get('next_at', 0)
+
+    @synchronized
+    def schedule_daily(self, next_at, now):
+        """Participate in an enclosing guarded model publication when present."""
+        value = {'next_at': next_at}
+        unit = nullcontext() if self.conn.in_transaction else self.conn.atomic()
+        with unit:
+            if recommendation_work.available(self.conn):
+                recommendation_work.write(self.conn, 'daily_model_schedule', value, now)
+            else:
+                self._store.rec_proposals.publish_prepared_home(json.dumps(value), now,
+                                                                surface='daily_model_schedule')
+
     @synchronized
     def latest_daily_selection(self):
         row = self.conn.execute("SELECT id,result_json FROM rec_model_selection_runs "
@@ -31,9 +52,9 @@ class ModelSelectionRepo(Repo):
             value = self._store.settings.get_setting(key)
             if value:
                 keep.add(str(value))
-        raw = self._store.settings.get_setting('radio_current_session')
         try:
-            radio = json.loads(raw) if raw else {}
+            from yt_playlist.core import radio_storage
+            radio = radio_storage.load(self.conn)[0] or {}
             if not radio.get('stopped') and (radio.get('comparison') or {}).get('run_id'):
                 keep.add(str(radio['comparison']['run_id']))
         except (TypeError, ValueError):
@@ -43,8 +64,14 @@ class ModelSelectionRepo(Repo):
             assigned = held.get('comparison') or (held.get('choice_context') or {}).get('comparison') or {}
             if assigned.get('run_id'):
                 keep.add(str(assigned['run_id']))
+        from yt_playlist.core import recommendation_setting_outputs
+        if recommendation_setting_outputs.available(self.conn):
+            keep.update(str(row[0]) for row in self.conn.execute('SELECT run_ref FROM radio_seed_output WHERE run_ref IS NOT NULL'))
         pairs = [row[0] for row in self.conn.execute("SELECT surface FROM rec_proposals WHERE surface LIKE 'model_pair:%'")]
         with self.conn:
+            if self._store._model_projections:
+                from yt_playlist.core import model_projections
+                model_projections.clear(self.conn, keep)
             for surface in pairs:
                 if surface.split(':')[1] not in keep:
                     self.conn.execute('DELETE FROM rec_proposals WHERE surface=?', (surface,))
@@ -101,12 +128,15 @@ class ModelSelectionRepo(Repo):
             if paused and paused["value"] == "1":
                 raise ValueError("Automatic selection was paused before publication")
             self.conn.execute(
-                "INSERT INTO rec_model_previous_vectors SELECT ?,identity_key,vec FROM rec_vectors", (run_id,))
-            self.conn.execute("DELETE FROM rec_vectors")
-            self.conn.executemany("INSERT INTO rec_vectors(identity_key,vec) VALUES (?,?)", rows)
+                "INSERT INTO rec_model_previous_vectors SELECT ?,r.identity_key,e.vector "
+                "FROM recording_embeddings e JOIN recordings r ON r.id=e.recording_id "
+                "WHERE e.space='collaborative'", (run_id,))
+            # A selection has its own objective/basis even when dimensions match.
+            embeddings.publish(self.conn, 'rec_vectors', rows, replace=True,
+                               model_version=f'selection:{run_id}')
             self._store.settings.publish_values({"rec_embed_method": selected["method"],
                 "rec_dim": str(selected["dim"]), "rec_selection_active_run": str(run_id)})
-            self.conn.execute("DELETE FROM settings WHERE key='rec_fit_inputs'")
+            self._store.settings.publish_values({'rec_fit_inputs':None})
         self.conn.execute("UPDATE rec_model_selection_runs SET result_json=? WHERE id=?", (encoded, run_id))
 
     @synchronized
@@ -135,17 +165,30 @@ class ModelSelectionRepo(Repo):
                 "SELECT 1 FROM rec_model_previous_vectors WHERE run_id=? LIMIT 1", (run_id,)).fetchone():
             return False
         with self.conn:
-            self.conn.execute("DELETE FROM rec_vectors")
-            self.conn.execute("INSERT INTO rec_vectors SELECT identity_key,vec FROM rec_model_previous_vectors WHERE run_id=?",
-                              (run_id,))
+            self.conn.execute('UPDATE rec_model_selection_runs SET result_json=result_json WHERE id=?', (run_id,))
+            rows = list(self.conn.execute('SELECT identity_key,vec FROM rec_model_previous_vectors WHERE run_id=?',
+                                          (run_id,)))
+            embeddings.publish(self.conn, 'rec_vectors', rows, replace=True,
+                               model_version=f'selection-restore:{run_id}')
             self.conn.execute("DELETE FROM rec_proposals WHERE surface IN "
-                "('home_prepared','home_tuned','home_choice','album_prepared','mode_bundles','fresh_pool',"
+                "('home_choice','mode_bundles','fresh_pool',"
                 "'model_live_comparison','model_album_assignment','model_listening_monitor','model_live_report') OR surface LIKE 'model_pair:%'")
-            self.conn.executemany("INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)", [
-                ("rec_embed_method", result["previous"]["method"]),
-                ("rec_dim", str(result["previous"]["dim"])),
-                ("rec_selection_paused", "1"), ("rec_selection_restore", ""), ("rec_selection_active_run", ""),
-                ("rec_selection_display_run", str(run_id))])
+            if self._store._model_comparison_state:
+                from yt_playlist.core import model_comparison_state
+                model_comparison_state.clear(self.conn)
+            if self._store._model_projections:
+                from yt_playlist.core import model_projections
+                model_projections.clear(self.conn)
+            from yt_playlist.core.recommendation_invalidation import clear_model_display
+            clear_model_display(self.conn)
+            if self._store._recommendation_reports:
+                from yt_playlist.core import recommendation_reports
+                recommendation_reports.clear(self.conn, ('model_live_report',))
+            self._store.settings.publish_values({
+                "rec_embed_method":result["previous"]["method"],
+                "rec_dim":str(result["previous"]["dim"]),
+                "rec_selection_paused":"1", "rec_selection_restore":"", "rec_selection_active_run":"",
+                "rec_selection_display_run":str(run_id)})
             result.update(status="restored", restored_at=now, reason="Previous model restored at your request.")
             self.conn.execute("UPDATE rec_model_selection_runs SET result_json=? WHERE id=?",
                               (json.dumps(result), run_id))
@@ -164,4 +207,4 @@ class ModelSelectionRepo(Repo):
     def selection_play_keys(self, start, end):
         """Only exact play timestamps can establish outcomes after a saved forecast."""
         return {r["identity_key"] for r in self.conn.execute(
-            "SELECT DISTINCT identity_key FROM play_events WHERE played_at>=? AND played_at<?", (start, end))}
+            "SELECT DISTINCT identity_key FROM play_event_subjects WHERE played_at>=? AND played_at<?", (start, end))}

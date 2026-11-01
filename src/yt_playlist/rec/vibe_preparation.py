@@ -3,14 +3,28 @@ import json
 import hashlib
 
 from yt_playlist.core import audio_vibe_metadata
+from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS
 from yt_playlist.core.activity import check_stopping, WorkBudgetExceeded
-from yt_playlist.rec import audio_vibe_model, audio_vibe_preview, home_vibe
+from yt_playlist.rec import audio_vibe_cruise, audio_vibe_energize, audio_vibe_focus, audio_vibe_model, audio_vibe_preview, audio_vibe_relax, audio_vibe_release, audio_vibe_uplift, home_vibe
 from yt_playlist.rec import musical_profiles as profiles
 from yt_playlist.rec import vibe_prediction as policy
 
 
+def serving_prefix():
+    """Compatible fit semantics, independent of a replacement model's identity."""
+    return '/'.join(('recording-vibes-1', policy.VERSION, profiles.VERSION, audio_vibe_preview.VERSION)) + '/'
+
+
+def compatible_version(stamp):
+    prefix = serving_prefix()
+    return isinstance(stamp, str) and stamp.startswith(prefix) and len(stamp) > len(prefix)
+
+
 def version():
-    return '/'.join(('recording-vibes-1', policy.VERSION, profiles.VERSION, audio_vibe_preview.VERSION, audio_vibe_model.identity()))
+    return serving_prefix() + '/'.join((
+                     audio_vibe_cruise.identity(), audio_vibe_release.identity(),
+                     audio_vibe_relax.identity(), audio_vibe_uplift.identity(),
+                     audio_vibe_energize.identity(), audio_vibe_focus.identity(), audio_vibe_model.identity()))
 
 
 def due(store):
@@ -38,9 +52,12 @@ def _measured(inputs, sources, selected, overrides):
     samples = inputs['samples']
     if samples:
         prediction = audio_vibe_preview.predict(samples, metadata=inputs['metadata'])
+        shared_scores = {row['vibe']: row['score'] for row in prediction['ranking']}
+        suitability = {**(prediction.get('suitability') or shared_scores),
+                       **{channel: shared_scores[vibe] for channel, vibe in INTENSITY_CHANNELS.items()}}
         return {'source': 'audio_measurement', 'sample_ids': sorted(s['id'] for s in samples),
                 'model': prediction.get('model'), 'fits': {
-                    row['vibe']: {'score': row['score'], 'support': 1.} for row in prediction['ranking']}}
+                    vibe: {'score': score, 'support': 1.} for vibe, score in suitability.items()}}
     # Provider classifiers (AcousticBrainz et al) and selected numeric catalog
     # attributes are own evidence. Provider tags, artist/release descriptions,
     # curated genre priors and propagated predictions cannot seed new cohorts.
@@ -69,6 +86,9 @@ def _measured(inputs, sources, selected, overrides):
                       for axis, weight in preset['weights'].items()) / sum(abs(w) for w in preset['weights'].values())
         if support > 0:
             fits[vibe] = {'score': home_vibe.heuristic_affinity(own, vibe), 'support': support}
+    for channel, vibe in INTENSITY_CHANNELS.items():
+        if vibe in fits:
+            fits[channel] = dict(fits[vibe])
     return {'source': 'provider_measurement', 'fits': fits} if fits else None
 
 
@@ -95,7 +115,7 @@ def recordings(reader, rows, musical, *, source_inputs=None):
             sources, overrides, _truncated = source_inputs[key]
             sources = [s for s in sources if s['version'] == profiles.VERSION]
             genre = overrides.get('genre') if 'genre' in overrides else features.get('genre')
-            track = {'artist': inputs[key]['artist'], 'genre': audio_vibe_metadata.subgenre({'genre': genre}),
+            track = {'artist': inputs[key]['artist'], 'genre': audio_vibe_metadata.subgenre({'genre': genre},conn=reader.conn),
                      'evidence': measured(inputs[key], sources, features.get('audio'), overrides), 'version': stamp}
             group_keys.update(policy.groups(track['artist'], track['genre']))
         tracks[key] = track
@@ -130,6 +150,8 @@ def recordings(reader, rows, musical, *, source_inputs=None):
             continue
         profile, track = json.loads(payload), tracks[key]
         fallback = {vibe: home_vibe.heuristic_affinity(profile, vibe) for vibe in home_vibe.PRESETS}
+        for channel, vibe in INTENSITY_CHANNELS.items():
+            fallback[channel] = fallback[vibe]
         candidates = []
         for group in policy.groups(track['artist'], track['genre']):
             stats = cohorts[group]['stats']
@@ -146,6 +168,8 @@ def recordings(reader, rows, musical, *, source_inputs=None):
                 projected['inputs'] = {identity: mid for identity, mid in cohorts[group]['inputs'].get(vibe, {}).items()
                                        if identity != key}
             resolved[key][vibe] = projected
+        profile['vibes']['intensity_fits'] = {
+            vibe: profile['vibes']['fits'].pop(channel) for channel, vibe in INTENSITY_CHANNELS.items()}
         updated.append((key, profiles.canonical(profile), profile_version, profiles.digest(profile)))
     if version() != stamp:
         raise WorkBudgetExceeded('Configured vibe model changed during capture')

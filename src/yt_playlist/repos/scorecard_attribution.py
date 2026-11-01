@@ -3,6 +3,7 @@ from bisect import bisect_right
 from collections import defaultdict
 
 from yt_playlist.core.activity import check_cancellable_work
+from yt_playlist.core import served_facts
 
 
 LIVE = "COALESCE(json_extract(provenance,'$.policy_kind'),'live')='live'"
@@ -39,6 +40,8 @@ class _Timeline:
 
 class Attribution:
     def __init__(self, conn, keys, start, end, horizon):
+        live = served_facts.expression(conn, 'policy_kind', "COALESCE(json_extract(provenance,'$.policy_kind'),'live')") + "='live'"
+        video = served_facts.expression(conn, 'video_id', VIDEO)
         self.plays, self.responses, self.exits = [], [], []
         self.fallback = {}
         owners = []
@@ -47,10 +50,10 @@ class Attribution:
         for chunk, placeholders in _chunks(keys):
             owners.extend(conn.execute(
                 'SELECT id,identity_key,served_at FROM rec_served_impressions '
-                f'WHERE identity_key IN ({placeholders}) AND {LIVE} '
+                f'WHERE identity_key IN ({placeholders}) AND {live} '
                 'AND served_at>=? AND served_at<=?', (*chunk, start - horizon, end + horizon)))
             self.plays.extend(conn.execute(
-                'SELECT identity_key,played_at,is_generated FROM play_events '
+                'SELECT identity_key,played_at,is_generated FROM play_event_subjects '
                 f'WHERE identity_key IN ({placeholders}) AND played_at>=? AND played_at<=?',
                 (*chunk, start, end + horizon)))
             self.responses.extend(conn.execute(
@@ -68,8 +71,8 @@ class Attribution:
             # owners outside the report and identities later edited/removed.
             for chunk, placeholders in _chunks({r['video_id'] for r in self.exits if r['video_id']}):
                 videos.extend(conn.execute(
-                    f'SELECT id,identity_key,served_at,{VIDEO} video_id FROM rec_served_impressions '
-                    f'WHERE {VIDEO} IN ({placeholders}) AND {LIVE} '
+                    f'SELECT id,identity_key,served_at,{video} video_id FROM rec_served_impressions '
+                    f'WHERE {video} IN ({placeholders}) AND {live} '
                     'AND served_at>=? AND served_at<=?', (*chunk, start - horizon, end + horizon)))
         self.video_owners = _Timeline(videos, 'video_id', 'identity_key', horizon)
         missing = {r['video_id'] for r in self.exits if r['video_id']

@@ -9,7 +9,7 @@ from yt_playlist.web.routes.charts import _build_ticker, _ticker_periods
 
 
 def _seed(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     a = store.tracks.upsert_track("v1", "Alpha", "Artist A", "Album A", 200, album_browse_id="album-a")
     b = store.tracks.upsert_track("v2", "Beta", "Artist B", "Album B", 200, album_browse_id="album-b")
     store.tracks.set_track_enrichment(a, "techno", "1995")
@@ -70,7 +70,7 @@ def test_charts_ticker_tabs_render(store):
 
 
 def test_charts_ticker_handles_no_history(store):
-    store.identities.upsert_identity("me", "c", None, True)
+    store.accounts.upsert_account("me", "c", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.get("/charts")
@@ -99,8 +99,8 @@ def test_charts_root_opens_top_songs(store):
 
 @pytest.mark.parametrize('other_account', [False, True])
 def test_same_title_playlists_keep_counts_history_artwork_and_navigation(store, other_account):
-    first = store.identities.upsert_identity('main', 'c', None, True)
-    second = store.identities.upsert_identity('other', 'd', None, False) if other_account else first
+    first = store.accounts.upsert_account('main', 'c', None, True)
+    second = store.accounts.upsert_account('other', 'd', None, False) if other_account else first
     a = store.tracks.upsert_track('v1', 'Old song', 'Artist', '', 180)
     b = store.tracks.upsert_track('v2', 'Recent song', 'Artist', '', 180, thumbnail='/recent.png')
     extra = store.tracks.upsert_track('v3', 'Unplayed', 'Artist', '', 180)

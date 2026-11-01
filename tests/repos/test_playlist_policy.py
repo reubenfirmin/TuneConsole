@@ -12,7 +12,7 @@ from yt_playlist.library.playlist_metadata import GENERATED_DESCRIPTION, PROMOTE
 
 
 def test_group_names_cannot_adopt_or_quarantine_and_stale_sync_cannot_revoke_adoption(store):
-    iid = store.identities.upsert_identity('main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('main', 'bridge', None, True)
     pid = store.playlists.upsert_playlist(iid, 'PL', 'Mix', 0, '', 1)
     store.playlists.set_playlist_group('PL', 'Generated')
     assert store.rec_eligibility.excluded_playlist_ids() == set()
@@ -36,7 +36,7 @@ def test_group_names_cannot_adopt_or_quarantine_and_stale_sync_cannot_revoke_ado
 def test_recovery_preserves_policy_groups_and_remote_markers(store, tmp_path, monkeypatch,
                                                            generated, adopted, operation):
     monkeypatch.setenv('YT_PLAYLIST_HOME', str(tmp_path))
-    iid = store.identities.upsert_identity('main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('main', 'bridge', None, True)
     pid = store.playlists.upsert_playlist(iid, 'SOURCE', 'Mix', 1, '', 1)
     tid = store.tracks.upsert_track('a', 'A', 'Artist', None, 200)
     store.playlists.set_playlist_tracks(pid, [tid])
@@ -63,7 +63,7 @@ def test_recovery_preserves_policy_groups_and_remote_markers(store, tmp_path, mo
     # Another install sees only remote metadata, so it must reach the same policy decision.
     other = Store(':memory:')
     other.init_schema()
-    other_id = other.identities.upsert_identity('other', 'bridge', None, True)
+    other_id = other.accounts.upsert_account('other', 'bridge', None, True)
     sync.refresh_playlist(other, other_id, client, new_id, 'Mix', 40 * 86400 + 2)
     assert other.playlists.is_quarantined_playlist(new_id) == (generated and not adopted)
     other.conn.close()

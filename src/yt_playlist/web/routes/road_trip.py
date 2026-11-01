@@ -28,11 +28,9 @@ from yt_playlist.rec.road_trip_axes import canonical_genre
 from yt_playlist.util.matching import identity_key
 from yt_playlist.core.activity import activity_for
 from yt_playlist.core.accounts import client_for
+from yt_playlist.core.road_trip_contract import MIN_TARGET_MINUTES, MAX_TARGET_MINUTES
 from yt_playlist.web.context import request_form
 from yt_playlist.web.road_trip_drafts import RoadTripDrafts
-
-MIN_TARGET_MINUTES = 15
-MAX_TARGET_MINUTES = 12 * 60
 
 
 def _spawn(fn):
@@ -289,14 +287,14 @@ def build(ctx) -> APIRouter:
 
         if recipe is None or state is None:
             return response("That playlist is gone - build it again.")
-        identity_id, client = _client()
+        account_id, client = _client()
         tracks = road_trip_rec.draft_tracks(state)
         if client is None or not tracks:
             return response("Couldn't save it - connect the main account and keep at least one track.")
         stats = state["stats"]
         try:
             saved = playlist_generated.create_generated_playlist(store, result["name"], tracks,
-                client, now_fn(), identity_id,
+                client, now_fn(), account_id,
                 recipe={"model": "road_trip", "road_trip_recipe_id": recipe_id, "journey": "road_trip",
                         "own_pct": state["own_pct"], "familiarity_pct": state["familiarity_pct"],
                         "target_minutes": state["target_minutes"],

@@ -30,7 +30,7 @@ def merge(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     monkeypatch.setattr(executor, "_capture_post", lambda *a, **kw:
                         undo_capture.capture_post(*a, **kw, sleep=lambda _: None))
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
 
     def setup(before, source):
         keep = store.playlists.upsert_playlist(iid, "KEEP", "Keeper", len(before), "", 1)

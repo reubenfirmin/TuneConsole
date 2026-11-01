@@ -64,9 +64,11 @@ def dj_order(tracks, stickiness=0.0, seed=0, *, feat=None):
         if feat:
             features = feat(item)
             artist, genre = features.get("artist"), features.get("genre")
+            family = features.get('family',genre_map.family(genre))
         else:
             artist, genre = _field(item, "artist"), _field(item, "genre")
-        rows.append((item, artist, genre_map.family(genre)))
+            family = _field(item,'family') or genre_map.family(genre)
+        rows.append((item, artist, family))
     rng = random.Random(seed)
     rng.shuffle(rows)
     remaining = Counter(row[1] for row in rows)

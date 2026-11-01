@@ -20,7 +20,7 @@ from yt_playlist.repos.trends import TrendsRepo
 def database(request, tmp_path):
     store = Store(":memory:" if request.param == "memory" else tmp_path / "state.db")
     store.init_schema()
-    store.identities.upsert_identity("me", "c", None, True)
+    store.accounts.upsert_account("me", "c", None, True)
     seed_catalog_track(store, "song", "Song", "Artist", video_id="video")
     store.history.record_history_plays(1, 5 * 86400, ["song"], source_timezone="UTC")
     yield store
@@ -30,7 +30,9 @@ def database(request, tmp_path):
 def test_slow_rollup_sql_allows_ui_reads_and_writes_before_shutdown(tmp_path, monkeypatch):
     store = Store(tmp_path / "state.db")
     store.init_schema()
-    store.trends.upsert_first_play_min([("track", "saved", 1, 86400, "saved")])
+    store.accounts.upsert_account('Listener','c',None,True)
+    store.history.record_history_plays(1,86400,['saved'],source_timezone='UTC')
+    store.trends.refresh_first_play()
     store.rec_proposals.put_proposals("trend_rollups", {"saved": True})
     entered = threading.Event()
     reader_connections = []
@@ -44,7 +46,7 @@ def test_slow_rollup_sql_allows_ui_reads_and_writes_before_shutdown(tmp_path, mo
         repo.conn.execute("WITH RECURSIVE slow(n) AS (VALUES(query_started()) UNION ALL "
                           "SELECT n+1 FROM slow WHERE n<1000000000) SELECT sum(n) FROM slow").fetchone()
 
-    monkeypatch.setattr(TrendsRepo, "_rebuild_artist_first_play", slow_query)
+    monkeypatch.setattr(TrendsRepo, "prepare_first_play", slow_query)
     monkeypatch.setattr(worker, "_rebuild", worker._refresh_trends)
 
     async def ui_interaction():
@@ -98,16 +100,16 @@ def test_source_reset_during_calculation_cannot_publish_stale_rollup(database, m
 
 def test_failed_publication_keeps_previous_index_rollup_and_review_stamp(database):
     store = database
-    store.trends.upsert_first_play_min([("track", "saved", 1, 86400, "saved")])
+    store.trends.refresh_first_play()
     store.rec_proposals.put_proposals("trend_rollups", {"saved": True})
     store.settings.set_setting("trend_spotlight_review_month", "saved")
     with store.conn:
-        store.conn.execute("CREATE TRIGGER reject_rollup BEFORE INSERT ON rec_proposals "
+        store.conn.execute("CREATE TRIGGER reject_rollup BEFORE INSERT ON home_display_publications "
                            "WHEN NEW.surface='trend_rollups' "
                            "BEGIN SELECT RAISE(ABORT,'rejected publication'); END")
     with pytest.raises(sqlite3.IntegrityError, match="rejected publication"):
         trend_rollups.build(store, 6 * 86400)
-    assert store.trends.first_play_map("track") == {"saved": 1}
+    assert store.trends.first_play_map("track") == {"song": 5}
     assert store.rec_proposals.get_proposals("trend_rollups") == {"saved": True}
     assert store.settings.get_setting("trend_spotlight_review_month") == "saved"
     assert not store.conn.in_transaction

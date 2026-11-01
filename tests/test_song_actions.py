@@ -12,9 +12,9 @@ SONG = {"video_id": "new-song", "title": "A song's <title>", "artist": "Artist &
 
 
 def seed_song_actions(store):
-    main_id = store.identities.upsert_identity("Main", "main-cred", None, True)
-    other_id = store.identities.upsert_identity("Other account", "other-cred", None, False)
-    offline_id = store.identities.upsert_identity("Offline", "offline-cred", None, False)
+    main_id = store.accounts.upsert_account("Main", "main-cred", None, True)
+    other_id = store.accounts.upsert_account("Other account", "other-cred", None, False)
+    offline_id = store.accounts.upsert_account("Offline", "offline-cred", None, False)
     source = store.playlists.upsert_playlist(main_id, "SOURCE", "Source mix", 1, "h", 1)
     destination = store.playlists.upsert_playlist(other_id, "DEST", "Evening mix", 0, "", 1)
     system = store.playlists.upsert_playlist(main_id, "LM", "Liked Music", 0, "", 1)
@@ -55,14 +55,14 @@ def test_create_seeds_an_ordinary_playlist_on_main_account(songs):
     assert data["message"] == "Playlist created."
     assert data["added"] is True
     playlist = songs["store"].playlists.get_playlist(int(data["url"].split("/")[-1]))
-    assert playlist.title == "Soul favorites" and playlist.identity_id == songs["main_id"]
+    assert playlist.title == "Soul favorites" and playlist.account_id == songs["main_id"]
     assert playlist.created_at == 100.0
     assert playlist.thumbnail == SONG["thumbnail"]
     assert next(p for p in songs["store"].playlists.get_playlists() if p.id == playlist.id).thumbnail == SONG["thumbnail"]
     tracks = songs["store"].charts.playlist_tracks_detail(playlist.id)
     assert [(t["video_id"], t["duration"], t["album_browse"]) for t in tracks] == [(SONG["video_id"], 225, "MPRE_new")]
-    assert playlist.ytm_playlist_id not in songs["store"].playlists.get_playlist_groups()
-    assert songs["main"].added == [(playlist.ytm_playlist_id, [SONG["video_id"]])]
+    assert playlist.provider_playlist_id not in songs["store"].playlists.get_playlist_groups()
+    assert songs["main"].added == [(playlist.provider_playlist_id, [SONG["video_id"]])]
     assert not songs["other"].created
 
 
@@ -160,7 +160,7 @@ def test_new_song_playlist_seeds_before_first_readable_page(songs, monkeypatch, 
     assert playlist.track_count == (0 if unknown else 1)
     actions = [a for a in store.actions.get_actions() if a.kind == COPY_PLAYLIST]
     assert len(actions) == 1 and actions[0].status == 'executed'
-    assert json.loads(actions[0].undo_json)['new_ytm'] == playlist.ytm_playlist_id
+    assert json.loads(actions[0].undo_json)['new_ytm'] == playlist.provider_playlist_id
     assert json.loads(actions[0].undo_json)['post'] is None
     if unknown:
         assert data['status'] == 'partial' and data['uncertain'] == 1

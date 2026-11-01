@@ -81,8 +81,10 @@ def test_external_vector_write_invalidates_cached_identity(tmp_path):
     try:
         before = measurement.serving_policy(store, 100)[1]["models"]["collaborative"]
         with sqlite3.connect(tmp_path / "state.db") as other:
-            other.execute("INSERT INTO rec_vectors VALUES (?,?)",
-                          ("song|artist", np.asarray([1., 0.], dtype=np.float32).tobytes()))
+            other.execute("PRAGMA foreign_keys=ON")
+            subject = other.execute("INSERT INTO recordings(identity_key) VALUES ('song|artist')").lastrowid
+            other.execute("INSERT INTO recording_embeddings VALUES (?,'collaborative','external-test',2,?,100)",
+                          (subject, np.asarray([1., 0.], dtype=np.float32).tobytes()))
         assert measurement.serving_policy(store, 100)[1]["models"]["collaborative"] != before
     finally:
         store.conn.close()
@@ -97,7 +99,7 @@ def test_mode_centroid_publication_invalidates_model_identity(store):
 
 
 def test_new_listening_evidence_invalidates_basket_identity(store):
-    identity = store.identities.upsert_identity("main", "ref", None, True)
+    identity = store.accounts.upsert_account("main", "ref", None, True)
     keys = []
     for i in range(2):
         tid = store.tracks.upsert_track(f"v{i}", f"Song {i}", f"Artist {i}", None, 200)

@@ -7,7 +7,7 @@ from tests.test_mode_cards_route import prepare_home
 
 
 def _client(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     return iid, TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                            base_url="http://127.0.0.1")
 

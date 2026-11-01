@@ -161,7 +161,7 @@ function moveTab(fromId, toId, rows) {
     init() {
       this.$watch('from', () => { this.sel = {}; this.lastChecked = null; });
     },
-    visibleIds() { return this.rows.filter(r => r.identity_id === this.from).map(r => r.id); },
+    visibleIds() { return this.rows.filter(r => r.account_id === this.from).map(r => r.id); },
     selectedIds() { return this.visibleIds().filter(id => this.sel[id]); },
     count() { return this.selectedIds().length; },
     allSelected() { return this.visibleIds().length > 0 && this.count() === this.visibleIds().length; },

@@ -14,7 +14,7 @@ from yt_playlist.util.retry import with_retry
 def empty_playlist(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     monkeypatch.setattr(executor, "with_retry", lambda fn: with_retry(fn, sleep=lambda _: None))
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     pid = store.playlists.upsert_playlist(iid, "EMPTY", "Empty at last sync", 0, "", 1)
     return SimpleNamespace(store=store, pid=pid, client=FakeClient(), home=tmp_path)
 

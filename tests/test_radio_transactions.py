@@ -43,7 +43,7 @@ def test_existing_radio_keeps_running_with_discarded_writes_and_resumes_saving(p
 def test_radio_creation_finishing_after_repair_retains_only_source_provenance(poc, monkeypatch):
     c, _, frames, _, pool = poc
     store = c.ctx.store
-    iid = store.identities.get_master_identity().id
+    iid = store.accounts.get_master_account().id
     remote = FakeClient(catalog={t['video_id']: {'videoId': t['video_id'], 'title': t['title'],
         'artists': [{'name': t['artist']}], 'duration_seconds': 180} for t in pool})
     c.ctx.client_provider = lambda: {iid: remote}
@@ -67,7 +67,8 @@ def test_radio_creation_finishing_after_repair_retains_only_source_provenance(po
         assert result['local_id'] is None and frames
         assert store.settings.get_setting(SESSION_KEY) is None
         assert store.playlists.is_quarantined_playlist(result['playlist_id'])
-        assert json.loads(store.settings.get_setting('radio_session_playlist_ids')) == [result['playlist_id']]
+        from yt_playlist.core import radio_provenance
+        assert radio_provenance.ids(store.conn) == [result['playlist_id']]
     finally:
         store.conn.execute('PRAGMA query_only=OFF')
         store.activity_paused = False

@@ -2,8 +2,8 @@
 from contextlib import ExitStack
 import json
 
-from yt_playlist.core import audio_vibe_metadata, sample_files
-from yt_playlist.core.audio_vibe_contract import PREDICTION_VERSION
+from yt_playlist.core import audio_vibe_metadata, genre_identity, metadata_evidence, metadata_native, sample_files
+from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS, PREDICTION_VERSION
 from yt_playlist.core.activity import WorkBudgetExceeded, check_stopping
 from yt_playlist.core.db_revisions import column_group_reads, keyed_reads
 from yt_playlist.repos.base import Repo, synchronized
@@ -90,14 +90,30 @@ class VibePredictionsRepo(Repo):
                 guards.enter_context(keyed_reads(self._store, table, ids.values()))
             entries = [r[0] for rid in ids.values() for r in self.conn.execute(
                 'SELECT id FROM catalog_entries WHERE recording_id=?', (rid,))]
-            for table in ('track_artists', 'entry_field_choices', 'unresolved_items'):
+            from yt_playlist.core import metadata_runtime
+            choices = (('metadata_runtime_choices',) if metadata_runtime.active(self.conn) else
+                       ('metadata_choice_heads', 'metadata_observations') if metadata_evidence.available(self.conn) else ('entry_field_choices',))
+            for table in (self.entry_artists_table, *choices, 'unresolved_items'):
                 guards.enter_context(keyed_reads(self._store, table, entries))
+            sources = {r[0] for rid in ids.values() for r in self.conn.execute(
+                'SELECT source_key FROM rec_musical_links WHERE recording_id=?', (rid,))}
+            guards.enter_context(keyed_reads(self._store, 'rec_musical_sources', sources))
+            if metadata_native.available(self.conn):
+                guards.enter_context(keyed_reads(self._store, 'musical_source_observations', sources))
+                with keyed_reads(self._store, 'native_metadata_observations', []):
+                    references = [r for source in sources for r in self.conn.execute(
+                        'SELECT o.id,o.delivery_id FROM musical_source_observations s '
+                        'JOIN native_metadata_observations o ON o.id=s.observation_id WHERE s.source_key=?',
+                        (source,))]
+                guards.enter_context(keyed_reads(self._store, 'native_metadata_observations',
+                                                [r[0] for r in references]))
+                guards.enter_context(keyed_reads(self._store, 'metadata_deliveries', [r[1] for r in references]))
             for key in keys:
                 check_stopping()
                 rid = ids.get(key)
                 old = self._current(rid) if rid else None
                 artists = [r[0] for r in self.conn.execute('SELECT DISTINCT a.artist_id FROM catalog_entries e '
-                    'JOIN track_artists a ON a.entry_id=e.id WHERE e.recording_id=? ORDER BY a.artist_id LIMIT 17', (rid,))]
+                    f'JOIN {self.entry_artists_table} a ON a.entry_id=e.id WHERE e.recording_id=? ORDER BY a.artist_id LIMIT 17', (rid,))]
                 artist = json.dumps(artists, separators=(',', ':')) if 0 < len(artists) <= 16 else None
                 runs = self.conn.execute('SELECT run_id,video_id,MAX(captured_at) AS captured FROM sample_attributes '
                     'WHERE recording_id=? GROUP BY run_id,video_id HAVING COUNT(*)=3 '
@@ -178,9 +194,9 @@ class VibePredictionsRepo(Repo):
                 changed |= self.conn.execute('DELETE FROM recording_vibes WHERE recording_id=?', (rid,)).rowcount > 0
                 continue
             if track['genre']:
-                from yt_playlist.util import genre_catalog
-                self.conn.execute("INSERT OR IGNORE INTO genre_catalog(key,name,source) VALUES (?,?,'custom')",
-                                   (track['genre'], genre_catalog.canonical_name(track['genre'])))
+                resolved_key, reason = genre_identity.resolve(self.conn,track['genre'])
+                if reason is not None or resolved_key != track['genre']:
+                    raise ValueError('Prediction conditioning requires a canonical specific genre key')
             previous = {row['vibe']: row for row in self.conn.execute('SELECT * FROM recording_vibes WHERE recording_id=?', (rid,))}
             for vibe in previous.keys() - resolved.get(key, {}).keys():
                 self.conn.execute('DELETE FROM recording_vibes WHERE recording_id=? AND vibe=?', (rid, vibe))
@@ -240,7 +256,10 @@ class VibePredictionsRepo(Repo):
                 fit = {name: row[name] for name in ('score', 'support', 'source')}
                 if row['recordings'] is not None:
                     fit.update({name: row[name] for name in ('recordings', 'variance')})
-                vibes['fits'][row['vibe']] = fit
+                if row['vibe'] in INTENSITY_CHANNELS:
+                    vibes.setdefault('intensity_fits', {})[INTENSITY_CHANNELS[row['vibe']]] = fit
+                else:
+                    vibes['fits'][row['vibe']] = fit
         return profiles
 
     @synchronized

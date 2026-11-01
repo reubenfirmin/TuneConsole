@@ -4,7 +4,7 @@ Every remote write has a committed backup reference first. Interrupted writes ar
 read back on recovery; recovery never replays a destructive request.
 """
 import json
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack
 
 from yt_playlist.library.playlist_snapshot import http_status, playlist_if_present
 from yt_playlist.library.playlist_mutation import mutation_status
@@ -19,16 +19,15 @@ def deletion_status(undo):
     return "delete_failed" if "failed" in phases else "executed"
 
 
-def _save(store, action_id, undo, now):
-    store.actions.update_action(action_id, deletion_status(undo), now,
-                                undo_json=json.dumps(undo))
+def _save(store, action_id, undo, now,claims=None):
+    store.actions.save_deletion_progress(action_id,undo,now,claims or {})
 
 
 def _prune(store, action, entry):
     # IDs can change after a re-sync. Match the remote account and playlist too.
     for playlist in store.playlists.get_playlists():
-        if (playlist.identity_id == entry["identity"]
-                and playlist.ytm_playlist_id == entry["ytm"]):
+        if (playlist.account_id == entry["identity"]
+                and playlist.provider_playlist_id == entry["ytm"]):
             store.playlists.remove_playlist(playlist.id)
     if action.kind == GC_GENERATED:
         store.playlist_recipes.delete_cluster_canvas(entry["ytm"])
@@ -36,7 +35,7 @@ def _prune(store, action, entry):
 
 def pending_deletion(store, playlist):
     """Find an interrupted attempt before a repeated UI request or GC can start a new one."""
-    return store.actions.get_pending_deletion(playlist.identity_id, playlist.ytm_playlist_id)
+    return store.actions.get_pending_deletion(playlist.account_id, playlist.provider_playlist_id)
 
 
 def reconcile_deletion(store, action_id, clients, now, *, locked=False, claimed_target=None):
@@ -48,9 +47,16 @@ def reconcile_deletion(store, action_id, clients, now, *, locked=False, claimed_
         if action is None or action.status not in ("delete_pending", "delete_failed"):
             raise ValueError("This action has no pending deletion. Reload the Action Log.")
         undo = json.loads(action.undo_json)
+        tokens = {}
         for target in sorted({(e["identity"], e["ytm"]) for e in undo.get("deletions", [])}):
             if target != claimed_target:
                 claims.enter_context(claim_deletion_target(store, *target))
+            entry = next(e for e in undo['deletions'] if (e['identity'],e['ytm'])==target)
+            if entry['phase']!='complete':
+                token = store.actions.begin_deletion(action_id,*target,now,reconcile=True)
+                if token is not None:
+                    tokens[target] = token
+                    claims.callback(store.actions.release_deletion,token)
         for entry in undo.get("deletions", []):
             if entry["phase"] == "complete":
                 continue
@@ -59,7 +65,7 @@ def reconcile_deletion(store, action_id, clients, now, *, locked=False, claimed_
                 # An unavailable reconnect must not strand that local completion.
                 _prune(store, action, entry)
                 entry["phase"] = "complete"
-                _save(store, action_id, undo, now)
+                _save(store, action_id, undo, now,tokens)
                 continue
             client = clients.get(entry["identity"])
             if client is None:
@@ -68,7 +74,7 @@ def reconcile_deletion(store, action_id, clients, now, *, locked=False, claimed_
                 present = playlist_if_present(client, entry["ytm"])
             except Exception as exc:
                 entry["phase"] = "uncertain"
-                _save(store, action_id, undo, now)
+                _save(store, action_id, undo, now,tokens)
                 raise ValueError("Deletion is still unconfirmed. The backup is saved; reconnect "
                                  "and recheck in the Action Log. No deletion was retried.") from exc
             if present is not None:
@@ -77,10 +83,10 @@ def reconcile_deletion(store, action_id, clients, now, *, locked=False, claimed_
             else:
                 entry["phase"] = "remote_complete"
                 entry.pop("error", None)
-                _save(store, action_id, undo, now)
+                _save(store, action_id, undo, now,tokens)
                 _prune(store, action, entry)
                 entry["phase"] = "complete"
-            _save(store, action_id, undo, now)
+            _save(store, action_id, undo, now,tokens)
         params = json.loads(action.params_json)
         if action.kind == MOVE_IDENTITY:
             params["deleted"] = all(entry["phase"] == "complete" for entry in undo["deletions"])
@@ -99,14 +105,14 @@ def resume_pending_deletion(store, playlist, client, now):
     action = pending_deletion(store, playlist)
     if action is None:
         return None
-    action = reconcile_deletion(store, action.id, {playlist.identity_id: client}, now,
-                                claimed_target=(playlist.identity_id, playlist.ytm_playlist_id))
+    action = reconcile_deletion(store, action.id, {playlist.account_id: client}, now,
+                                claimed_target=(playlist.account_id, playlist.provider_playlist_id))
     if action.status != "executed":
         raise ValueError("The previous deletion did not complete. The playlist was preserved. "
                          "Review the saved action before requesting deletion again.")
     undo = json.loads(action.undo_json)
     return next(entry["backup"] for entry in undo["deletions"]
-                if entry["identity"] == playlist.identity_id and entry["ytm"] == playlist.ytm_playlist_id)
+                if entry["identity"] == playlist.account_id and entry["ytm"] == playlist.provider_playlist_id)
 
 
 def resume_gc_deletion(store, playlist, clients, now):
@@ -116,7 +122,7 @@ def resume_gc_deletion(store, playlist, clients, now):
     may proceed through the normal fresh-backup gate; other actions keep ownership
     of their failed deletion and require an explicit request.
     """
-    target = (playlist.identity_id, playlist.ytm_playlist_id)
+    target = (playlist.account_id, playlist.provider_playlist_id)
     action = (pending_deletion(store, playlist)
               or store.actions.get_failed_deletion(*target))
     if action is None:
@@ -138,13 +144,15 @@ def delete_backed_up(store, playlist, client, backup, now, *, kind, action_id=No
                      params=None, locked=False):
     """Attach durable intent to its owning action, then issue exactly one remote write."""
     new_action = action_id is None
-    entry = {"identity": playlist.identity_id, "ytm": playlist.ytm_playlist_id,
+    entry = {"identity": playlist.account_id, "ytm": playlist.provider_playlist_id,
              "title": playlist.title, "backup": backup, "phase": "pending"}
     if new_action:
         action_id = store.actions.record_action(
-            kind, json.dumps(params or {"ytm": playlist.ytm_playlist_id, "title": playlist.title}),
+            kind, json.dumps(params or {"ytm": playlist.provider_playlist_id, "title": playlist.title}),
             "{}", "delete_pending", json.dumps({"backup": backup, "deletions": [entry]}), now)
-    with nullcontext() if locked else claim_action(store, action_id, operation="Deletion"):
+    with ExitStack() as claims:
+        if not locked:
+            claims.enter_context(claim_action(store, action_id, operation="Deletion"))
         action = store.actions.get_action(action_id)
         if action.status not in ("planned", "executed", "delete_pending"):
             raise ValueError("This action changed before deletion. Reload the Action Log.")
@@ -154,7 +162,7 @@ def delete_backed_up(store, playlist, client, backup, now, *, kind, action_id=No
             entry = entries[0]
             if entry["phase"] != "pending":
                 raise ValueError("This deletion was already reconciled. Reload the Action Log.")
-        elif any(item["identity"] == playlist.identity_id and item["ytm"] == playlist.ytm_playlist_id
+        elif any(item["identity"] == playlist.account_id and item["ytm"] == playlist.provider_playlist_id
                  for item in entries):
             raise ValueError("This deletion already has a saved attempt. Recheck it in the Action Log.")
         else:
@@ -164,31 +172,34 @@ def delete_backed_up(store, playlist, client, backup, now, *, kind, action_id=No
         if backup != undo.get("backup") and backup not in undo.setdefault("backups", []):
             undo["backups"].append(backup)
         _save(store, action_id, undo, now)  # must commit before transport, including planned actions
+        token = store.actions.begin_deletion(action_id,playlist.account_id,playlist.provider_playlist_id,now)
+        tokens = {(playlist.account_id,playlist.provider_playlist_id):token} if token is not None else {}
+        claims.callback(store.actions.release_deletion,token)
         try:
-            result = client.delete_playlist(playlist.ytm_playlist_id)
+            result = client.delete_playlist(playlist.provider_playlist_id)
         except Exception as exc:
             entry["phase"] = "failed" if http_status(exc) in (400, 401, 403) else "uncertain"
             entry["error"] = "Deletion was not confirmed. The backup is saved; recheck this action."
-            _save(store, action_id, undo, now)
+            _save(store, action_id, undo, now,tokens)
             raise
         status = mutation_status(result)
         if status is not None and status != "STATUS_SUCCEEDED":
             entry["phase"] = "failed"
-            _save(store, action_id, undo, now)
+            _save(store, action_id, undo, now,tokens)
             raise ValueError("YouTube rejected playlist deletion. The playlist and backup were retained.")
         try:
-            present = playlist_if_present(client, playlist.ytm_playlist_id)
+            present = playlist_if_present(client, playlist.provider_playlist_id)
         except Exception as exc:
             entry["phase"] = "uncertain"
-            _save(store, action_id, undo, now)
+            _save(store, action_id, undo, now,tokens)
             raise ValueError("Deletion was not confirmed. Recheck the saved action before retrying.") from exc
         if present is not None:
             entry["phase"] = "failed"
-            _save(store, action_id, undo, now)
+            _save(store, action_id, undo, now,tokens)
             raise ValueError("YouTube has not confirmed deletion. The playlist and backup were retained.")
         entry["phase"] = "remote_complete"
-        _save(store, action_id, undo, now)  # retain remote completion even if local pruning fails
+        _save(store, action_id, undo, now,tokens)  # retain remote completion even if local pruning fails
         _prune(store, action, entry)
         entry["phase"] = "complete"
-        _save(store, action_id, undo, now)
+        _save(store, action_id, undo, now,tokens)
     return action_id

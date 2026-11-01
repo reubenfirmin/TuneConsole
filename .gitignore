@@ -2,6 +2,9 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+# Local pytest reports and temporary test workspaces.
+.pytest-*.xml
+.pytest-tmp-*/
 .coverage
 .coverage.*
 htmlcov/

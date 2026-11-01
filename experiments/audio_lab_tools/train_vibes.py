@@ -25,7 +25,7 @@ from threadpoolctl import threadpool_limits
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 from yt_playlist.rec import audio_vibe_model as model
 from yt_playlist.rec import audio_vibe_preview as heuristic
-from yt_playlist.core import audio_embedding, audio_vibe_metadata, sample_files
+from yt_playlist.core import audio_annotations, audio_embedding, audio_vibe_metadata, sample_files
 
 MIN_SUPPORT = 3
 WIDE_DIVERGENCE_GAP = .5
@@ -88,15 +88,21 @@ def examples_from_db(path, *, require_embeddings=False):
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA query_only=ON')
         conn.execute('BEGIN')
-        labels = list(conn.execute('SELECT labels.*,COALESCE(runs.video_id,'
-            '(SELECT video_id FROM sample_attributes WHERE run_id=labels.run_id '
-            'ORDER BY captured_at DESC,id DESC LIMIT 1)) video_id '
-            'FROM audio_session_labels labels LEFT JOIN audio_vibe_runs runs USING(run_id) '
-            'WHERE labels.taxonomy_version=? ORDER BY labels.updated_at,labels.run_id', (TAXONOMY_VERSION,)))
-        earlier = conn.execute('SELECT COUNT(*) FROM audio_vibe_feedback').fetchone()[0]
-        earlier += conn.execute('SELECT COUNT(*) FROM audio_vibe_labels').fetchone()[0]
-        earlier += conn.execute('SELECT COUNT(*) FROM audio_session_labels WHERE taxonomy_version!=?',
-                                (TAXONOMY_VERSION,)).fetchone()[0]
+        normalized = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='audio_annotations'").fetchone())
+        if normalized:
+            labels, earlier = audio_annotations.training_rows(conn, TAXONOMY_VERSION)
+        else:
+            # Existing frozen development snapshots keep their original format.
+            # This parser is read-only; live writers use annotation relations.
+            labels = list(conn.execute('SELECT labels.*,COALESCE(runs.video_id,'
+                '(SELECT video_id FROM sample_attributes WHERE run_id=labels.run_id '
+                'ORDER BY captured_at DESC,id DESC LIMIT 1)) video_id '
+                'FROM audio_session_labels labels LEFT JOIN audio_vibe_runs runs USING(run_id) '
+                'WHERE labels.taxonomy_version=? ORDER BY labels.updated_at,labels.run_id', (TAXONOMY_VERSION,)))
+            earlier = conn.execute('SELECT COUNT(*) FROM audio_vibe_feedback').fetchone()[0]
+            earlier += conn.execute('SELECT COUNT(*) FROM audio_vibe_labels').fetchone()[0]
+            earlier += conn.execute('SELECT COUNT(*) FROM audio_session_labels WHERE taxonomy_version!=?',
+                                    (TAXONOMY_VERSION,)).fetchone()[0]
         if earlier:
             skipped['earlier_label_vocabulary'] = earlier
         latest = {}
@@ -110,7 +116,7 @@ def examples_from_db(path, *, require_embeddings=False):
         selected = {}
         for video, label in latest.items():
             try:
-                targets = json.loads(label['vibes'])
+                targets = label['labels'] if normalized else json.loads(label['vibes'])
                 valid = (isinstance(targets, list) and len(set(targets)) == len(targets)
                          and set(targets) <= set(model.LABELS))
             except (ValueError, TypeError):
@@ -155,7 +161,7 @@ def examples_from_db(path, *, require_embeddings=False):
                         'sampled_at': [captured_at for value, captured_at in measurements],
                         'title': excerpts[0].get('title', ''), 'artist': excerpts[0].get('artist', ''),
                         'labels': targets, 'values': values,
-                        'feedback_prediction': feedback_snapshot(json.loads(label['prediction']), targets),
+                        'feedback_prediction': feedback_snapshot(label['evaluation'] if normalized else json.loads(label['prediction']), targets),
                         'metadata_sha256': hashlib.sha256(json.dumps(
                             metadata[video], sort_keys=True, allow_nan=False).encode()).hexdigest(),
                         'subgenre': audio_vibe_metadata.subgenre(metadata[video]),

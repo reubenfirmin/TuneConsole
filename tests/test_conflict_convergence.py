@@ -9,7 +9,7 @@ from yt_playlist.util import net
 @pytest.fixture
 def conflict(store):
     track = _track(store)
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     playlist = store.playlists.upsert_playlist(iid, "PL", "Library", 1, "", 100)
     store.playlists.set_playlist_tracks(playlist, [track["id"]])
     providers = [FakeProv("musicbrainz", {"Hyperballad": {"genre": "Rock", "year": "2000"}}),

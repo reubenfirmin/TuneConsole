@@ -9,7 +9,7 @@ from yt_playlist.util.matching import identity_key
 
 def _store():
     s = Store(":memory:"); s.init_schema()
-    s.identities.upsert_identity("main", "bridge", None, True)
+    s.accounts.upsert_account("main", "bridge", None, True)
     return s
 
 

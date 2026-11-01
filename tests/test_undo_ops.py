@@ -18,7 +18,7 @@ def test_successful_facade_undo_updates_local_membership_without_errors_or_keepe
     elif operation == "delete":
         iid, aid = _deleted(store, client)
     else:
-        iid = store.identities.upsert_identity("Main", "bridge", None, True)
+        iid = store.accounts.upsert_account("Main", "bridge", None, True)
         source = store.playlists.upsert_playlist(iid, "SOURCE", "Source", 2, "", 1)
         keeper = store.playlists.upsert_playlist(iid, "KEEP", "Keeper", 2, "", 1)
         PlaylistOps(store, lambda: {iid: client}, lambda: 2).delete_dupe(source, keeper)
@@ -40,5 +40,5 @@ def test_successful_facade_undo_updates_local_membership_without_errors_or_keepe
     if operation == "copy":
         assert not store.playlists.get_playlists()
     else:
-        restored = next(p for p in store.playlists.get_playlists() if p.ytm_playlist_id == "PL_NEW_0")
+        restored = next(p for p in store.playlists.get_playlists() if p.provider_playlist_id == "PL_NEW_0")
         assert [row[1] for row in store.playlists.get_playlist_tracks_with_meta(restored.id)] == ["a", "b"]

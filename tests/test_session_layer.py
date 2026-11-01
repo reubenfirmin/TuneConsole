@@ -8,7 +8,7 @@ def test_hour_old_play_dominates_12h_old_at_hl4h(store):
     """At session_halflife=4h, an hour-old play should contribute more weight than a 12-hour-old one,
     so the tilt vector should be closer to the fresh play's direction. Weight ratio:
     decay_weight(3600, 4/24) / decay_weight(43200, 4/24) = 0.5**(1/4) / 0.5**(3) ≈ 6.73"""
-    iid = store.identities.upsert_identity("main", "test", None, True)
+    iid = store.accounts.upsert_account("main", "test", None, True)
 
     # Create two distinct test vectors: one pointing along [1, 0] and another along [0, 1]
     # (will embed them in the full space by padding with zeros)
@@ -66,7 +66,7 @@ def test_quiet_store_returns_none(store):
 
 def test_below_gate_returns_none(store):
     """When fewer than now_min_events keys contribute, session_tilt returns None."""
-    iid = store.identities.upsert_identity("main", "test", None, True)
+    iid = store.accounts.upsert_account("main", "test", None, True)
 
     V = np.random.randn(5, 3).astype(np.float64)
     idx = {f"track{i}|artist{i}": i for i in range(5)}
@@ -86,7 +86,7 @@ def test_below_gate_returns_none(store):
 
 def test_keys_absent_from_idx_do_not_contribute(store):
     """Keys in play_events that are absent from idx should not contribute to tilt or count toward gate."""
-    iid = store.identities.upsert_identity("main", "test", None, True)
+    iid = store.accounts.upsert_account("main", "test", None, True)
 
     V = np.eye(3, dtype=np.float64)
     idx = {"track0|artist0": 0, "track1|artist1": 1}  # Only 2 keys in idx
@@ -140,7 +140,7 @@ def test_session_tilt_passes_radio_exclusion_to_play_events_since(store, monkeyp
 def test_zero_norm_contribution_returns_none(store):
     """When a key's vector has zero norm, it should be skipped. If all vectors are zero-norm,
     the result should be None."""
-    iid = store.identities.upsert_identity("main", "test", None, True)
+    iid = store.accounts.upsert_account("main", "test", None, True)
 
     # Create vectors with zero norm
     V = np.zeros((3, 4), dtype=np.float64)

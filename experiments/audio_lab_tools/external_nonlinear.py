@@ -7,13 +7,14 @@ import numpy as np
 
 from .external_experiment import OUT, digest, save
 from .external_learners import candidates, prediction, select, serializable
-from .external_training import feature_matrices
+from .external_training import feature_matrices, validation_groups
 from .external_transfer import external_head_features
 
 
-def head_features(datasets, gold, kind='rbf'):
+def head_features(datasets, gold, kind='rbf', *, identity_exclusions=()):
     # Reuse the established representation identity/weight verification.
-    _, _, exclusions, signatures, _ = external_head_features(datasets, gold)
+    _, _, exclusions, signatures, _ = external_head_features(
+        datasets, gold, identity_exclusions=identity_exclusions)
     embedding = np.array([row['embedding_values'] for row in gold])
     parts, names, heads = [], [], {}
     for dataset in datasets:
@@ -42,7 +43,7 @@ def head_features(datasets, gold, kind='rbf'):
             fitted = {key: np.asarray(value) if isinstance(value, list) else value
                       for key, value in cached['model'].items()}
         else:
-            choice = select(x, y, [row['group'] for row in rows], False)[kind]
+            choice = select(x, y, validation_groups(rows), False)[kind]
             fitted = candidates(x, y)[choice]
             save(cache_path, {'provenance': provenance, 'parameter_key': choice,
                               'model': serializable(fitted)})

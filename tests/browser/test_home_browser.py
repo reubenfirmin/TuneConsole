@@ -1,5 +1,6 @@
 import pytest
 from tests.test_mode_cards_route import prepare_home
+from tests.visual_support import capture
 
 
 @pytest.mark.parametrize("width", [1440, 390])
@@ -50,7 +51,7 @@ def test_revisit_full_playlist_and_track_playback(live_app, store, page, width):
         cards = section.locator('.redis-card').all()
         assert min(c.bounding_box()['height'] for c in cards) < max(c.bounding_box()['height'] for c in cards) / 2
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    section.screenshot(path=f"/tmp/tuneconsole-407-revisit-{width}.png")
+    capture(section, path=f"/tmp/tuneconsole-407-revisit-{width}.png")
     play_button.click()
     rows.first.locator(".pl-play").click()
     assert plays == ['https://music.youtube.com/playlist?list=quiet-list', "https://music.youtube.com/watch?v=quiet-15&list=quiet-list"]
@@ -191,7 +192,7 @@ def test_fresh_skeleton_click_builds_selected_pool_then_shows_mix(live_app, stor
     page.set_viewport_size({"width": 390, "height": 850})
     card.scroll_into_view_if_needed()
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-    page.screenshot(path=tmp_path / "fresh-skeleton.png")
+    capture(page, path=tmp_path / "fresh-skeleton.png")
     try:
         # Native button keyboard activation starts discovery and expands the same card.
         start = card.get_by_role("button", name="Find fresh songs", exact=True)
@@ -201,7 +202,7 @@ def test_fresh_skeleton_click_builds_selected_pool_then_shows_mix(live_app, stor
         expect(card.get_by_role("status")).to_have_text("Finding fresh jazz songs…")
         assert calls[0]["include_genres"] == ["jazz", "techno"]
         expect(card.locator('.fresh-pool-tile > span').first).to_have_css("animation-name", "fresh-pool-beat")
-        page.screenshot(path=tmp_path / "fresh-building.png")
+        capture(page, path=tmp_path / "fresh-building.png")
         page.emulate_media(reduced_motion="reduce")
         # Pool builds keep their activity animation under either motion preference.
         expect(card.locator('.fresh-pool-tile > span').first).to_have_css("animation-name", "fresh-pool-beat")
@@ -213,7 +214,7 @@ def test_fresh_skeleton_click_builds_selected_pool_then_shows_mix(live_app, stor
     expect(card.locator(".gen-row")).to_have_count(12, timeout=10000)
     card.locator(".gen-poster").press("Enter")
     expect(card.get_by_role("button", name="Save and play this mix")).to_be_visible()
-    page.screenshot(path=tmp_path / "fresh-ready.png")
+    capture(page, path=tmp_path / "fresh-ready.png")
 
 
 def test_two_ready_mixes_show_clickable_skeletons_for_the_missing_slots(live_app, store, page, monkeypatch, tmp_path):
@@ -262,7 +263,7 @@ def test_two_ready_mixes_show_clickable_skeletons_for_the_missing_slots(live_app
     expect(card.get_by_role("button", name="Build from your catalog", exact=True)).to_be_visible()
     assert not calls
     assert card.locator('.fresh-pool-tile > span').first.evaluate("el => getComputedStyle(el).animationName") == "none"
-    board.screenshot(path=tmp_path / "two-ready-two-skeletons.png", animations="disabled")
+    capture(board, path=tmp_path / "two-ready-two-skeletons.png", animations="disabled")
     try:
         card.get_by_role("button", name="Build from your catalog", exact=True).click()
         expect(card).to_have_attribute("aria-busy", "true")
@@ -272,7 +273,7 @@ def test_two_ready_mixes_show_clickable_skeletons_for_the_missing_slots(live_app
         expect(page.locator("#gen-comfort")).to_have_attribute("aria-busy", "false")
         page.set_viewport_size({"width": 390, "height": 850})
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-        card.screenshot(path=tmp_path / "catalog-building.png")
+        capture(card, path=tmp_path / "catalog-building.png")
     finally:
         release.set()
     expect(card.locator(".gen-row")).to_have_count(12, timeout=10000)
@@ -321,7 +322,7 @@ def test_saving_wheelhouse_keeps_all_four_mixtapes(live_app, store, page, monkey
     expect(board.locator('#gen-wheelhouse .gen-row')).to_have_count(len(wheelhouse['tracks']))
     assert board.locator('.gen-row').all_text_contents() == before
     expect(board.locator('#gen-wheelhouse .gen-poster')).to_be_visible()
-    board.screenshot(path=f'/tmp/tuneconsole-428-saved-wheelhouse-{width}.png')
+    capture(board, path=f'/tmp/tuneconsole-428-saved-wheelhouse-{width}.png')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), page.evaluate('''
         [...document.querySelectorAll('body *')].filter(el => {
           const r=el.getBoundingClientRect(); return r.width && r.right>innerWidth+1 && getComputedStyle(el).display!=='none';
@@ -354,7 +355,7 @@ def test_lost_held_mix_keeps_its_slot_then_recovers_after_preparation(live_app, 
     expect(board.get_by_role('button', name='Build more in your wheelhouse', exact=True)).to_be_visible()
     assert page.locator('#gen-more').count() == 0
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    board.screenshot(path=f'/tmp/tuneconsole-428-skeleton-{width}.png')
+    capture(board, path=f'/tmp/tuneconsole-428-skeleton-{width}.png')
 
     replacement = deepcopy(payload)
     offer = next(p for p in replacement['menus'][0]['protos'] if p['lane'] == 'wheelhouse')
@@ -367,7 +368,7 @@ def test_lost_held_mix_keeps_its_slot_then_recovers_after_preparation(live_app, 
     expect(board.locator(':scope > .gen-card')).to_have_count(4)
     assert not old_keys.intersection(board.locator('#gen-wheelhouse .gen-row').evaluate_all(
         'rows => rows.map(row => row.dataset.key)'))
-    board.screenshot(path=f'/tmp/tuneconsole-428-recovered-{width}.png')
+    capture(board, path=f'/tmp/tuneconsole-428-recovered-{width}.png')
 
 
 def test_home_is_landing_with_status_and_sections(live_app, page):
@@ -379,12 +380,9 @@ def test_home_is_landing_with_status_and_sections(live_app, page):
     # welcome; the feed and the freshness line wait for a first sync.
     assert page.get_by_role("button", name="Full sync").count() == 0
     assert page.get_by_role("button", name="Sync plays").count() == 0
-    expect(page.get_by_role('heading', name='Welcome to TuneConsole.')).to_be_visible()
-    page.get_by_role('button', name='Get started').click()
-    expect(page.get_by_role('heading', name='How do you like to listen?')).to_be_visible()
-    page.get_by_role('button', name='Start with Mix tapes').click()
     expect(page.get_by_role("heading", name="Welcome to TuneConsole")).to_be_visible()
     expect(page.get_by_role("link", name="Get the extension")).to_be_visible()
+    expect(page.get_by_role('heading', name='How do you like to listen?')).to_have_count(0)
     assert page.get_by_text("Library synced").count() == 0     # no awkward "not yet" line anymore
 
 
@@ -393,6 +391,7 @@ def test_cold_preparation_status_is_visible(live_app, store, page):
 
     store.settings.set_setting('last_sync_at', '1')
     store.settings.set_setting('onboard_dismissed', '1')
+    store.tracks.upsert_track('cold-song', 'Song', 'Artist', None, None)
     page.goto(live_app)
     expect(page.get_by_role('status').filter(
         has_text='Your next mixes will appear as your library is prepared.')).to_be_visible()
@@ -437,8 +436,8 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(live_app, store, p
     button = panel.locator("#home-make-mixes")
     expect(button).to_be_hidden()
     panel.locator(".fp-collapse").click()
-    expect(page.get_by_role("tab", name="Vibe", exact=True)).to_have_attribute("aria-selected", "true")
-    page.get_by_role("tab", name="Genre focus", exact=True).click()
+    expect(page.get_by_role("tab", name="Vibe", exact=True)).to_be_hidden()
+    expect(page.get_by_role("tab", name="Genre focus", exact=True)).to_have_attribute("aria-selected", "true")
     expect(button).to_be_enabled()
     choices = panel.get_by_role("checkbox")
     expect(choices).to_have_count(6)
@@ -464,7 +463,7 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(live_app, store, p
         panel.scroll_into_view_if_needed()
         expect(button).to_be_in_viewport()
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-        page.screenshot(path=tmp_path / f"mix-genres-{width}.png")
+        capture(page, path=tmp_path / f"mix-genres-{width}.png")
     button.click()
     expect(panel.locator("dialog")).not_to_be_visible()
     assert set(page.evaluate("homeOfferedGenres()")) == {"jazz", "techno"}
@@ -547,7 +546,7 @@ def test_clear_mix_controls_resets_applied_and_draft_choices_from_either_tab(liv
         page.set_viewport_size({"width": width, "height": 850})
         expect(clear).to_be_in_viewport()
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-        page.screenshot(path=tmp_path / f"mix-reset-{width}.png")
+        capture(page, path=tmp_path / f"mix-reset-{width}.png")
     clear.click()
     expect(panel.locator(".fp-breadth-slider")).to_have_value("0")
     expect(page.locator("#home-mode-cards")).to_have_attribute("data-requested-genres", "[]")
@@ -744,7 +743,7 @@ def test_configurator_modal_blocks_background_and_keeps_focus(live_app, store, p
                 && css.outlineStyle === 'none' && css.boxShadow === 'none';
         }""")
         expect(dialog.get_by_role("button", name="Shuffle genres", exact=True)).to_be_in_viewport()
-        page.screenshot(path=tmp_path / f"mix-modal-{width}.png")
+        capture(page, path=tmp_path / f"mix-modal-{width}.png")
     page.keyboard.press("Escape")
     expect(dialog).not_to_be_visible()
     expect(launcher).to_be_focused()
@@ -766,7 +765,7 @@ def test_configurator_modal_blocks_background_and_keeps_focus(live_app, store, p
             && css.outlineStyle === 'none' && css.boxShadow === 'none'
             && css.borderTopWidth === '0px';
     }""")
-    page.screenshot(path=tmp_path / "preferences-search.png")
+    capture(page, path=tmp_path / "preferences-search.png")
 
 
 def test_quick_genres_show_favorites_and_search_reaches_the_rest(live_app, store, page):
@@ -777,7 +776,7 @@ def test_quick_genres_show_favorites_and_search_reaches_the_rest(live_app, store
     seed_genres(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     tid = store.tracks.upsert_track("fav", "Favorite", "Favorite artist", None, None)
     store.tracks.set_track_genre(tid, "Techno")
     for day in range(30):

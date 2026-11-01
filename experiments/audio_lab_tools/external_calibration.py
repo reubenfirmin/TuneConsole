@@ -16,7 +16,7 @@ def probabilities(model, x):
     return np.exp(logits - logsumexp(logits, axis=1, keepdims=True))
 
 
-def fit(x, y, alpha):
+def fit(x, y, alpha, *, initial_iterations=500):
     z, medians, mean, scale = standardize(x)
     n, d = z.shape
     count = y.shape[1]
@@ -34,12 +34,22 @@ def fit(x, y, alpha):
         return value, gradient
 
     result = minimize(objective, initial, jac=True, method='L-BFGS-B',
-                      options={'maxiter': 500, 'ftol': 1e-11, 'gtol': 1e-7})
-    if not result.success or not np.isfinite(result.x).all():
+                      options={'maxiter': initial_iterations, 'ftol': 1e-11, 'gtol': 1e-7})
+    iterations = result.nit
+    if result.status == 1 and np.isfinite(result.x).all():
+        # A weakly regularized, correlated native embedding can need more than
+        # 500 steps. Continue the same training objective from its current fit;
+        # convergence tolerances and the candidate grid remain unchanged.
+        result = minimize(objective, result.x, jac=True, method='L-BFGS-B',
+                          options={'maxiter': 5000, 'ftol': 1e-11, 'gtol': 1e-7})
+        iterations += result.nit
+    if not result.success or not np.isfinite(result.x).all() or not np.isfinite(result.fun):
         raise RuntimeError('Softmax fit failed: ' + result.message)
     return {'kind': 'softmax', 'medians': medians, 'mean': mean, 'scale': scale,
             'weights': result.x[:d * count].reshape(d, count),
-            'intercept': result.x[d * count:], 'alpha': alpha}
+            'intercept': result.x[d * count:], 'alpha': alpha,
+            'optimization': {'iterations': iterations, 'objective': float(result.fun),
+                             'converged': True, 'message': str(result.message)}}
 
 
 def fit_selected(x, y, groups):

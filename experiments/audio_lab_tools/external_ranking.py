@@ -33,9 +33,11 @@ def top_mean(observed, scores, count=10):
     return float((observed[better].sum() + (count - sum(better)) * observed[tied].mean()) / count)
 
 
-def main():
-    source = OUT / 'cal500.oof.csv'
-    manifest = json.loads((OUT / 'cal500.features.json').read_text())
+def evaluate(dataset='cal500'):
+    if dataset not in ('cal500', 'cal500-raw-activity'):
+        raise ValueError('Expected a published or original-vote CAL500 task')
+    source = OUT / f'{dataset}.oof.csv'
+    manifest = json.loads((OUT / f'{dataset}.features.json').read_text())
     rows = manifest['rows']
     ids = {row['id']: i for i, row in enumerate(rows)}
     names = rows[0]['target_names']
@@ -56,15 +58,22 @@ def main():
     annotations = DATA / 'cal500/annotations-source'
     source_ids = {name: i for i, name in enumerate((annotations / 'songNames.txt').read_text().splitlines())}
     published_binary = np.loadtxt(annotations / 'hardAnnotations.txt', delimiter=',')
-    binary = published_binary[[source_ids[row['id'].removeprefix('cal500:')] for row in rows]].astype(bool)
+    binary = (published_binary[[source_ids[row['id'].removeprefix('cal500:')] for row in rows]].astype(bool)
+              if dataset == 'cal500' else observed > 0)
     activity = [j for j, name in enumerate(names) if name.startswith('Usage-')]
-    report = {'created_at': stamp(), 'dataset': 'cal500', 'rows': len(rows),
+    report = {'created_at': stamp(), 'dataset': dataset, 'rows': len(rows),
               'oof_sha256': digest(source), 'published_binary_annotation_sha256': digest(annotations / 'hardAnnotations.txt'),
               'limitations': ['Published binary annotations are used as supplied; they are not assumed to require majority consensus.',
                               'Published activity soft weights discard single-Yes choices; their top-ten lift concerns these filtered weights.',
                               'AP and AUC concern native tags, not the six vibe labels.',
                               'Top-ten vote fractions average rankings within each held-out fold, with expected values for tied scores.',
                               'Rare positives produce uncertain estimates; no statistical significance is claimed.'], 'activities': {}}
+    if dataset == 'cal500-raw-activity':
+        report['limitations'] = [
+            'Raw targets are original Yes-checkbox fractions; binary relevance means at least one supplied Yes response.',
+            'Omitted checkboxes are interpreted as unselected; missing-response identities are unavailable.',
+            'AP/AUC and fold-wise top-ten lift concern native activities, not the six vibe labels.',
+            'Rare positives and rater disagreement remain; no statistical significance is claimed.']
     for j in activity:
         item = {'positives': int(binary[:, j].sum()), 'prevalence': float(binary[:, j].mean()),
                 'mean_vote_fraction': float(observed[:, j].mean()), 'families': {}}
@@ -82,12 +91,12 @@ def main():
     report['macro_activity_average_precision'] = {family: float(np.mean([
         item['families'][family]['average_precision'] for item in report['activities'].values()
         if item['families'][family]['average_precision'] is not None])) for family in families}
-    save(OUT / 'cal500.ranking.json', report)
-    lines = ['# CAL500 held-out activity ranking', '',
+    save(OUT / f'{dataset}.ranking.json', report)
+    lines = [f'# {dataset}: held-out activity ranking', '',
              f"{len(rows)} audio examples. Macro activity AP: attributes "
              f"{report['macro_activity_average_precision']['attributes']:.3f}; embeddings "
              f"{report['macro_activity_average_precision']['embedding']:.3f}.", '',
-             'Each activity has its own prevalence baseline. Lift compares average published soft annotation weight '
+             'Each activity has its own prevalence baseline. Lift compares average native annotation weight '
              'among the ten highest-ranked tracks in each held-out fold with random selection.', '',
              '| Activity | Binary positives | Prevalence | Attribute AP | Embedding AP | Embedding AUC | Top-ten vote lift |',
              '| --- | ---: | ---: | ---: | ---: | ---: | ---: |']
@@ -99,8 +108,13 @@ def main():
                      f"{number(attribute['average_precision'])} | {number(embedding['average_precision'])} | "
                      f"{number(embedding['roc_auc'])} | {number(embedding['top_ten_vote_lift_vs_random'])} |")
     lines.extend(['', *['- ' + value for value in report['limitations']], ''])
-    (OUT / 'cal500.ranking.md').write_text('\n'.join(lines))
+    (OUT / f'{dataset}.ranking.md').write_text('\n'.join(lines))
     print(json.dumps({'macro_activity_average_precision': report['macro_activity_average_precision']}))
+    return report
+
+
+def main():
+    evaluate()
 
 
 if __name__ == '__main__':

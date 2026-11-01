@@ -29,9 +29,13 @@ def identity(text):
 
 def artist_keys(text):
     result = {identity(text)}
-    if text.count(',') == 1:
-        surname, given = text.split(',')
-        result.add(identity(given + ' ' + surname))
+    # PMEmo joins separately credited artists with '+'. Bind every credit,
+    # retaining the complete spelling too; do not guess at '&' in band names.
+    for credit in text.split('+'):
+        result.add(identity(credit))
+        if credit.count(',') == 1:
+            surname, given = credit.split(',')
+            result.add(identity(given + ' ' + surname))
     return result - {''}
 
 

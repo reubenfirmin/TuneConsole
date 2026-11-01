@@ -17,7 +17,7 @@ from yt_playlist.web.app import create_app
 def missing(store, monkeypatch, tmp_path):
     monkeypatch.setenv('YT_PLAYLIST_HOME', str(tmp_path))
     monkeypatch.setattr(executor, 'with_retry', lambda fn: fn())
-    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
     pid = store.playlists.upsert_playlist(iid, 'MISSING', 'Gone from YouTube', 0, '', 1)
     client = FakeClient()
     app = create_app(store, lambda: {iid: client}, now_fn=lambda: 2)
@@ -90,7 +90,7 @@ def test_local_removal_preserves_cached_content(missing, store, monkeypatch, cou
 
 def test_explicit_removal_cannot_drop_system_playlist(missing, store):
     _, client, http = missing
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     system = store.playlists.upsert_playlist(iid, 'LM', 'Liked Music', 0, '', 1)
     assert http.post('/playlist/forget-empty', data={'playlist': system}).status_code == 422
     assert store.playlists.get_playlist(system) is not None and not client.deleted

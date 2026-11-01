@@ -149,7 +149,7 @@ def test_replays_are_one_recording_partial_runs_do_not_replace_complete_and_anno
         store.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?)', (two,))
     drain(store)
     store.conn.set_trace_callback(None)
-    assert not any('audio_session_labels' in sql or 'audio_vibe_feedback' in sql for sql in statements)
+    assert not any('audio_annotation' in sql or 'audio_taxonom' in sql for sql in statements)
 
 
 @pytest.mark.parametrize('genre', ['Electronic', 'Techno', 'House', 'Ambient', 'Rock'])

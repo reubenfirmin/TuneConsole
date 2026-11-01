@@ -2,8 +2,8 @@
 from tests.conftest import FakeClient, _track
 from tests.web_support import _client
 def _two_identity_move(store):
-    i1 = store.identities.upsert_identity("Main", "c1", None, True)
-    i2 = store.identities.upsert_identity("Alt", "c2", None, False)
+    i1 = store.accounts.upsert_account("Main", "c1", None, True)
+    i2 = store.accounts.upsert_account("Alt", "c2", None, False)
     pid = store.playlists.upsert_playlist(i1, "PL1", "Mix", 1, "h", 1.0)
     t = store.tracks.upsert_track("v1", "S", "X", None, None, 1)
     store.playlists.set_playlist_tracks(pid, [t])

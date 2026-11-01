@@ -30,6 +30,7 @@ class MixRequest:
     banned: list[str]
     previous: list[str]
     building: bool
+    genre_families: dict[str,str] | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +171,7 @@ def _fill(order, slots, cap, quotas=None, preferred_artists=()):
 
 def _feat(item):
     return {"artist": item.get("artist") or "", "genre": item.get("genre") or "",
+            "family": item.get('family') or '',
             "source": item.get("source") or "theirs"}
 
 
@@ -178,8 +180,11 @@ def _is_overlap(candidate, state):
     artists = {artist.strip().lower() for artist in inputs.get("artists", []) if artist}
     if (candidate.get("artist") or "").strip().lower() in artists:
         return True
-    wanted = {genre_map.family(genre) for genre in inputs.get("genres", []) if genre}
-    return bool(wanted and genre_map.family(candidate.get("genre")) in wanted)
+    families = state.get('genre_families')
+    wanted = {families[genre] if families is not None else genre_map.family(genre)
+              for genre in inputs.get("genres", []) if genre}
+    family = (candidate.get('family') if families is not None else genre_map.family(candidate.get('genre')))
+    return bool(wanted and family in wanted)
 
 
 def _mix_source(candidate, state):
@@ -261,7 +266,8 @@ def construct(request: MixRequest, rng: RandomSource) -> MixResult:
     decides eligibility; construction never searches, looks up metadata or persists.
     """
     state = {"own_pct": request.own_pct, "targets": request.targets, "building": request.building,
-             "inputs": {"artists": request.artists, "genres": request.genres}}
+             "inputs": {"artists": request.artists, "genres": request.genres},
+             "genre_families":request.genre_families}
     groups = {"yours": [], "theirs": [], "blend": []}
     banned, penalized = set(request.banned), set(request.previous)
     unique = {}

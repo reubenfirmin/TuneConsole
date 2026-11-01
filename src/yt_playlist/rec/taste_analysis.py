@@ -33,6 +33,9 @@ def taste_fingerprint(store, now, *, prepared=None) -> dict:
     niche. A pinned axis not in the play distribution at all is appended with share=0.0.
     """
     mix_tuning.expire(store, now)
+    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
+        with store.read_view() as reader:
+            return taste_fingerprint(reader, now, prepared=prepared)
     bd = prepared["breadth"] if prepared is not None else taste_breadth(store)
     w = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     leans = store.rec_model.get_leans()
@@ -56,11 +59,11 @@ def taste_fingerprint(store, now, *, prepared=None) -> dict:
         minus any the user hid, minus any that already carry a lean: a leaned/added subgenre is
         promoted to its own top-level bar, so it never shows in both places."""
         out = []
-        for sub in genre_map.subgenres_of(fam):
+        for sub in genre_map.subgenres_of(fam,conn=store.conn):
             ax = f"genre:{sub}"
             if sub == fam or ax in hidden or ax in leans:
                 continue
-            eff = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, w.get(ax, 1.0) * store.rec_model.get_lean(ax)))
+            eff = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, w.get(ax, 1.0) * leans.get(ax, 1.0)))
             live, active = _live(ax, eff)
             out.append({"name": sub, "axis": ax, "effective": eff, "live": live, "live_active": active})
         return out
@@ -70,7 +73,7 @@ def taste_fingerprint(store, now, *, prepared=None) -> dict:
         if f"genre:{f}" in hidden:
             continue
         ax = f"genre:{f}"
-        eff = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, w.get(ax, 1.0) * store.rec_model.get_lean(ax)))
+        eff = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, w.get(ax, 1.0) * leans.get(ax, 1.0)))
         live, active = _live(ax, eff)
         subs = _subs(f)
         families.append({"name": f, "share": share, "weight": w.get(ax, 1.0),
@@ -81,7 +84,7 @@ def taste_fingerprint(store, now, *, prepared=None) -> dict:
         if f"era:{d}" in hidden:
             continue
         ax = f"era:{d}"
-        eff = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, w.get(ax, 1.0) * store.rec_model.get_lean(ax)))
+        eff = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, w.get(ax, 1.0) * leans.get(ax, 1.0)))
         live, active = _live(ax, eff)
         eras.append({"name": d, "share": share, "weight": w.get(ax, 1.0),
                      "effective": eff, "live": live, "live_active": active, "pinned": ax in leans})
@@ -128,6 +131,9 @@ def playlist_facets(store, playlist_id) -> dict:
     """The mix's facets for the transient feedback panel: the genres, eras, and tracks present, each
     with the identity_keys to tilt toward/away. Genres are by descending presence; eras chronological.
     """
+    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
+        with store.read_view() as reader:
+            return playlist_facets(reader, playlist_id)
     keys = store.playlists.get_playlist_track_keys(playlist_id)
     dao = store.rec_query
     meta = store.rec_query.tracks_by_keys(keys)
@@ -135,7 +141,7 @@ def playlist_facets(store, playlist_id) -> dict:
     fam_keys, era_keys = {}, {}
     for k in keys:
         if k in genres:
-            fam_keys.setdefault(genre_map.family(genres[k]), []).append(k)
+            fam_keys.setdefault(genre_map.family(genres[k],conn=store.conn), []).append(k)
         if k in decades:
             era_keys.setdefault(decades[k], []).append(k)
     return {
@@ -177,10 +183,14 @@ def taste_breadth(store, *, genre_plays=None) -> dict:
     a *play-weighted* genre distribution, so a low-play context doesn't inflate your apparent breadth
     relative to genres the user actually plays. Spec §5.2.
     """
+    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
+        with store.read_view() as reader:
+            return taste_breadth(reader, genre_plays=genre_plays)
     fams: dict = {}
     dist = store.rec_query.genre_play_distribution() if genre_plays is None else genre_plays
     for genre, c in dist.items():
-        fams[genre_map.family(genre)] = fams.get(genre_map.family(genre), 0) + c
+        family = genre_map.family(genre,conn=store.conn)
+        fams[family] = fams.get(family, 0) + c
     total = sum(fams.values())
     if total == 0 or len(fams) <= 1:
         return {"breadth": 0.0, "n_families": len(fams),

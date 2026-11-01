@@ -148,7 +148,7 @@ def test_cancelled_import_request_remains_owned_until_worker_finishes(store, mon
 def test_library_decode_keeps_requests_and_bridge_responsive_and_is_drained(store, monkeypatch):
     ctx = context(store)
     ctx.spotify_import_lock = threading.Lock()
-    store.identities.upsert_identity('main', 'credential', None, True)
+    store.accounts.upsert_account('main', 'credential', None, True)
     app = FastAPI()
     app.include_router(setup.build(ctx))
     app.include_router(bridge.build(ctx))
@@ -194,7 +194,7 @@ def test_library_decode_keeps_requests_and_bridge_responsive_and_is_drained(stor
 def test_cancelled_library_upload_keeps_decoder_owned(store, monkeypatch):
     ctx = context(store)
     ctx.spotify_import_lock = threading.Lock()
-    store.identities.upsert_identity('main', 'credential', None, True)
+    store.accounts.upsert_account('main', 'credential', None, True)
     app = FastAPI()
     app.include_router(setup.build(ctx))
     entered, release = threading.Event(), threading.Event()
@@ -229,7 +229,7 @@ def test_cancelled_library_upload_keeps_decoder_owned(store, monkeypatch):
 def test_library_upload_format_error_keeps_guidance_and_releases_work(store):
     ctx = context(store)
     ctx.spotify_import_lock = threading.Lock()
-    store.identities.upsert_identity('main', 'credential', None, True)
+    store.accounts.upsert_account('main', 'credential', None, True)
     app = FastAPI()
     app.include_router(setup.build(ctx))
     with TestClient(app) as client:

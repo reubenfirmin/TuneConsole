@@ -8,17 +8,23 @@ from yt_playlist.core.store import Store
 from yt_playlist.rec import home_prepared, journeys, mode_surfaces
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, seed_catalog_track
+from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
 
 
 @pytest.fixture
 def store():
     s = Store(":memory:")
-    s.init_schema()
-    return s
+    try:
+        s.init_schema()
+        yield s
+    finally:
+        s.conn.close()
 
 
 def _client(store, now=1000.0):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     prepare_home(store, now)
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                       base_url="http://127.0.0.1")
@@ -26,27 +32,17 @@ def _client(store, now=1000.0):
 
 def prepare_home(store, now=1000.0):
     """Seed eligible subjects, then prepare candidate pools before Home as the worker does."""
-    payload = store.rec_proposals.get_proposals("mode_bundles") or {}
-    tracks = {item["key"]: (lane, item) for mid, bucket in payload.items() if not mid.startswith("_")
-              for lane, items in bucket.items() for item in items if item.get("key")}
-    owned = store.rec_query.tracks_by_keys(tracks)
-    discovered = store.discovery.discovered_tracks_by_keys(tracks)
-    for key, (lane, item) in tracks.items():
-        if key in owned or key in discovered:
-            continue
-        if 'title' not in item or 'artist' not in item:
-            continue  # genre-option-only fixture rows are never playable candidates
-        video = "fixture-" + key
-        if lane == "fresh":
-            store.discovery.upsert_discovered_track(key, video, item["title"], item["artist"], "", None,
-                                                   item.get("genre"), None, None, 1)
-        else:
-            seed_catalog_track(store, key, item["title"], item["artist"], video_id=video,
-                               genre=item.get("genre"))
-    if (not payload and not store.rec_proposals.get_proposals("fresh_pool")
+    if (not store.recommendations.head('home') and not store.recommendations.head('fresh')
             and store.rec_query.library_keys()):
         assert mode_surfaces.prepare_bundles(store, now) is not None
-    assert home_prepared.prepare(store, now) is not None
+    # The worker continues bounded preparation slices. A cold slice can finish
+    # its reusable inputs without yet publishing a menu, especially during
+    # tuning expiry; give the fixture the same bounded continuation.
+    for _ in range(3):
+        if home_prepared.prepare(store, now) is not None:
+            break
+    else:
+        raise AssertionError('Home did not publish after three preparation slices')
 
 
 def _seed_bundles(store):
@@ -65,7 +61,9 @@ def _seed_bundles(store):
     for surf in ms.CARD_SURFACES:
         payload["1"][surf] = items(f"{surf}h", "house")
         payload["2"][surf] = items(f"{surf}t", "techno")
-    store.rec_proposals.put_proposals("mode_bundles", payload, 1.0)
+    seed_bundle_subjects(store, payload)
+    publish_bundles(store, payload, 1.0)
+    return payload
 
 
 def test_cards_route_renders_mode_cards(store):
@@ -114,10 +112,9 @@ def test_mode_card_recipe_carries_a_journey(store):
 
 
 def test_fresh_mode_card_recipe_retains_lane(store):
-    _seed_bundles(store)
-    bundles = store.rec_proposals.get_proposals("mode_bundles")
-    store.rec_proposals.put_proposals("mode_bundles", {
-        **{mid: {"fresh": bucket["fresh"]} for mid, bucket in bundles.items()},
+    bundles = _seed_bundles(store)
+    publish_bundles(store, {
+        **{mid: {"fresh": bucket["fresh"]} for mid, bucket in bundles.items() if not mid.startswith('_')},
         "_meta": {"full_pools": True},
     }, 1)
     response = _client(store).get("/home/cards")
@@ -134,7 +131,7 @@ def test_cards_route_ok_when_empty(store):
 def test_explicit_tuning_with_object_tracks_is_cached_without_request_fallback(store, monkeypatch):
     # Explicit tuning can still produce ForYouItem objects. Ordinary reads must use the
     # prepared result instead of invoking the legacy ranker when mode bundles are missing.
-    from yt_playlist.rec import home_cards as home_mod
+    from yt_playlist.rec import stored_home
     from yt_playlist.rec.surfaces import ForYouItem
     proto = {"lane": "wheelhouse", "label": "More in your wheelhouse", "name": "Mix", "note": "",
              "tracks": [ForYouItem(f"Song {i}", f"Artist {i}", "", f"v{i}", None, 0, "reason", key=f"k{i}")
@@ -144,11 +141,11 @@ def test_explicit_tuning_with_object_tracks_is_cached_without_request_fallback(s
         seed_catalog_track(store, f"k{i}", f"Song {i}", f"Artist {i}", video_id=f"v{i}")
     calls = []
 
-    def legacy_card(store, card, now, **kwargs):
-        calls.append(card)
-        return proto if card == "wheelhouse" else None
+    def candidates(store, now, **kwargs):
+        calls.append('wheelhouse')
+        return [proto]
 
-    monkeypatch.setattr(home_mod, "_one_card", legacy_card)
+    monkeypatch.setattr(stored_home, "unmodeled_cards", candidates)
     client = _client(store)
     calls.clear()  # Background preparation may read the existing Fresh pool.
     assert client.get("/home/cards").status_code == 200

@@ -12,12 +12,11 @@ from websockets.sync.client import connect
 
 from tests.browser_fixtures import _free_port
 from tests.conftest import FakeClient
-from tests.core.test_policy_upgrade import _legacy, _state
 from tests.onboarding_support import publish_personal_mix
-from yt_playlist.core import db_space, policy_upgrade
-from yt_playlist.core.storage_maintenance import LOW_SPACE_MESSAGE, MESSAGE
+from tests.test_storage_maintenance import current_vacuum_store
+from yt_playlist.core import account_auth_state, db_space, playback_feedback, policy_upgrade
+from yt_playlist.core.storage_maintenance import LOW_SPACE_MESSAGE
 from yt_playlist.web import app as web_app
-from yt_playlist.web.context import AUTH_EXPIRED_KEY
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 
 
@@ -71,10 +70,11 @@ def _radio_diagnostics(page, ctx, tmp_path):
 
 @pytest.mark.parametrize('enough_space', [True, False])
 @pytest.mark.parametrize('height', [520, 720])
-def test_start_radio_during_repair_has_no_error_banner(page, tmp_path, monkeypatch, enough_space, height):
+def test_start_radio_during_repair_has_no_error_banner(current_vacuum_store, page, tmp_path, monkeypatch,
+                                                     enough_space, height):
     page.set_viewport_size({'width': 1280, 'height': height})
-    store, _ = _legacy(tmp_path / 'state.db')
-    iid = store.identities.upsert_identity('Main', 'bridge', None, True)
+    store = current_vacuum_store
+    iid = store.accounts.upsert_account('Main', 'bridge', None, True)
     pool = [{'videoId': f'radio-{i}', 'title': f'Radio song {i}',
              'artists': [{'name': f'Artist {i}'}], 'duration_seconds': 180,
              'setVideoId': f'set-radio-{i}'} for i in range(20)]
@@ -84,15 +84,29 @@ def test_start_radio_during_repair_has_no_error_banner(page, tmp_path, monkeypat
     store.playlists.set_playlist_tracks(pid, tids)
     store.settings.set_setting('last_sync_at', '1000')
     store.settings.set_setting('onboard_dismissed', '1')
-    store.settings.set_setting(AUTH_EXPIRED_KEY, json.dumps({str(iid): 'Main'}))
+    with store.conn:
+        account_auth_state.flag(store.conn, iid, 'Main')
     publish_personal_mix(store, now=1000)
+    # A returning listener has already used Radio. Keep the real access
+    # projection; this check does not bypass the new-user progression gates.
+    store.rec_proposals.put_proposals('listening_choices',
+        {'home_format': {'episodes': {'radio': 1}}}, 1000)
     remote = FakeClient(catalog={t['videoId']: t for t in pool})
-    app = web_app.create_app(store, lambda: {iid: remote}, now_fn=lambda: 1000, background_work=True)
+    app = web_app.create_app(store, lambda: {iid: remote}, now_fn=lambda: 1000, background_work=False)
     ctx = app.state.ctx
     monkeypatch.setattr(ctx.radio, '_start_monitor', lambda s: None)
     monkeypatch.setattr(ctx.rec_worker, 'start_ticker', lambda: None)
     monkeypatch.setattr(ctx.enrich_worker, 'start_ticker', lambda: None)
     monkeypatch.setattr(ctx.rec_worker, 'trigger_mode_refresh', lambda: None)
+    monkeypatch.setattr(web_app, '_background_sync_loop', lambda *a, **kw: None)
+    monkeypatch.setattr(ctx.radio, 'prepare', lambda: None)
+    # The provider handoff is controlled; extension navigation and play events
+    # still travel over the real WebSocket below.
+    async def confirm_handoff(frame, **kwargs):
+        assert frame['type'] == 'radio-session'
+        return 200, json.dumps({'ok': True, 'player': ctx.bridge.now_playing,
+                               'playback_synced': True, 'native': {'available': True}})
+    monkeypatch.setattr(ctx.bridge, 'request_control', confirm_handoff)
     entered, release = threading.Event(), threading.Event()
     compact = policy_upgrade._compact
 
@@ -107,9 +121,13 @@ def test_start_radio_during_repair_has_no_error_banner(page, tmp_path, monkeypat
             while not release.wait(.01) and not ctx.storage_maintenance._stop.is_set():
                 pass
             return int(ctx.storage_maintenance._stop.is_set())
-        conn.set_progress_handler(progress, 1000)
-        compact(conn, directory)
-        conn.set_progress_handler(None, 0)
+        conn.set_trace_callback(lambda sql: conn.set_progress_handler(progress, 1000)
+                                if sql.startswith('VACUUM INTO') else None)
+        try:
+            compact(conn, directory)
+        finally:
+            conn.set_trace_callback(None)
+            conn.set_progress_handler(None, 0)
 
     monkeypatch.setattr(policy_upgrade, '_compact', hold_vacuum)
     port = _free_port()
@@ -117,12 +135,19 @@ def test_start_radio_during_repair_has_no_error_banner(page, tmp_path, monkeypat
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     try:
+        deadline = time.monotonic() + 10
+        while not server.started:
+            assert thread.is_alive() and time.monotonic() < deadline
+            time.sleep(.01)
+        assert page.request.get(f'http://127.0.0.1:{port}/radio/seeds').json()['tracks']
+        assert page.request.get(f'http://127.0.0.1:{port}/home/growth').json()['ready_areas']['radio']
+        ctx.storage_maintenance.start()
         assert entered.wait(10)
         with connect(f'ws://127.0.0.1:{port}/bridge/ws', origin=EXTENSION_ORIGIN, open_timeout=5) as extension, \
                 _radio_diagnostics(page, ctx, tmp_path) as diagnostics:
             page.goto(f'http://127.0.0.1:{port}/#radio')
-            expect(page.locator('#storage-maintenance')).to_have_text(MESSAGE)
-            expect(page.locator('#storage-maintenance')).to_be_visible()
+            expect(page.locator('#storage-maintenance')).to_have_text('Library updates are paused.')
+            expect(page.locator('html')).to_have_attribute('data-storage-compacting', 'true')
             expect(page.locator('.authbar')).to_be_hidden()
             start = page.get_by_role('button', name='Start radio with ').first
             expect(start).to_be_visible()
@@ -160,33 +185,35 @@ def test_start_radio_during_repair_has_no_error_banner(page, tmp_path, monkeypat
             page.screenshot(path=str(tmp_path / 'active-storage-repair-radio.png'))
             release.set()
             assert ctx.storage_maintenance.ready.wait(10)
+            playback_feedback.drain(store)
             banner = page.locator('#storage-maintenance')
             if enough_space:
-                expect(banner).to_be_hidden(timeout=5000)
+                expect(banner).to_be_hidden()
             else:
-                expect(banner).to_have_text(LOW_SPACE_MESSAGE, timeout=5000)
-                expect(banner).to_be_visible()
-                expect(banner).to_have_attribute('role', 'alert')
-                expect(page.locator('html')).to_have_attribute('data-storage-compacting', 'false')
+                expect(banner).to_have_text('Free disk space to finish.')
+            expect(page.locator('html')).to_have_attribute('data-storage-compacting', 'false')
             expect(page.locator('.authbar')).to_be_hidden()
             status = ctx.storage_maintenance.status()
             assert not status['active'] and status['recording']
             assert status['phase'] == ('done' if enough_space else 'deferred')
-            assert _state(store.conn)['phase'] == ('done' if enough_space else 'compacting')
+            assert status['message'] == ('' if enough_space else LOW_SPACE_MESSAGE)
             assert status['warning'] == (not enough_space)
+            assert store.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+            assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+            store.settings.set_setting('after-compaction', 'writes resumed')
+            assert store.settings.get_setting('after-compaction') == 'writes resumed'
             page.screenshot(path=str(tmp_path / 'storage-repair-result.png'))
-            # Server rendering preserves a deferred warning even without polling.
+            # The server renders the same warning even when polling is unavailable.
             page.route('**/static/storage-maintenance.js*', lambda route: route.abort())
             page.reload()
             if enough_space:
                 expect(banner).to_be_hidden()
             else:
                 expect(banner).to_be_visible()
-                expect(banner).to_have_text(LOW_SPACE_MESSAGE)
+                expect(banner).to_have_text('Free disk space to finish.')
             page.screenshot(path=str(tmp_path / 'storage-repair-result-after-reload.png'))
     finally:
         release.set()
         server.should_exit = True
         thread.join(10)
         assert not thread.is_alive()
-        store.conn.close()

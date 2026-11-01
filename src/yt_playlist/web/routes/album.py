@@ -107,27 +107,20 @@ def build(ctx) -> APIRouter:
         # (privately owned release) is yours by definition, and can never appear in saved_albums
         # because saving means liking an audioPlaylistId, which an upload has none of.
         in_library = saved or upload
-        # The editable "folded-in library" table is only for library albums (whose full track list has
-        # been materialized for enrichment). For any other album, regular sync may still have stamped
-        # one incidental track with this album_browse_id (because it's in one of your playlists). That
-        # partial subset must NOT shadow the full live-fetched album. Count it for
-        # the library-status note, but only display it for saved or uploaded albums.
+        # Capture metadata for library editing independently of occurrence count:
+        # repeats and unavailable positions are not extra catalog members.
+        if not getattr(store, 'activity_paused', False) and in_library and album:
+            for t in album.get('tracks') or []:
+                if t.get('video_id') and t.get('title'):
+                    store.tracks.upsert_track(t['video_id'], t['title'],
+                        t.get('artist') or album.get('artist') or '', album.get('title') or '',
+                        parse_duration(t.get('duration')), album_browse_id=browse_id,
+                        thumbnail=album.get('thumbnail'))
+        # Complete publication owns the displayed sequence for every release.
+        # Before publication, incidental library evidence cannot shadow a live response.
         library_tracks = store.charts.album_tracks_detail(browse_id) if browse_id else []
         tracks = library_tracks if in_library else []
-        # Fold a library album's tracks in ON DEMAND (using the tracks we just fetched live), so
-        # enrichment is available the moment you open it, no waiting for a full sync. Fold whenever
-        # the live album has more than we hold: an upload typically arrives as a PARTIAL subset (sync
-        # stamps only the tracks that appear in a playlist), and a `not tracks` guard would skip the
-        # fold entirely for it, leaving 3 of 17 rows on screen.
-        if (not getattr(store, 'activity_paused', False)
-                and in_library and album and album.get("tracks") and len(tracks) < len(album["tracks"])):
-            for t in album["tracks"]:
-                if t.get("video_id") and t.get("title"):
-                    store.tracks.upsert_track(t["video_id"], t["title"], t.get("artist") or album.get("artist") or "",
-                                       album.get("title") or "", parse_duration(t.get("duration")),
-                                       album_browse_id=browse_id, thumbnail=album.get("thumbnail"))
-            tracks = store.charts.album_tracks_detail(browse_id)
-        complete = store.collection.is_album_tracklist_complete(browse_id)
+        complete = store.collection.has_published_album_tracklist(browse_id)
         fallback_tracks = library_tracks if complete else tracks if not inline else []
         if fallback_tracks and not (album and album.get("title")):
             meta = next((a for a in store.collection.get_saved_albums() if a["browse"] == browse_id), {})
@@ -136,13 +129,15 @@ def build(ctx) -> APIRouter:
                      "thumbnail": meta.get("thumbnail") or fallback_tracks[0]["thumbnail"], "tracks": fallback_tracks}
         # Unsaved releases use the same row component. Merge known metadata by exact
         # upload while retaining the full fetched sequence and keeping library ownership intact.
-        table_tracks = tracks if album else []
-        if album and (not in_library or getattr(store, 'activity_paused', False)):
+        table_tracks = (library_tracks if complete else tracks) if album else []
+        if album and not complete and (not in_library or getattr(store, 'activity_paused', False)):
             known = {t['video_id']: t for t in store.charts.video_tracks_detail(
                 [t['video_id'] for t in album.get('tracks') or [] if t.get('video_id')])}
             table_tracks = [{
                 **known.get(t.get('video_id'), {}),
-                'video_id': t.get('video_id') or '', 'title': t.get('title') or '',
+                'video_id': t.get('video_id') if t.get('title') else '',
+                'title': t.get('title') or 'Unavailable track',
+                'available': known.get(t.get('video_id'), {}).get('available') if t.get('title') else 0,
                 'artist': t.get('artist') or album.get('artist') or '',
                 'album': album['title'], 'album_browse': browse_id,
                 'thumbnail': t.get('thumbnail') or album.get('thumbnail'),
@@ -152,6 +147,8 @@ def build(ctx) -> APIRouter:
                 'liked': known.get(t.get('video_id'), {}).get('liked', False),
                 'plays': known.get(t.get('video_id'), {}).get('plays'),
             } for t in album.get('tracks') or []]
+        if album and complete:
+            album = {**album, 'tracks': table_tracks}
         cover, mosaic = cover_and_mosaic(album, tracks)
         editorial = {'browse_id': browse_id, 'title': (album or {}).get('title'),
                      'artist': (album or {}).get('artist')}
@@ -187,7 +184,7 @@ def build(ctx) -> APIRouter:
             "album_feedback": album_choices.feedback_state(store, [browse_id]).get(browse_id, {}).get("kind"),
             "companion": companion, "companion_recipe": companion_recipe,
             "is_upload": upload, "in_library": in_library,
-            "library_track_count": len({t["track_id"] for t in library_tracks}),
+            "library_track_count": len({t["track_id"] for t in library_tracks if t.get('track_id') is not None}),
             "cover": cover, "mosaic": mosaic,
             "genres": sorted(set(store.genres.get_genre_whitelist()) | set(store.genres.all_genres()), key=str.lower),
             "lastfm_configured": lastfm.api_key(store) is not None,
@@ -235,9 +232,11 @@ def build(ctx) -> APIRouter:
                              "tracks": [{"video_id": track['videoId'],
                                          'key': store.tracks.identity_key_for_video(track['videoId'])}
                                         for track in tracks if track.get('videoId')]})
-                store.settings.set_setting("listening_album_pending", json.dumps({"opportunity_id": opportunity,
-                    "browse": browse, "playlist": playlist, "at": ctx.now_fn(), 'action_id': action_id,
-                    'videos': [track['videoId'] for track in tracks if track.get('videoId')]}))
+                from yt_playlist.core import album_playback_context
+                with store._lock,store.conn:
+                    album_playback_context.put(store.conn,{"opportunity_id":opportunity,
+                        "browse":browse,"playlist":playlist,"at":ctx.now_fn(),'action_id':action_id,
+                        'videos':[track['videoId'] for track in tracks if track.get('videoId')]})
             ctx.bridge.send_control({"type": "navigate", "url":
                 "https://music.youtube.com/watch?v=" + quote(video, safe="") + "&list=" + quote(playlist, safe="")},
                 intent=intent)

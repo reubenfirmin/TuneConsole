@@ -27,6 +27,9 @@ def test_populated_upgrade_preserves_legacy_evidence_and_rolls_back_interruption
             migrate(store.conn, registry=(*MIGRATIONS[:48], Migration(49, MIGRATIONS[48].name, interrupted)))
         assert tuple(store.conn.execute('SELECT * FROM metadata_findings').fetchone()) == legacy
         assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 48
+        # Version 79 is the supported installed boundary that retains these
+        # observations. Later explicit conversions replace their owner.
+        migrate(store.conn, registry=MIGRATIONS[:79])
         store.init_schema()
         upgraded = tuple(store.conn.execute('SELECT * FROM metadata_findings').fetchone())
         assert upgraded == (*legacy, None, None)

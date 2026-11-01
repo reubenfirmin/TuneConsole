@@ -54,7 +54,7 @@ def build_discovered_content_vectors(store) -> int:
         snapshot = store.rec_model.content_generation()
         if not snapshot["model"]:
             return 0
-        out = content_model.encode_discovered(store.discovery.get_discovered_tracks(), json.loads(snapshot["model"]))
+        out = content_model.encode_discovered(store.discovery.get_discovered_tracks(), json.loads(snapshot["model"]),conn=store.conn)
         if store.rec_model.publish_content_generation(snapshot["library"], out, snapshot["model"],
                 snapshot["revision"] or "", snapshot["inputs"], snapshot["generation"]):
             return len(out)
@@ -78,7 +78,7 @@ def content_space(store, include_new) -> VectorSpace:
         if DV is not None:
             if CV is None:
                 ckeys, CV = list(dkeys), DV
-            elif DV.shape[1] == CV.shape[1]:
+            elif snapshot['library_basis'] == snapshot['discovered_basis']:
                 ckeys = list(ckeys) + list(dkeys)
                 CV = np.vstack([CV, DV])
         cidx = {k: i for i, k in enumerate(ckeys)}

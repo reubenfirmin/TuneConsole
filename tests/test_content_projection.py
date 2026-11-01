@@ -6,7 +6,7 @@ from tests import model_support
 
 
 def test_content_projection_lands_in_right_cluster(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(15)]
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(15)]
     for t in A:
@@ -32,7 +32,7 @@ def test_content_projection_lands_in_right_cluster(store):
 
 
 def test_projection_none_without_enough_tags(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     assert discover.ContentProjection.fit(store) is None
 
 
@@ -108,7 +108,7 @@ def test_projection_reports_insufficient_fold_evidence(store, monkeypatch):
 # --- §2: enriched feature basis (audio + subgenre) and graceful degradation ---
 
 def _two_playlists(store, A, B):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", len(A), "h", 0.0), A)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", len(B), "h2", 0.0), B)
     model_support.build_track_model(store, dim=8)

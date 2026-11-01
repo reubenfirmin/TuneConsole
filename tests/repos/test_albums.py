@@ -39,7 +39,7 @@ def test_releases_keep_equal_titles_separate_and_multiple_release_links(store):
     first,second = albums.lookup(store.conn,'first'),albums.lookup(store.conn,'second')
     assert first != second
     assert {r[0] for r in store.conn.execute('SELECT album_id FROM album_tracks WHERE entry_id=?', (entry,))} == {first,second}
-    assert store.conn.execute('SELECT COUNT(*) FROM album_library_memberships WHERE album_id=?', (first,)).fetchone()[0] == 1
+    assert store.conn.execute('SELECT COUNT(*) FROM saved_album_memberships WHERE album_id=?', (first,)).fetchone()[0] == 1
     assert store.conn.execute('SELECT COUNT(*) FROM album_discovery_memberships WHERE album_id=?', (second,)).fetchone()[0] == 1
     store.conn.execute('DELETE FROM discovered_albums WHERE browse_id=\'second\'')
     assert albums.lookup(store.conn,'second') == second
@@ -57,7 +57,7 @@ def test_full_fetch_retains_order_repeats_and_disc_numbers(store):
             {'entry_id':b,'disc_number':2,'track_number':2}],now=50)
     assert list(map(tuple,store.conn.execute('SELECT entry_id,position,disc_number,track_number FROM album_tracks WHERE album_id=? ORDER BY position', (aid,)))) == [(b,0,1,1),(a,1,2,1),(b,2,2,2)]
     assert store.conn.execute('SELECT fetched_at,complete,expected_track_count FROM album_fetch_state').fetchone()[:] == (50,1,3)
-    assert json.loads(store.conn.execute('SELECT track_keys FROM album_tracklists').fetchone()[0]) == ['second|artist','first|artist','second|artist']
+    assert json.loads(store.conn.execute('SELECT track_keys FROM album_tracklist_keys').fetchone()[0]) == ['second|artist','first|artist','second|artist']
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
@@ -106,7 +106,7 @@ def test_release_consumers_keep_same_title_releases_and_previous_associations(st
     from random import Random
     from yt_playlist.rec.discover import _scan_artist_albums
 
-    iid = store.identities.upsert_identity('me','c',None,True)
+    iid = store.accounts.upsert_account('me','c',None,True)
     pid = store.playlists.upsert_playlist(iid,'P','Mix',1,'h',0)
     entry = store.tracks.upsert_track('v','Song','Artist','Same',10,album_browse_id='first',artist_browse_id='UC_artist')
     store.tracks.upsert_track('v','Song','Artist','Same',10,album_browse_id='second',artist_browse_id='UC_artist')
@@ -171,7 +171,7 @@ def test_recap_uses_all_release_relationships_without_inventing_playback_context
     from yt_playlist.rec.recap_metrics import month_bounds,profile
     from yt_playlist.repos.recap import RecapRepo
 
-    iid = store.identities.upsert_identity('me','c',None,True)
+    iid = store.accounts.upsert_account('me','c',None,True)
     keys = []
     for i in range(3):
         entry = store.tracks.upsert_track(str(i),f'Song {i}','Artist','Album',10,album_browse_id='release')
@@ -181,6 +181,6 @@ def test_recap_uses_all_release_relationships_without_inventing_playback_context
     data = RecapRepo(store).snapshot(since,until)
     assert all(data['meta'][k]['album_browse_ids']=={'release',f'other-{i}'} for i,k in enumerate(keys))
     assert all(data['meta'][k]['album_browse_id'] is None for k in keys)
-    events = [dict(identity_id=iid,source='live',identity_key=k,played_at=since+i*60) for i,k in enumerate(keys)]
+    events = [dict(account_id=iid,source='live',identity_key=k,played_at=since+i*60) for i,k in enumerate(keys)]
     stats = profile('2026-09',events,data['meta'],{(iid,'live'):(since-1,until)},[])
     assert stats.album_covered_plays==stats.album_run_plays==3

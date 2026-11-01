@@ -15,12 +15,29 @@ _KEY_COLUMNS = {"settings": "key", "rec_proposals": "surface", "player_events": 
                 "catalog_entries": "recording_id", "unresolved_items": "entry_id",
                 "entry_field_choices": "entry_id", "library_memberships": "entry_id",
                 "discovery_memberships": "recording_id", "discovery_sources": "recording_id",
-                "rec_content_pending": "identity_key", "rec_prepared_content": "identity_key",
+                "rec_content_pending": "identity_key", "prepared_recording_inputs": "recording_id",
+                "unresolved_preparation_inputs": "raw_key",
+                "recording_embeddings": "space", "artist_embeddings": "space",
                 "rec_musical_sources": "source_key", "rec_musical_links": ("source_key", "recording_id"),
+                "musical_source_observations": "source_key", "metadata_choice_heads": "entry_id",
+                "metadata_runtime_choices": "entry_id", "metadata_runtime_recording_sources": "recording_id",
+                "metadata_runtime_entry_sources": "entry_id", "metadata_runtime_recording_genres": "recording_id",
+                "metadata_observations": "entry_id",
+                "native_metadata_observations": "id", "metadata_deliveries": "id",
+                "published_metadata_head": "id", "published_metadata_destination_head": "id",
+                "published_metadata_destination_native": "source_key",
+                "published_metadata_destination_deliveries": "id",
                 "rec_musical_pending": "source_key", "rec_musical_source_profiles": "source_key",
-                "rec_musical_profiles": "identity_key", "track_artists": "entry_id",
+                "rec_musical_profiles": "identity_key", "entry_artists": "entry_id", "track_artists": "entry_id",
                 "recording_vibes": "recording_id", "sample_attributes": "recording_id",
-                "measurements": "recording_id"}
+                "measurements": "recording_id",
+                "choice_learning_heads": "surface", "choice_learning_publications": "id",
+                "choice_learning_parameters": "publication_id", "choice_learning_exclusions": "publication_id",
+                "choice_mode_estimates": "publication_id", "choice_group_estimates": "publication_id",
+                "choice_group_opportunities": "publication_id", "choice_interest_contexts": "publication_id",
+                "choice_interest_features": "publication_id", "choice_interest_tracks": "publication_id",
+                "choice_album_interests": "publication_id", "choice_album_track_days": "publication_id",
+                "choice_interest_mix_descriptors": "publication_id"}
 # A declared catalog read consumes every recording field except enrichment's
 # scheduling timestamps. Default/unannotated reads still guard the entire row.
 # Excluding only these fields also guards newly added catalog columns.
@@ -29,6 +46,7 @@ _COLUMN_GROUP_EXCLUSIONS = {
 }
 _COLUMN_GROUP_INCLUSIONS = {
     "recordings": {"identity": {"id", "identity_key"}},
+    "metadata_runtime_state": {"format": {"id", "active"}},
 }
 
 
@@ -41,8 +59,21 @@ def _literal(value):
 
 
 class Revisions:
+    @staticmethod
+    def unbind(conn):
+        """Retire this connection's counters when its schema is replaced."""
+        for name, in conn.execute("SELECT name FROM sqlite_temp_schema WHERE type='trigger' "
+                                  "AND name LIKE 'snapshot_revision_%'").fetchall():
+            # Preparing DDL can refresh main's schema and automatically remove
+            # TEMP triggers whose tables an external migration just retired.
+            conn.execute(f'DROP TRIGGER IF EXISTS temp.{_identifier(name)}')
+        conn.execute('DROP TABLE IF EXISTS temp.snapshot_revisions')
+
     def __init__(self, conn):
         self.conn = conn
+        # If external DDL races binding, this older epoch forces another bind
+        # and prevents readers using a newer definition from trusting counters.
+        self.schema_version = conn.execute('PRAGMA main.schema_version').fetchone()[0]
         self.tables = set()
         self.views = {r[0] for r in conn.execute(
             "SELECT name FROM main.sqlite_schema WHERE type='view'")}
@@ -70,8 +101,11 @@ class Revisions:
                                 (("OLD", "NEW") if operation == "UPDATE" else
                                  ("OLD",) if operation == "DELETE" else ("NEW",)))
                 writes = "".join(
-                    "INSERT INTO snapshot_revisions(table_name,record_key,revision) VALUES ("
-                    f"{_literal(name)},{key},total_changes()+1) ON CONFLICT(table_name,record_key) "
+                    # Nullable references have no keyed consumer. Their whole
+                    # owner revision still advances through the first key.
+                    "INSERT INTO snapshot_revisions(table_name,record_key,revision) SELECT "
+                    f"{_literal(name)},{key},total_changes()+1 WHERE {key} IS NOT NULL "
+                    "ON CONFLICT(table_name,record_key) "
                     "DO UPDATE SET revision=excluded.revision;" for key in keys)
                 condition = f" WHEN {changed}" if operation == "UPDATE" else ""
                 trigger = _identifier(f"snapshot_revision_{name}_{operation.lower()}")
@@ -90,6 +124,22 @@ class Revisions:
                                  "ON CONFLICT(table_name,record_key) "
                                  "DO UPDATE SET revision=excluded.revision; END")
         conn.commit()
+
+    def refresh(self):
+        """Bind newly published owners before pinning another background view.
+
+        Older views already carry a different main schema epoch and cannot
+        publish. Rebinding these connection-local counters scans definitions
+        only, leaving all stored data and applied history untouched.
+        """
+        if self.conn.execute('PRAGMA main.schema_version').fetchone()[0] == self.schema_version:
+            return
+        if self.conn.in_transaction:
+            raise RuntimeError('Cannot refresh snapshot revisions inside another transaction')
+        self.unbind(self.conn)
+        rebound = Revisions(self.conn)
+        self.tables, self.views = rebound.tables, rebound.views
+        self.schema_version = rebound.schema_version
 
     def capture(self, dependencies=None):
         """Read last-write serials, seeking only requested dependencies when supplied.
@@ -160,6 +210,10 @@ class Reads:
                 keys = self._record_keys.get(table)
                 if keys is not None:
                     self.include({(table, key) for key in keys})
+                elif table == 'metadata_runtime_state' and _column in ('id', 'active'):
+                    # Format detection reads this owner directly. File-GC cursor
+                    # changes must not invalidate model calculations or rankings.
+                    self.include({(table, 'group:format')})
                 else:
                     self.include({(table, "")})
         return sqlite3.SQLITE_OK

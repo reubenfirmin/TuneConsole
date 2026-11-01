@@ -32,7 +32,7 @@ class _DescClient(FakeClient):
 
 
 def _sync(store, client):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     sync.sync_identity(store, iid, client, now=1000.0)
     return iid
 
@@ -96,7 +96,7 @@ def test_a_playlist_with_no_description_is_left_alone():
 
 def test_creating_a_generated_playlist_writes_the_marker():
     s = _store()
-    iid = s.identities.upsert_identity("main", "cred", None, True)
+    iid = s.accounts.upsert_account("main", "cred", None, True)
     client = FakeClient()
 
     playlist_generated.create_generated_playlist(

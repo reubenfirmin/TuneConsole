@@ -1,11 +1,11 @@
 """Provider revisions survive bounded publication, restart and newer attempts."""
 from contextlib import contextmanager
-import json
 
 import pytest
 
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core.store import Store
+from yt_playlist.core import provider_frontiers
 from yt_playlist.repos import enrichment_state
 
 ORIGINAL = {'deezer': {'fingerprint': 'original', 'status': 'available'}}
@@ -106,7 +106,7 @@ def test_partial_configuration_refresh_resumes_after_restart_without_requeueing_
     with pytest.raises(WorkClosing):
         database.enrichment_state.reconcile_provider_configuration(CHANGED)
     assert jobs(database) == {rows[0]['recording_id']}
-    refresh = json.loads(database.settings.get_setting(enrichment_state.REFRESH_KEY + 'deezer'))
+    refresh = provider_frontiers.read(database.conn, 'deezer')
     assert refresh['cursor'] == rows[0]['recording_id']
     database.enrichment_state.record_enrichment_attempt(rows[0]['identity_key'], 'deezer', {}, now=20)
     restarted = Store(database._db_path)
@@ -114,7 +114,7 @@ def test_partial_configuration_refresh_resumes_after_restart_without_requeueing_
     try:
         restarted.enrichment_state.reconcile_provider_configuration(CHANGED)
         assert jobs(restarted) == {rows[1]['recording_id']}
-        assert restarted.settings.get_setting(enrichment_state.REFRESH_KEY + 'deezer') is None
+        assert provider_frontiers.read(restarted.conn, 'deezer') is None
         assert restarted.enrichment_state.enrichment_provider_state(rows[0]['recording_id'])['deezer']['at'] == 20
         assert not restarted.conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:

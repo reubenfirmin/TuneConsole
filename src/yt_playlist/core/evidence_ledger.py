@@ -33,6 +33,17 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
+def root_for_database(path, memory_key):
+    from . import paths
+    return (Path(path).with_name(Path(path).name + '.evidence') if path else
+            paths.data_dir() / 'test-evidence' / str(memory_key))
+
+
+def directory(conn):
+    return root_for_database(conn.execute('PRAGMA database_list').fetchone()[2],
+                             getattr(conn, '_policy_memory_key', id(conn)))
+
+
 def library_byte_budget(recordings):
     """Reserve base event space plus replay context space proportional to saved music.
 
@@ -78,9 +89,13 @@ def _mkdir(path):
 class EvidenceLedger:
     KINDS = {"opportunity", "response", "forecast", "artifact", "report", "checkpoint"}
 
-    def __init__(self, directory, byte_budget):
+    def __init__(self, directory, byte_budget, *, opportunity_projection=None):
         self.directory = Path(directory)
         self.byte_budget = byte_budget
+        self.opportunity_projection = opportunity_projection
+
+    def project_opportunity(self, value):
+        return self.opportunity_projection(value) if self.opportunity_projection else value
 
     @contextmanager
     def _budget(self):
@@ -128,7 +143,8 @@ class EvidenceLedger:
 
     def get(self, kind, identity):
         try:
-            return json.loads(self._path(kind, identity).read_bytes())
+            value = json.loads(self._path(kind, identity).read_bytes())
+            return self.project_opportunity(value) if kind == 'opportunity' else value
         except FileNotFoundError:
             return None
 
@@ -227,15 +243,30 @@ class EvidenceLedger:
         for path in paths:
             check_cancellable_work()
             try:
-                records.append(json.loads(path.read_bytes()))
+                value = json.loads(path.read_bytes())
+                records.append(self.project_opportunity(value) if kind == 'opportunity' else value)
             except FileNotFoundError:
                 # Another application's maintenance can retire an unanswered old menu.
                 continue
         return records
 
-    def maintain(self, before, *, protected_artifacts=(), protected_runs=(), orphan_before=None,
+    def maintain(self, *args, **kwargs):
+        """Do not retire files belonging to an analytics reader or backup."""
+        from . import policy_documents
+        _mkdir(self.directory)
+        with (self.directory / '.readers.lock').open('a+b') as stream:
+            unlock = policy_documents._try_file_lock(stream, exclusive=True)
+            if unlock is None:
+                return {'deferred': True}
+            try:
+                return self._maintain(*args, **kwargs)
+            finally:
+                unlock()
+
+    def _maintain(self, before, *, protected_artifacts=(), protected_runs=(), orphan_before=None,
                  protected_opportunities=(), pressure_before=None, compacted_contexts=(),
-                 context_before=None, context_byte_budget=0, required_bytes=0, pending_protection=None):
+                 context_before=None, context_byte_budget=0, required_bytes=0, pending_protection=None,
+                 retire_references=None):
         """Retire old unanswered menus and orphan artifacts; preserve choice/correction inputs.
 
         At 90% capacity, retire the oldest unanswered menus until 30% is free.
@@ -369,10 +400,12 @@ class EvidenceLedger:
                     used -= sum(sizes.get(path, 0) for path in freed - removed)
                     removed.update(freed)
             surviving_contexts = {offer['context'] for oid, offer in offers.items() if oid not in retired}
+            retired_checkpoints = {}
             for path in (self.directory / 'checkpoint').glob('*/*.json'):
                 value = json.loads(path.read_bytes())
                 if value.get('source_context') not in surviving_contexts:
                     removed.add(path)
+                    retired_checkpoints[path] = value.get('source_context')
             guard = pending_protection() if pending_protection is not None else nullcontext(((), ()))
             with guard as (pending_artifacts, pending_opportunities):
                 # Admissions can continue throughout inventory and planning. Take
@@ -395,6 +428,9 @@ class EvidenceLedger:
                     self._advance_generation()
                 for path in removed:
                     path.unlink(missing_ok=True)
+                if retire_references is not None:
+                    retire_references(sorted(retired), sorted(identity for path, identity in retired_checkpoints.items()
+                        if path in removed and isinstance(identity, str)))
             surviving_contexts = {offer['context'] for oid, offer in offers.items() if oid not in retired}
             # The lock excludes writers; only old abandoned staging files may be removed.
             for path in self.directory.glob("*/*/.pending-*"):

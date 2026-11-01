@@ -10,7 +10,7 @@ from yt_playlist.repos import scorecard_attribution
 
 
 def seed(store):
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
     store.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
     store.rec_ledger.record_served_impressions('shown', 'home', [{
         'key': 'song|artist', 'rank': 1, 'model_version': 'm',
@@ -105,7 +105,7 @@ def test_empty_report_does_not_scan_events_or_catalog(store):
 def test_repeated_exits_use_bulk_historical_lookup_and_index(store):
     iid = seed(store)
     store.conn.executemany(
-        'INSERT INTO player_events(identity_id,kind,video_id,position,duration,at) VALUES (?,?,?,?,?,?)',
+        'INSERT INTO player_events(account_id,kind,video_id,position,duration,at) VALUES (?,?,?,?,?,?)',
         [(iid, 'ended', 'video', 190, 200, at) for at in range(120, 320)])
     store.conn.commit()
     with store.read_snapshot() as snapshot:

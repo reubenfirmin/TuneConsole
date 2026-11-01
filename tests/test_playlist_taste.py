@@ -3,7 +3,7 @@ from tests import model_support
 
 
 def test_playlist_taste_weights_by_play_and_scores(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     techno = [store.tracks.upsert_track(f"t{i}", f"T{i}", "TechnoBand", None, None) for i in range(8)]
     folk = [store.tracks.upsert_track(f"f{i}", f"F{i}", "FolkBand", None, None) for i in range(8)]
     pt = store.playlists.upsert_playlist(iid, "PT", "Techno Nights", 8, "h", 0.0)
@@ -26,6 +26,6 @@ def test_playlist_taste_weights_by_play_and_scores(store):
 
 
 def test_playlist_taste_empty_without_vectors(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     pt = scoring.playlist_taste(store)
     assert not pt and pt.score([1.0]) == (0.0, [])

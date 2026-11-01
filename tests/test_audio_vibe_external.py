@@ -148,4 +148,4 @@ def test_model_change_replaces_one_measurement_vote_and_preserves_feedback(store
     assert fits(store, measured)['relax']['score'] < before
     assert fits(store, neighbour)['relax']['recordings'] == 1
     assert store.audio_vibes.feedback(samples[0]['run_id']) == feedback
-    assert not any('audio_session_labels' in sql or 'audio_vibe_feedback' in sql for sql in statements)
+    assert not any('audio_annotation' in sql or 'audio_taxonom' in sql for sql in statements)

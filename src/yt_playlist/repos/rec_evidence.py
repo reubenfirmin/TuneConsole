@@ -20,7 +20,7 @@ class RecEvidenceRepo(Repo):
         rows = self.conn.execute(
             "SELECT pe.identity_key k,CAST(julianday(c.day)-julianday('1970-01-01') AS INTEGER) day,"
             "SUM(CASE WHEN pe.is_generated=1 THEN 0 ELSE 1 END) non_generated "
-            "FROM play_events pe JOIN play_event_calendar c ON c.event_id=pe.id "
+            "FROM play_event_subjects pe JOIN play_event_calendar c ON c.event_id=pe.id "
             "GROUP BY pe.identity_key,c.day HAVING NOT EXISTS "
             "(SELECT 1 FROM listening_days d WHERE d.identity_key=pe.identity_key AND d.day=c.day)").fetchall()
         return {(r["day"], r["k"]) for r in rows if r["non_generated"] == 0}
@@ -42,7 +42,7 @@ class RecEvidenceRepo(Repo):
         """
         rows = self.conn.execute(
             "SELECT pe.identity_key k,SUM(CASE WHEN pe.is_generated=1 THEN 0 ELSE 1 END) non_generated "
-            "FROM play_events pe WHERE pe.played_at>=? GROUP BY pe.identity_key HAVING NOT EXISTS "
+            "FROM play_event_subjects pe WHERE pe.played_at>=? GROUP BY pe.identity_key HAVING NOT EXISTS "
             "(SELECT 1 FROM listening_days d WHERE d.identity_key=pe.identity_key AND d.day_ts>=?)",
             (since_ts,since_ts)).fetchall()
         return {r["k"] for r in rows if r["non_generated"] == 0}
@@ -52,7 +52,7 @@ class RecEvidenceRepo(Repo):
         """Generated-only provenance for causal evaluation's [start, end) interval."""
         rows = self.conn.execute(
             "SELECT pe.identity_key k,SUM(CASE WHEN pe.is_generated=1 THEN 0 ELSE 1 END) non_generated "
-            "FROM play_events pe WHERE pe.played_at>=? AND pe.played_at<? GROUP BY pe.identity_key "
+            "FROM play_event_subjects pe WHERE pe.played_at>=? AND pe.played_at<? GROUP BY pe.identity_key "
             "HAVING NOT EXISTS (SELECT 1 FROM listening_days d WHERE d.identity_key=pe.identity_key "
             "AND d.day_ts>=? AND d.day_ts<?)",(start_ts,end_ts,start_ts,end_ts)).fetchall()
         return {r["k"] for r in rows if r["non_generated"] == 0}
@@ -65,7 +65,7 @@ class RecEvidenceRepo(Repo):
             return set()
         qs = ",".join("?" * len(ids))
         rows = self.conn.execute(
-            f"SELECT DISTINCT identity_key k FROM play_events WHERE playlist_ytm_id IN ({qs}) "
+            f"SELECT DISTINCT identity_key k FROM play_event_subjects WHERE playlist_ytm_id IN ({qs}) "
             "AND played_at >= ?", list(ids) + [since_ts]).fetchall()
         return {r["k"] for r in rows}
 
@@ -93,8 +93,8 @@ class RecEvidenceRepo(Repo):
                 pbuckets.setdefault(r["g"], set()).add(r["k"])
         out += [list(s) for s in pbuckets.values() if len(s) > 1]
         for grp, cap in (
-            ("SELECT at.album_id g,t.identity_key k FROM tracks t JOIN album_tracks at ON at.entry_id=t.id", max_album),
-            ("SELECT ta.artist_id g, t.identity_key k FROM tracks t JOIN track_artists ta ON ta.entry_id=t.id", _ARTIST_BASKET_CAP)):
+            (f"SELECT at.album_id g,t.identity_key k FROM tracks t JOIN {self.album_tracks_table} at ON at.entry_id=t.id", max_album),
+            (f"SELECT ta.artist_id g, t.identity_key k FROM tracks t JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id", _ARTIST_BASKET_CAP)):
             buckets = {}
             for r in self.conn.execute(grp):
                 if r["k"] in good:
@@ -112,7 +112,7 @@ class RecEvidenceRepo(Repo):
             if r["k"] not in good:
                 continue
             if r["genre"]:
-                fam.setdefault(genre_map.family(r["genre"]), set()).add(r["k"])
+                fam.setdefault(genre_map.family(r["genre"],conn=self.conn), set()).add(r["k"])
             dec = decade(r["mb_year"])
             if dec is not None:
                 yr.setdefault(dec, set()).add(r["k"])
@@ -165,7 +165,7 @@ class RecEvidenceRepo(Repo):
         # cannot establish that the same co-membership existed before cutoff.
         sbuckets = {}
         for r in self.conn.execute(
-                "SELECT DISTINCT identity_id||':'||day g,identity_key k FROM listening_activity WHERE at<?", (cutoff,)):
+                "SELECT DISTINCT account_id||':'||day g,identity_key k FROM listening_activity WHERE at<?", (cutoff,)):
             if r["k"] in good:
                 sbuckets.setdefault(r["g"], set()).add(r["k"])
         out += [list(s) for s in sbuckets.values() if 1 < len(s) <= max_session]

@@ -6,9 +6,11 @@ from tests.test_home_other_genres import seed_genres
 from yt_playlist.rec import graduation, mix_tuning, rec_params, scoring
 from yt_playlist.web.app import create_app
 
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
+
 
 def client_at(store, clock):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     from tests.test_mode_cards_route import prepare_home
     prepare_home(store, clock[0])
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: clock[0]),

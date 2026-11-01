@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized
 from yt_playlist.core.catalog_query import playable_tracks_sql
+from yt_playlist.core import album_memberships
 
 MIN_QUERY = 2                   # shorter queries are too noisy to bother
 CANDIDATE_CAP = 50              # rows fetched per section before the seeded sample
@@ -56,10 +57,10 @@ class SearchRepo(Repo):
         rows = self.conn.execute(
             "WITH library_artists AS ("
             " SELECT ta.artist_id,t.identity_key,t.thumbnail FROM tracks t "
-            " JOIN track_artists ta ON ta.entry_id=t.id UNION ALL "
+            f" JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id UNION ALL "
             " SELECT aa.artist_id,NULL,a.thumbnail FROM albums a "
             " JOIN album_artists aa ON aa.album_id=a.id "
-            " WHERE EXISTS (SELECT 1 FROM album_library_memberships m WHERE m.album_id=a.id)"
+            f" WHERE EXISTS (SELECT 1 FROM {album_memberships.read_relation(self.conn)} m WHERE m.album_id=a.id)"
             ") SELECT a.id artist_id,a.name artist,COUNT(DISTINCT l.identity_key) n,MIN(l.thumbnail) thumb "
             "FROM artists a JOIN library_artists l ON l.artist_id=a.id "
             "WHERE NOT EXISTS (SELECT 1 FROM artist_redirects r WHERE r.retired_id=a.id) "
@@ -83,7 +84,7 @@ class SearchRepo(Repo):
         shown_keys = set()
 
         eligible = playable_tracks_sql(
-            'SELECT t.* FROM tracks t WHERE EXISTS (SELECT 1 FROM track_artists ta '
+            f'SELECT t.* FROM tracks t WHERE EXISTS (SELECT 1 FROM {self.entry_artists_table} ta '
             'WHERE ta.entry_id=t.id AND ta.artist_id=?)')
         trows = self.conn.execute(
             "SELECT title, artist, identity_key key, video_id vid, thumbnail thumb "
@@ -98,13 +99,13 @@ class SearchRepo(Repo):
 
         arows = self.conn.execute(
             "SELECT a.title album,p.provider_id browse,COALESCE(a.thumbnail,("
-            " SELECT MIN(t.thumbnail) FROM album_tracks at JOIN tracks t ON t.id=at.entry_id "
+            f" SELECT MIN(t.thumbnail) FROM {self.album_tracks_table} at JOIN tracks t ON t.id=at.entry_id "
             " WHERE at.album_id=a.id)) thumb FROM albums a "
             "JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
             "WHERE NULLIF(a.title,'') IS NOT NULL AND NULLIF(p.provider_id,'') IS NOT NULL AND ("
-            " EXISTS (SELECT 1 FROM album_tracks at JOIN tracks t ON t.id=at.entry_id "
-            " JOIN track_artists ta ON ta.entry_id=t.id WHERE at.album_id=a.id AND ta.artist_id=?) "
-            " OR (EXISTS (SELECT 1 FROM album_library_memberships m WHERE m.album_id=a.id) "
+            f" EXISTS (SELECT 1 FROM {self.album_tracks_table} at JOIN tracks t ON t.id=at.entry_id "
+            f" JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id WHERE at.album_id=a.id AND ta.artist_id=?) "
+            f" OR (EXISTS (SELECT 1 FROM {album_memberships.read_relation(self.conn)} m WHERE m.album_id=a.id) "
             " AND EXISTS (SELECT 1 FROM album_artists aa WHERE aa.album_id=a.id AND aa.artist_id=?))) "
             "ORDER BY a.id LIMIT ?", (artist_id,artist_id,CANDIDATE_CAP)).fetchall()
         picked = _sample(arows, q, per_section)
@@ -118,8 +119,8 @@ class SearchRepo(Repo):
             "SELECT p.id pid, p.title title, p.thumbnail thumb "
             "FROM playlists p JOIN playlist_tracks pt ON pt.playlist_id=p.id "
             "JOIN tracks t ON t.id=pt.track_id "
-            "JOIN track_artists ta ON ta.entry_id=t.id "
-            "LEFT JOIN quarantined_playlists g ON g.ytm=p.scope_ref "
+            f"JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id "
+            "LEFT JOIN quarantined_playlists g ON g.playlist_scope_id=p.playlist_scope_id "
             "WHERE ta.artist_id=? AND (g.name IS NULL OR g.name<>?) "
             "GROUP BY p.id LIMIT ?", (artist_id, GENERATED_GROUP, CANDIDATE_CAP)).fetchall()
         picked = _sample(prows, q, per_section)
@@ -151,7 +152,7 @@ class SearchRepo(Repo):
     def _playlists_section(self, like, q, per_section, shown_pids, sections):
         rows = self.conn.execute(
             "SELECT p.id pid, p.title title, p.thumbnail thumb "
-            "FROM playlists p LEFT JOIN quarantined_playlists g ON g.ytm=p.scope_ref "
+            "FROM playlists p LEFT JOIN quarantined_playlists g ON g.playlist_scope_id=p.playlist_scope_id "
             "WHERE p.title LIKE ? ESCAPE '\\' AND (g.name IS NULL OR g.name<>?) "
             "GROUP BY p.id LIMIT ?", (like, GENERATED_GROUP, CANDIDATE_CAP)).fetchall()
         rows = [r for r in rows if r["pid"] not in shown_pids]

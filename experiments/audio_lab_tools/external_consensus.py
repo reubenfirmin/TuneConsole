@@ -16,6 +16,7 @@ from .external_experiment import OUT, digest, normalize, save, stamp
 from .external_training import SEED, fit_path, folds, predict
 from .external_transfer import (SNAPSHOT, VIBES, external_head_features,
                                 probabilities, score, select_vibe_alpha)
+from .research_artifacts import compact_slug
 
 ENTROPY_PENALTY = .05
 SEARCH_VERSION = 2
@@ -44,6 +45,12 @@ def expert_prediction(model, x):
 
 
 def crossfit_experts(features, y, groups, kind='linear'):
+    from .external_prediction_cache import crossfit
+    return crossfit('acceptable-vibe-calibration', features, y, groups,
+                    lambda: _crossfit_experts(features, y, groups, kind), kind)
+
+
+def _crossfit_experts(features, y, groups, kind='linear'):
     """Each meta-training prediction excludes that row and its artist group."""
     split = folds(groups, count=3, seed=SEED + 1)
     predictions = np.zeros((len(y), len(features), len(VIBES)))
@@ -118,21 +125,24 @@ def pool(experts, candidate):
     return np.einsum('nmk,m->nk', experts[:, candidate['indices'], :], candidate['weights'])
 
 
-def evaluate(datasets, native_learner='ridge', calibrator='linear'):
+def evaluate(datasets, native_learner='ridge', calibrator='linear', *, identity_exclusions=(), run_name=None):
     with threadpool_limits(limits=1):
-        return _evaluate(datasets, native_learner, calibrator)
+        return _evaluate(datasets, native_learner, calibrator,
+                         identity_exclusions=identity_exclusions, run_name=run_name)
 
 
-def _evaluate(datasets, native_learner='ridge', calibrator='linear'):
+def _evaluate(datasets, native_learner='ridge', calibrator='linear', *, identity_exclusions=(), run_name=None):
     snapshot = json.loads(SNAPSHOT.read_text())
     rows = [row for row in snapshot['gold'] if len(row.get('embedding_values', [])) == 200]
     y = np.array([[int(name in row['labels']) / len(row['labels']) for name in VIBES] for row in rows])
     groups = [normalize(row['artist']) or row['video_id'] for row in rows]
     if native_learner == 'ridge':
-        qualities, names, exclusions, signatures, native_heads = external_head_features(datasets, rows)
+        qualities, names, exclusions, signatures, native_heads = external_head_features(
+            datasets, rows, identity_exclusions=identity_exclusions)
     else:
         from .external_nonlinear import head_features
-        qualities, names, exclusions, signatures, native_heads = head_features(datasets, rows, native_learner)
+        qualities, names, exclusions, signatures, native_heads = head_features(
+            datasets, rows, native_learner, identity_exclusions=identity_exclusions)
     features = {'embedding': np.array([row['embedding_values'] for row in rows])}
     feature_names = {'embedding': [f'musicnn_{i:03d}' for i in range(200)]}
     for dataset in datasets:
@@ -198,11 +208,15 @@ def _evaluate(datasets, native_learner='ridge', calibrator='linear'):
         calibration_slug = ('mixed-' + '+'.join(name + '-' + kind for name, kind in sorted(calibrator.items()))
                             if isinstance(calibrator, dict) else calibrator)
         slug += f'__native-{native_learner}__calibrator-{calibration_slug}'
+    if run_name:
+        slug = run_name + '__' + slug
+    slug = compact_slug(slug)
     report = {'created_at': stamp(), 'search_version': SEARCH_VERSION, 'datasets': datasets, 'gold_rows': len(rows),
               'silver_rows_excluded': len(snapshot['silver']), 'vibes': VIBES,
               'native_learner': native_learner, 'calibrator_learner': calibrator,
               'snapshot_sha256': digest(SNAPSHOT), 'script_sha256': digest(__file__),
               'embedding_signatures': sorted(signatures), 'external_identity_exclusions': exclusions,
+              'additional_protected_identity_rows': len(identity_exclusions),
               'methods': results, 'weights_by_fold': weights_by_fold, 'expert_alphas_by_fold': alphas,
               'combination_search': {'expert_names': list(features),
                                      'subsets': 2 ** len(features) - 1,
@@ -221,7 +235,7 @@ def _evaluate(datasets, native_learner='ridge', calibrator='linear'):
                               'External native labels are not interchangeable with vibe labels; each expert has its own six-vibe calibrator.',
                               'Experts share MusiCNN embeddings and may make correlated mistakes; agreement is not established confidence.',
                               'The best fixed combination after inspecting outer results is descriptive; use selected_combination or selected_candidate to assess the search procedure.',
-                              'Unknown upstream pretraining overlap, artist aliases, and unavailable Emotify artist identities remain.',
+                              'Unknown upstream pretraining overlap, artist aliases and missing artist identities remain.',
                               'No pseudo-label supervision, database writes, vibe changes, or model activation.']}
     save(OUT / f'consensus-{slug}.report.json', report)
     save(OUT / f'consensus-{slug}.oof.json', {'rows': [{'video_id': row['video_id'], 'fold': int(fold)}

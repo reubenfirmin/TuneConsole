@@ -26,11 +26,10 @@ def build(ctx) -> APIRouter:
         if job:
             return {"events": [event for _, event in job.events.since(0)[1]],
                     "outcome": job.outcome}
-        state = ctx.store.settings.get_setting("library_sync_state")
-        if not state:
+        from yt_playlist.core import sync_state
+        result = sync_state.state(ctx.store)
+        if not result:
             return {"events": [], "outcome": None}
-        import json
-        result = json.loads(state)
         events = []
         for account in result.get("accounts", {}).values():
             resources = account.get("resources", {})

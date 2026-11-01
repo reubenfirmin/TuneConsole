@@ -4,12 +4,27 @@ from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
 
 
-def _client(store, now=1000.0):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    from tests.test_mode_cards_route import prepare_home
-    prepare_home(store, now)
+def _client(store, now=1000.0, *, prepare=True):
+    iid = store.accounts.upsert_account("main", "cred", None, True)
+    if prepare:
+        from tests.test_mode_cards_route import prepare_home
+        prepare_home(store, now)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now)
     return TestClient(app, base_url="http://127.0.0.1")
+
+
+def _publish_existing_listener_mix(store):
+    from tests.onboarding_support import publish_personal_mix
+
+    publish_personal_mix(store)
+    # Publish the complete menu as the ordinary worker baseline; this fixture
+    # has no held tuning window that should supersede later history updates.
+    store.rec_proposals.put_proposals('home_prepared', store.rec_proposals.get_proposals('home_tuned'), 1000)
+    store.rec_proposals.put_proposals('home_tuned', {}, 1000)
+    # Controlled worker output for a returning listener. These tests exercise
+    # fingerprint rendering after earned access, without mocking the journey.
+    store.rec_proposals.put_proposals('listening_choices', {
+        'home_format': {'episodes': {'mixes': 1}}}, 1000)
 
 
 def test_home_visit_ticks_card_rotation_but_previews_dont(store):
@@ -29,14 +44,29 @@ def test_home_visit_ticks_card_rotation_but_previews_dont(store):
 
 
 def test_home_is_default_route(store):
-    c = _client(store)
+    c = _client(store, prepare=False)
     r = c.get("/")
     assert r.status_code == 200
     assert 'id="home"' in r.text          # Home shell marker
     assert "home-status" in r.text         # live status card is present
     assert "Extension connected" not in r.text  # connection alone is not useful Home content
     assert "Library synced" not in r.text  # freshness line only appears after a first sync
-    assert 'id="welcome-title"' in r.text  # first-run welcome precedes the format choice
+    assert 'id="arrival-title"' in r.text
+    assert 'Your festival starts here.' in r.text
+    assert 'class="festival-map"' in r.text
+    assert 'id="home-mode-cards"' not in r.text
+    assert "homeStatus()" in r.text
+    assert "Sync now" not in r.text and "Full sync" not in r.text
+    assert "Sync plays" not in r.text and "sync-toggle" not in r.text
+    feed = c.get("/home/feed")
+    assert feed.status_code == 200
+    assert 'id="steer-toast"' in feed.text
+    assert "Mixes updated." in feed.text and "Adjust recommendation settings" in feed.text
+
+    store.settings.set_setting("last_sync_at", "1000")
+    html = c.get("/").text
+    assert "Library synced" not in html and "not yet" not in html
+    assert "hs-refresh" not in html
 
 
 def test_next_home_visit_expires_a_day_old_theme_menu(store):
@@ -76,8 +106,9 @@ def test_revisit_shows_full_current_playlist_in_saved_order(store):
     from html import unescape
     import re
     from tests.conftest import seed_catalog_track
+    from tests.onboarding_support import publish_personal_mix
 
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     pid = store.playlists.upsert_playlist(iid, "quiet-list", "Quiet mix", 9, None, 1000)
     tracks = [store.tracks.upsert_track(f"v{9-i}", f"Song {i}", "Artist", None, None, thumbnail="/static/icon.png")
               for i in range(8)]
@@ -85,7 +116,15 @@ def test_revisit_shows_full_current_playlist_in_saved_order(store):
     store.playlists.set_playlist_tracks(pid, tracks)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
-    html = _client(store).get("/").text
+    client = _client(store)
+    # The worker can prepare this quiet playlist independently of a full mix
+    # board. A dismissal alone still cannot graduate initial listening setup.
+    assert client.get('/home/growth').json()['ready_areas']['rediscover']
+    assert 'id="onboarding-feed"' in client.get('/').text
+    publish_personal_mix(store)
+    assert client.get('/home/onboard/status').json()['setup']['complete']
+    html = client.get('/').text
+    assert 'x-show="growth.ready_areas.rediscover"' in html
     section = html.split('<section id="rediscover">', 1)[1].split('</section>', 1)[0]
     table = re.search(r'<table class="track-table redis-tracks".*?</table>', section, re.S).group()
     rows = re.findall(r'<tr class="srow".*?</tr>', table, re.S)
@@ -99,16 +138,11 @@ def test_revisit_shows_full_current_playlist_in_saved_order(store):
     assert "redis-more" not in section
 
 
-def test_playlists_moved_to_slash_playlists(store):
-    c = _client(store)
-    assert c.get("/playlists").status_code == 200
-
-
 def test_home_renders_for_you_and_no_sync_elsewhere(store):
     # Complete cards are available both inline and through the fragment endpoint.
     import numpy as np
     from yt_playlist.rec import mode_surfaces as ms
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("v1", "Gem", "X", None, None)
     day = 86400.0
     now = 200 * day
@@ -144,26 +178,17 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
     assert 'class="home-status card card--status is-live global-now-playing"' in home
 
     # Now Playing belongs to the shared layout, not Home, so it follows the user across the app.
-    assert "global-now-playing" in c.get("/playlists").text
+    playlists = c.get("/playlists")
+    assert playlists.status_code == 200
+    assert "global-now-playing" in playlists.text
     assert "global-now-playing" in c.get("/charts").text
-
-
-def test_home_feed_fragment_renders_fingerprint(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
-    store.tracks.set_track_genre(t, "Techno")
-    store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
-    c = _client(store)
-    r = c.get("/home/feed")
-    assert r.status_code == 200
-    assert "fingerprint" in r.text                       # the header partial rendered
-    assert 'id="home-feed"' in r.text                    # the re-rank swap-target container
 
 
 def test_steering_panel_hidden_until_genres_exist(store):
     """The wheelhouse steering panel (genre/era sliders) is empty-state until the library has genres."""
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     c = _client(store)
+    _publish_existing_listener_mix(store)
     assert 'id="fingerprint"' not in c.get("/home/feed").text     # no genres yet -> panel hidden
 
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
@@ -171,11 +196,14 @@ def test_steering_panel_hidden_until_genres_exist(store):
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
     from tests.test_mode_cards_route import prepare_home
     prepare_home(store, 1000)
-    assert 'id="fingerprint"' in c.get("/home/feed").text          # genres present -> panel appears  # persisted
+    response = c.get("/home/feed")
+    assert response.status_code == 200
+    assert 'id="fingerprint"' in response.text
+    assert 'id="home-feed"' in response.text
 
 
 def test_home_page_has_steering_and_fingerprint(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
     store.tracks.set_track_year(t, "1999")
@@ -184,8 +212,7 @@ def test_home_page_has_steering_and_fingerprint(store):
     store.settings.set_setting("onboard_dismissed", "1")          # graduated user: testing the normal feed, not onboarding
     from tests.test_mode_cards_route import prepare_home
     prepare_home(store)
-    from tests.onboarding_support import publish_personal_mix
-    publish_personal_mix(store)
+    _publish_existing_listener_mix(store)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     html = c.get("/").text
@@ -197,7 +224,7 @@ def test_home_page_has_steering_and_fingerprint(store):
 
 
 def test_home_steer_writes_lean_not_permanent_weight(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.post("/home/steer", data={"axis": "genre:techno", "weight": "1.5"})
@@ -209,40 +236,19 @@ def test_home_steer_writes_lean_not_permanent_weight(store):
     assert store.rec_model.get_lean("genre:techno") == 1.5
 
 
-def test_home_feed_has_steer_toast_scaffold(store):
-    c = _client(store)
-    html = c.get("/home/feed").text
-    assert 'id="steer-toast"' in html
-    assert "Mixes updated." in html and "Adjust recommendation settings" in html
-
-
-def test_home_status_card_replaces_sync_buttons(store):
-    """Syncing is automatic and stays out of the regular-user status card."""
-    c = _client(store)
-    html = c.get("/").text
-    assert "homeStatus()" in html            # the status card's Alpine component
-    assert "Library synced" not in html      # no awkward "not yet" line before the first sync
-    assert "Sync now" not in html and "Full sync" not in html   # no manual sync buttons
-    assert "Sync plays" not in html and "sync-toggle" not in html
-
-    store.settings.set_setting("last_sync_at", "1000")   # after a first sync (now_fn -> 1000.0)
-    html = c.get("/").text
-    assert "Library synced" not in html and "not yet" not in html
-    assert "hs-refresh" not in html          # background maintenance is not a regular-user action
-
-
 def test_presync_shows_recs_placeholder_not_feed(store):
-    """The arrival screen replaces the feed until the first complete library sync."""
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    """The festival guides arrival until useful offers exist, across a full sync."""
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("v1", "Gem", "X", None, None)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
 
     html = c.get("/").text
-    assert 'id="welcome-title"' in html
-    html = c.post('/home/onboard/format', data={'format': 'mixes'}).text
-    assert 'class="arrival"' in html
-    assert "personal mixes and find your next favorites" in html
+    assert 'id="arrival-title"' in html
+    assert 'Your festival starts here.' in html
+    assert 'class="festival-map"' in html
+    assert c.post('/home/onboard/format', data={'format': 'mixes'}).status_code == 409
+    assert store.settings.get_setting('home_format') is None
     assert "More in your wheelhouse" not in html                           # feed hidden pre-sync
 
     store.settings.set_setting("last_sync_at", "1000")
@@ -260,7 +266,7 @@ def test_enrich_nudge_is_gone(store):
 
 
 def test_fingerprint_bar_shows_effective_multiplier(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
@@ -268,8 +274,7 @@ def test_fingerprint_bar_shows_effective_multiplier(store):
     store.settings.set_setting("onboard_dismissed", "1")       # graduated user: testing the normal feed, not onboarding
     fam = __import__("yt_playlist.util.genre_map", fromlist=["family"]).family("Techno")
     store.rec_model.set_lean(f"genre:{fam}", 1.5, 1000.0)        # standing lean, permanent still 1.0
-    from tests.onboarding_support import publish_personal_mix
-    publish_personal_mix(store)
+    _publish_existing_listener_mix(store)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     html = c.get("/").text
@@ -281,7 +286,7 @@ def test_taste_fingerprint_marks_transient(store):
     # held-steer thumb (which stays at `effective`). The two mood signals no longer share one position.
     from yt_playlist.rec import taste_analysis
     from yt_playlist.util.matching import identity_key
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     keys = []
     for i in range(10):
         t = store.tracks.upsert_track(f"v{i}", f"song{i}", "band", None, None)
@@ -302,7 +307,7 @@ def test_taste_fingerprint_marker_inert_when_stale(store):
     # A stale sync relaxes the transient to ~0, so no bar claims a live marker (families still present).
     from yt_playlist.rec import taste_analysis
     from yt_playlist.util.matching import identity_key
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     keys = []
     for i in range(5):
         t = store.tracks.upsert_track(f"v{i}", f"song{i}", "band", None, None)
@@ -322,7 +327,7 @@ def test_fingerprint_subgenres_attached_and_deduped(store):
     family token itself is excluded (no self-duplicate), and a subgenre with a lean is promoted to its
     own top bar instead of appearing under the family."""
     from yt_playlist.rec import taste_analysis
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "techno")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
@@ -343,6 +348,7 @@ def test_fingerprint_add_reaches_zero_play_niche(store):
     """POST /home/fingerprint/add axis='genre:gqom' -> 200; returns just the re-rendered genre bars
     (for swapping #fp-genre-bars, leaving the picker alive) with a gqom bar, and persists the lean."""
     c = _client(store)
+    _publish_existing_listener_mix(store)
     r = c.post("/home/fingerprint/add", data={"axis": "genre:gqom"})
     assert r.status_code == 200
     # The added axis renders as a steerable bar in the returned bars partial...
@@ -379,7 +385,7 @@ def test_home_breadth_bar_is_interactive(store):
     """#7: the Breadth bar steers the feed. It posts to /home/breadth bound to the breadth_bias param,
     and a post persists the bias and re-renders only the four-card board."""
     from yt_playlist.rec import rec_params
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
@@ -391,20 +397,13 @@ def test_home_breadth_bar_is_interactive(store):
     assert r.status_code == 200 and 'id="home-mode-cards"' in r.text
     assert 'id="home-feed"' not in r.text
     assert rec_params.get_param(store, "breadth_bias") == 0.5
-
-
-def test_home_breadth_clamps_out_of_range(store):
-    """A stray value can't run away: the param spec clamps the bias to [-1, 1]."""
-    from yt_playlist.rec import rec_params
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    c = _client(store)
     c.post("/home/breadth", data={"breadth_bias": "9"})
     assert rec_params.get_param(store, "breadth_bias") == 1.0
 
 
 def test_home_has_no_stance_toggle(store):
     """#7: the noisy wheelhouse/explore toggle is gone (route, container, and its unique label)."""
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")

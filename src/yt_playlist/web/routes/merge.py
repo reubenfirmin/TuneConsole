@@ -30,9 +30,9 @@ def build(ctx) -> APIRouter:
         pls = [p for p in (store.playlists.get_playlist(i) for i in ids) if p is not None]
         if len(pls) < 2:
             return None
-        idmap = {i.id: i.label for i in store.identities.get_identities()}
-        members = [{"id": p.id, "letter": chr(65 + n), "ident": idmap.get(p.identity_id, "?"),
-                    "title": p.title, "ytm": p.ytm_playlist_id} for n, p in enumerate(pls)]
+        idmap = {i.id: i.label for i in store.accounts.get_accounts()}
+        members = [{"id": p.id, "letter": chr(65 + n), "ident": idmap.get(p.account_id, "?"),
+                    "title": p.title, "ytm": p.provider_playlist_id} for n, p in enumerate(pls)]
         tracks = {}
         seqs = [[] for _ in pls]
         for mi, p in enumerate(pls):
@@ -180,7 +180,8 @@ def build(ctx) -> APIRouter:
                 if t["tid"] not in draft_params["excluded"] and t["video_id"]]
         member_ids = [m["id"] for m in members]   # the existing playlists only (not stale ?ids entries)
         try:
-            s = ctx.ops().apply_merge(member_ids, vids, draft_params["keep"])
+            s = ctx.ops().apply_merge(member_ids, vids, draft_params["keep"],
+                                      reviewed_draft=(draft.id,draft.revision))
         except ValueError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001

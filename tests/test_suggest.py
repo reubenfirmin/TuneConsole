@@ -18,7 +18,7 @@ class _TrackInputParser(HTMLParser):
 
 
 def _seed(store, genre="Techno"):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.tracks.upsert_track("v1", "Anchor", "Band", None, None)
     b = store.tracks.upsert_track("v2", "Bonus", "Band", None, None)
     if genre:
@@ -61,7 +61,7 @@ def test_suggestion_card_has_wired_add_button(store):
 
 
 def test_recs_rebuild_endpoint(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.post("/recs/rebuild")

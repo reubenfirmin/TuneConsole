@@ -2,6 +2,7 @@
 import pytest
 from playwright.sync_api import expect
 
+from tests.home_fixture_support import publish_menu
 from tests.test_home_other_genres import seed_genres
 from tests.test_mode_cards_route import prepare_home
 
@@ -41,13 +42,11 @@ def test_regeneration_sends_the_held_recipe_after_each_animated_swap(live_app, s
         assert all(row['opportunity_id'] != other for row in responses)
 
 
-@pytest.mark.parametrize("endpoint", ["/home/refresh-cards", "/home/refresh-card/wheelhouse"])
 @pytest.mark.parametrize("failure", ["network", "http", "unprocessable", "missing", "invalid", "empty"])
-def test_mix_regeneration_recovers_from_failure(live_app, store, page, endpoint, failure):
-    seed_genres(store)
+def test_mix_regeneration_recovers_from_failure(live_app, store, page, failure, unlocked_home_controls):
+    publish_menu(store, 1)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
-    prepare_home(store, 1)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
@@ -57,11 +56,10 @@ def test_mix_regeneration_recovers_from_failure(live_app, store, page, endpoint,
     card.locator(".gen-poster").click()
     body = card.locator(".gen-card-body")
     button = card.get_by_role("button", name="Regenerate this mix", exact=True)
-    # Both template variants share the same behavior with different POST endpoints.
-    button.evaluate("""(button, endpoint) => {
-        button.setAttribute('hx-post', endpoint);
-        htmx.process(button);
-    }""", endpoint)
+    # Both template variants use this handler. Their actual endpoint/target
+    # attributes are checked separately in test_mix_regeneration_markup.py.
+    endpoint = button.get_attribute('hx-post')
+    assert endpoint == '/home/refresh-card/wheelhouse'
     before = body.locator(".gen-row").evaluate_all("rows => rows.map(row => row.outerHTML)")
     replacement = body.evaluate("""body => {
         const next = body.cloneNode(true);
