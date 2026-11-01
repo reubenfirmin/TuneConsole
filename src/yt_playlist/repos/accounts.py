@@ -15,7 +15,49 @@ _UPSERT = (
 )
 
 
+def _select(configs, existing):
+    """Resolve saved account identity without changing an existing remote owner."""
+    validate_accounts([{'id': cfg.account_id, 'label': cfg.label,
+        'credential_ref': cfg.credential_ref, 'brand_account_id': cfg.brand_account_id,
+        'is_master': cfg.is_master} for cfg in configs])
+    selected, used = [], set()
+    for cfg in configs:
+        row = next((r for r in existing if r['id'] == cfg.account_id), None) if cfg.account_id else None
+        if cfg.account_id is not None and row is None:
+            raise ValueError('Unknown identity ID')
+        if row is not None and (row['brand_account_id'] or None) != (cfg.brand_account_id or None):
+            raise ValueError('An existing account cannot be retargeted; add the other account separately')
+        if row is None and cfg.account_id is None:
+            row = next((r for r in existing if r['label'] == cfg.label
+                        and (r['brand_account_id'] or None) == (cfg.brand_account_id or None)), None)
+        if row is None and cfg.account_id is None:
+            matches = [r for r in existing if r['credential_ref'] == cfg.credential_ref
+                       and (r['brand_account_id'] or None) == (cfg.brand_account_id or None)
+                       and r['id'] not in used]
+            row = matches[0] if len(matches) == 1 else None
+        iid = row['id'] if row else cfg.account_id
+        if iid in used:
+            raise ValueError('each account may only appear once')
+        if iid is not None:
+            used.add(iid)
+        selected.append((cfg, iid))
+    return selected, used
+
+
 class AccountRepo(Repo):
+    @lookup_read
+    def configured_ids(self, configs):
+        """Load existing account bindings during maintenance without reconciliation."""
+        table = entity_names.owner(self.conn, 'accounts').table
+        existing = list(self.conn.execute(f'SELECT * FROM {table} WHERE active=1'))
+        selected, used = _select(tuple(configs), existing)
+        if any(iid is None for _, iid in selected) or used != {r['id'] for r in existing}:
+            raise ValueError('Account changes must wait for the storage update')
+        masters = {r['id'] for r in existing if r['is_master']}
+        if {iid for cfg, iid in selected if cfg.is_master} != masters:
+            raise ValueError('Account changes must wait for the storage update')
+        return {cfg.label: iid for cfg, iid in selected}
+
     @synchronized
     def upsert_account(self, label, credential_ref, brand_account_id, is_master):
         is_master = account_flag(is_master)
@@ -40,35 +82,12 @@ class AccountRepo(Repo):
     def reconciled(self, configs):
         """Keep reconciliation unpublished until the caller has prepared its config/runtime."""
         configs = tuple(configs)
-        validate_accounts([{'id': cfg.account_id, 'label': cfg.label,
-            'credential_ref': cfg.credential_ref, 'brand_account_id': cfg.brand_account_id,
-            'is_master': cfg.is_master} for cfg in configs])
         with self._lock:
             table = entity_names.owner(self.conn, 'accounts').table
             self.conn.execute("SAVEPOINT setup_identities")
             try:
                 existing = list(self.conn.execute(f"SELECT * FROM {table}"))
-                selected, used = [], set()
-                for cfg in configs:
-                    row = next((r for r in existing if r["id"] == cfg.account_id), None) if cfg.account_id else None
-                    if cfg.account_id is not None and row is None:
-                        raise ValueError('Unknown identity ID')
-                    if row is not None and (row['brand_account_id'] or None)!=(cfg.brand_account_id or None):
-                        raise ValueError('An existing account cannot be retargeted; add the other account separately')
-                    if row is None and cfg.account_id is None:
-                        row = next((r for r in existing if r["label"] == cfg.label
-                                    and (r['brand_account_id'] or None)==(cfg.brand_account_id or None)), None)
-                    if row is None and cfg.account_id is None:
-                        matches = [r for r in existing if r["credential_ref"] == cfg.credential_ref
-                                   and (r["brand_account_id"] or None) == (cfg.brand_account_id or None)
-                                   and r["id"] not in used]
-                        row = matches[0] if len(matches) == 1 else None
-                    iid = row["id"] if row else cfg.account_id
-                    if iid in used:
-                        raise ValueError("each account may only appear once")
-                    if iid is not None:
-                        used.add(iid)
-                    selected.append((cfg, iid))
+                selected, used = _select(configs, existing)
                 self.conn.execute(f"UPDATE {table} SET active=0, is_master=0")
                 labels = {cfg.label for cfg,_ in selected}
                 for old in existing:

@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+from .. import fao
 
 from .. import action_backup_files, action_work, collection_recovery, policy_documents
 from ..evidence_ledger import canonical
@@ -32,7 +33,7 @@ def retained(root, encoded, digest):
     if not 0 < len(encoded) <= action_backup_files.MAX_BYTES or hashlib.sha256(encoded).hexdigest() != digest:
         raise MigrationError('Action custody exceeds its budget or differs from its digest')
     path = Path(root) / digest[:2] / (digest+'.json')
-    with path.open('rb') as stream:
+    with fao.open_reader(path) as stream:
         if stream.read(len(encoded)+1) != encoded:
             raise MigrationError('Action custody differs from its original')
     return str(path)

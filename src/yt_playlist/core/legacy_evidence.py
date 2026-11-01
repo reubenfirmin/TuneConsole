@@ -4,6 +4,7 @@ Payloads are exact historical text, including non-JSON signatures. Queryable
 ambiguity guards have a separate typed relation; archive age never permits GC.
 """
 import hashlib
+from . import fao
 import json
 from contextlib import closing
 from pathlib import Path
@@ -156,7 +157,7 @@ def _read(domain, filename, digest, size, offset, *, kind='original'):
     path = Path(filename)
     if not _digest(path.stem):
         raise ValueError('Invalid retained evidence filename')
-    with path.open('rb') as stream:
+    with fao.open_reader(path) as stream:
         if offset:
             header = _header(domain)
             if offset < len(header) or stream.read(len(header)) != header:
@@ -241,7 +242,7 @@ def _document(root, value, kind):
 
 def _read_document(path, kind):
     path = Path(path)
-    return _read('catalog', str(path), path.stem, path.stat().st_size, 0, kind=kind)[1]
+    return _read('catalog', str(path), path.stem, fao.stat(path).logical_bytes, 0, kind=kind)[1]
 
 
 def export(conn, target):

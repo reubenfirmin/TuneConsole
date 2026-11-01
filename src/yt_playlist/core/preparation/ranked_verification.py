@@ -1,6 +1,7 @@
 """Read-only verification shared by clicked pools and paired projections."""
 import hashlib
 from pathlib import Path
+from .. import fao
 
 from ..evidence_ledger import canonical
 from ..migrations.runner import MigrationError
@@ -18,7 +19,7 @@ def retained(root, encoded):
         raise MigrationError('Ranked file exceeds its byte budget')
     digest = hashlib.sha256(encoded).hexdigest()
     path = Path(root) / digest[:2] / (digest+'.json')
-    with path.open('rb') as stream:
+    with fao.open_reader(path) as stream:
         if stream.read(len(encoded)+1) != encoded:
             raise MigrationError('Ranked file differs from its original')
     return str(path), digest, len(encoded)

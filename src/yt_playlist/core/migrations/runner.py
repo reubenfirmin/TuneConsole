@@ -363,6 +363,11 @@ def migrate(conn, *, registry=None, clock=time.time, defer_validation=False):
             if fresh is None:
                 fresh = not bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").fetchone())
             if production:
+                if not fresh and current == 64:
+                    from ..db_rebuild.source import admit
+                    admit(conn)
+                    conn.rollback()
+                    return True
                 if not fresh and current >= 79:
                     # All these installed schemas have readable repository
                     # adapters. Inspect structure on one committed read snapshot;

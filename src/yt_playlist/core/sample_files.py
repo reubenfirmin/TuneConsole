@@ -8,6 +8,7 @@ from itertools import zip_longest
 
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.evidence_ledger import _mkdir, _sync_directory, canonical
+from . import fao
 
 MAX_BYTES = 256 * 1024
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
@@ -37,32 +38,14 @@ def _publish(root, encoded):
     # interrupted migrations/retries reuse an already durable file safely.
     digest = hashlib.sha256(encoded).hexdigest()
     path = Path(root) / digest[:2] / (digest + '.json')
-    _mkdir(path.parent)
-    pending = None
-    try:
-        with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.pending-', delete=False) as stream:
-            pending = Path(stream.name)
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-        try:
-            os.link(pending, path)
-        except FileExistsError:
-            with path.open('rb') as existing:
-                matches = existing.read(len(encoded) + 1) == encoded
-            if not matches:
-                raise ValueError('Sample file does not match its content hash')
-        _sync_directory(path.parent)
-    finally:
-        if pending is not None:
-            pending.unlink(missing_ok=True)
+    fao.write_bytes(path, encoded, immutable=True)
     return str(path)
 
 
 def _encoded(filename, *, max_bytes=MAX_BYTES):
     """Bound external input and verify the immutable content address on every read."""
     path = Path(filename)
-    with path.open('rb') as stream:
+    with fao.open_reader(path) as stream:
         encoded = stream.read(max_bytes + 1)
     if len(encoded) > max_bytes:
         raise ValueError('Sample file exceeds the input byte budget')

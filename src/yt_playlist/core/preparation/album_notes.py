@@ -7,6 +7,7 @@ the progress revision fences each bounded commit against continuing writes.
 import hashlib
 import json
 from pathlib import Path
+from .. import fao
 import time
 
 from .. import album_note_outputs, album_note_requests, recommendation_outputs
@@ -60,7 +61,7 @@ def directory(conn):
 def read_original(row):
     if row['filename'] is None:
         return None
-    with Path(row['filename']).open('rb') as stream:
+    with fao.open_reader(row['filename']) as stream:
         encoded = stream.read(row['byte_size'] + 1)
     if (len(encoded) != row['byte_size'] or hashlib.sha256(encoded).hexdigest() != row['digest']
             or Path(row['filename']).stem != row['digest']):

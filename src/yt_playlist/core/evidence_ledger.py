@@ -5,6 +5,7 @@ recovering torn JSONL appends. Publication is exclusive and atomic across thread
 never see a half-written record. All paths are derived from hashes, never supplied filenames.
 """
 import hashlib
+from . import fao
 import json
 import os
 from pathlib import Path
@@ -119,8 +120,8 @@ class EvidenceLedger:
                     used = int(stream.read())
                 except ValueError:
                     recovered = True
-                    used = sum(path.stat().st_size for path in self.directory.glob("*/*.json"))
-                    used += sum(path.stat().st_size for path in self.directory.glob("*/*/*.json"))
+                    used = sum(fao.stat(path).logical_bytes for path in self.directory.glob("*/*.json"))
+                    used += sum(fao.stat(path).logical_bytes for path in self.directory.glob("*/*/*.json"))
                 def save(value):
                     stream.seek(0)
                     stream.truncate()
@@ -143,7 +144,7 @@ class EvidenceLedger:
 
     def get(self, kind, identity):
         try:
-            value = json.loads(self._path(kind, identity).read_bytes())
+            value = json.loads(fao.read_bytes(self._path(kind, identity)))
             return self.project_opportunity(value) if kind == 'opportunity' else value
         except FileNotFoundError:
             return None
@@ -179,7 +180,7 @@ class EvidenceLedger:
                     and any(not self._path('artifact', component).is_file() for component in dependencies)):
                 raise ValueError('Listening context component is no longer retained')
             if existing:
-                if path.read_bytes() != encoded:
+                if fao.read_bytes(path) != encoded:
                     raise EvidenceConflict(f"Conflicting {kind} evidence: {identity}")
                 if kind == 'artifact':
                     # Reusing an old immutable manifest starts a fresh preparation
@@ -207,27 +208,12 @@ class EvidenceLedger:
                 raise
 
     def _publish(self, path, encoded, kind, identity):
-        _mkdir(path.parent)
-        # A unique staging file lives on the destination filesystem. Hard-link publication does
-        # not overwrite a competing writer; process death leaves only an ignored staging file.
-        pending = None
+        existing = fao.exists(path)
         try:
-            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".pending-", delete=False) as stream:
-                pending = Path(stream.name)
-                stream.write(encoded)
-                stream.flush()
-                os.fsync(stream.fileno())
-            try:
-                os.link(pending, path)
-            except FileExistsError:
-                if path.read_bytes() != encoded:
-                    raise EvidenceConflict(f"Conflicting {kind} evidence: {identity}")
-                return False
-            _sync_directory(path.parent)
-            return True
-        finally:
-            if pending is not None:
-                pending.unlink(missing_ok=True)
+            fao.write_bytes(path, encoded, immutable=True)
+        except fao.CorruptFile as exc:
+            raise EvidenceConflict(f"Conflicting {kind} evidence: {identity}") from exc
+        return not existing
 
     def artifact(self, value):
         identity = hashlib.sha256(canonical(value)).hexdigest()
@@ -243,7 +229,7 @@ class EvidenceLedger:
         for path in paths:
             check_cancellable_work()
             try:
-                value = json.loads(path.read_bytes())
+                value = json.loads(fao.read_bytes(path))
                 records.append(self.project_opportunity(value) if kind == 'opportunity' else value)
             except FileNotFoundError:
                 # Another application's maintenance can retire an unanswered old menu.
@@ -287,7 +273,7 @@ class EvidenceLedger:
                        if offer["observed_at"] < before and oid not in protected}
             orphan_before = before if orphan_before is None else orphan_before
             artifacts = list((self.directory / "artifact").glob("*/*.json"))
-            sizes = {path: path.stat().st_size for path in self.directory.glob('*/*/*.json')}
+            sizes = {path: fao.stat(path).logical_bytes for path in self.directory.glob('*/*/*.json')}
             edges = {}
 
             def closure(roots):
@@ -306,7 +292,7 @@ class EvidenceLedger:
             pinned = set(protected_artifacts)
             for path in artifacts:
                 if path.stat().st_mtime >= orphan_before:
-                    pinned.update(_components(json.loads(path.read_bytes())))
+                    pinned.update(_components(json.loads(fao.read_bytes(path))))
             references = Counter(closure(pinned))
             references.update(path for path in artifacts if path.stat().st_mtime >= orphan_before)
             # A caller acknowledges compact, correction-capable inputs only after
@@ -344,7 +330,7 @@ class EvidenceLedger:
             removed = {path for oid in retired for path in retired_paths(oid)}
             removed.update(path for path in artifacts if not references[path])
             for path in (self.directory / "report").glob("*/*.json"):
-                value = json.loads(path.read_bytes())
+                value = json.loads(fao.read_bytes(path))
                 if value["report"]["at"] < before:
                     removed.add(path)
             used = sum(size for path, size in sizes.items() if path not in removed)
@@ -402,7 +388,7 @@ class EvidenceLedger:
             surviving_contexts = {offer['context'] for oid, offer in offers.items() if oid not in retired}
             retired_checkpoints = {}
             for path in (self.directory / 'checkpoint').glob('*/*.json'):
-                value = json.loads(path.read_bytes())
+                value = json.loads(fao.read_bytes(path))
                 if value.get('source_context') not in surviving_contexts:
                     removed.add(path)
                     retired_checkpoints[path] = value.get('source_context')
@@ -435,7 +421,7 @@ class EvidenceLedger:
             # The lock excludes writers; only old abandoned staging files may be removed.
             for path in self.directory.glob("*/*/.pending-*"):
                 path.unlink(missing_ok=True)
-            used = sum(path.stat().st_size for path in self.directory.glob("*/*/*.json"))
+            used = sum(fao.stat(path).logical_bytes for path in self.directory.glob("*/*/*.json"))
             save(used)
             return {"used_bytes": used, "budget_bytes": self.byte_budget,
                     "required_bytes": required_bytes,

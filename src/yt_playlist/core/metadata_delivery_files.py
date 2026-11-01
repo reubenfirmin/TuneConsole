@@ -13,7 +13,7 @@ import tempfile
 
 from .activity import check_cancellable_work
 from .evidence_ledger import canonical, _sync_directory
-from . import policy_documents
+from . import policy_documents, fao
 
 FORMAT = 'metadata-delivery-1'
 MAX_BYTES = 8 * 1024 * 1024
@@ -79,7 +79,7 @@ def _read(filename, digest, byte_size, offset, *, kind='response'):
     path = Path(filename)
     if not _digest(path.stem):
         raise ValueError('Invalid metadata delivery filename')
-    with path.open('rb') as stream:
+    with fao.open_reader(path) as stream:
         if offset:
             if offset < len(PACK_HEADER) or stream.read(len(PACK_HEADER)) != PACK_HEADER:
                 raise ValueError('Invalid metadata delivery pack')
@@ -114,7 +114,7 @@ def _document(root, value, kind):
 def _read_document(path, kind):
     path = Path(path)
     # stat bounds allocation, and _read rejects any concurrent size change.
-    return json.loads(_read(path, path.stem, path.stat().st_size, 0, kind=kind))['value']
+    return json.loads(_read(path, path.stem, fao.stat(path).logical_bytes, 0, kind=kind))['value']
 
 
 def export(conn, root):

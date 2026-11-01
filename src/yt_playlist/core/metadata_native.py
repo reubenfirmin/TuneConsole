@@ -6,17 +6,72 @@ matching documents into a second historical payload store.
 """
 from collections import OrderedDict
 from contextlib import ExitStack
+import hashlib
 import json
 
 from . import metadata_deliveries as deliveries
 from .activity import WorkBudgetExceeded
 from .db_revisions import keyed_reads
+from .evidence_ledger import canonical
 
 FORMAT = 'native-metadata-observations-1'
 FIELDS = frozenset(('tags', 'bpm', 'energy', 'danceability', 'mood_party', 'mood_aggressive',
                     'music_key', 'music_scale', 'mood_happy', 'mood_sad', 'mood_relaxed',
                     'mood_acoustic', 'instrumental', 'loudness', 'dynamic_complexity'))
 MAX_OBSERVATIONS = 64
+RUNTIME_HEAD_SQL = '''CREATE TABLE metadata_native_delivery_heads (
+    source_key TEXT PRIMARY KEY NOT NULL REFERENCES rec_musical_sources(source_key) ON DELETE CASCADE,
+    run_id TEXT NOT NULL,accepted_at REAL NOT NULL,
+    result_hash BLOB CHECK(result_hash IS NULL OR (typeof(result_hash)='blob' AND length(result_hash)=32))) WITHOUT ROWID'''
+
+
+def install_runtime_heads(conn, context=None):
+    """Bounded DDL only; installed freshness is adopted during explicit preparation or admission."""
+    conn.execute(RUNTIME_HEAD_SQL)
+
+
+def validate_runtime_heads(conn):
+    from .migrations.current import _tokens
+    from .migrations.runner import MigrationError
+    row = conn.execute("SELECT sql FROM sqlite_schema WHERE name='metadata_native_delivery_heads'").fetchone()
+    if row is None or _tokens(row[0]) != _tokens(RUNTIME_HEAD_SQL):
+        raise MigrationError('Incompatible native metadata delivery heads')
+
+
+def _result_hash(values):
+    # This source owns normalized model evidence. Input-title matching details
+    # can differ between recordings sharing an artist/release in the same run.
+    normalized = {payload['field']: _profile_value(payload) for payload in values}
+    return hashlib.sha256(canonical(normalized)).digest()
+
+
+def installed_runtime_head(conn, key, previous):
+    """Use known capture provenance without inventing it for older converted sources."""
+    if previous.get('run_id') is not None and previous.get('at') is not None:
+        raw = previous.get('raw')
+        return {'run_id': previous['run_id'], 'accepted_at': previous['at'],
+                'result_hash': _result_hash(raw) if isinstance(raw, list) else None}
+    if not available(conn):
+        return None
+    # At most the finite selected fields are inspected. This also retains a
+    # newer identical legacy delivery, whose selection advanced without a new
+    # model-input revision. No historical graph is rebuilt on ordinary startup.
+    row = conn.execute('SELECT d.id,d.delivery_key,d.observed_at FROM musical_source_observations s '
+        'JOIN native_metadata_observations o ON o.id=s.observation_id '
+        'JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE s.source_key=? '
+        'ORDER BY d.observed_at DESC,d.id DESC LIMIT 1', (key,)).fetchone()
+    if row is None or row['observed_at'] is None:
+        return None
+    body = deliveries.response(conn, row['id'])
+    raw = body.get('observations') if isinstance(body, dict) and body.get('format') == FORMAT else None
+    return {'run_id': row['delivery_key'], 'accepted_at': row['observed_at'],
+            'result_hash': _result_hash(raw) if isinstance(raw, list) else None}
+
+
+def retain_runtime_head(conn, key, head):
+    conn.execute('INSERT INTO metadata_native_delivery_heads VALUES (?,?,?,?) ON CONFLICT(source_key) DO UPDATE SET '
+        'run_id=excluded.run_id,accepted_at=excluded.accepted_at,result_hash=excluded.result_hash',
+        (key, head['run_id'], head['accepted_at'], head['result_hash']))
 
 
 def available(conn):
@@ -164,13 +219,21 @@ def _record_runtime(conn, entry_id, provider, grouped, *, run_id, now, recording
         key = json.dumps([provider, scope, entity], separators=(',', ':'), ensure_ascii=False)
         source = conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?', (key,)).fetchone()
         previous = files.read(conn, 'native', (key,), source[0]) if source else {}
-        if previous and now < previous.get('at', 0):
-            continue
         normalized = {payload['field']: _profile_value(payload) for payload in values}
-        if previous.get('run_id') == run_id and any(previous.get('observations', {}).get(name) != value
-                                                   for name, value in normalized.items()):
-            raise ValueError('A native metadata run cannot change its result')
-        if previous and now == previous.get('at') and previous.get('run_id') != run_id:
+        head = conn.execute('SELECT run_id,accepted_at,result_hash FROM metadata_native_delivery_heads WHERE source_key=?',
+                            (key,)).fetchone()
+        if head is None:
+            head = installed_runtime_head(conn, key, previous)
+        result_hash = _result_hash(values)
+        replay = head is not None and head['run_id'] == run_id
+        if replay:
+            changed_result = (head['result_hash'] != result_hash if head['result_hash'] is not None else
+                any(previous.get('observations', {}).get(name) != value for name, value in normalized.items()))
+            if changed_result:
+                raise ValueError('A native metadata run cannot change its result')
+        elif head is not None and now <= head['accepted_at']:
+            # First accepted delivery wins a timestamp tie. Replays retain
+            # their original capture time rather than renewing freshness.
             continue
         current = {**previous.get('observations', {}), **normalized}
         changed = not source or current != previous.get('observations', {})
@@ -183,6 +246,10 @@ def _record_runtime(conn, entry_id, provider, grouped, *, run_id, now, recording
             else:
                 conn.execute('INSERT INTO rec_musical_sources(source_key,provider,scope,entity_id,revision) VALUES (?,?,?,?,?)',
                              (key, provider, scope, entity, revision))
+        if not replay:
+            # This current admission watermark is independent of immutable
+            # model inputs. Identical values create neither files nor work.
+            retain_runtime_head(conn, key, {'run_id': run_id, 'accepted_at': now, 'result_hash': result_hash})
         conn.execute('DELETE FROM rec_musical_links WHERE recording_id=? AND source_key<>? AND delivery_id<>? '
             'AND EXISTS (SELECT 1 FROM rec_musical_sources s WHERE s.source_key=rec_musical_links.source_key '
             'AND s.provider=? AND s.scope=?)', (recording_id, key, run_id, provider, scope))

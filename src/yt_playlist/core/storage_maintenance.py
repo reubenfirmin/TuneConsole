@@ -59,6 +59,8 @@ class StorageMaintenance:
         self._conn_lock = threading.Lock()
         self.report = None
         self._rebuilding = False
+        if getattr(store, '_rebuild_source_version', None) == 64:
+            self.ready.clear()
 
     def start_compaction(self, *, scratch=None):
         """Explicit retained-copy operation, independent of schema preparation."""
@@ -113,7 +115,7 @@ class StorageMaintenance:
             log.warning('Database copy stopped; inspect durable recovery state',
                         exc_info=not self._stop.is_set())
         finally:
-            self.active = self.store.activity_paused
+            self.active = bool(getattr(self.store, '_activity_paused', False))
             if self.active:
                 self.phase = 'recovery_required'
                 self.message = 'Storage recovery is required before recording can resume. Preserve the recovery files and restart.'
@@ -123,20 +125,23 @@ class StorageMaintenance:
                     playback_feedback.try_drain(self.store)
             except Exception:
                 log.warning('Playback feedback or provenance awaits retry after database copy',exc_info=True)
-            self.ready.set()
+            if not getattr(self.store, '_rebuild_source_version', None):
+                self.ready.set()
 
     def status(self):
         from yt_playlist.core import playback_feedback
         evidence = (bool(getattr(self.store, '_evidence_maintenance', 0))
                     or getattr(self.store, '_evidence_recovery_pending', False))
         pending = playback_feedback.inbox(self.store).pending()
-        active = self.active or evidence or bool(pending)
+        rebuild_required = getattr(self.store, '_rebuild_source_version', None) == 64
+        active = self.active or evidence or bool(pending) or rebuild_required
         retrying = evidence and getattr(self.store, '_evidence_recovery_failed', False)
         phase = (self.phase if self.active else getattr(self.store, '_evidence_phase', 'listening_history')
-                 if evidence else 'playback_feedback' if pending else self.phase)
+                 if evidence else 'rebuild_required' if rebuild_required else 'playback_feedback' if pending else self.phase)
         message = (self.message if self.active and self.phase=='recovery_required' else
                    (REBUILD_MESSAGE if self._rebuilding else MESSAGE) if self.active else EVIDENCE_RETRY_MESSAGE if retrying else EVIDENCE_MESSAGE
-                   if evidence else 'Applying saved playback feedback. Playback, likes and Next are available; '
+                   if evidence else 'Your library remains available while its storage update is pending. '+LISTENING_MESSAGE
+                   if rebuild_required else 'Applying saved playback feedback. Playback, likes and Next are available; '
                    'history and recommendation updates are delayed. '
                    'Playlist changes, syncing, imports and settings changes are paused.' if pending
                    else SCHEMA_RETRY_MESSAGE if phase == 'schema_retry' else self.message)
@@ -147,7 +152,7 @@ class StorageMaintenance:
             message += ' ' + detail
         if pending:
             message += f' {pending} saved playback observations await replay.'
-        warning = bool(retrying or phase == 'schema_retry'
+        warning = bool(retrying or phase == 'schema_retry' or rebuild_required and self.error
                        or not active and self.phase == 'deferred')
         # Keep the UI to one short sentence; message retains diagnostic detail
         # for API callers and rejected writes.
@@ -171,6 +176,10 @@ class StorageMaintenance:
         if self.store._db_path is None or self._thread is not None:
             return
         with self.store._lock:
+            if getattr(self.store, '_rebuild_source_version', None) == 64:
+                self.phase = 'rebuild_required'
+                self.ready.clear()
+                return
             from .migrations import regular
             if regular.validate(self.store.conn) < len(regular.CHANGES):
                 # Only additive bounded DDL runs here. The job's connection never

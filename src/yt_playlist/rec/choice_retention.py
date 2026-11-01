@@ -2,6 +2,7 @@
 from contextlib import ExitStack
 import hashlib
 import json
+from yt_playlist.core import fao
 
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.evidence_ledger import canonical, EvidenceBudgetExceeded, EvidenceConflict
@@ -61,7 +62,7 @@ def _acknowledge(store, now, publish):
                 break
             if scan.identity is None:
                 try:
-                    offer = ledger.project_opportunity(json.loads(scan.path.read_bytes()))
+                    offer = ledger.project_opportunity(json.loads(fao.read_bytes(scan.path)))
                 except FileNotFoundError:
                     scan.advance(store)
                     continue

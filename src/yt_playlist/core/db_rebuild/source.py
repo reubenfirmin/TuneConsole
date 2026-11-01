@@ -6,7 +6,7 @@ released layout must never execute a populated historical migration.
 import hashlib
 import json
 
-from ..migrations import current, regular
+from ..migrations import regular
 from ..migrations.registry import MIGRATIONS
 from ..migrations.runner import MigrationError, history, validate_version
 from .build import quote

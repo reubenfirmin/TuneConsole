@@ -1,6 +1,7 @@
 """Select exact frozen album choices while retaining installed album writers."""
 import hashlib
 from pathlib import Path
+from .. import fao
 
 from .. import album_tracklists, albums
 from ..evidence_ledger import canonical
@@ -20,7 +21,7 @@ def retained(root, encoded):
     if not 0 < len(encoded) <= preparation.files.MAX_BYTES:
         raise MigrationError('Album original exceeds its file budget')
     path = Path(root) / digest[:2] / (digest+'.json')
-    with path.open('rb') as stream:
+    with fao.open_reader(path) as stream:
         if stream.read(len(encoded)+1) != encoded:
             raise MigrationError('Album original differs from its retained bytes')
     return str(path), digest, len(encoded)

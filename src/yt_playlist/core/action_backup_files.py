@@ -2,7 +2,7 @@
 import hashlib
 from pathlib import Path
 
-from . import collection_recovery
+from . import collection_recovery, fao
 from .evidence_ledger import canonical
 from .policy_documents import _publish_encoded
 
@@ -11,7 +11,7 @@ MAX_BYTES = 64 * 1024 * 1024
 
 
 def verified(filename,digest=None,size=None):
-    with Path(filename).open('rb') as stream:
+    with fao.open_reader(filename) as stream:
         encoded = stream.read(MAX_BYTES+1)
     actual = hashlib.sha256(encoded).hexdigest()
     if not encoded or len(encoded)>MAX_BYTES or (digest is not None and actual!=digest) or (size is not None and len(encoded)!=size):

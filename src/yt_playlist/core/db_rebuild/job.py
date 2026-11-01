@@ -152,7 +152,11 @@ def _verify_backup(source, backup, *, cancelled=lambda:False):
                 original.execute('SELECT * FROM sqlite_sequence ORDER BY name').fetchall():
             raise ValueError('Recovery backup changed sequence high-water marks')
         policy_recovery._verify(copied)
-        build._format(copied)
+        if copied.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 64:
+            from .source import admit
+            admit(copied)
+        else:
+            build._format(copied)
 
 
 def run(store, *, destination=None, resume=False, scratch=None, progress=lambda phase, detail: None,
@@ -214,7 +218,9 @@ def run(store, *, destination=None, resume=False, scratch=None, progress=lambda 
             with store._lock:
                 # Admission setup belongs to the same recovery scope as the
                 # copy: even a failed first state write must restore service.
-                if store.conn.in_transaction or store.activity_paused:
+                released_source = getattr(store, '_rebuild_source_version', None) == 64
+                if (store.conn.in_transaction or store.activity_paused and not (
+                        released_source and destination is not None and not getattr(store, '_activity_paused', False))):
                     raise RuntimeError('Compaction needs idle write admission')
                 original_query_only = store.conn.execute('PRAGMA query_only').fetchone()[0]
                 store._maintenance_accounts = tuple(store.accounts.get_accounts())
@@ -348,8 +354,10 @@ def run(store, *, destination=None, resume=False, scratch=None, progress=lambda 
                         store.conn._storage_compacting = True
                     else:
                         store.activity_paused = False
-                        store.conn._storage_compacting = False
-                        store.conn.execute(f'PRAGMA query_only={original_query_only}')
+                        required = getattr(store, '_rebuild_source_version', None) == 64
+                        store.conn._storage_compacting = required
+                        query_only = 1 if required else 0 if state['phase'] == 'complete' else original_query_only
+                        store.conn.execute(f'PRAGMA query_only={query_only}')
 
 
 def main(argv=None):

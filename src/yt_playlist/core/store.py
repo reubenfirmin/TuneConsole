@@ -65,6 +65,7 @@ class Store:
     def activity_paused(self):
         source = getattr(self, '_evidence_source', self)
         return (getattr(source, '_activity_paused', False)
+                or getattr(source, '_rebuild_source_version', None) == 64
                 or bool(getattr(source, '_evidence_maintenance', 0))
                 or getattr(source, '_evidence_recovery_pending', False))
 
@@ -303,6 +304,8 @@ class Store:
         try:
             self._schema_compatibility = bool(migrate(
                 self.conn, defer_validation=defer_metadata and self._db_path is not None))
+            self._rebuild_source_version = (64 if self.conn.execute(
+                'SELECT max(version) FROM schema_migrations').fetchone()[0] == 64 else None)
             # Preparation changes no runtime owner. Old owners remain writable
             # until a separately verified, bounded publication replaces them.
             self._schema_recovery_pending = False
@@ -312,13 +315,16 @@ class Store:
             from yt_playlist.core import repair
             if not self._schema_compatibility:
                 repair.run_once(self)
-            if self._db_path is not None:
+            if self._db_path is not None and not self._rebuild_source_version:
                 # A maintenance read transaction must not hold up UI writes (rollback journal
                 # readers otherwise block the writer at commit, even on separate connections).
                 mode = self.conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
                 if mode.lower() != "wal":
                     raise RuntimeError("Database requires WAL for nonblocking background readers")
             self._snapshot_revisions = Revisions(self.conn)
+            if self._rebuild_source_version:
+                self.conn.execute('PRAGMA query_only=ON')
+                self.conn._storage_compacting = True
         except BaseException:
             self.conn.close()
             raise

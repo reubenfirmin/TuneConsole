@@ -38,6 +38,10 @@ _KEY_COLUMNS = {"settings": "key", "rec_proposals": "surface", "player_events": 
                 "choice_interest_features": "publication_id", "choice_interest_tracks": "publication_id",
                 "choice_album_interests": "publication_id", "choice_album_track_days": "publication_id",
                 "choice_interest_mix_descriptors": "publication_id"}
+# Keyed musical-link readers consume source/recording membership only. The
+# delivery token fences incoming alternatives; changing it alone must not
+# discard a model calculation. Unannotated reads still guard the complete row.
+_KEY_COLUMN_EXCLUSIONS = {"rec_musical_links": {"delivery_id"}}
 # A declared catalog read consumes every recording field except enrichment's
 # scheduling timestamps. Default/unannotated reads still guard the entire row.
 # Excluding only these fields also guards newly added catalog columns.
@@ -87,6 +91,8 @@ class Revisions:
             columns = [r[1] for r in conn.execute(f"PRAGMA main.table_xinfo({_identifier(name)})")]
             changed = " OR ".join(f"OLD.{_identifier(c)} IS NOT NEW.{_identifier(c)}"
                                   for c in columns)
+            key_changed = " OR ".join(f"OLD.{_identifier(c)} IS NOT NEW.{_identifier(c)}"
+                for c in columns if c not in _KEY_COLUMN_EXCLUSIONS.get(name, ()))
             groups = {group: [c for c in columns if c not in excluded]
                       for group, excluded in _COLUMN_GROUP_EXCLUSIONS.get(name, {}).items()}
             groups.update({group: [c for c in columns if c in included]
@@ -105,6 +111,8 @@ class Revisions:
                     # owner revision still advances through the first key.
                     "INSERT INTO snapshot_revisions(table_name,record_key,revision) SELECT "
                     f"{_literal(name)},{key},total_changes()+1 WHERE {key} IS NOT NULL "
+                    + (f"AND ({key_changed}) " if operation == 'UPDATE' and key != "''"
+                       and name in _KEY_COLUMN_EXCLUSIONS else '') +
                     "ON CONFLICT(table_name,record_key) "
                     "DO UPDATE SET revision=excluded.revision;" for key in keys)
                 condition = f" WHEN {changed}" if operation == "UPDATE" else ""
@@ -210,6 +218,10 @@ class Reads:
                 keys = self._record_keys.get(table)
                 if keys is not None:
                     self.include({(table, key) for key in keys})
+                    if _column in _KEY_COLUMN_EXCLUSIONS.get(table, ()):
+                        # A caller consuming bookkeeping needs its full guard;
+                        # keyed membership counters deliberately omit it.
+                        self.include({(table, "")})
                 elif table == 'metadata_runtime_state' and _column in ('id', 'active'):
                     # Format detection reads this owner directly. File-GC cursor
                     # changes must not invalidate model calculations or rankings.

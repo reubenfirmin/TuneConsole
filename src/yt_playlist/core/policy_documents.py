@@ -12,6 +12,7 @@ import time
 from .activity import check_cancellable_work
 from .evidence_ledger import _mkdir, _sync_directory, canonical
 from .policy_config import BASE_FIELD
+from . import fao
 
 FORMAT = 'recommendation-policy-1'
 MAX_BYTES = 8 * 1024 * 1024
@@ -115,34 +116,12 @@ def publish(root, configuration):
 
 def _publish_encoded(root, encoded, digest):
     path = Path(root) / digest[:2] / (digest + '.json')
-    _mkdir(path.parent)
-    # Reused configurations are immutable and already durably published.
-    if path.exists():
-        if _existing(path, len(encoded)) != encoded:
-            raise ValueError('Recommendation policy file does not match its digest')
-        _sync_directory(path.parent)
-        return str(path)
-    pending = None
-    try:
-        with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.pending-', delete=False) as stream:
-            pending = Path(stream.name)
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-        try:
-            os.link(pending, path)
-        except FileExistsError:
-            if _existing(path, len(encoded)) != encoded:
-                raise ValueError('Recommendation policy file does not match its digest')
-        _sync_directory(path.parent)
-    finally:
-        if pending is not None:
-            pending.unlink(missing_ok=True)
+    fao.write_bytes(path, encoded, immutable=True)
     return str(path)
 
 
 def _existing(path, size=MAX_BYTES):
-    with path.open('rb') as stream:
+    with fao.open_reader(path) as stream:
         return stream.read(size + 1)
 
 
@@ -181,7 +160,7 @@ def read(filename, digest, *, offset=0, size=None):
     if (type(offset) is not int or offset < 0
             or size is not None and (type(size) is not int or not 0 < size <= MAX_BYTES)):
         raise ValueError('Invalid recommendation policy file range')
-    with path.open('rb') as stream:
+    with fao.open_reader(path) as stream:
         if offset:
             if (size is None or offset < len(PACK_HEADER) or stream.read(len(PACK_HEADER)) != PACK_HEADER
                     or len(path.stem) != 64 or any(c not in '0123456789abcdef' for c in path.stem)):

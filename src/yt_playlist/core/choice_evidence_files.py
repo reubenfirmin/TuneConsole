@@ -3,7 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from . import evidence_ledger, policy_documents
+from . import evidence_ledger, policy_documents, fao
 
 MAX_BYTES = 8 * 1024 * 1024
 PAGE_ROWS = 512
@@ -20,7 +20,7 @@ def references(conn):
 
 
 def _read(path):
-    with path.open('rb') as stream:
+    with fao.open_reader(path) as stream:
         data = stream.read(MAX_BYTES + 1)
     if len(data) > MAX_BYTES:
         raise ValueError('Listening evidence exceeds recovery memory budget')
@@ -110,5 +110,5 @@ def restore(conn, manifest):
                     raise ValueError('Listening evidence backup failed verification')
                 _validate(kind, token, data)
                 output._publish(output.directory / kind / token[:2] / (token + '.json'), data, kind, token)
-        save(sum(path.stat().st_size for path in references(conn)))
+        save(sum(fao.stat(path).logical_bytes for path in references(conn)))
         output._advance_generation()

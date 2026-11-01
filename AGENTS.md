@@ -45,6 +45,9 @@
 - After an interrupted or killed run, remove its disposable workspace once its
   processes have stopped. Keep acceptance evidence in ticket comments or an
   explicitly chosen report destination, separate from disposable fixtures.
+  Use `./scripts/test-artifacts-cleanup.py PATH...` to preview eligible retained
+  workspaces, then the same command with `--delete` to remove them. Keep cleanup
+  behind this stable command instead of requesting one-off removal approvals.
 - Targeted pytest checks do not acquire or wait for the global-suite lock. Run
   `uv run pytest <paths>` directly, including while another agent owns that lock.
 - The shared test lock is only for the global test suite. Running experiments

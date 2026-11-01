@@ -10,6 +10,7 @@ import tempfile
 
 from .evidence_ledger import canonical, _sync_directory
 from .activity import check_cancellable_work, WorkBudgetExceeded
+from . import fao
 
 MAX_BYTES = 8 * 1024 * 1024
 KINDS = frozenset(('alternatives', 'native', 'choices', 'conflicts'))
@@ -59,7 +60,7 @@ def publish(conn, kind, owner, revision, data):
     path = directory(conn) / relative(kind, owner, revision)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        old = path.read_bytes()
+        old = fao.read_bytes(path, max_bytes=MAX_BYTES)
     except FileNotFoundError:
         old = None
     if old is not None:
@@ -79,27 +80,15 @@ def publish(conn, kind, owner, revision, data):
                     'ON p.name=s.provider WHERE s.recording_id=? AND p.id=?', owner).fetchone()
         if current is not None and revision <= current[0]:
             raise ValueError('Runtime metadata revision cannot change its content')
-    with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.publishing-', delete=False) as stream:
-        staging = Path(stream.name)
-        try:
-            stream.write(encoded)
-            stream.flush()
-            import os
-            os.fsync(stream.fileno())
-            stream.close()
-            # Writers hold SQLite's reservation. Revision names are unique to
-            # that transaction, so another publisher cannot replace this head.
-            staging.replace(path)
-            _sync_directory(path.parent)
-        finally:
-            staging.unlink(missing_ok=True)
+    # The owner's SQL reservation fences this revision's publication.
+    fao.write_bytes(path, encoded, max_bytes=MAX_BYTES)
     return path
 
 
 def read(conn, kind, owner, revision, *, missing=False, max_bytes=MAX_BYTES):
     path = directory(conn) / relative(kind, owner, revision)
     try:
-        with path.open('rb') as stream:
+        with fao.open_reader(path) as stream:
             encoded = stream.read(min(max_bytes, MAX_BYTES) + 1)
     except FileNotFoundError:
         if missing:
@@ -151,20 +140,12 @@ def export(conn, root):
         relative_path = relative(kind, owner, revision)
         source, target = directory(conn) / relative_path, root / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
-        with target.open('rb') as stream:
-            import os
-            os.fsync(stream.fileno())
-        _sync_directory(target.parent)
+        fao.copy(source, target, max_bytes=MAX_BYTES)
         entries.append({'kind': kind, 'owner': list(owner), 'revision': revision,
-                        'bytes': target.stat().st_size, 'sha256': hashlib.sha256(target.read_bytes()).hexdigest()})
+                        'bytes': fao.stat(target).logical_bytes, 'sha256': hashlib.sha256(fao.read_bytes(target)).hexdigest()})
     root.mkdir(parents=True, exist_ok=True)
     manifest = root / 'manifest.json'
-    manifest.write_bytes(canonical({'format': 1, 'entries': entries}))
-    with manifest.open('rb') as stream:
-        import os
-        os.fsync(stream.fileno())
-    _sync_directory(root)
+    fao.write_bytes(manifest, canonical({'format': 1, 'entries': entries}))
     return str(manifest)
 
 
@@ -172,7 +153,7 @@ def restore(conn, manifest):
     """Copy owned files, checking custody; no SQL locator needs rewriting."""
     import shutil
     manifest = Path(manifest)
-    document = json.loads(manifest.read_bytes())
+    document = json.loads(fao.read_bytes(manifest))
     if not isinstance(document, dict) or document.get('format') != 1 or not isinstance(document.get('entries'), list):
         raise ValueError('Invalid runtime metadata backup')
     expected = {(kind, tuple(owner), revision): required for kind, owner, revision, required in references(conn, include_expired=True)}
@@ -185,7 +166,7 @@ def restore(conn, manifest):
         seen.add(key)
         relative_path = relative(*key)
         source = manifest.parent / relative_path
-        with source.open('rb') as stream:
+        with fao.open_reader(source) as stream:
             encoded = stream.read(MAX_BYTES+1)
         if len(encoded) > MAX_BYTES:
             raise ValueError('Runtime metadata backup document exceeds its byte budget')
@@ -193,11 +174,7 @@ def restore(conn, manifest):
             raise ValueError('Runtime metadata backup file failed verification')
         target = directory(conn) / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
-        with target.open('rb') as stream:
-            import os
-            os.fsync(stream.fileno())
-        _sync_directory(target.parent)
+        fao.copy(source, target, max_bytes=MAX_BYTES)
         read(conn, *key)
     if any(required and key not in seen for key, required in expected.items()):
         raise ValueError('Runtime metadata backup is missing a required document')

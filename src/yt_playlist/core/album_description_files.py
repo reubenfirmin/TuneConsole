@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 
 from .evidence_ledger import _mkdir, _sync_directory, canonical
+from . import fao
 
 FORMAT = 'album-description-1'
 MAX_BYTES = 256 * 1024
@@ -42,28 +43,12 @@ def publish(root, raw):
     encoded = document(raw)
     digest = hashlib.sha256(encoded).hexdigest()
     path = Path(root) / digest[:2] / (digest + '.json')
-    _mkdir(path.parent)
-    pending = None
-    try:
-        with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.pending-', delete=False) as stream:
-            pending = Path(stream.name)
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-        try:
-            os.link(pending, path)
-        except FileExistsError:
-            if _existing(path) != encoded:
-                raise ValueError('Album description file does not match its digest')
-        _sync_directory(path.parent)
-    finally:
-        if pending is not None:
-            pending.unlink(missing_ok=True)
+    fao.write_bytes(path, encoded, immutable=True, max_bytes=MAX_BYTES)
     return str(path), digest, len(encoded)
 
 
 def _existing(path):
-    with Path(path).open('rb') as stream:
+    with fao.open_reader(path) as stream:
         return stream.read(MAX_BYTES + 1)
 
 

@@ -8,7 +8,7 @@ from functools import partial
 import hashlib
 from pathlib import Path
 
-from . import policy_documents, recommendation_outputs as files
+from . import policy_documents, recommendation_outputs as files, fao
 from .activity import check_cancellable_work
 
 
@@ -102,7 +102,7 @@ def _read(reference):
             or type(size) is not int or not 0 < size <= 512 * 1024 * 1024):
         raise ValueError('Invalid preparation file reference')
     path = Path(filename)
-    with path.open('rb') as stream:
+    with fao.open_reader(path) as stream:
         encoded = stream.read(size + 1)
     if path.stem != digest or len(encoded) != size or hashlib.sha256(encoded).hexdigest() != digest:
         raise ValueError('Preparation file differs from retained bytes')

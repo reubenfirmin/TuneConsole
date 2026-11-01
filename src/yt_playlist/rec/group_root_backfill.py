@@ -8,6 +8,7 @@ import hashlib
 from dataclasses import dataclass
 from itertools import tee
 import json
+from yt_playlist.core import fao
 import math
 import time
 
@@ -207,7 +208,7 @@ class Backfill:
                 self._advance()
                 continue
             try:
-                size = path.stat().st_size
+                size = fao.stat(path).logical_bytes
                 if size > MAX_RECORD_BYTES:
                     self.pending_path = path
                     raise WorkBudgetExceeded('Historical listening group evidence exceeds its admitted memory')
@@ -217,7 +218,7 @@ class Backfill:
                 # Keep this exact path on cancellation or malformed input;
                 # retry must never skip an unprocessed historical owner.
                 self.pending_path = path
-                value = json.loads(path.read_bytes())
+                value = json.loads(fao.read_bytes(path))
                 operation = self._record(ledger, kind, value, path)
                 if operation is not None:
                     operations.append(operation)

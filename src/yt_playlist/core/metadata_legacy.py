@@ -240,20 +240,25 @@ def copy_observations(conn, owner, rows):
             _native_observe(conn,captured)
 
 
-def backfill_selections(conn):
+def copy_selections(conn, old, rows):
     """Provider labels/times are retained attribution, never an equal-value join."""
-    for old, new, subject, allowed in (
-            ('recording_field_sources', 'recording_metadata_selections', 'recording_id', values.RECORDING_FIELDS),
-            ('item_field_sources', 'entry_metadata_selections', 'entry_id', values.ITEM_FIELDS)):
-        for row in conn.execute(f'SELECT * FROM {old}'):
-            if row['field'] not in allowed:
-                raise ValueError(f'Unsupported legacy metadata selection field: {old}.{row["field"]}')
-            conn.execute(f'INSERT INTO {new}({subject},field,attribution_status,legacy_source,selected_at) '
-                         "VALUES (?,?,'legacy_unresolved',?,?) ON CONFLICT DO NOTHING",
-                         (row[subject], row['field'], row['source'], row['selected_at']))
+    new, subject, allowed = {
+        'recording_field_sources': ('recording_metadata_selections', 'recording_id', values.RECORDING_FIELDS),
+        'item_field_sources': ('entry_metadata_selections', 'entry_id', values.ITEM_FIELDS)}[old]
+    for row in rows:
+        if row['field'] not in allowed:
+            raise ValueError(f'Unsupported legacy metadata selection field: {old}.{row["field"]}')
+        conn.execute(f'INSERT INTO {new}({subject},field,attribution_status,legacy_source,selected_at) '
+                     "VALUES (?,?,'legacy_unresolved',?,?) ON CONFLICT DO NOTHING",
+                     (row[subject], row['field'], row['source'], row['selected_at']))
 
 
-def backfill_conflicts(conn):
+def backfill_selections(conn):
+    for owner in ('recording_field_sources', 'item_field_sources'):
+        copy_selections(conn, owner, conn.execute('SELECT * FROM '+owner))
+
+
+def backfill_conflicts(conn, *, batches=None):
     """Retain each original conflict and link its explicitly offered evidence.
 
     A recorded resolution is its own decision. It is never matched to an equal
@@ -261,7 +266,7 @@ def backfill_conflicts(conn):
     """
     statuses = {0: 'unresolved', 1: 'user_resolved', 2: 'provider_converged'}
     count = 0
-    for rows in _batches(conn, 'enrichment_conflict'):
+    for rows in _batches(conn, 'enrichment_conflict') if batches is None else batches:
         for captured in capture_batch(conn, 'enrichment_conflict', rows):
             _, row, entry, recording, _, field, scope, _, _ = captured
             if entry is None or field not in CATALOG_FIELDS:
@@ -332,7 +337,7 @@ def _operational_fields(conn, owner, captured):
         yield field, observation
 
 
-def backfill_operational(conn):
+def backfill_operational(conn, *, sources=None):
     """Keep retry/frontier membership relational, with explicit legacy values.
 
     The old attempt/state owners recorded a recording and sometimes an item,
@@ -340,9 +345,9 @@ def backfill_operational(conn):
     their finite evidence cannot be selected as a newly proved catalog fact.
     """
     counts = {}
-    for owner in ('provider_attempts', 'enrichment_provider_state'):
+    for owner in ('provider_attempts', 'enrichment_provider_state') if sources is None else sources:
         count = 0
-        for rows in _batches(conn, owner):
+        for rows in _batches(conn, owner) if sources is None else sources[owner]:
             for captured in capture_batch(conn, owner, rows):
                 delivery, row, _, recording, *_ = captured
                 if recording is None:
@@ -362,9 +367,9 @@ def backfill_operational(conn):
     return counts
 
 
-def backfill_identifiers(conn):
+def backfill_identifiers(conn, *, batches=None):
     count = 0
-    for rows in _batches(conn, 'recording_identifiers'):
+    for rows in _batches(conn, 'recording_identifiers') if batches is None else batches:
         for delivery, row, *_ in capture_batch(conn, 'recording_identifiers', rows):
             conn.execute('UPDATE recording_identifiers SET delivery_id=? WHERE id=? AND delivery_id IS NULL',
                          (delivery, row['id']))
@@ -372,8 +377,8 @@ def backfill_identifiers(conn):
     return count
 
 
-def backfill_hints(conn):
-    for rows in _batches(conn, 'catalog_field_hints'):
+def backfill_hints(conn, *, batches=None):
+    for rows in _batches(conn, 'catalog_field_hints') if batches is None else batches:
         for captured in capture_batch(conn, 'catalog_field_hints', rows):
             _, row, entry, _, _, field, *_ = captured
             observation = _observe(conn, 'catalog_field_hints', captured, raw=row['value_json'], encoded=True,

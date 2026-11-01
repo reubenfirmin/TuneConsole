@@ -4,9 +4,8 @@ These callbacks use the same domain writers as the historical conversions.
 They neither replace source tables nor commit independently of the rebuild.
 """
 import json
-import sqlite3
 
-from .. import (action_work, album_tracklists, append_work, collection_recovery,
+from .. import (action_work, album_tracklists,
                experiment_decision_state, legacy_evidence, playlist_recipe_state,
                recommendation_setting_outputs, road_trip_draft_storage,
                spotify_job_state, taste_control_state, workflow_settings)
@@ -58,8 +57,6 @@ def _action(reader, target, row):
 def _recipe(reader, target, row):
     value = json.loads(row['recipe'])
     playlist_recipe_state.save(target,row['playlist_ytm'],value,row['created_at'])
-    recipe = target.execute('SELECT id,playlist_scope_id FROM rec_recipes ORDER BY id DESC LIMIT 1').fetchone()
-    append_work.save_tv(target,recipe['id'],recipe['playlist_scope_id'],value)
 
 
 def _canvas(reader, target, row):
@@ -82,12 +79,6 @@ def settings(reader, target, cursor, limit):
         if jobs.get('spotify_library_import_job'):
             spotify_job_state.save(target,json.loads(jobs['spotify_library_import_job']),legacy=True)
         recommendation_setting_outputs.put(target,source.settings(reader,{'radio_seed_offer','rec_autotune_result'}))
-        from .. import radio_policy_roots
-        for row in target.execute('SELECT * FROM radio_sessions').fetchall():
-            state = collection_recovery.read(row['recovery_filename'],row['recovery_digest'],row['recovery_bytes'],
-                                            kind='radio-session',owner=row['id'])
-            append_work.save_radio(target,row['id'],row['revision'],state)
-            radio_policy_roots.save_session(target,row['id'],state)
         return Batch(['rows',None],len(original)+len(saved)+len(jobs),False)
     values, bookmark, done = source.scan(reader,'settings',cursor[1],limit)
     for row in values:

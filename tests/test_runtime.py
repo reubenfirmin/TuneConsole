@@ -3,8 +3,8 @@ from yt_playlist.core.runtime import Runtime
 
 
 def _stub_ytmusic(monkeypatch):
-    import yt_playlist.core.accounts as identities
-    monkeypatch.setattr(identities, "YTMusic", lambda *a, **k: object())        # build_client provider
+    import yt_playlist.core.runtime as runtime
+    monkeypatch.setattr(runtime, 'build_client', lambda *a, **k: object())
 
 
 def test_load_provisions_default_identity_on_first_run(store, monkeypatch, tmp_path):

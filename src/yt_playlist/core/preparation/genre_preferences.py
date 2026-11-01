@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+from .. import fao
 import time
 
 from .. import genre_identity
@@ -101,7 +102,7 @@ def directory(conn):
 
 
 def read_baseline(row):
-    with Path(row['filename']).open('rb') as stream:
+    with fao.open_reader(row['filename']) as stream:
         encoded = stream.read(row['byte_size'] + 1)
     if (len(encoded) != row['byte_size'] or hashlib.sha256(encoded).hexdigest() != row['digest']
             or Path(row['filename']).stem != row['digest']):

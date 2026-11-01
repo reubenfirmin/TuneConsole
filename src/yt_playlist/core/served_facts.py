@@ -1,5 +1,6 @@
 """Captured reporting facts; opaque diagnostics belong to keyed JSON files."""
 import hashlib
+from . import fao
 import json
 import math
 import os
@@ -138,23 +139,13 @@ def publish(conn, identity, at, trace):
         raise ValueError('Served diagnostic is immutable')
     # Failed publications can leave an ID's orphan. A reused legacy ID must
     # also respect readers of its former owner before replacing that file.
-    if path.exists() and path.read_bytes() != encoded:
+    if fao.exists(path) and fao.read_bytes(path) != encoded:
         with (root / '.readers.lock').open('a+b') as lock:
             unlock = policy_documents._try_file_lock(lock, exclusive=True)
             if unlock is None:
                 raise ValueError('Served diagnostic identity is still retained by a reader; retry preparation')
             unlock()
-    with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.publishing-', delete=False) as stream:
-        pending = Path(stream.name)
-        try:
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-            stream.close()
-            pending.replace(path)
-            _sync_directory(path.parent)
-        finally:
-            pending.unlink(missing_ok=True)
+    fao.write_bytes(path, encoded, max_bytes=MAX_BYTES)
     marks = ','.join('?' for _ in FIELDS)
     conn.execute('INSERT INTO served_facts(impression_id,' + ','.join(FIELDS) + ') VALUES (?,' + marks + ')',
                  (identity, *extract(trace)))
@@ -166,7 +157,7 @@ def diagnostic(conn, row):
         return None
     path = directory(conn) / relative(row['id'])
     try:
-        with path.open('rb') as stream:
+        with fao.open_reader(path) as stream:
             encoded = stream.read(MAX_BYTES + 1)
     except FileNotFoundError:
         raise ValueError('Unexpectedly missing served diagnostic: ' + str(row['id'])) from None
@@ -270,24 +261,18 @@ def export(conn, target):
         path = relative(row['id'])
         destination = target / path
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(directory(conn) / path, destination)
-        encoded = destination.read_bytes()
-        with destination.open('rb') as stream:
-            os.fsync(stream.fileno())
-        _sync_directory(destination.parent)
+        fao.copy(directory(conn) / path, destination, max_bytes=MAX_BYTES)
+        encoded = fao.read_bytes(destination, max_bytes=MAX_BYTES)
         entries.append([row['id'], len(encoded), hashlib.sha256(encoded).hexdigest()])
     target.mkdir(parents=True, exist_ok=True)
     manifest = target / 'manifest.json'
-    manifest.write_bytes(canonical({'format': 'served-diagnostics-1', 'entries': entries}))
-    with manifest.open('rb') as stream:
-        os.fsync(stream.fileno())
-    _sync_directory(target)
+    fao.write_bytes(manifest, canonical({'format': 'served-diagnostics-1', 'entries': entries}))
     return str(manifest)
 
 
 def restore(conn, manifest):
     manifest = Path(manifest)
-    value = json.loads(manifest.read_bytes())
+    value = json.loads(fao.read_bytes(manifest))
     if not isinstance(value, dict) or set(value) != {'format', 'entries'} or value['format'] != 'served-diagnostics-1':
         raise ValueError('Unsupported served diagnostics backup')
     expected = {row['id']: row for row in references(conn)}
@@ -297,23 +282,13 @@ def restore(conn, manifest):
             raise ValueError('Served diagnostics backup differs from SQL ownership')
         seen.add(identity)
         source = manifest.parent / relative(identity)
-        with source.open('rb') as stream:
+        with fao.open_reader(source) as stream:
             encoded = stream.read(MAX_BYTES + 1)
         if len(encoded) > MAX_BYTES or len(encoded) != size or hashlib.sha256(encoded).hexdigest() != digest:
             raise ValueError('Served diagnostic backup failed verification')
         target = directory(conn) / relative(identity)
         target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=target.parent, prefix='.restoring-', delete=False) as stream:
-            pending = Path(stream.name)
-            try:
-                stream.write(encoded)
-                stream.flush()
-                os.fsync(stream.fileno())
-                stream.close()
-                pending.replace(target)
-                _sync_directory(target.parent)
-            finally:
-                pending.unlink(missing_ok=True)
+        fao.copy(source, target, max_bytes=MAX_BYTES)
         diagnostic(conn, expected[identity])
     if seen != expected.keys():
         raise ValueError('Served diagnostics backup is incomplete')

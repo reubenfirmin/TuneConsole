@@ -7,6 +7,7 @@ import tempfile
 
 from yt_playlist.core.audio_annotation_contract import FILE_FORMAT
 from yt_playlist.core.evidence_ledger import _mkdir, _sync_directory, canonical
+from . import fao
 
 MAX_BYTES = 4 * 1024 * 1024
 
@@ -30,29 +31,13 @@ def publish(root, document):
         raise ValueError('Annotation document exceeds the input byte budget')
     digest = hashlib.sha256(encoded).hexdigest()
     path = Path(root) / digest[:2] / (digest + '.json')
-    _mkdir(path.parent)
-    pending = None
-    try:
-        with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.pending-', delete=False) as stream:
-            pending = Path(stream.name)
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-        try:
-            os.link(pending, path)
-        except FileExistsError:
-            if path.read_bytes() != encoded:
-                raise ValueError('Annotation file does not match its content hash')
-        _sync_directory(path.parent)
-    finally:
-        if pending is not None:
-            pending.unlink(missing_ok=True)
+    fao.write_bytes(path, encoded, immutable=True, max_bytes=MAX_BYTES)
     return str(path)
 
 
 def read(filename, *, expected=None):
     path = Path(filename)
-    with path.open('rb') as stream:
+    with fao.open_reader(path) as stream:
         encoded = stream.read(MAX_BYTES + 1)
     if len(encoded) > MAX_BYTES:
         raise ValueError('Annotation document exceeds the input byte budget')

@@ -2,7 +2,7 @@
 from contextlib import ExitStack
 import json
 
-from yt_playlist.core import audio_vibe_metadata, genre_identity, metadata_evidence, metadata_native, sample_files
+from yt_playlist.core import audio_vibe_metadata, genre_identity, metadata_evidence, metadata_native, sample_files, vibe_provenance
 from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS, PREDICTION_VERSION
 from yt_playlist.core.activity import WorkBudgetExceeded, check_stopping
 from yt_playlist.core.db_revisions import column_group_reads, keyed_reads
@@ -212,17 +212,18 @@ class VibePredictionsRepo(Repo):
                             and old['score'] == fit['score'] and old['support'] == fit['support']
                             and old['inputs_version'] == track['version'] and old['artist_key'] == track['artist']
                             and old['subgenre_key'] == track['genre']):
-                        saved = {row[0] for row in self.conn.execute('SELECT measurement_id FROM prediction_inputs WHERE prediction_id=?',
-                                                                   (old['prediction_id'],))}
-                        if saved == inputs:
+                        if vibe_provenance.same_inputs(self.conn, old['prediction_id'], inputs):
                             pid = old['prediction_id']
                     if pid is None:
                         pid = self.conn.execute('INSERT INTO predictions(recording_id,vibe,score,support,subgenre_key,kind,policy_version,predicted_at) '
                             'VALUES (?,?,?,?,?,?,?,?)', (rid, vibe, fit['score'], fit['support'],
                             track['genre'] if source != 'artist' else None, source, track['version'], now)).lastrowid
-                        self.conn.executemany('INSERT INTO prediction_artists VALUES (?,?)',
-                            [(pid, aid) for aid in json.loads(track['artist'] or '[]')] if source != 'genre' else [])
-                        self.conn.executemany('INSERT INTO prediction_inputs VALUES (?,?)', [(pid, mid) for mid in sorted(inputs)])
+                        artists = json.loads(track['artist'] or '[]') if source != 'genre' else []
+                        if vibe_provenance.available(self.conn):
+                            vibe_provenance.publish_many(self.conn, [(pid, inputs, artists)])
+                        else:
+                            self.conn.executemany('INSERT INTO prediction_artists VALUES (?,?)', [(pid, aid) for aid in artists])
+                            self.conn.executemany('INSERT INTO prediction_inputs VALUES (?,?)', [(pid, mid) for mid in sorted(inputs)])
                     mid = None
                 values = (rid, vibe, fit['score'], fit['support'], source, mid, pid, track['version'], track['artist'], track['genre'],
                           fit.get('recordings'), fit.get('variance'))

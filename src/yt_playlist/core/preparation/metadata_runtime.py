@@ -150,6 +150,11 @@ def _native(conn, cursor, limit):
         values = metadata_native.source_values(conn, row['source_key'], max_bytes=files.MAX_BYTES)
         files.publish(conn, 'native', (row['source_key'],), row['revision'],
                       {'observations':values, 'provider':row['provider']})
+        head = metadata_native.installed_runtime_head(conn, row['source_key'], {})
+        if head is not None:
+            metadata_native.retain_runtime_head(conn, row['source_key'], head)
+        else:
+            conn.execute('DELETE FROM metadata_native_delivery_heads WHERE source_key=?', (row['source_key'],))
     return rows[-1]['source_key'] if rows else cursor, len(rows)
 
 

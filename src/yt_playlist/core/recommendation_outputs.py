@@ -7,7 +7,7 @@ from itertools import islice
 from pathlib import Path
 import tempfile
 
-from . import policy_documents
+from . import policy_documents, fao
 from .activity import check_cancellable_work
 from .evidence_ledger import canonical, _sync_directory
 
@@ -75,7 +75,7 @@ def _read(filename, digest, size, *, surface=None, chunk_key=None):
     if type(size) is not int or not 0 < size <= MAX_BYTES:
         raise ValueError('Invalid prepared output byte range')
     path = Path(filename)
-    with path.open('rb') as stream:
+    with fao.open_reader(path) as stream:
         encoded = stream.read(size + 1)
     if path.stem != digest or len(encoded) != size or hashlib.sha256(encoded).hexdigest() != digest:
         raise ValueError('Prepared output does not match its digest')
@@ -104,7 +104,7 @@ def _manifest(root, value):
 
 def _load_manifest(path):
     path = Path(path)
-    with path.open('rb') as stream:
+    with fao.open_reader(path) as stream:
         encoded = stream.read(MANIFEST_BYTES + 1)
     if len(encoded) > MANIFEST_BYTES or hashlib.sha256(encoded).hexdigest() != path.stem:
         raise ValueError('Prepared output manifest does not match its digest')

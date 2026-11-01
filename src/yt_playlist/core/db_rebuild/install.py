@@ -61,10 +61,20 @@ def _open_store(store, internal):
     try:
         store.conn._policy_memory_key = store._evidence_key
         store._configure_connection()
-        store.conn.execute('PRAGMA journal_mode=WAL')
+        from ..migrations import current
+        from ..migrations.registry import MIGRATIONS
+        from ..migrations.runner import history
+        version = history(store.conn, MIGRATIONS)
+        store._schema_compatibility = version < current.VERSION
+        store._rebuild_source_version = 64 if version == 64 else None
+        if not store._rebuild_source_version:
+            store.conn.execute('PRAGMA journal_mode=WAL')
         store._bind_repositories()
         store._snapshot_revisions = Revisions(store.conn)
         store._read_memo = ReadMemo()
+        if store._rebuild_source_version:
+            store.conn.execute('PRAGMA query_only=ON')
+            store.conn._storage_compacting = True
     except BaseException:
         store.conn.close()
         raise

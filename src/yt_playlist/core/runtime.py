@@ -58,8 +58,12 @@ class Runtime:
             try:
                 cfgs = load_accounts(self.config_path)
                 content = self.config_path.read_bytes()
-                with self.store.accounts.reconciled(cfgs) as ids:
-                    provider = self._prepare_provider(cfgs, ids)
+                with self.store._lock:
+                    if self.store.activity_paused:
+                        provider = self._prepare_provider(cfgs, self.store.accounts.configured_ids(cfgs))
+                    else:
+                        with self.store.accounts.reconciled(cfgs) as ids:
+                            provider = self._prepare_provider(cfgs, ids)
             except Exception as e:
                 if self._last_config is not None:
                     restore_config(self._last_config, self.config_path)

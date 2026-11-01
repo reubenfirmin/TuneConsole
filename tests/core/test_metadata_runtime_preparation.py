@@ -92,3 +92,26 @@ def test_continuing_installed_writes_refuse_stale_activation(tmp_path):
         assert store.conn.execute('SELECT bpm FROM catalog_tracks WHERE id=?', (entry,)).fetchone()[0] == 140
     finally:
         store.conn.close()
+
+
+def test_preparation_retains_newer_identical_native_delivery_freshness(tmp_path):
+    store = Store(tmp_path/'native.db')
+    store.init_schema()
+    try:
+        entry = store.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
+        observation = MetadataObservation('mood_party', .8, 'recording', 'native-id', 'prediction',
+                                          unit='classifier_probability')
+        for name, at in (('first', 10), ('newest', 30)):
+            store.enrichment_state.record_metadata_observations(entry, 'native', [observation], run_id=name, now=at)
+        progress = tmp_path/'progress.json'
+        run(store, progress)
+        preparation.activate(store.conn, progress)
+        late = MetadataObservation('mood_party', .1, 'recording', 'native-id', 'prediction',
+                                   unit='classifier_probability')
+        store.enrichment_state.record_metadata_observations(entry, 'native', [late], run_id='late', now=20)
+        key = store.conn.execute('SELECT source_key FROM rec_musical_sources').fetchone()[0]
+        assert metadata_native.source_values(store.conn, key)['mood_party']['value'] == .8
+        with pytest.raises(ValueError, match='cannot change its result'):
+            store.enrichment_state.record_metadata_observations(entry, 'native', [late], run_id='newest', now=30)
+    finally:
+        store.conn.close()

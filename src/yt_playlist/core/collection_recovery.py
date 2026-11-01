@@ -7,7 +7,7 @@ from functools import wraps
 
 from .evidence_ledger import canonical
 from .policy_documents import _publish_encoded
-from . import policy_documents
+from . import policy_documents, fao
 from .activity import check_cancellable_work
 from .evidence_ledger import _sync_directory
 
@@ -72,7 +72,7 @@ def read(filename,digest,size,*,kind,owner):
     if kind not in KINDS or type(size) is not int or not 0<size<=MAX_BYTES:
         raise ValueError('Invalid collection recovery reference')
     path = Path(filename)
-    with path.open('rb') as stream:
+    with fao.open_reader(path) as stream:
         encoded = stream.read(size+1)
     if path.stem!=digest or len(encoded)!=size or hashlib.sha256(encoded).hexdigest()!=digest:
         raise ValueError('Collection recovery does not match its digest')
@@ -104,7 +104,7 @@ def _manifest(root,value):
 
 def _load_manifest(path):
     path = Path(path)
-    with path.open('rb') as stream:
+    with fao.open_reader(path) as stream:
         encoded = stream.read(MAX_BYTES+1)
     if len(encoded)>MAX_BYTES or hashlib.sha256(encoded).hexdigest()!=path.stem:
         raise ValueError('Collection backup manifest does not match its digest')

@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import heapq
 import json
+from .. import fao
 from pathlib import Path
 import time
 
@@ -57,12 +58,12 @@ def _menus(store, state):
                                    if p.stem > state['cursor']), key=lambda p: p.stem)
     used, prepared = 0, []
     for path in paths:
-        size = path.stat().st_size
+        size = fao.stat(path).logical_bytes
         if size > MAX_BYTES:
             raise ValueError('Historical menu exceeds preparation byte budget')
         if used and used + size > MAX_BYTES:
             break
-        offer = json.loads(path.read_bytes())
+        offer = json.loads(fao.read_bytes(path))
         if hashlib.sha256(offer['id'].encode()).hexdigest() != path.stem:
             raise ValueError('Historical menu identity does not match its file')
         projection, at = _context(store, ledger, offer)

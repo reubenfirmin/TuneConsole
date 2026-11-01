@@ -178,6 +178,26 @@ def _validate_mode_retention(conn):
     mode_retention.validate(conn)
 
 
+def _install_native_metadata_heads(conn, context):
+    from .. import metadata_native
+    metadata_native.install_runtime_heads(conn, context)
+
+
+def _validate_native_metadata_heads(conn):
+    from .. import metadata_native
+    metadata_native.validate_runtime_heads(conn)
+
+
+def _install_vibe_provenance(conn, context):
+    from .. import vibe_provenance
+    vibe_provenance.install(conn, context)
+
+
+def _validate_vibe_provenance(conn):
+    from .. import vibe_provenance
+    vibe_provenance.validate(conn)
+
+
 def after_owner_upgrade(conn):
     """Keep adopted bounded guards when an explicit upgrade creates an owner."""
     if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='schema_changes'").fetchone():
@@ -201,6 +221,8 @@ CHANGES = (
     Change(11, 'displayed_mix_choice_descriptors', _install_mix_choices, _validate_mix_choices),
     Change(12, 'compact_artist_delivery_replays', _install_credit_retention, _validate_credit_retention),
     Change(13, 'retired_taste_mode_payloads', _install_mode_retention, _validate_mode_retention),
+    Change(14, 'native_metadata_delivery_freshness', _install_native_metadata_heads, _validate_native_metadata_heads),
+    Change(15, 'file_owned_prediction_provenance', _install_vibe_provenance, _validate_vibe_provenance),
 )
 
 

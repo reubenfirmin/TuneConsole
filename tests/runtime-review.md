@@ -185,7 +185,7 @@ Each row is a separate run; counts must not be added as independent coverage.
 | `similar-rendered-order` | 12 passed in 71.33s: all retained dialog combinations. |
 | `browser-after` | 23 passed, 2 setup errors, 47 deselected in 158.78s. Merge, real-backend hearts and Event-held deletion passed; the dialog scroll setup errors were fixed and superseded by the twelve-case run above. |
 | `radio-locks` | 5 passed, 14 deselected in 79.76s: stronger 1440/390 motion journeys and three extension lock cases. |
-| `album-js` | 31 passed, 5 failed in 77.58s. All thirteen Node scenarios and consolidated upload render passed. Five album readiness checks returned 409 rather than 200. |
+| `album-js` | 31 passed, 5 failed in 77.58s. All thirteen Node scenarios and consolidated upload render passed. Four album readiness requests returned 409 rather than 200; the held-offer check found no opportunity in its ledger. |
 | `render-delete` | 28 passed, 104 deselected in 55.48s: selected Node, album/upload, pagination, provenance and cleanup cases. |
 | `tail-network` | 151 passed, 4 failed in 448.38s. Two mode fixtures and the truncation fixture were corrected and passed later; first-sync expectation of a nonempty state remains unresolved. |
 | `model-isolation` | 57 passed in 124.25s: robust/semisupervised training, full pipeline/export, mode exclusion, item2vec, roll and bandit checks. |
@@ -272,3 +272,44 @@ evidence. Independent acceptance, controlled end-to-end runtime comparison and
 the broader shared-checkout integration gaps above belong to review. No full
 suite was run for this handoff, and no implementation assertion was removed to
 hide a baseline failure.
+
+## Recorded failure tickets, 2026-11-01
+
+The unresolved observations above are now assigned to the following focused
+Ready / P2 tickets. Each contains exact failing cases, recorded diagnostics,
+focused reproduction commands and acceptance criteria. Filing did not rerun the
+tests against later shared-checkout changes; these are recorded failures to
+reconcile, not newly established production regressions.
+
+| Group | Ticket |
+| --- | --- |
+| Home/album readiness, typed publication and unlocked consumer fixtures | [#714](https://github.com/reubenfirmin/TuneConsole/issues/714) |
+| Account-scoped Road Trip draft and album unsave contracts | [#715](https://github.com/reubenfirmin/TuneConsole/issues/715) |
+| Radio coherent publication through the current owner | [#716](https://github.com/reubenfirmin/TuneConsole/issues/716) |
+| First-sync persisted retry state | [#717](https://github.com/reubenfirmin/TuneConsole/issues/717) |
+| Progressive repair dependency capture and invalidation | [#719](https://github.com/reubenfirmin/TuneConsole/issues/719) |
+| Identity typing, save feedback and help visibility | [#721](https://github.com/reubenfirmin/TuneConsole/issues/721) |
+| Feature asset guards and shared playlist launcher | [#722](https://github.com/reubenfirmin/TuneConsole/issues/722) |
+| DeepSeek album identity and paid-admission fixtures | [#723](https://github.com/reubenfirmin/TuneConsole/issues/723) |
+
+The three baseline architecture guards were added to existing Ready / P2
+[#583](https://github.com/reubenfirmin/TuneConsole/issues/583). The disappearing
+Spotify basetemp observation was linked to existing Ready / P2
+[#703](https://github.com/reubenfirmin/TuneConsole/issues/703); that provider
+case's later pass does not establish safe concurrent-session cleanup.
+Superseded intermediate failures were excluded from new tickets.
+
+The pushed PR run
+[41316661540](https://github.com/reubenfirmin/TuneConsole/actions/runs/41316661540)
+failed collection because the tracked cleanup test loads a script absent from
+the pushed checkout. Existing P1
+[#713](https://github.com/reubenfirmin/TuneConsole/issues/713) owns that blocker.
+The original populated-helper import errors in
+[#701](https://github.com/reubenfirmin/TuneConsole/issues/701) were absent from
+the sampled new logs. Successful shard execution remains unestablished.
+This failed run is not a completed-suite runtime measurement.
+
+The user subsequently clarified that the local housekeeping script does not
+need automated suite coverage. `tests/test_test_artifacts_cleanup.py` has been
+removed, eliminating its collection-time import. The manual utility remains.
+#713 is handed to review pending the next user-controlled push and CI run.
