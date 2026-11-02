@@ -55,7 +55,7 @@ def install(conn, context=None):
 
 
 def validate(conn):
-    from .migrations.current import _tokens
+    from .schema_contract import tokens as _tokens
     replacements = dict(legacy_order_guards()) if ordered_legacy(conn) else {}
     for name, sql in definitions():
         sql = replacements.get(name,sql)
@@ -111,7 +111,7 @@ def install_legacy_order(conn, context=None):
 
 
 def validate_legacy_order(conn):
-    from .migrations.current import _tokens
+    from .schema_contract import tokens as _tokens
     for name,sql in legacy_order_definitions():
         row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?',(name,)).fetchone()
         if row is None or _tokens(row[0])!=_tokens(sql):

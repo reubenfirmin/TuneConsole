@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from .. import choice_learning_state as learning, group_evidence
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import choice_learning as preparation
 from .mapped_publication import MappedPublication
 

@@ -36,6 +36,29 @@ def notice_app(store):
         assert not thread.is_alive()
 
 
+@pytest.mark.parametrize('width',[1536,1040])
+def test_history_notice_with_available_cards_and_writable_library(notice_app,store,page,width):
+    url,maintenance = notice_app
+    maintenance.ready.clear()
+    maintenance.report = {'analytics_pending':True}
+    store.rec_proposals.put_proposals('home_prepared',{'schema':1,'protos':[
+        {'label':'Available mix','tracks':[{'videoId':'prepared-track'}]}]},1)
+    page.set_viewport_size({'width':width,'height':900})
+    page.goto(url+'/playlists')
+    banner = page.locator('#storage-maintenance')
+    expect(banner).to_be_visible()
+    expect(banner).to_have_text('Optimizing app storage; some recommendations are temporarily unavailable.')
+    expect(banner).to_have_attribute('role','status')
+    assert page.request.post(url+'/settings/lastfm-key',form={'key':'accepted-during-history'}).status==204
+    assert store.settings.get_setting('lastfm_api_key')=='accepted-during-history'
+    assert banner.evaluate('el => el.scrollWidth <= el.clientWidth')
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=f'/tmp/tuneconsole-686-history-{width}.png',full_page=True)
+    maintenance.report['analytics_pending'] = False
+    maintenance.ready.set()
+    expect(banner).to_be_hidden()
+
+
 @pytest.mark.parametrize('width,text_size', [(1536, 16), (1040, 16)])
 def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, page, tmp_path, width, text_size):
     url, maintenance = notice_app
@@ -64,7 +87,7 @@ def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, 
         rail = page.locator('.topbar').bounding_box()
         assert box['x'] >= rail['x'] + rail['width']
 
-    expect(banner).to_have_text('Updating library storage; browsing and playback remain available.')
+    expect(banner).to_have_text('Performing database maintenance.')
     expect(banner).not_to_have_attribute('title', re.compile('.+'))
     expect(banner).to_have_attribute('role', 'status')
     check_notice()
@@ -80,6 +103,28 @@ def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, 
         store._evidence_recovery_failed = False
 
     store._evidence_recovery_pending = False
+    maintenance.ready.clear()
+    preparation = 'Preparing library data. Features will appear as they are ready.'
+    expect(banner).to_have_text(preparation)
+    expect(banner).to_have_attribute('role', 'status')
+    check_notice()
+    status = page.request.get(url + '/storage-maintenance/status').json()
+    assert not status['active'] and status['recording']
+    assert page.request.post(url + '/settings/lastfm-key', form={'key': 'notice-test-key'}).status == 204
+    assert store.settings.get_setting('lastfm_api_key') == 'notice-test-key'
+    account = store.accounts.get_master_account().id
+    playback_feedback.capture(store, 'player', account, {'kind': 'state', 'state': 'paused'}, 1)
+    assert playback_feedback.drain(store) == 1
+    # Preparation has the same useful server-rendered notice without polling.
+    page.route('**/static/storage-maintenance.js*', lambda route: route.abort())
+    page.reload()
+    expect(banner).to_have_text(preparation)
+    check_notice()
+    page.screenshot(path=f'/tmp/tuneconsole-824-preparation-{width}-{text_size}.png', full_page=True)
+    page.unroute('**/static/storage-maintenance.js*')
+    page.reload()
+    maintenance.ready.set()
+    expect(banner).to_be_hidden()
     if width == 1536:
         account = store.accounts.get_master_account().id
         playback_feedback.capture(store, 'player', account, {'kind': 'state', 'state': 'paused'}, 2)
@@ -90,6 +135,7 @@ def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, 
         expect(banner).to_be_hidden()
 
     maintenance.phase = 'deferred'
+    maintenance.ready.clear()
     maintenance._deferred(db_space.LowDiskSpace('insufficient scratch space'))
     expect(banner).to_have_text('Free disk space to finish.')
     expect(banner).to_have_attribute('role', 'alert')
@@ -114,6 +160,7 @@ def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, 
     expect(banner).to_have_text('Free disk space to finish.')
     check_notice()
     maintenance.phase, maintenance.message = 'done', ''
+    maintenance.ready.set()
     page.unroute('**/static/storage-maintenance.js*')
     page.reload()
     expect(banner).to_be_hidden()

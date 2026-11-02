@@ -40,6 +40,44 @@ def test_dislike_moves_lean_negative(store):
     assert any(v < 0 for f, v in leans.items() if not f.startswith("artist:"))
 
 
+def test_blended_leans_batch_metadata_and_keep_event_denominators_and_artist_rules(store, monkeypatch):
+    first = _jazz_track(store, 'first', 'First', artist='A', year='1960')
+    second = _jazz_track(store, 'second', 'Second', artist='B', year='1970')
+    missing = 'missing|unknown'
+    monkeypatch.setattr(type(store.rec_signals), 'recent_mood_events',
+                        lambda _: [(1, 1, [first, first, second, missing])])
+    monkeypatch.setattr(transient, 'evidence_plays', lambda *_: [(first, 5), (second, 6)])
+    monkeypatch.setattr(type(store.rec_model), 'recent_liked_with_ts', lambda _, **kw: [(second, 7)])
+    monkeypatch.setattr(type(store.rec_model), 'disliked_with_ts', lambda _: [(first, 8)])
+    monkeypatch.setattr(type(store.player_events), 'recent_skips_with_ts', lambda *_: [(second, 9)])
+    from yt_playlist.rec import choice_learning
+    monkeypatch.setattr(choice_learning, 'contexts', lambda *_: [])
+    now = 86410
+    def strength(at, weight, half_life):
+        return rec_params.get_param(store, weight) * 2 ** (
+            -(now-at) / (86400 * rec_params.get_param(store, half_life)))
+    mood = 2 ** (-(now-1) / (86400 * rec_params.get_param(store, 'mood_halflife_d'))) / 3
+    play_a = strength(5, 'play_transient_w', 'play_halflife_d')
+    play_b = strength(6, 'play_transient_w', 'play_halflife_d')
+    like = strength(7, 'like_transient_w', 'like_halflife_d')
+    dislike = strength(8, 'dislike_transient_w', 'dislike_halflife_d')
+    skip = strength(9, 'skip_transient_w', 'skip_halflife_d')
+    expected = {'genre:jazz': 2*mood+play_a+play_b+like-dislike-skip,
+                'era:1960': mood+play_a-dislike, 'era:1970': mood+play_b+like-skip,
+                'artist:A': mood+play_a, 'artist:B': mood+play_b+like}
+    calls = {}
+    for name in ('track_genres', 'track_decades', 'track_artists'):
+        original = getattr(type(store.rec_query), name)
+        def capture(repo, keys, _name=name, _original=original):
+            calls.setdefault(_name, []).append(list(keys))
+            return _original(repo, keys)
+        monkeypatch.setattr(type(store.rec_query), name, capture)
+    assert transient.facet_leans(store, now) == pytest.approx(expected)
+    assert set(calls) == {'track_genres', 'track_decades', 'track_artists'}
+    assert all(len(batches) == 1 and set(batches[0]) == {first, second, missing}
+               for batches in calls.values())
+
+
 def test_facet_multiplier_clamps_and_neutral_at_zero(store):
     g = rec_params.get_param(store, "facet_gain")
     lo = rec_params.get_param(store, "facet_mult_min")

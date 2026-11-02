@@ -164,7 +164,7 @@ def configuration(conn, version):
     if typed(conn):
         value = policy_documents.configuration(conn, version)
         if value is None:
-            from yt_playlist.core import policy_history
+            from yt_playlist.core import policy_history_read as policy_history
             if policy_history.available(conn):
                 return policy_history.configuration(conn,version)
         return value

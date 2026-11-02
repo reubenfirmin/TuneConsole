@@ -30,7 +30,7 @@ def set_stamp(conn,key,value):
 @collection_recovery.pinned_read
 def read(conn):
     if not available(conn):
-        from .preparation.library_sync_publication import RESULT
+        from .published_documents import LIBRARY_SYNC as RESULT
         revision = RESULT.selected(conn)
         if revision is not None:
             return json.loads(RESULT.value(conn,revision) or '{}')

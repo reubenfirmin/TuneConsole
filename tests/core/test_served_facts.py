@@ -2,6 +2,7 @@
 import json
 import hashlib
 import time
+import threading
 
 import pytest
 
@@ -62,6 +63,92 @@ def test_partial_preparation_continuing_writes_and_expiry_preserve_reports(store
     with store.conn:
         facts.expire(store.conn, facts.RETAIN_SECONDS + 201)
     assert reports(store) == baseline
+
+
+def test_staged_diagnostics_prepare_without_sql_writer_and_publish_atomically(store, monkeypatch):
+    trace = offer(store, 'first')
+    before = reports(store)
+    stage = fao.stage_bytes
+    calls = []
+    def checked(*args, **kwargs):
+        assert not store.conn.in_transaction
+        calls.append(args[0])
+        return stage(*args, **kwargs)
+    monkeypatch.setattr(fao, 'stage_bytes', checked)
+    with facts.staged_batch(store.conn, 1) as publish:
+        assert calls and not store.conn.in_transaction
+        assert reports(store) == before
+        with pytest.raises(RuntimeError, match='writer reservation'):
+            publish()
+        with pytest.raises(RuntimeError, match='rollback'):
+            with store.conn:
+                store.conn.execute('BEGIN IMMEDIATE')
+                assert publish() == 1
+                raise RuntimeError('rollback')
+    assert store.conn.execute('SELECT count(*) FROM served_facts').fetchone()[0] == 0
+    assert reports(store) == before
+    with facts.staged_batch(store.conn, 1) as publish:
+        with store.conn:
+            store.conn.execute('BEGIN IMMEDIATE')
+            assert publish() == 1
+    assert scorecard.served_recommendation(store, 1)['provenance'] == trace
+    assert reports(store) == before
+    assert not list(facts.directory(store.conn).rglob('.fao-pending-*'))
+
+
+def test_staged_diagnostics_retry_changed_inputs_and_do_not_activate_early(store):
+    offer(store, 'first')
+    with facts.staged_batch(store.conn, 1) as publish:
+        with store.conn:
+            store.conn.execute('DELETE FROM rec_served_impressions')
+            assert publish() is None
+    assert not facts.active(store.conn)
+    assert not list(facts.directory(store.conn).rglob('.fao-pending-*'))
+    with facts.staged_batch(store.conn, 1) as publish:
+        offer(store, 'arrived-during-staging')
+        with store.conn:
+            store.conn.execute('BEGIN IMMEDIATE')
+            assert publish() is None
+    assert not facts.active(store.conn)
+    activate(store)
+    assert store.conn.execute('SELECT count(*) FROM served_facts').fetchone()[0] == 1
+
+
+def test_foreground_write_completes_while_diagnostic_file_is_staging(file_backed_store, monkeypatch):
+    from yt_playlist.core.store import Store
+    store = file_backed_store
+    trace = offer(store, 'first')
+    entered, written = threading.Event(), threading.Event()
+    failures = []
+    stage = fao.stage_bytes
+    def delayed(*args, **kwargs):
+        entered.set()
+        assert written.wait(5), 'File preparation retained the SQL writer'
+        return stage(*args, **kwargs)
+    monkeypatch.setattr(fao, 'stage_bytes', delayed)
+    def analytics():
+        prepared = Store.open_current(store._db_path)
+        try:
+            with facts.staged_batch(prepared.conn, 1) as publish:
+                with prepared.conn:
+                    prepared.conn.execute('BEGIN IMMEDIATE')
+                    assert publish() == 1
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            prepared.conn.close()
+    worker = threading.Thread(target=analytics)
+    worker.start()
+    try:
+        assert entered.wait(5)
+        store.settings.set_setting('during-diagnostic-compression', 'accepted')
+        written.set()
+    finally:
+        written.set()
+        worker.join(10)
+    assert not worker.is_alive() and not failures
+    assert store.settings.get_setting('during-diagnostic-compression') == 'accepted'
+    assert scorecard.served_recommendation(store, 1)['provenance'] == trace
 
 
 def test_compact_writes_deduplicate_and_keep_policy_subject_facts(store):

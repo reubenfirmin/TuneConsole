@@ -39,7 +39,7 @@ def _relocate(conn, staged):
     definition = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (guard,)).fetchone()[0]
     conn.execute('DROP TRIGGER ' + guard)
     for identity, filename, offset in staged.execute('SELECT o.id,c.target,c.target_offset '
-            'FROM owners o JOIN contents c ON c.digest=o.digest ORDER BY o.id'):
+            'FROM owners o JOIN contents c ON c.digest=o.digest AND c.filename=o.filename ORDER BY o.id'):
         check_cancellable_work()
         conn.execute('UPDATE ' + destinations.table('deliveries')
                      + ' SET filename=?,byte_offset=? WHERE id=?', (filename, offset, identity))

@@ -5,7 +5,7 @@ import math
 import time
 
 from .. import sync_state
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import library_sync as preparation
 from .document_publication import DocumentPublication, Proof, main as run
 from .selection import invalidators
@@ -83,7 +83,7 @@ class StampPublication:
     worker = preparation.STAMP_JOB
 
     def validate(self, conn):
-        from ..migrations.current import _tokens
+        from ..schema_contract import tokens as _tokens
         for name, sql in definitions():
             row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
             if row is None or _tokens(row[0]) != _tokens(sql):

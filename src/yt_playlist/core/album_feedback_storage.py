@@ -27,8 +27,7 @@ def rows(conn, *, account_id=None):
 @collection_recovery.pinned_read
 def original(conn, *, account_id=None):
     if not available(conn):
-        from .preparation import collection_feedback_publication
-        owner = collection_feedback_publication.SOURCES['album_feedback']
+        from .published_documents import ALBUM_FEEDBACK as owner
         revision = owner.selected(conn)
         if revision is not None:
             return json.loads(owner.value(conn,revision) or '{}')

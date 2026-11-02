@@ -10,7 +10,7 @@ def available(conn):
 
 def fetched(conn,token):
     if not available(conn):
-        from .preparation.discovery_checkpoint_publication import OWNERS
+        from .discovery_checkpoint_reads import OWNERS
         owner = OWNERS['fetch-history']
         if (revision := owner.selected(conn)) is not None:
             return owner.read(conn, revision, PREFIX+token) is not None

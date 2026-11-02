@@ -5,14 +5,14 @@ KEYS = frozenset({'rec_group_shadow_progress','rec_group_shadow_checkpoint','rec
 
 
 def available(conn):
-    from .preparation import checkpoint_publication
+    from . import checkpoint_reads as checkpoint_publication
     return (conn.execute("SELECT 1 FROM sqlite_schema WHERE name='group_preparation_state'").fetchone() is not None
             or checkpoint_publication.installed(conn, 'group-checkpoints'))
 
 
 def get(conn,key,default=None):
     from . import group_progress
-    from .preparation import checkpoint_publication
+    from . import checkpoint_reads as checkpoint_publication
     revision = checkpoint_publication.selected(conn, 'group-checkpoints')
     if revision is not None:
         return checkpoint_publication.read(conn, 'group-checkpoints', revision, key, default)
@@ -34,7 +34,7 @@ def get(conn,key,default=None):
 
 def put(conn,values,*,legacy=False):
     if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='group_preparation_state'").fetchone():
-        from .preparation.control_publication import retained_write
+        from .control_reads import retained_write
         return retained_write(conn, values)
     if legacy:
         # Explicit frozen conversion may run without prior regular admission.
@@ -70,7 +70,7 @@ def checkpoint(conn,generation,serial,now,*,legacy=False):
     if generation is not None and row is None and not legacy:
         raise ValueError('Grouping checkpoint requires its published generation')
     if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='group_preparation_state'").fetchone():
-        from .preparation.control_publication import retained_write
+        from .control_reads import retained_write
         return retained_write(conn, {'rec_group_shadow_checkpoint': json.dumps(
             {'generation': generation, 'serial': serial, 'at': now})})
     conn.execute('INSERT INTO group_preparation_state(singleton) VALUES (1) ON CONFLICT(singleton) DO NOTHING')

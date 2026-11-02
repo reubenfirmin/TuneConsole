@@ -3,7 +3,7 @@ import hashlib
 
 from .. import collection_recovery, experiment_decision_state, taste_control_state
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import taste_controls as preparation
 from .document_publication import DocumentPublication, main as run, verify_paged_plan
 
@@ -76,7 +76,7 @@ class TastePublication(DocumentPublication):
             f'UPDATE {self.tables[1]} SET active=0 WHERE active=1; END')
 
     def validate_preparation(self, conn):
-        from ..migrations.current import _tokens
+        from ..schema_contract import tokens as _tokens
         optional = {f'prepare_{self.job.name}_dependency_{owner}_{operation}'
             for owner in self.job.optional_dependencies for operation in ('insert', 'update', 'delete')}
         for name, sql in self.job.definitions(conn):

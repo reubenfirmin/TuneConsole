@@ -174,7 +174,7 @@ def refresh_listening_reads(conn):
     version = conn.execute('PRAGMA main.schema_version').fetchone()[0]
     if getattr(conn, '_listening_read_schema_version', None) == version:
         return
-    from .preparation import subject_publication
+    from . import listening_subject_reads as subject_publication
     if subject_publication.native(conn) or not conn.execute(
             'SELECT 1 FROM main.sqlite_schema WHERE name=?', (subject_publication.table('head'),)).fetchone():
         if not conn.in_transaction:

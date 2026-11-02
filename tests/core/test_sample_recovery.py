@@ -126,26 +126,32 @@ def test_interruption_rolls_back_coordinates_and_retry_preserves_exact_bytes(ins
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-def test_compactor_inventory_and_backup_include_samples(installed, tmp_path):
+def test_compactor_inventory_and_retained_original_recovery_include_samples(installed, tmp_path):
     store, _ = installed
     values = capture(store)
     paths = [Path(row[0]) for row in store.conn.execute('SELECT filename FROM sample_attributes')]
     inventory = copy_compaction._owned_files(store.conn)
     assert inventory['files'] >= 3
     assert inventory['bytes'] >= sum(path.stat().st_size for path in paths)
-    def stop(phase, detail):
-        if phase == 'copy':
-            raise RuntimeError('stop after verified backup')
-    with pytest.raises(RuntimeError, match='stop after verified backup'):
-        copy_compaction.run(store, progress=stop)
+    copy_compaction.run(store)
     state = db_handles.state(store._db_path)
-    assert 'samples' in state['backup_file_manifests']
+    assert state['phase'] == 'complete'
+    assert copy_compaction.db_handles is db_handles
     candidate_path = tmp_path/'backup-restore'/'copy.db'
     candidate_path.parent.mkdir()
-    with closing(sqlite3.connect(state['backup'])) as backup, closing(sqlite3.connect(candidate_path)) as target:
+    # The current job retains the original database and immutable file owners.
+    # Recover that original through the public exporter, then remove the shared
+    # producer files so a surviving absolute reference cannot hide missing custody.
+    with closing(sqlite3.connect(Path(state['original']).as_uri()+'?mode=ro', uri=True)) as backup, \
+            closing(sqlite3.connect(candidate_path)) as target:
+        backup.row_factory = sqlite3.Row
+        with copy_compaction._files(backup), backup:
+            backup.execute('BEGIN')
+            manifests = policy_recovery._export_files(backup, candidate_path)
         backup.backup(target)
         target.row_factory = sqlite3.Row
-        policy_recovery._restore_files(target, state['backup_file_manifests'])
+        assert 'samples' in manifests
+        policy_recovery._restore_files(target, manifests)
     hidden = sample_files.directory(store.conn).with_name('hidden-producer-samples')
     sample_files.directory(store.conn).rename(hidden)
     try:

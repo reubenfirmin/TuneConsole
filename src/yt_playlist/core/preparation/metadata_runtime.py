@@ -60,15 +60,16 @@ def _initial(conn):
             'at': time.time(), 'stage': 0, 'cursor': None, 'counts': {}}
 
 
-def _sources(conn, scope, cursor, limit):
+def _sources(conn, scope, cursor, limit, *, source=None):
+    source = conn if source is None else source
     owner, key = ('recordings', 'id') if scope == 'recording' else ('catalog_entries', 'id')
-    rows = conn.execute(f'SELECT {key} FROM {owner} WHERE {key}>? ORDER BY {key} LIMIT ?',
+    rows = source.execute(f'SELECT {key} FROM {owner} WHERE {key}>? ORDER BY {key} LIMIT ?',
                         (cursor or 0, limit)).fetchall()
     table = 'recording_field_sources' if scope == 'recording' else 'item_field_sources'
     for (identity,) in rows:
         target = 'metadata_runtime_'+scope+'_sources'
         conn.execute('DELETE FROM '+target+' WHERE '+scope+'_id=?', (identity,))
-        for row in conn.execute('SELECT field,source FROM '+table+' WHERE '+scope+'_id=?', (identity,)).fetchall():
+        for row in source.execute('SELECT field,source FROM '+table+' WHERE '+scope+'_id=?', (identity,)).fetchall():
             conn.execute('INSERT INTO '+target+' VALUES (?,?,?)',
                          (identity, runtime.code(row['field']), runtime.provider_id(conn, row['source'])))
         if scope == 'recording':
@@ -79,12 +80,13 @@ def _sources(conn, scope, cursor, limit):
     return rows[-1][0] if rows else cursor, len(rows)
 
 
-def _choices(conn, cursor, limit):
+def _choices(conn, cursor, limit, *, source=None):
+    source = conn if source is None else source
     cursor = cursor or [0, '']
-    rows = conn.execute('SELECT * FROM metadata_choice_heads WHERE (entry_id,field)>(?,?) '
+    rows = source.execute('SELECT * FROM metadata_choice_heads WHERE (entry_id,field)>(?,?) '
                         'ORDER BY entry_id,field LIMIT ?', (*cursor, limit)).fetchall()
     for head in rows:
-        history = conn.execute("SELECT * FROM metadata_observations WHERE entry_id=? AND field=? "
+        history = source.execute("SELECT * FROM metadata_observations WHERE entry_id=? AND field=? "
             "AND origin IN ('user','legacy_choice') ORDER BY id", (head['entry_id'], head['field'])).fetchall()
         if not history:
             raise ValueError('Manual metadata head has no retained decisions')
@@ -180,7 +182,7 @@ def _conflict_documents(conn, rows):
         yield 'conflicts', (row['id'],), 1, {'candidates': candidates}
 
 
-def prepare_batch(conn, stage, cursor, limit, *, at):
+def prepare_batch(conn, stage, cursor, limit, *, at, source=None):
     """Convert one prefix inside the caller's transaction and checkpoint.
 
     The standalone preparer and the database rebuild share these domain rules;
@@ -191,11 +193,11 @@ def prepare_batch(conn, stage, cursor, limit, *, at):
     if type(limit) is not int or not 1 <= limit <= 128:
         raise ValueError('Metadata preparation batch size must be 1 to 128')
     if stage == 'recordings':
-        return _sources(conn, 'recording', cursor, limit)
+        return _sources(conn, 'recording', cursor, limit, source=source)
     if stage == 'entries':
-        return _sources(conn, 'entry', cursor, limit)
+        return _sources(conn, 'entry', cursor, limit, source=source)
     if stage == 'choices':
-        return _choices(conn, cursor, limit)
+        return _choices(conn, cursor, limit, source=source)
     if stage == 'providers':
         return _providers(conn, cursor, limit, at)
     if stage == 'native':

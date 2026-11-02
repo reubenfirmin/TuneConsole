@@ -79,17 +79,23 @@ function applySongMetadata(videoId, metadata) {
 
 function songActions() {
   // Keep DOM nodes and the originating Alpine scope outside reactive data.
-  let trigger = null, owner = null, request = 0, lookupStream = null;
+  let trigger = null, owner = null, request = 0, lookupStream = null, maintenanceObserver = null;
   const metadataSaves = new Map();
   return {
     song: {}, context: {}, mode: 'create', name: '', query: '', selected: '',
     playlists: [], multipleIdentities: false, loading: false, busy: false, error: '', result: null,
-    artworkFailed: false,
+    artworkFailed: false, readOnly: document.documentElement.dataset.storageCompacting === 'true',
     metadata: { title: '', artist: '', genre: '', year: '' }, initialMetadata: {}, originals: {},
     metadataLoaded: false, trackId: null, genreOptions: [], genres: [],
     lookupRunning: false, lookupStatus: '',
     reasons: [['vibe', 'Wrong vibe'], ['era', 'Wrong era'], ['mainstream', 'Too mainstream'],
               ['own_it', 'Already know it'], ['artist', 'Not this artist']],
+    init() {
+      maintenanceObserver = new MutationObserver(() => {
+        this.readOnly = document.documentElement.dataset.storageCompacting === 'true';
+      });
+      maintenanceObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-storage-compacting'] });
+    },
     show(detail) {
       if (this.$refs.dialog.open) return;
       const wasOpen = this.$refs.menu.matches(':popover-open');
@@ -125,7 +131,7 @@ function songActions() {
       this.$refs.menu.hidePopover();
     },
     menuKey(event) {
-      const items = [...this.$refs.menu.querySelectorAll('[role="menuitem"]')].filter(el => el.getClientRects().length);
+      const items = [...this.$refs.menu.querySelectorAll('[role="menuitem"]')].filter(el => !el.matches(':disabled') && el.getClientRects().length);
       const index = items.indexOf(document.activeElement);
       let next;
       if (event.key === 'ArrowDown') next = (index + 1) % items.length;
@@ -170,8 +176,9 @@ function songActions() {
       if (reason === 'artist') values.axis = 'artist:' + this.song.artist;
       htmx.ajax('POST', '/recs/feedback', { values, target: trigger.closest('.tile'), swap: 'outerHTML' });
     },
-    destroy() { request++; lookupStream?.close(); },
+    destroy() { request++; lookupStream?.close(); maintenanceObserver?.disconnect(); },
     async openDialog(mode) {
+      if (document.documentElement.dataset.storageCompacting === 'true') return;
       this.closeMenu();
       this.mode = mode;
       this.name = this.song.title;

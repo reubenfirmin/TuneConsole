@@ -6,24 +6,17 @@ SQL copy. New model publications can use these functions directly.
 import json
 
 from . import collection_recovery
-
-FIELDS = {'rec_content_model':('recording','model'),
-          'rec_content_generation':('recording','generation'),
-          'rec_content_inputs':('recording','input_fingerprint'),
-          'rec_content_genre_revision':('recording','genre_revision'),
-          'rec_fit_inputs':('recording','fit_fingerprint'),
-          'rec_artist_fit_inputs':('artist','fit_fingerprint'),
-          'rec_artist_content_model':('artist','model')}
+from .model_contract import FIELDS
 
 
 def available(conn):
-    from .preparation import model_publication
+    from . import model_reads as model_publication
     return model_publication.native(conn) or model_publication.installed(conn)
 
 
 @collection_recovery.pinned_read
 def get(conn,key,default=None):
-    from .preparation import checkpoint_publication, model_publication
+    from . import checkpoint_reads as checkpoint_publication, model_reads as model_publication
     if not model_publication.native(conn):
         selected = model_publication.selected(conn)
         return (model_publication.read(conn, selected, key, default) if selected is not None
@@ -41,7 +34,7 @@ def get(conn,key,default=None):
 
 
 def put(conn,values):
-    from .preparation import model_publication
+    from . import model_reads as model_publication
     if not model_publication.native(conn):
         conn.executemany('INSERT INTO main.settings(key,value) VALUES (?,?) '
             'ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value IS NOT excluded.value', values.items())

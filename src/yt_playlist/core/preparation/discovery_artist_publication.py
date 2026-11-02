@@ -6,7 +6,7 @@ import json
 
 from .. import collection_recovery, genre_classifications, recommendation_outputs as files
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import discovery_artists as preparation, document_plan
 from .mapped_publication import MappedPublication, Stage
 

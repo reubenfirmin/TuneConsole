@@ -58,6 +58,30 @@ def _try_file_lock(stream, *, exclusive):
     return unlock
 
 
+@contextmanager
+def retained_reader(root):
+    """Fence retained file bytes for the full lifetime of a SQL snapshot."""
+    root = Path(root)
+    missing, current = [], root
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    root.mkdir(parents=True, exist_ok=True)
+    for directory in reversed(missing):
+        _sync(directory.parent)
+    with (root / '.readers.lock').open('a+b') as lock:
+        while True:
+            check_cancellable_work()
+            unlock = _try_file_lock(lock, exclusive=False)
+            if unlock is not None:
+                break
+            time.sleep(.025)
+        try:
+            yield
+        finally:
+            unlock()
+
+
 BLOCK = 64 * 1024
 MAX_BYTES = 512 * 1024 * 1024
 # A trailing custody record does not alter bz2.decompress's original output.

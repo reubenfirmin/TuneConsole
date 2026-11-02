@@ -1,7 +1,7 @@
 """Reject oversized SQL rows before transferring their payload to Python."""
 import json
 
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 
 
 def rows(conn, query, parameters=(), *, byte_limit, message):

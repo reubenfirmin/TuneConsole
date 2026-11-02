@@ -1,5 +1,6 @@
 """Captured reporting facts; opaque diagnostics belong to keyed JSON files."""
 import hashlib
+from contextlib import contextmanager, ExitStack
 from . import fao
 import json
 import math
@@ -66,8 +67,8 @@ def install(conn, context=None):
 
 
 def validate(conn):
-    from .migrations.current import _tokens
-    from .migrations.runner import MigrationError
+    from .schema_contract import tokens as _tokens
+    from .schema_contract import MigrationError
     for name, sql in definitions():
         row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
         if row is None or _tokens(row[0]) != _tokens(sql):
@@ -125,11 +126,15 @@ def reporting_trace(row):
             'experiment': experiment, 'propensity': row['propensity']}
 
 
-def publish(conn, identity, at, trace):
+def _encoded(identity, at, trace):
     body = {'format': 1, 'impression_id': identity, 'served_at': at, 'provenance': trace}
     encoded = canonical({'body': body, 'sha256': hashlib.sha256(canonical(body)).hexdigest()})
     if len(encoded) > MAX_BYTES:
         raise ValueError('Served diagnostic exceeds its byte budget')
+    return encoded
+
+
+def _replaceable(conn, identity, encoded):
     root = directory(conn)
     path = root / relative(identity)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -145,11 +150,21 @@ def publish(conn, identity, at, trace):
             if unlock is None:
                 raise ValueError('Served diagnostic identity is still retained by a reader; retry preparation')
             unlock()
-    fao.write_bytes(path, encoded, max_bytes=MAX_BYTES)
+    return path
+
+
+def _capture(conn, identity, trace):
     marks = ','.join('?' for _ in FIELDS)
     conn.execute('INSERT INTO served_facts(impression_id,' + ','.join(FIELDS) + ') VALUES (?,' + marks + ')',
                  (identity, *extract(trace)))
     conn.execute('DELETE FROM served_diagnostic_retirements WHERE impression_id=?', (identity,))
+
+
+def publish(conn, identity, at, trace):
+    encoded = _encoded(identity, at, trace)
+    path = _replaceable(conn, identity, encoded)
+    fao.write_bytes(path, encoded, max_bytes=MAX_BYTES)
+    _capture(conn, identity, trace)
 
 
 def diagnostic(conn, row):
@@ -186,20 +201,66 @@ def expression(conn, field, legacy, alias=''):
             f'THEN (SELECT {field} FROM served_facts f WHERE f.impression_id={prefix}id) ELSE {legacy} END')
 
 
+def _missing(conn, limit):
+    return conn.execute('SELECT i.id,i.served_at,i.provenance FROM rec_served_impressions i '
+        'LEFT JOIN served_facts f ON f.impression_id=i.id WHERE f.impression_id IS NULL ORDER BY i.id LIMIT ?',
+        (limit,)).fetchall()
+
+
+def _activate(conn):
+    conn.execute('UPDATE served_fact_state SET active=1,next_id=max(next_id,'
+                 '(SELECT COALESCE(max(id),0)+1 FROM rec_served_impressions)) WHERE id=1')
+
+
+@contextmanager
+def staged_batch(conn, limit=128):
+    """Prepare files off-writer; publish only if their captured owners survive.
+
+    A changed or concurrently prepared input returns None, asking the caller
+    to retry rather than publishing stale facts or declaring completion.
+    """
+    if conn.in_transaction:
+        raise RuntimeError('Diagnostic staging requires an idle connection')
+    if type(limit) is not int or not 1 <= limit <= 256:
+        raise ValueError('Invalid served preparation batch size')
+    rows = [tuple(row) for row in _missing(conn, limit)]
+    with ExitStack() as cleanup:
+        prepared = []
+        for identity, at, provenance in rows:
+            trace = json.loads(provenance)
+            encoded = _encoded(identity, at, trace)
+            path = directory(conn) / relative(identity)
+            expected = fao.stat(path).identity if fao.exists(path) else False
+            file = fao.stage_bytes(path, encoded, expected=expected, max_bytes=MAX_BYTES)
+            cleanup.callback(file.close)
+            prepared.append((identity, encoded, trace, file))
+
+        def publish_prepared():
+            if not conn.in_transaction:
+                raise RuntimeError('Diagnostic publication requires a writer reservation')
+            if [tuple(row) for row in _missing(conn, limit)] != rows:
+                return None
+            for identity, encoded, trace, file in prepared:
+                _replaceable(conn, identity, encoded)
+                file.publish()
+                _capture(conn, identity, trace)
+            if not rows:
+                _activate(conn)
+            return len(rows)
+        yield publish_prepared
+
+
 def prepare_batch(conn, limit=128):
     """Explicit bounded preparation. Caller commits each batch before continuing."""
     if not 1 <= limit <= 256:
         raise ValueError('Invalid served preparation batch size')
     if not conn.in_transaction:
         conn.execute('BEGIN IMMEDIATE')
-    rows = conn.execute('SELECT i.id,i.served_at,i.provenance FROM rec_served_impressions i '
-        'LEFT JOIN served_facts f ON f.impression_id=i.id WHERE f.impression_id IS NULL ORDER BY i.id LIMIT ?',
-        (limit,)).fetchall()
+    rows = _missing(conn, limit)
     for row in rows:
         publish(conn, row['id'], row['served_at'], json.loads(row['provenance']))
     if not rows:
-        conn.execute('UPDATE served_fact_state SET active=1,next_id=max(next_id,'
-                     '(SELECT COALESCE(max(id),0)+1 FROM rec_served_impressions)) WHERE id=1')
+        _activate(conn)
     return len(rows)
 
 

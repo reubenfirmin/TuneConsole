@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from yt_playlist.core import db_space, playback_feedback
+from yt_playlist.core.storage_maintenance import COPY_DEFERRED_MESSAGE
 from yt_playlist.web.app import create_app
 
 
@@ -27,9 +28,20 @@ def test_preparation_uses_existing_notice_without_pausing_normal_use(store, monk
         html = client.get('/playlists').text
         assert html.count('id="storage-maintenance"') == 1
         assert status['banner_message'] in html
+        # Last-good display output keeps working while analytics, refresh or
+        # worker retries continue. Their activity alone is not a user notice.
+        store.rec_proposals.put_proposals('home_prepared',
+            {'schema': 1, 'protos': [{'label': 'Prepared mix', 'tracks': [{'videoId': 'prepared-track'}]}]}, 1)
+        with monkeypatch.context() as prepared_only:
+            def unexpected_decode(*args, **kwargs):
+                raise AssertionError('The notice must only check prepared headers')
+            prepared_only.setattr(store.rec_proposals, 'get_proposals', unexpected_decode)
+            assert client.get('/storage-maintenance/status').json()['banner_message'] == ''
+        prepared_html = client.get('/playlists').text
+        assert re.search(r'<div id="storage-maintenance"[^>]* hidden>', prepared_html)
         ctx.storage_maintenance.active = True
         assert client.get('/storage-maintenance/status').json()['banner_message'] == (
-            'Performing database maintenance - this should take just a few minutes.')
+            'Performing database maintenance.')
         ctx.storage_maintenance.active = False
         ctx.storage_maintenance.ready.set()
         ctx.rec_worker.jobs.cancel()
@@ -39,13 +51,14 @@ def test_preparation_uses_existing_notice_without_pausing_normal_use(store, monk
 
 @pytest.mark.parametrize('state,expected,active,warning', [
     ('idle', '', False, False),
-    ('compacting', 'Performing database maintenance - this should take just a few minutes.', True, False),
-    ('evidence', 'Performing database maintenance - this should take just a few minutes.', True, False),
+    ('compacting', 'Performing database maintenance.', True, False),
+    ('evidence', 'Performing database maintenance.', True, False),
     ('retrying', 'Library updates need attention.', True, True),
     ('feedback', 'Catching up on your listening.', True, False),
     ('low_space', 'Free disk space to finish.', False, True),
     ('deferred', 'Library update will retry.', False, True),
     ('schema_retry', 'Library update needs a retry.', False, True),
+    ('copy_stopped', 'Library preparation stopped.', False, True),
 ])
 def test_notice_matches_status_without_javascript(store, state, expected, active, warning):
     app = create_app(store, lambda: {}, background_work=False)
@@ -63,6 +76,9 @@ def test_notice_matches_status_without_javascript(store, state, expected, active
         maintenance._deferred(db_space.LowDiskSpace('full') if state == 'low_space' else RuntimeError('stopped'))
     elif state == 'schema_retry':
         maintenance.phase = state
+    elif state == 'copy_stopped':
+        maintenance.phase = 'deferred'
+        maintenance.message = COPY_DEFERRED_MESSAGE
     with TestClient(app, base_url='http://127.0.0.1') as client:
         status = client.get('/storage-maintenance/status').json()
         assert (status['active'], status['warning'], status['recording']) == (active, warning, not active)
@@ -81,4 +97,21 @@ def test_notice_matches_status_without_javascript(store, state, expected, active
             response = client.post('/sync')
             assert response.status_code == 503
             assert response.text == status['message']
+
+
+def test_analytics_notice_remains_visible_with_usable_recommendations(store):
+    app = create_app(store,lambda:{},background_work=False)
+    maintenance = app.state.ctx.storage_maintenance
+    maintenance.ready.clear()
+    maintenance.report = {'analytics_pending':True}
+    store.rec_proposals.put_proposals('home_prepared',{'schema':1,'protos':[
+        {'label':'Available mix','tracks':[{'videoId':'prepared-track'}]}]},1)
+    with TestClient(app,base_url='http://127.0.0.1') as client:
+        status = client.get('/storage-maintenance/status').json()
+        assert status['banner_message']=='Optimizing app storage; some recommendations are temporarily unavailable.'
+        assert not status['active'] and status['recording']
+        assert status['banner_message'] in client.get('/playlists').text
+        maintenance.report['analytics_pending'] = False
+        maintenance.ready.set()
+        assert client.get('/storage-maintenance/status').json()['banner_message']==''
 

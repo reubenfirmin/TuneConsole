@@ -37,7 +37,7 @@ def _subject_rows(conn, account_id, values, *, observations):
     from using the account/subject/date index. Both subject kinds can contribute
     to one current key, and each independent source row must survive.
     """
-    from .preparation import calendar_indexes
+    from . import calendar_lookup as calendar_indexes
     indexed = calendar_indexes.selected(conn)
     fields = 'identity_key,source_day,timezone' if observations else 'identity_key'
     placeholders = ','.join('(?,?,?)' if observations else '(?)' for _ in values)
@@ -107,7 +107,7 @@ def reconcile_foreign_days(conn, account_id, *, observations=None, events=None):
     timestamp). Full account reconciliation is reserved for calendar/identity
     changes and source removal. Multiple sources for one date share a lookup.
     """
-    from .preparation import calendar_indexes
+    from . import calendar_lookup as calendar_indexes
     _,event_table,account = _subjects(conn)
     indexed = event_table == 'play_event_subjects' and calendar_indexes.selected(conn)
     projected, bounds = {}, {}

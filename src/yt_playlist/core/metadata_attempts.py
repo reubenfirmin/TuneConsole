@@ -12,9 +12,9 @@ import uuid
 from . import metadata_deliveries as deliveries, metadata_evidence as evidence, metadata_values as values
 from .activity import WorkBudgetExceeded
 from .evidence_ledger import canonical as encode
+from .metadata_contract import PROVIDER_FIELDS as FIELDS
 
 FORMAT = 'enrichment-result-1'
-FIELDS = (*values.RECORDING_FIELDS, *values.ITEM_FIELDS, 'year', 'art', 'isrc', 'mb_release_ids', 'cover_url')
 MAX_STATE_BYTES = 8 * 1024 * 1024
 
 

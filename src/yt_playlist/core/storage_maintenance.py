@@ -36,8 +36,7 @@ LOW_SPACE_MESSAGE = ('Storage compaction blocked: not enough free disk space. '
                      'Compaction will retry on the next launch.')
 SCHEMA_RETRY_MESSAGE = ('A storage update needs another attempt. Your library remains available. '
                         'Retry the schema update from the maintenance command.')
-COPY_DEFERRED_MESSAGE = ('The storage update did not finish. Activity recording has resumed. '
-                         'Resolve the reported problem before requesting another attempt.')
+COPY_DEFERRED_MESSAGE = 'Library preparation stopped. Activity recording has resumed.'
 COPY_LOW_SPACE_MESSAGE = ('The storage update needs more disk space. Activity recording has resumed. '
                           'Free space or choose another scratch directory before requesting another attempt.')
 
@@ -114,7 +113,8 @@ class StorageMaintenance:
                         and previous['source_identity'] == build._source_identity(self.store._db_path))
                 from . import db_handles
                 previous = db_handles.state(self.store._db_path) or {}
-                if previous.get('phase') == 'complete' and previous.get('analytics_pending'):
+                if previous.get('analytics_pending') and (previous.get('phase') == 'complete'
+                        or previous.get('analytics_complete') or previous.get('preparation')):
                     self.report = previous
                 else:
                     self.report = job.run(self.store,destination=destination,rebuild=rebuild,resume=resume,scratch=scratch,
@@ -155,12 +155,13 @@ class StorageMaintenance:
                     or getattr(self.store, '_evidence_recovery_pending', False))
         pending = playback_feedback.inbox(self.store).pending()
         rebuild_required = getattr(self.store, '_rebuild_source_version', None) == 64
-        active = self.active or evidence or bool(pending) or rebuild_required
+        copy_active = self.active or bool(getattr(self.store,'_activity_paused',False))
+        active = copy_active or evidence or bool(pending) or rebuild_required
         retrying = evidence and getattr(self.store, '_evidence_recovery_failed', False)
-        phase = (self.phase if self.active else getattr(self.store, '_evidence_phase', 'listening_history')
+        phase = (self.phase if copy_active else getattr(self.store, '_evidence_phase', 'listening_history')
                  if evidence else 'rebuild_required' if rebuild_required else 'playback_feedback' if pending else self.phase)
-        message = (self.message if self.active and self.phase=='recovery_required' else
-                   (REBUILD_MESSAGE if self._rebuilding else MESSAGE) if self.active else EVIDENCE_RETRY_MESSAGE if retrying else EVIDENCE_MESSAGE
+        message = (self.message if copy_active and self.phase=='recovery_required' else
+                   (REBUILD_MESSAGE if self._rebuilding else MESSAGE) if copy_active else EVIDENCE_RETRY_MESSAGE if retrying else EVIDENCE_MESSAGE
                    if evidence else 'Your library remains available while its storage update is pending. '+LISTENING_MESSAGE
                    if rebuild_required else 'Applying saved playback feedback. Playback, likes and Next are available; '
                    'history and recommendation updates are delayed. '
@@ -181,13 +182,16 @@ class StorageMaintenance:
         if active:
             banner_message = ('Library recovery is needed.' if phase=='recovery_required' else
                               'Library updates need attention.' if retrying else
-                              'Catching up on your listening.' if not self.active and not evidence else
-                              'Performing database maintenance - this should take just a few minutes.')
+                              'Catching up on your listening.' if not copy_active and not evidence else
+                              'Performing database maintenance.')
         elif warning:
             banner_message = ('Library update needs a retry.' if phase == 'schema_retry' else
                               'Free disk space to finish.' if self.message in {LOW_SPACE_MESSAGE,COPY_LOW_SPACE_MESSAGE} else
-                              'Library cleanup needs a retry.' if self.message == COPY_DEFERRED_MESSAGE else
+                              'Library preparation stopped.' if self.message == COPY_DEFERRED_MESSAGE else
                               'Library update will retry.')
+        elif self.report and self.report.get('analytics_pending'):
+            banner_message = 'Optimizing app storage; some recommendations are temporarily unavailable.'
+            message = 'Your library is available while historical data is prepared in the background.'
         return dict(active=active, phase=phase, message=message, pending_feedback=pending,
                     recording=not active, capturing_feedback=True,
                     warning=warning, banner_message=banner_message,
@@ -199,7 +203,8 @@ class StorageMaintenance:
         with self.store._lock:
             from . import db_handles
             pending = db_handles.state(self.store._db_path) or {}
-            if pending.get('phase') == 'complete' and pending.get('analytics_pending'):
+            if pending.get('analytics_pending') and (pending.get('phase') == 'complete'
+                    or pending.get('analytics_complete') or pending.get('preparation')):
                 self._start_copy(destination=None,rebuild=True,resume=False,scratch=None)
                 return
             if self.store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] in (64,93):

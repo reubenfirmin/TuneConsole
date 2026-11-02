@@ -1,6 +1,6 @@
 """Publish verified TV state independently while retaining compatible writers."""
 from .. import tv_recommendation_state as state
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import artist_lookup, tv_state as preparation
 from .document_publication import DocumentPublication, main as run
 

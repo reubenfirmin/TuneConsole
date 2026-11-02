@@ -5,6 +5,24 @@ DERIVED = ('listening_evidence', 'eligible_listening_evidence', 'listening_days'
     'listening_daily_items', 'listening_daily_snapshots', 'listening_activity', 'listening_day_counts')
 
 
+def materialized():
+    """Capture native subject projections once for whole-history calculations.
+
+    Canonical keys are resolved with COALESCE in the subject views. Repeated
+    correlated probes cannot use the physical subject indexes through that
+    expression. Materialized inputs let SQLite index the resolved keys while
+    preserving the same evidence eligibility and calendar rules.
+    """
+    names = {name: 'recent_' + name for name in
+             ('play_event_subjects', 'listening_observation_subjects', *DERIVED)}
+    names.update(sources='play_event_sources', calendar='play_event_calendar')
+    inputs = [f'{names[name]} AS MATERIALIZED (SELECT * FROM {name})' for name in
+              ('play_event_subjects', 'listening_observation_subjects')]
+    inputs.extend(f'{names[name]} AS MATERIALIZED ({query})'
+                  for name, query in definitions(names.__getitem__))
+    return ','.join(inputs), names
+
+
 def definitions(relation, *, staged=False):
     """Generate our finite projection family; never rewrite installed SQL."""
     events, observations, sources, calendar = (relation(name) for name in

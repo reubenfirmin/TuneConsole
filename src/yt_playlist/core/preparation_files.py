@@ -40,7 +40,7 @@ def domains():
 
 def _owners(conn):
     """Validate only explicitly declared file tables, including retired owners."""
-    from .migrations.current import _tokens
+    from .schema_contract import tokens as _tokens
     seen = set()
     for domain, directory, definitions in domains():
         for table, definition in definitions:

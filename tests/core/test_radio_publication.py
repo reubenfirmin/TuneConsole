@@ -7,7 +7,7 @@ import pytest
 
 from tests.core.test_legacy_radio_upgrade import installed_radio
 from tests.core.test_radio_preparation import finish, header
-from yt_playlist.core import catalog, radio_storage
+from yt_playlist.core import catalog, radio_reads, radio_storage
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import radio_publication as publication, radio_session as preparation
 from yt_playlist.core.store import Store
@@ -33,11 +33,12 @@ def test_preopened_readers_and_compatible_writer_keep_exact_checkpoint(tmp_path,
         publication.publish(store.conn,revision=revision)
         assert publication.selected(other.conn) == revision
         real_read = preparation.read
+        real_value = radio_reads.session_value
         reads = []
-        def reading(row):
-            reads.append(row['generation'])
-            return real_read(row)
-        monkeypatch.setattr(preparation,'read',reading)
+        def reading(conn, revision, *args, **kwargs):
+            reads.append(revision)
+            return real_value(conn, revision, *args, **kwargs)
+        monkeypatch.setattr(radio_reads,'session_value',reading)
         assert other.settings.get_setting(preparation.KEY) == raw
         assert radio_storage.load_published(other.conn) == (state,None)
         assert radio_storage.load(other.conn) == (state,None)

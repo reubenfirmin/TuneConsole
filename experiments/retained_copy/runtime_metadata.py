@@ -184,6 +184,78 @@ def exercise(candidate):
             'web_application_started':False}
 
 
+def retire_locators(candidate, report_path):
+    """Verify #682's physical cleanup on a disposable actual-library copy."""
+    from yt_playlist.core.preparation import metadata_locators
+    from yt_playlist.core import catalog
+    candidate = Path(candidate).resolve(strict=True)
+    started, now = time.monotonic(), time.time()
+    with candidate.open('rb') as stream:
+        source_digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+    report = {'source': str(candidate), 'source_sql_bytes': candidate.stat().st_size}
+    with tempfile.TemporaryDirectory(prefix='tuneconsole-locator-retirement-') as temporary:
+        path = Path(temporary) / 'state.db'
+        with closing(sqlite3.connect(candidate.as_uri()+'?mode=ro', uri=True)) as origin, closing(sqlite3.connect(path)) as target:
+            origin.backup(target)
+        shutil.copytree(candidate.with_name(candidate.name+'.metadata-runtime'), path.with_name(path.name+'.metadata-runtime'))
+        store = Store(path)
+        try:
+            store.init_schema()
+            before = baseline(path, now)
+            histories = {table: list(map(tuple, store.conn.execute('SELECT * FROM '+table+' ORDER BY version')))
+                         for table in ('schema_migrations', 'schema_changes')}
+            report['before_columns'] = [row[1] for row in store.conn.execute('PRAGMA table_info(metadata_deliveries)')]
+            with store.conn:
+                store.conn.execute('BEGIN')
+                manifest = metadata_runtime_files.export(store.conn, Path(temporary) / 'recovery')
+            phase = time.monotonic()
+            report['retirement'] = metadata_locators.retire(store.conn, manifest)
+            report['retirement_seconds'] = time.monotonic() - phase
+            report['after_columns'] = [row[1] for row in store.conn.execute('PRAGMA table_info(metadata_deliveries)')]
+            assert not metadata_locators.COLUMNS.intersection(report['after_columns'])
+            assert not metadata_locators.REMOVED.intersection(row[0] for row in store.conn.execute('SELECT name FROM sqlite_schema'))
+            assert histories == {table: list(map(tuple, store.conn.execute('SELECT * FROM '+table+' ORDER BY version')))
+                                 for table in histories}
+            report['histories_unchanged'] = True
+            after = baseline(path, now)
+            report['input_differences'] = [key for key in before if before[key] != after[key]]
+            assert not report['input_differences'], report['input_differences']
+            store.init_schema()
+            entry = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id IS NOT NULL ORDER BY id LIMIT 1').fetchone()[0]
+            fields = {'bpm': 141}
+            delivery, _ = store.enrichment_state.capture_provider_result(entry, '682-retirement', fields, run_id='continued')
+            store.enrichment.apply_provider_fields(entry, '682-retirement', fields, providers=('682-retirement',), delivery_id=delivery)
+            with store.conn:
+                catalog.choose_field(store.conn, entry, 'bpm', 139)
+            assert store.conn.execute('SELECT bpm FROM catalog_tracks WHERE id=?', (entry,)).fetchone()[0] == 139
+            store.conn.close()
+            store = Store(path)
+            store.init_schema()
+            with store.conn:
+                catalog.withdraw_choice(store.conn, entry, 'bpm')
+            assert store.conn.execute('SELECT bpm FROM catalog_tracks WHERE id=?', (entry,)).fetchone()[0] == 141
+            assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+            report['continued_enrichment_and_reopened_choice_reset'] = True
+            with store.conn:
+                store.conn.execute('BEGIN')
+                manifest = metadata_runtime_files.export(store.conn, Path(temporary) / 'continued-recovery')
+            moved = Path(temporary) / 'relocated.db'
+            with closing(sqlite3.connect(moved)) as target:
+                store.conn.backup(target)
+            with closing(sqlite3.connect(moved)) as target:
+                metadata_runtime_files.restore(target, manifest)
+                report['relocated_members'] = metadata_runtime_files.verify_backup(target, manifest)
+            report['baseline'] = before
+        finally:
+            store.conn.close()
+    with candidate.open('rb') as stream:
+        assert hashlib.file_digest(stream, 'sha256').hexdigest() == source_digest
+    report['source_sha256_unchanged'] = source_digest
+    report['seconds'] = time.monotonic() - started
+    Path(report_path).write_text(json.dumps(report, indent=2, sort_keys=True)+'\n')
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('source', type=Path)

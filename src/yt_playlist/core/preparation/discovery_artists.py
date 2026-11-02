@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .. import collection_recovery, genre_identity, recommendation_outputs as files
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import discovery_subjects, document_plan, taste_controls
 from .ordered_rows import OrderedJob
 from .rows import Job, main as run

@@ -8,12 +8,9 @@ import sqlite3
 from typing import Callable
 
 from yt_playlist.core import db_space
+from yt_playlist.core.schema_contract import MigrationError
 
 log = logging.getLogger(__name__)
-
-
-class MigrationError(RuntimeError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -375,8 +372,8 @@ def migrate(conn, *, registry=None, clock=time.time, defer_validation=False):
                 fresh = not bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").fetchone())
             if production:
                 if not fresh and current == 64:
-                    from ..db_rebuild.source import admit
-                    admit(conn)
+                    from .. import released_schema
+                    released_schema.validate(conn)
                     conn.rollback()
                     return True
                 if not fresh and current >= 79:

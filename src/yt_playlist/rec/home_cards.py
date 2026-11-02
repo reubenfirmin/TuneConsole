@@ -280,10 +280,16 @@ class HomeCards:
             cards = [c for c in cards if c["lane"] != "fresh"]
         if cards:
             protos = []
+            completion = prepared
+            if completion is None:
+                from yt_playlist.rec import transient
+                from yt_playlist.rec.taste_analysis import era_distribution, taste_breadth
+                completion = {'leans': transient.facet_leans(store, now),
+                              'dists': (taste_breadth(store)['families'], dict(era_distribution(store)))}
             for card in cards:
                 key = ('home-complete-card', checkpoint, epoch, card['lane'], card.get('group_version'),
                        card.get('mode_id'), tuple(t['key'] for t in card['tracks']))
-                complete = lambda: _complete_card(store, card, now, epoch, prepared, self.selection_data)
+                complete = lambda: _complete_card(store, card, now, epoch, completion, self.selection_data)
                 protos.append(store.memoized_read(key, complete) if checkpoint is not None else complete())
             if request.record:
                 self.record_modes(protos, epoch, now)

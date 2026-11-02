@@ -38,11 +38,17 @@ def test_selected_reads_use_typed_rows_and_preserve_exact_source_keys(installed)
     preopened = Store(store._db_path)
     try:
         preopened.init_schema(defer_metadata=True)
-        with store.read_view() as pinned, connect(store) as job:
+        # Keep an old WAL snapshot across the whole preparation/migration job.
+        # This fixture lifetime exceeds an ordinary bounded serving read; the
+        # later preopened.read_view still exercises that public read contract.
+        with connect(store) as pinned, connect(store) as job:
+            pinned.execute('PRAGMA query_only=ON')
+            pinned.execute('BEGIN')
+            pinned.execute('SELECT 1 FROM sqlite_schema LIMIT 1').fetchone()
             for name, owner in publication.OWNERS.items():
                 identity = ready(job, name)
                 owner.publish(job, stage=identity)
-                assert owner.selected(pinned.conn) is None
+                assert owner.selected(pinned) is None
                 assert owner.selected(preopened.conn) == identity
                 for suffix, raw in values[name].items():
                     assert owner.read(job, identity, preparation.PREFIXES[name]+suffix)['raw_value'] == raw

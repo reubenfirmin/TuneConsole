@@ -4,7 +4,7 @@ import hashlib
 
 from .. import collection_recovery, playlist_recipe_state
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import collection_documents as preparation
 from .document_publication import verify_paged_plan
 from .mapped_publication import MappedPublication

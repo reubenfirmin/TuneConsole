@@ -85,6 +85,19 @@ def _existing(path, size=MAX_BYTES):
         return stream.read(size + 1)
 
 
+def pack_header(header, age):
+    """Keep custody clocks in a recovered pack's content-addressed identity.
+
+    Equal retained records can come from different, differently aged packs.
+    Their bytes alone cannot identify both publications. A bounded header suffix
+    distinguishes those clocks without changing any owned record or keeping a
+    separate file registry. Installed headers and record ranges remain readable.
+    """
+    if age is None:
+        return header
+    return header + b'Custody clocks 1 ' + canonical([age.mtime_ns, age.ctime_ns]) + b'\n'
+
+
 def publish_many(root, configurations, *, age=None):
     """Pack small configurations without allocating a filesystem block per leaf.
 
@@ -92,11 +105,12 @@ def publish_many(root, configurations, *, age=None):
     Packs are immutable and contain at most PACK_BYTES, apart from one admitted
     larger record. No file index or shared artifact owner is needed.
     """
-    records, size = [], len(PACK_HEADER)
+    header = pack_header(PACK_HEADER, age)
+    records, size = [], len(header)
     def sealed():
-        encoded = PACK_HEADER + b''.join(records)
+        encoded = header + b''.join(records)
         filename = _publish_encoded(root, encoded, hashlib.sha256(encoded).hexdigest(), age=age)
-        offset = len(PACK_HEADER)
+        offset = len(header)
         for record in records:
             yield filename, hashlib.sha256(record).hexdigest(), len(record), offset
             offset += len(record)
@@ -108,7 +122,7 @@ def publish_many(root, configurations, *, age=None):
             raise ValueError('Recommendation policy exceeds its file byte budget')
         if records and size + len(encoded) > PACK_BYTES:
             yield from sealed()
-            records, size = [], len(PACK_HEADER)
+            records, size = [], len(header)
         records.append(encoded)
         size += len(encoded)
     if records:
@@ -249,9 +263,9 @@ def install(conn, rows, bases=(), *, memory_key=None):
             if existing is not None and existing[0] != digest:
                 raise ValueError(f'Conflicting immutable recommendation policy: {version!r}')
             if existing is None and owner==OWNERS[1]:
-                from . import policy_history
-                if policy_history.available(conn):
-                    historical = policy_history.document(conn,version)
+                from . import policy_history_read
+                if policy_history_read.available(conn):
+                    historical = policy_history_read.document(conn,version)
                     if historical is not None and historical['configuration'] != _value:
                         raise ValueError(f'Conflicting immutable historical policy: {version!r}')
             if (base is not None and base not in prepared[OWNERS[0]] and not conn.execute(

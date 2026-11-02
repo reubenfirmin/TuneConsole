@@ -1,6 +1,6 @@
 """Publish verified playback attribution and pending album queues independently."""
 from .. import album_playback_context, playback_bindings
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import playback_context as preparation
 from .document_publication import DocumentPublication, main as run
 

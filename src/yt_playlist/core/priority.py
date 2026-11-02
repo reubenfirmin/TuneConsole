@@ -74,6 +74,7 @@ class ServingLock:
         self._lock = threading.RLock()
         self._local = threading.local()
         self._diagnostics = LockWaitDiagnostics()
+        self._foreground_waiters = 0
 
     @property
     def held_by_current_thread(self):
@@ -99,14 +100,25 @@ class ServingLock:
                 deadline = None if timeout < 0 else time.monotonic() + timeout
                 while True:
                     background[1]()
-                    if self._lock.acquire(False):
-                        break
+                    # A queued request gets this connection before another
+                    # background batch. The priority timeslice alone cannot
+                    # provide that handoff after a slow transaction commits.
+                    with priority._condition:
+                        if (not self._foreground_waiters or self.held_by_current_thread) and self._lock.acquire(False):
+                            break
                     if not blocking or (deadline is not None and time.monotonic() >= deadline):
                         return False
                     time.sleep(0.005)
-            elif not self._lock.acquire(blocking, timeout):
-                release()
-                return False
+            else:
+                with priority._condition:
+                    self._foreground_waiters += 1
+                try:
+                    if not self._lock.acquire(blocking, timeout):
+                        release()
+                        return False
+                finally:
+                    with priority._condition:
+                        self._foreground_waiters -= 1
         except BaseException:
             if release:
                 release()

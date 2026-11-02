@@ -400,3 +400,35 @@ The user subsequently clarified that the local housekeeping script does not
 need automated suite coverage. `tests/test_test_artifacts_cleanup.py` has been
 removed, eliminating its collection-time import. The manual utility remains.
 #713 is handed to review pending the next user-controlled push and CI run.
+
+## Selected Vibe reads, 2026-11-02 (#534)
+
+The current typed owner receives the same decoded publication for plain, v1 and
+v2 private input encodings. The former 24-case cross product repeated complete
+1,096-subject seeding, profile publication and unrelated-pool hydration for each
+encoding and filter. Three pure round-trip checks now prove complete codec
+parity. Two database cases retain both lanes and independently check all four
+include/avoid scenarios against the full-hydration reference. They preserve the
+200-item pools above the 192-item production bound, selected-profile spies,
+candidate order and filter assertions. Each case owns its Store; no live mutable
+fixture is shared between tests. Retry, invalidation, detached results, dislike
+rechecks and absent/old-state tests remain.
+
+Focused measurements (Python 3.14.8 / pytest 9.1.1):
+
+```sh
+uv run pytest tests/rec/test_vibe_pool_reads.py -k 'plain and fresh' --tb=short --durations=5 --maxfail=1 --junitxml=/tmp/tuneconsole-534-vibe-before.xml
+uv run pytest tests/rec/test_vibe_pool_reads.py --tb=short --durations=5 --maxfail=1 --junitxml=/tmp/tuneconsole-534-vibe-after.xml
+```
+
+Before: four fresh/plain filter cases passed in 148.29s (calls 33.92–36.93s).
+After: the complete revised module passed nine cases in 141.23s; its Fresh case,
+covering all four filters, took 44.52s, Explore 40.56s and retry 42.62s. Concurrent
+focused work and ongoing shared-checkout changes prevent treating these as a
+controlled machine benchmark. The concrete reduction is 24 database setups to
+two, with three separate codec checks. No whole-suite projection is made.
+
+The required complete intended desktop/TV CI runtime of at most 15 minutes still
+needs a future hosted run. Run 41497980082 aborted collection, tracked by #825;
+it establishes neither passing behavior nor that runtime target. The current
+user explicitly prohibited a full suite. No full suite, commit or push was run.

@@ -49,12 +49,13 @@ def _digest(value):
 
 def publish_encoded(root, records, *, age=None):
     """Yield (filename, record digest, byte size, offset), retaining one pack."""
-    pending, size = [], len(PACK_HEADER)
+    header = policy_documents.pack_header(PACK_HEADER, age)
+    pending, size = [], len(header)
 
     def seal():
-        packed = PACK_HEADER + b''.join(pending)
+        packed = header + b''.join(pending)
         filename = policy_documents._publish_encoded(root, packed, hashlib.sha256(packed).hexdigest(), age=age)
-        offset = len(PACK_HEADER)
+        offset = len(header)
         for record in pending:
             yield filename, hashlib.sha256(record).hexdigest(), len(record), offset
             offset += len(record)
@@ -65,7 +66,7 @@ def publish_encoded(root, records, *, age=None):
             raise ValueError('Invalid encoded metadata delivery')
         if pending and size + len(record) > PACK_BYTES:
             yield from seal()
-            pending, size = [], len(PACK_HEADER)
+            pending, size = [], len(header)
         pending.append(record)
         size += len(record)
     if pending:
@@ -131,6 +132,9 @@ def read(filename, digest, byte_size, offset):
 
 
 def references(conn):
+    from . import metadata_locator_contract as metadata_locators
+    if metadata_locators.retired(conn):
+        return iter(())
     return conn.execute('SELECT id,raw_filename,raw_digest,raw_byte_size,raw_offset '
                         'FROM metadata_deliveries WHERE raw_filename IS NOT NULL ORDER BY id')
 
@@ -153,6 +157,9 @@ def export(conn, root):
 
 
 def _contents(conn):
+    from . import metadata_locator_contract as metadata_locators
+    if metadata_locators.retired(conn):
+        return iter(())
     return conn.execute('SELECT DISTINCT raw_filename,raw_digest,raw_byte_size,raw_offset '
                         'FROM metadata_deliveries WHERE raw_filename IS NOT NULL ORDER BY raw_filename,raw_offset')
 
@@ -164,11 +171,12 @@ def _export(conn, root, *, directory, references, contents):
         raise ValueError('Metadata export needs a pinned view and a separate directory')
     with closing(sqlite3.connect('')) as staged:
         staged.execute('PRAGMA cache_size=-1024')
-        staged.execute('CREATE TABLE contents(digest TEXT PRIMARY KEY,filename TEXT,size INTEGER,offset INTEGER,'
-                       'target TEXT,target_offset INTEGER) WITHOUT ROWID')
+        staged.execute('CREATE TABLE contents(digest TEXT,filename TEXT,size INTEGER,offset INTEGER,'
+                       'target TEXT,target_offset INTEGER,PRIMARY KEY(digest,filename)) WITHOUT ROWID')
         for (filename, digest, size, offset), encoded in _read_records(contents(conn)):
             check_cancellable_work()
-            old = staged.execute('SELECT filename,size,offset FROM contents WHERE digest=?', (digest,)).fetchone()
+            old = staged.execute('SELECT filename,size,offset FROM contents WHERE digest=? AND filename=?',
+                                 (digest, filename)).fetchone()
             if old:
                 if _read(old[0], digest, old[1], old[2]) != encoded:
                     raise ValueError('Metadata backup content digest collision')
@@ -193,10 +201,10 @@ def _export(conn, root, *, directory, references, contents):
             chunks.append(_document(root, entries, 'backup-chunk')[1])
             entries.clear()
 
-        for identity, _, digest, size, _ in references(conn):
+        for identity, source, digest, size, _ in references(conn):
             check_cancellable_work()
-            filename, offset = staged.execute('SELECT target,target_offset FROM contents WHERE digest=? AND size=?',
-                                               (digest, size)).fetchone()
+            filename, offset = staged.execute('SELECT target,target_offset FROM contents '
+                'WHERE digest=? AND filename=? AND size=?', (digest, source, size)).fetchone()
             entries.append({'id': identity, 'digest': digest, 'byte_size': size, 'offset': offset,
                             'relative_filename': filename})
             if len(entries) == CHUNK_ROWS:
@@ -207,7 +215,7 @@ def _export(conn, root, *, directory, references, contents):
 
 
 def _copy_contents(staged, root):
-    """Publish each distinct response once, using a disk-backed range map."""
+    """Publish responses per source file, preserving distinct custody clocks."""
     staged.execute('CREATE INDEX IF NOT EXISTS contents_source ON contents(filename,offset,digest)')
     after = None
     while True:
@@ -222,7 +230,8 @@ def _copy_contents(staged, root):
             filename, digest, size, offset = target
             if (digest, size) != (row[0], row[2]):
                 raise ValueError('Metadata copy changed captured content')
-            staged.execute('UPDATE contents SET target=?,target_offset=? WHERE digest=?', (filename, offset, digest))
+            staged.execute('UPDATE contents SET target=?,target_offset=? WHERE digest=? AND filename=?',
+                           (filename, offset, digest, row[1]))
         after = batch[-1][1], batch[-1][3], batch[-1][0]
 
 
@@ -266,8 +275,8 @@ def _restore(conn, manifest, *, directory, references, relocate):
         staged.execute('PRAGMA cache_size=-1024')
         staged.execute('CREATE TABLE owners(id INTEGER PRIMARY KEY,filename TEXT NOT NULL,digest TEXT NOT NULL,'
                        'size INTEGER NOT NULL,offset INTEGER NOT NULL)')
-        staged.execute('CREATE TABLE contents(digest TEXT PRIMARY KEY,filename TEXT,size INTEGER,offset INTEGER,'
-                       'target TEXT,target_offset INTEGER) WITHOUT ROWID')
+        staged.execute('CREATE TABLE contents(digest TEXT,filename TEXT,size INTEGER,offset INTEGER,'
+                       'target TEXT,target_offset INTEGER,PRIMARY KEY(digest,filename)) WITHOUT ROWID')
         for digest in document['chunks']:
             check_cancellable_work()
             entries = _read_document(root / digest[:2] / (digest + '.json'), 'backup-chunk')
@@ -280,7 +289,8 @@ def _restore(conn, manifest, *, directory, references, relocate):
                                    (entry['id'], source, entry['digest'], entry['byte_size'], entry['offset']))
                 except sqlite3.IntegrityError as exc:
                     raise ValueError('Duplicate metadata backup owner') from exc
-                old = staged.execute('SELECT filename,size,offset FROM contents WHERE digest=?', (entry['digest'],)).fetchone()
+                old = staged.execute('SELECT filename,size,offset FROM contents WHERE digest=? AND filename=?',
+                                     (entry['digest'], source)).fetchone()
                 if old:
                     if _read(old[0], entry['digest'], old[1], old[2]) != _read(source, entry['digest'], entry['byte_size'], entry['offset']):
                         raise ValueError('Metadata restore content digest collision')
@@ -307,7 +317,8 @@ def _restore(conn, manifest, *, directory, references, relocate):
 
 def _relocate(conn, staged):
     for identity, filename, offset in staged.execute('SELECT o.id,c.target,c.target_offset '
-                                                    'FROM owners o JOIN contents c ON c.digest=o.digest ORDER BY o.id'):
+                                                    'FROM owners o JOIN contents c ON c.digest=o.digest '
+                                                    'AND c.filename=o.filename ORDER BY o.id'):
         check_cancellable_work()
         conn.execute('UPDATE metadata_deliveries SET raw_filename=?,raw_offset=? WHERE id=?',
                      (filename, offset, identity))

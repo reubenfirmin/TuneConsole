@@ -6,7 +6,7 @@ from .. import fao
 
 from .. import action_backup_files, action_work, collection_recovery, policy_documents
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import action_ledger as preparation, document_plan
 from .mapped_publication import MappedPublication
 

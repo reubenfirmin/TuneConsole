@@ -260,7 +260,7 @@ class DiscoveryRepo(Repo):
             return []
         qs = ','.join('?' for _ in ids)
         typed = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='discovery_artist_image_state'").fetchone()
-        from yt_playlist.core.preparation.discovery_checkpoint_publication import OWNERS
+        from yt_playlist.core.discovery_checkpoint_reads import OWNERS
         owner = OWNERS['artist-images']
         revision = owner.selected(self.conn) if not typed else None
         if revision is not None:

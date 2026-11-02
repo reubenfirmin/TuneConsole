@@ -2,7 +2,7 @@
 import hashlib
 import json
 
-from .. import genre_identity
+from ..taste_reads import axis
 from .rows import Job, main as run
 
 
@@ -13,27 +13,6 @@ VALUES = ('weight', 'value', 'score', 'updated_at', 'last_graduated_day', 'sourc
 
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
-
-
-def axis(conn, token):
-    if not isinstance(token, str) or not token or len(token.encode()) > 4096:
-        raise ValueError('A taste axis requires 1..4096 bytes of text')
-    kind, genre, family, value, reason = 'other', None, None, token, None
-    if token.startswith(('genre:', 'family:')):
-        label = token.split(':', 1)[1]
-        # Existing family bars have priority over a genre of the same name.
-        if conn.execute('SELECT 1 FROM genre_family WHERE key=?', (label,)).fetchone():
-            kind, family, value = 'family', label, None
-        else:
-            genre, reason = genre_identity.resolve(conn, label)
-            if genre is not None:
-                kind, value = 'genre', None
-            else:
-                kind, value = 'unresolved_genre', label
-                reason = reason or 'unknown_genre'
-    fields = kind, genre, family, value, reason
-    identity = hashlib.sha256(encoded(fields).encode()).hexdigest()
-    return identity, fields
 
 
 def conflicts(conn, owner, identity):

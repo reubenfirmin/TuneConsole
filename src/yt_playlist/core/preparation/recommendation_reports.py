@@ -5,7 +5,7 @@ from pathlib import Path
 import time
 
 from .. import recommendation_outputs as files, recommendation_reports as reports
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from .rows import Job, main as run
 
 

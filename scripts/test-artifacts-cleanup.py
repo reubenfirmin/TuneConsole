@@ -29,7 +29,8 @@ MEMORY_ROOTS = frozenset('tuneconsole-' + name for name in (
     'served', 'groups', 'metadata', 'metadata-runtime', 'archives', 'policies',
     'recommendations', 'collections'))
 UUID = re.compile(r'[0-9a-f]{32}\Z')
-BUILD_PREFIXES = ('review748-', 'review-browser-fixes4-')
+BUILD_PREFIXES = ('review748-', 'review-browser-fixes4-', '686-focused-', '686-http-',
+                  '686-runtime-qualification-')
 
 
 def private_build_workspace(path):

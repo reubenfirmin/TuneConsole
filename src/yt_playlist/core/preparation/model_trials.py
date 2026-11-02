@@ -10,8 +10,8 @@ import json
 import math
 
 from .. import model_comparison_state as state
-from ..migrations import current as schema
-from ..migrations.runner import MigrationError
+from .. import schema_definition as schema
+from ..schema_contract import MigrationError
 from .ordered_rows import OrderedJob
 from .rows import Job, main as run
 

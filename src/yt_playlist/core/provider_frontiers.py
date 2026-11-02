@@ -13,7 +13,7 @@ def read(conn,provider):
         row = conn.execute('SELECT cursor,cutoff,fingerprint,revision FROM provider_refresh_frontiers WHERE provider=?',
                             (provider,)).fetchone()
         return dict(row) if row else None
-    from .preparation.discovery_checkpoint_publication import OWNERS
+    from .discovery_checkpoint_reads import OWNERS
     owner = OWNERS['provider-refresh']
     if (revision := owner.selected(conn)) is not None:
         row = owner.read(conn, revision, PREFIX+provider)

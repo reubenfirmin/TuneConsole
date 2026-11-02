@@ -5,7 +5,7 @@ import time
 
 from .. import metadata_evidence
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import bounded, metadata_evidence as preparation
 
 
@@ -72,7 +72,7 @@ def definitions():
 
 
 def validate(conn):
-    from ..migrations.current import _tokens
+    from ..schema_contract import tokens as _tokens
     from ..entity_names import predecessor_definition as transform
     renamed = conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='accounts'").fetchone()
     for name, sql in definitions():
@@ -280,8 +280,8 @@ def read_table(conn, owner):
 def fields(conn, owner, key):
     if owner not in ('provider_attempts','enrichment_provider_state'):
         raise ValueError('Unknown metadata operational owner')
-    from . import metadata_destinations
-    supplied = metadata_destinations.operational_fields(conn,owner,key)
+    from .. import metadata_reads
+    supplied = metadata_reads.operational_fields(conn,owner,key)
     if supplied is not None:
         return supplied
     identity = selected(conn)

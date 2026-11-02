@@ -4,7 +4,6 @@ import json
 
 from .. import (artist_credits, genre_identity, legacy_evidence, metadata_legacy,
                metadata_native, recipe_memberships)
-from ..migrations import v074_artist_credits as credits
 from . import development, source
 from .build import Batch, Stage
 
@@ -76,7 +75,11 @@ def _recipe(reader, target, row):
 
 
 def _credit(reader, target, row):
-    version = artist_credits.intern(target,credits._prepare(target,row['credit'],row['credits_json'],row['source']))
+    raw = row['credits_json']
+    if not isinstance(raw, str) or len(raw.encode()) > artist_credits.MAX_BYTES:
+        raise ValueError('Artist source credit exceeds its content budget')
+    prepared = artist_credits.prepare(target, row['credit'], json.loads(raw), row['source'])
+    version = artist_credits.intern(target, prepared)
     target.execute('INSERT INTO artist_credit_observations('
         'id,entry_id,credit_id,source,first_seen,last_seen,processing_count,capture_kind) '
         "VALUES (?,?,?,?,?,?,1,'legacy_capture')",
@@ -172,16 +175,20 @@ def verify(reader, target):
             raise ValueError('Released native metadata projection changed: '+key)
 
 
-def stages():
+def stages(*, sparse=False):
     yield from (development.rows(t,partial(_catalog,table=t)) for t in ('recordings','albums'))
     yield development.rows('playlist_scopes',_scope)
     yield development.rows('identities',_account_albums,name='account_album_state')
     yield development.rows('album_library_memberships',_membership)
     yield development.rows('road_trip_recipes',_recipe)
-    yield development.rows('artist_credit_observations',_credit)
+    if not sparse:
+        yield development.rows('artist_credit_observations',_credit)
     yield Stage('selected_artist_credits',_selected_credits)
     yield development.rows('rec_musical_sources',_musical_source)
-    for table in sorted(ARCHIVES):
+    for table in sorted(ARCHIVES if not sparse else ()):
         yield development.rows(table,partial(_archive,table=table))
     for table in sorted(METADATA):
+        if sparse and table not in ('recording_field_sources','item_field_sources',
+                                    'metadata_decisions','entry_field_choices','recording_identifiers'):
+            continue
         yield Stage('metadata:'+table,partial(_metadata,table=table))

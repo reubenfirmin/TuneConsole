@@ -5,6 +5,7 @@ from pathlib import Path
 
 from . import fao, file_collection, file_map, policy_documents
 from .evidence_ledger import canonical
+from . import legacy_evidence_contract as receipts
 
 DOMAINS = ('catalog','artist','album','playlist','recommendation','workflow','metadata','discovery')
 SQL = ("CREATE TABLE legacy_archive_heads (domain TEXT PRIMARY KEY NOT NULL CHECK(domain IN "
@@ -25,7 +26,7 @@ def install(conn, context=None):
 
 
 def validate(conn):
-    from .migrations.current import _tokens
+    from .schema_contract import tokens as _tokens
     for sql in (SQL,CUTOVER_SQL):
         row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?',(sql.split()[2],)).fetchone()
         if row is None or _tokens(row[0]) != _tokens(sql):
@@ -110,7 +111,6 @@ def put(conn, domain, values):
 
 
 def retain_many(conn, domain, rows):
-    from . import legacy_evidence
     values, used = [], 0
     now = time.time()
     for kind,source,payload,reason in rows:
@@ -121,16 +121,15 @@ def retain_many(conn, domain, rows):
             raise ValueError('Archive journal batch exceeds its work budget')
         retention, basis = disposition(domain,kind,payload,reason)
         values.append((kind,source,{'payload':payload,'reason':reason,'archived_at':now,
-            'subjects':legacy_evidence._subjects(conn,domain,kind,source,payload),
+            'subjects':receipts.subjects(conn,domain,kind,source,payload),
             'state':'retained','retention':retention,'disposition':basis}))
     return put(conn,domain,values)
 
 
 def prepare_batch(conn, domain, limit=128, *, keys=None):
-    from . import legacy_evidence
     if type(limit) is not int or not 1 <= limit <= 128:
         raise ValueError('Archive journal batch must be 1 to 128')
-    table = legacy_evidence.DOMAINS[domain]
+    table = receipts.DOMAINS[domain]
     if not conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?',(table,)).fetchone():
         return 0
     parameters, selected = [], ''
@@ -148,10 +147,10 @@ def prepare_batch(conn, domain, limit=128, *, keys=None):
         conn.execute('INSERT INTO legacy_archive_heads VALUES (?,?)',(domain,bytes.fromhex(publication)))
     values = []
     for row in rows:
-        raw = legacy_evidence._read(domain,row['filename'],row['content_digest'],row['byte_size'],row['file_offset'])[1]
+        raw = receipts.read(domain,row['filename'],row['content_digest'],row['byte_size'],row['file_offset'])[1]
         retention,basis = disposition(domain,row['kind'],raw,row['reason'])
         values.append((row['kind'],row['source_id'],{'payload':raw,'reason':row['reason'],
-            'archived_at':row['archived_at'],'subjects':{column:row[column] for column in legacy_evidence.SUBJECTS[domain]},
+            'archived_at':row['archived_at'],'subjects':{column:row[column] for column in receipts.SUBJECTS[domain]},
             'resolution_status':row['resolution_status'],'state':'retained','retention':retention,'disposition':basis}))
     put(conn,domain,values)
     verified = file_map.get_many(directory(conn)/domain,head(conn,domain),[key(kind,source) for kind,source,_ in values])
@@ -178,7 +177,7 @@ def retire_verified(conn, domain, verified_publication, now):
     concurrent publication invalidates that approval. Empty receipt owners alone
     do not establish verification, and an incomplete conversion cannot retire.
     """
-    from .legacy_evidence import DOMAINS as tables
+    from .legacy_evidence_contract import DOMAINS as tables
     if not conn.in_transaction:
         raise RuntimeError('Archive retirement requires a writer reservation')
     if verified_publication is None or head(conn,domain) != verified_publication:
@@ -192,7 +191,7 @@ def retire_verified(conn, domain, verified_publication, now):
 
 
 def retired_relations(conn):
-    from .legacy_evidence import DOMAINS as tables
+    from .legacy_evidence_contract import DOMAINS as tables
     if not conn.execute("SELECT 1 FROM sqlite_schema WHERE name='legacy_archive_cutovers'").fetchone():
         return set()
     validate(conn)

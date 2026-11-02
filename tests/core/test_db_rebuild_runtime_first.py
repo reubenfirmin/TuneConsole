@@ -76,6 +76,18 @@ def test_rebuild_discards_metadata_caches_and_refreshes_without_losing_user_choi
         assert stage not in ('providers', 'conflicts'), 'Discarded cache was converted'
         return prepare_batch(conn, stage, *args, **kwargs)
     monkeypatch.setattr(preparation, 'prepare_batch', selected_only)
+    from yt_playlist.core.db_rebuild import runtime_retention
+    retire = runtime_retention.retired_metadata
+    def checked_retirement(reader, target, cursor, limit):
+        if cursor is None:
+            original = target.execute('SELECT id,number_value FROM metadata_runtime_choices WHERE kind=4').fetchall()
+            target.execute('UPDATE metadata_runtime_choices SET number_value=999 WHERE kind=4')
+            with pytest.raises(ValueError, match='selected manual choice'):
+                verify_selected(target, source=reader if source_fixture == 'development93' else None)
+            target.executemany('UPDATE metadata_runtime_choices SET number_value=? WHERE id=?',
+                               [(value,identity) for identity,value in original])
+        return retire(reader,target,cursor,limit)
+    monkeypatch.setattr(runtime_retention,'retired_metadata',checked_retirement)
     store = Store(path)
     try:
         store.init_schema()
@@ -96,13 +108,8 @@ def test_rebuild_discards_metadata_caches_and_refreshes_without_losing_user_choi
         assert refresh['cursor'] == 0 and refresh['fingerprint'] == 'unchanged'
         assert provider_frontiers.read(store.conn, 'disabled') is None
         assert store.conn.execute('SELECT first_enriched_at,last_enriched_at FROM recordings WHERE id=8').fetchone()[:] == (10,10)
-        # Discarding caches must not weaken independent manual-choice checks.
-        with store.conn:
-            store.conn.execute('BEGIN IMMEDIATE')
-            store.conn.execute('UPDATE metadata_runtime_choices SET number_value=999 WHERE kind=4')
-            with pytest.raises(ValueError, match='selected manual choice'):
-                verify_selected(store.conn)
-            store.conn.rollback()
+        assert not store.conn.execute('SELECT 1 FROM metadata_observations LIMIT 1').fetchone()
+        assert not store.conn.execute('SELECT 1 FROM metadata_deliveries LIMIT 1').fetchone()
         now = time.time()+2
         store.enrichment_state.record_enrichment_attempt('song 3|artist', 'provider', {'bpm': 122}, now=now)
         with store.conn:
@@ -258,7 +265,7 @@ def test_foreground_provider_results_survive_analytics_and_restart(development93
         if mode != 'existing_during':
             lookup()
         def progress(phase, detail):
-            if detail['stage'] == 'copy:musical_source_observations':
+            if detail['stage'] == 'served-facts':
                 if mode == 'existing_during':
                     lookup()
                 if restart:
@@ -415,7 +422,8 @@ def test_runtime_reopens_before_analytics_and_preserves_new_edits(request, sourc
         store.conn.close()
 
 
-def test_interrupted_analytics_resumes_after_restart_without_rebuilding_runtime(production64):
+def test_interrupted_analytics_resumes_after_restart_without_rebuilding_runtime(production64, monkeypatch):
+    from yt_playlist.core.db_rebuild import destination
     from yt_playlist.core.storage_maintenance import StorageMaintenance
     store = Store(production64)
     try:
@@ -435,6 +443,9 @@ def test_interrupted_analytics_resumes_after_restart_without_rebuilding_runtime(
     maintenance = StorageMaintenance(store)
     try:
         store.init_schema()
+        # Unrelated application edits change the broad construction digest,
+        # while the installed schema and saved analytics stage plan still fit.
+        monkeypatch.setattr(destination, 'signature', lambda: 'unrelated-application-edit')
         maintenance.start()
         maintenance.join(15)
         assert maintenance.phase == 'done', maintenance.error
@@ -448,6 +459,30 @@ def test_interrupted_analytics_resumes_after_restart_without_rebuilding_runtime(
         store.conn.close()
 
 
+def test_analytics_rejects_changed_stage_plan_without_touching_its_checkpoint(production64, monkeypatch):
+    from yt_playlist.core.db_rebuild import destination
+    store = Store(production64)
+    try:
+        store.init_schema()
+        job.run(store, rebuild=True)
+        before = store.conn.execute('SELECT document FROM '+build.CHECKPOINT).fetchone()[0]
+        for_source = destination.for_source
+
+        def changed(*args, **kwargs):
+            spec = for_source(*args, **kwargs)
+            return replace(spec, stages=spec.stages[:-2] + tuple(reversed(spec.stages[-2:])))
+
+        monkeypatch.setattr(destination, 'for_source', changed)
+        with pytest.raises(ValueError, match='checkpoint belongs to another rebuild'):
+            job.finish_analytics(store)
+        assert store.conn.execute('SELECT document FROM '+build.CHECKPOINT).fetchone()[0] == before
+        assert db_handles.state(production64)['analytics_pending']
+        assert not store.activity_paused
+        store.settings.set_setting('after-analytics-error', 'accepted')
+    finally:
+        store.conn.close()
+
+
 def test_analytics_serves_foreground_writes_between_batches(production64, monkeypatch):
     from yt_playlist.core.db_rebuild import destination
     store = Store(production64)
@@ -457,6 +492,10 @@ def test_analytics_serves_foreground_writes_between_batches(production64, monkey
     try:
         store.init_schema()
         job.run(store, rebuild=True)
+        # Cooperative priority waits are deliberately bounded. Even if a
+        # waiting request outlives that timeslice, SQL writer admission must
+        # not let the analytics connection overtake its pending write.
+        monkeypatch.setattr(store.priority, 'checkpoint', lambda cancelled: None)
         members = store.playlists.get_playlist_track_ids(41)
         original = destination.for_source
         batches = 0
@@ -469,7 +508,7 @@ def test_analytics_serves_foreground_writes_between_batches(production64, monkey
                     if batches == 1:
                         entered.set()
                         assert queued.wait(5), 'Foreground read was blocked by the analytics writer'
-                        assert not completed.is_set(), 'Analytics did not own the first write transaction'
+                        assert not completed.wait(.05), 'Analytics did not own the first write transaction'
                     else:
                         assert completed.is_set(), 'Analytics took another batch before serving the queued write'
                     return callback(*args)
@@ -480,13 +519,12 @@ def test_analytics_serves_foreground_writes_between_batches(production64, monkey
         def foreground():
             try:
                 assert entered.wait(5)
-                # Reads use the public connection while the private writer is
-                # still inside its transaction. Then queue a genuine SQL write.
-                with store._lock:
-                    assert store.playlists.get_playlist_track_ids(41) == members
-                    queued.set()
-                    store.settings.set_setting('while-analytics-writes', 'accepted')
-                    completed.set()
+                # Normal read admission uses a WAL reader while the private
+                # writer owns serving write admission. Then queue a real edit.
+                assert store.playlists.get_playlist_track_ids(41) == members
+                queued.set()
+                store.settings.set_setting('while-analytics-writes', 'accepted')
+                completed.set()
             except BaseException as error:
                 failures.append(error)
         writer = threading.Thread(target=foreground)
@@ -501,6 +539,84 @@ def test_analytics_serves_foreground_writes_between_batches(production64, monkey
     finally:
         if writer is not None:
             writer.join(6)
+        store.conn.close()
+
+
+@pytest.mark.parametrize('commit_phase', ['batch', 'completion'])
+def test_slow_analytics_commit_queues_edits_without_blocking_browsing(production64, monkeypatch, commit_phase):
+    from yt_playlist.core.db_diagnostics import DiagnosticConnection
+    store = Store(production64)
+    committing, release, written = threading.Event(), threading.Event(), threading.Event()
+    failures, connections = [], set()
+    analytics = writer = None
+    checkpoint, finish = build._checkpoint, DiagnosticConnection._finish
+    held = False
+
+    def marked(conn, value=None):
+        if value is not None:
+            connections.add(conn)
+        return checkpoint(conn, value)
+
+    def delayed(conn, sql, target, *args):
+        nonlocal held
+        complete = conn in connections and not conn.execute(
+            'SELECT 1 FROM sqlite_schema WHERE name=?', (build.CHECKPOINT,)).fetchone()
+        if (not held and conn in connections and sql == 'COMMIT' and conn.in_transaction
+                and (commit_phase == 'batch' or complete)):
+            held = True
+            committing.set()
+            assert release.wait(10)
+        return finish(conn, sql, target, *args)
+
+    def complete():
+        try:
+            job.finish_analytics(store)
+        except BaseException as error:
+            failures.append(error)
+
+    def edit():
+        try:
+            store.settings.set_setting('queued-through-durability', 'accepted')
+            written.set()
+        except BaseException as error:
+            failures.append(error)
+
+    try:
+        store.init_schema()
+        job.run(store, rebuild=True)
+        members = store.playlists.get_playlist_track_ids(41)
+        # A real foreground INSERT must queue outside SQLite even if durability
+        # exceeds that connection's deliberately short test-only busy timeout.
+        store.conn.execute('PRAGMA busy_timeout=25')
+        monkeypatch.setattr(build, '_checkpoint', marked)
+        monkeypatch.setattr(DiagnosticConnection, '_finish', delayed)
+        analytics = threading.Thread(target=complete)
+        analytics.start()
+        assert committing.wait(10)
+        with closing(sqlite3.connect(store._db_path, timeout=0)) as probe:
+            with pytest.raises(sqlite3.OperationalError, match='locked'):
+                probe.execute('BEGIN IMMEDIATE')
+        assert store.playlists.get_playlist_track_ids(41) == members
+        writer = threading.Thread(target=edit)
+        writer.start()
+        assert not written.wait(.15)
+        assert not failures
+        release.set()
+        writer.join(10)
+        analytics.join(20)
+        assert not writer.is_alive() and not analytics.is_alive()
+        assert not failures and written.is_set()
+        assert store.settings.get_setting('queued-through-durability') == 'accepted'
+        assert not db_handles.state(store._db_path)['analytics_pending']
+        store.conn.close()
+        store = Store(production64)
+        store.init_schema()
+        assert store.settings.get_setting('queued-through-durability') == 'accepted'
+    finally:
+        release.set()
+        for thread in (writer, analytics):
+            if thread is not None:
+                thread.join(20)
         store.conn.close()
 
 

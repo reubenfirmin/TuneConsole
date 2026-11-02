@@ -9,7 +9,7 @@ import sqlite3
 import time
 
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from .rows import Job
 from . import bounded
 
@@ -72,7 +72,7 @@ class IndexJob(Job):
         # worker installs custody and independently verifies them. Once custody
         # exists its write fences are required, including during normal startup.
         if conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?',(CUSTODY,)).fetchone():
-            from ..migrations.current import _tokens
+            from ..schema_contract import tokens as _tokens
             for name,sql in custody():
                 row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?',(name,)).fetchone()
                 if row is None or _tokens(row[0])!=_tokens(sql):

@@ -11,65 +11,11 @@ import sqlite3
 
 from yt_playlist.core import group_documents, group_evidence, policy_documents
 from yt_playlist.core.prepared_references import FIELDS, PREPARED, context, replace_prepared
-from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing, check_cancellable_work
+from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.core.db_space import StorageCompacting
 from yt_playlist.core.evidence_ledger import _mkdir
-from yt_playlist.core.db_writes import atomic_write
+from yt_playlist.core.group_admission import source, enabled, admission, writer
 from yt_playlist.rec import recommendation_roots
-
-def source(store):
-    return getattr(store, '_evidence_source', store)
-
-
-def enabled(store):
-    return getattr(store, '_compact_group_files', False)
-
-
-@contextmanager
-def admission(store, *, blocking=True):
-    """Serialize this domain across processes without holding the serving lock."""
-    store = source(store)
-    if not enabled(store):
-        yield
-        return
-    with store._lock:
-        if not hasattr(store, '_group_root_admission'):
-            store._group_root_admission = threading.RLock()
-            store._group_root_depth = threading.local()
-    if blocking:
-        while not store._group_root_admission.acquire(timeout=.025):
-            check_cancellable_work()
-    elif not store._group_root_admission.acquire(blocking=False):
-        raise WorkBudgetExceeded('Listening history preparation is using publication. Please retry.')
-    try:
-        if getattr(store._group_root_depth, 'value', 0):
-            store._group_root_depth.value += 1
-            try:
-                yield
-            finally:
-                store._group_root_depth.value -= 1
-            return
-        root = group_documents.root_for_database(store._db_path, store._evidence_key)
-        _mkdir(root)
-        with (root / '.evidence.lock').open('a+b') as stream:
-            unlock = policy_documents._try_file_lock(stream, exclusive=True)
-            if unlock is None:
-                raise WorkBudgetExceeded('Listening evidence publication is owned by another process')
-            store._group_root_depth.value = 1
-            try:
-                yield
-            finally:
-                store._group_root_depth.value = 0
-                unlock()
-    finally:
-        store._group_root_admission.release()
-
-
-@contextmanager
-def writer(store):
-    store = source(store)
-    with atomic_write(store):
-        yield store.conn
-
 
 def retain(store, kind, identity, captured, at, *, strict=None, ledger=None):
     if kind in {'offer', 'response', 'checkpoint'}:
@@ -191,7 +137,7 @@ def _pending(store, resolve, at):
                 with admission(store, blocking=False):
                     release(store, 'pending', identity)
                     retired = True
-            except (WorkBudgetExceeded, WorkClosing):
+            except (WorkBudgetExceeded, WorkClosing, StorageCompacting):
                 # The unlocked lifetime file lets the bounded reaper retire
                 # this conservative SQL root after publication becomes free or
                 # another owner resumes maintenance after shutdown.

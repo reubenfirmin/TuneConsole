@@ -1,5 +1,6 @@
 <!doctype html>
-<html lang="en">
+{% set maintenance = storage_maintenance_status() %}
+<html lang="en" data-storage-compacting="{{ 'true' if maintenance.active else 'false' }}">
 <head>
   {% set path = request.url.path if request else "/" %}
   <meta charset="utf-8">
@@ -181,7 +182,6 @@
     <script defer src="/static/generating.js?v={{ asset_v }}"></script>
     {% include "_partials/mix_launch_loader.html" %}
   </template>
-  {% set maintenance = storage_maintenance_status() %}
   {% if setup_pending %}{% include "_partials/setup_status.html" %}{% endif %}
   <div id="storage-maintenance" class="storage-maintenance"
        data-warning="{{ 'true' if maintenance.warning else 'false' }}"

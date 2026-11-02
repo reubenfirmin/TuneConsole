@@ -1,6 +1,6 @@
 """Publish retained trial decisions, monitoring baselines and held assignments."""
 from .. import model_comparison_state as state
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import model_trials as preparation
 from .document_publication import DocumentPublication, main as run
 

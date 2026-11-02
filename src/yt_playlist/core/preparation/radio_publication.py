@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 
 from .. import collection_recovery, entity_names
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import radio_session as preparation
 from .selection import invalidators
 
@@ -55,7 +55,7 @@ def definitions():
 
 
 def validate(conn):
-    from ..migrations.current import _tokens
+    from ..schema_contract import tokens as _tokens
     from ..entity_names import predecessor_definition as transform
     renamed = conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='accounts'").fetchone()
     for name,sql in definitions():

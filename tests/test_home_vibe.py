@@ -23,6 +23,17 @@ def established_vibe_access(monkeypatch):
         'ready_formats': {'mixes': True}})
 
 
+def test_saved_vibe_requires_a_configured_access_policy(store, monkeypatch):
+    store.settings.set_setting(home_vibe.SETTING, 'relax')
+    store.settings.set_setting(mix_tuning.UPDATED_AT_SETTING, '1000')
+    monkeypatch.setattr(home_vibe, '_access', None)
+    with pytest.raises(RuntimeError, match='access policy'):
+        home_vibe.current(store, 1000)
+    # Natural readiness never applies the remembered control or invokes a gate.
+    with home_vibe.natural():
+        assert home_vibe.current(store, 1000) == ''
+
+
 @pytest.mark.parametrize("preset,preferred,other", [
     ("relax", {"energy": .1, "bpm": 75, "mood_relaxed": .9, "loudness": .2},
                {"energy": .9, "bpm": 160, "mood_relaxed": .1, "loudness": .95}),

@@ -31,8 +31,8 @@ def install_runtime_heads(conn, context=None):
 
 
 def validate_runtime_heads(conn):
-    from .migrations.current import _tokens
-    from .migrations.runner import MigrationError
+    from .schema_contract import tokens as _tokens
+    from .schema_contract import MigrationError
     row = conn.execute("SELECT sql FROM sqlite_schema WHERE name='metadata_native_delivery_heads'").fetchone()
     if row is None or _tokens(row[0]) != _tokens(RUNTIME_HEAD_SQL):
         raise MigrationError('Incompatible native metadata delivery heads')

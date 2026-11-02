@@ -16,7 +16,7 @@ PART_CHARACTERS = 64 * 1024
 
 
 def prepared_owner(conn):
-    from .preparation.report_publication import active
+    from .report_reads import active
     return active(conn)
 
 
@@ -113,11 +113,11 @@ def _retire(conn, identity):
 
 def encoded(conn, surface):
     if prepared_owner(conn):
-        from .migrations.runner import MigrationError
-        from .preparation import recommendation_reports as preparation, report_publication
-        row = report_publication.selected(conn, surface)
+        from .schema_contract import MigrationError
+        from . import report_reads
+        row = report_reads.selected(conn, surface)
         try:
-            return preparation.read_original(conn, row) if row is not None else None
+            return report_reads.read_original(conn, row) if row is not None else None
         except (OSError, ValueError, MigrationError):
             return None
     row = conn.execute('SELECT p.id,p.content_digest,p.total_bytes,p.part_count '
@@ -140,7 +140,7 @@ def encoded(conn, surface):
 
 def checkpoint(conn, surface):
     if prepared_owner(conn):
-        from .preparation.report_publication import selected
+        from .report_reads import selected
         row = selected(conn, surface)
         return dict(zip(('at', 'schema', 'watermark', 'report_id', 'generation', 'inputs', 'next_at'),
             (row[name] for name in ('observed_at', 'schema_version', 'watermark', 'report_key',
@@ -153,7 +153,7 @@ def checkpoint(conn, surface):
 
 def present(conn, surface):
     if prepared_owner(conn):
-        from .preparation.report_publication import selected
+        from .report_reads import selected
         row = selected(conn, surface)
         return row is not None and row['has_content'] == 1
     return conn.execute('SELECT 1 FROM recommendation_report_heads h JOIN recommendation_report_publications p '
@@ -162,7 +162,7 @@ def present(conn, surface):
 
 def choice_usage(conn):
     if prepared_owner(conn):
-        from .preparation.report_publication import selected
+        from .report_reads import selected
         row = selected(conn, 'listening_choices')
         if row is None:
             return {}

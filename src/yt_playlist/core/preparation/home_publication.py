@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from .. import home_outputs as outputs, recommendation_outputs as files
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import home_outputs as preparation
 from .pair_publication import RetainedPublication
 

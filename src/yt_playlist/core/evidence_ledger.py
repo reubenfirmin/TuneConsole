@@ -225,7 +225,9 @@ class EvidenceLedger:
             check_cancellable_work()
             try:
                 value = json.loads(fao.read_bytes(path))
-                records.append(self.project_opportunity(value) if kind == 'opportunity' else value)
+                value = self.project_opportunity(value) if kind == 'opportunity' else value
+                if value is not None:
+                    records.append(value)
             except FileNotFoundError:
                 # Another application's maintenance can retire an unanswered old menu.
                 continue

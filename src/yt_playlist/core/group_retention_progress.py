@@ -3,7 +3,7 @@
 Installing these empty owners never traverses historical evidence. Root changes
 invalidate the walk; retirement itself leaves its conservative closure usable.
 """
-from .migrations.runner import MigrationError
+from .schema_contract import MigrationError
 
 TABLE = 'group_retention_walk'
 
@@ -82,7 +82,7 @@ def definitions(conn):
 
 
 def validate(conn):
-    from .migrations.current import _tokens
+    from .schema_contract import tokens as _tokens
     for name, sql in definitions(conn):
         row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
         if row is None or _tokens(row[0]) != _tokens(sql):

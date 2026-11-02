@@ -66,7 +66,7 @@ def _acknowledge(store, now, publish):
                 except FileNotFoundError:
                     scan.advance(store)
                     continue
-                if offer['observed_at'] > now or offer['at'] > now:
+                if offer is None or offer['observed_at'] > now or offer['at'] > now:
                     scan.advance(store)
                     continue
                 scan.identity = offer['context']

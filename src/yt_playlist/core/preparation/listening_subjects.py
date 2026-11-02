@@ -12,7 +12,8 @@ import json
 import sqlite3
 import time
 
-from ..migrations.runner import MigrationError, history, validate_version
+from ..schema_admission import history, validate_version
+from ..schema_contract import MigrationError
 
 
 STATE = 'listening_subject_preparation'
@@ -117,15 +118,14 @@ def bounded_rows(conn, query, parameters=(), *, byte_limit=MAX_ROW_BYTES):
 
 
 def _version(conn):
-    from ..migrations.registry import MIGRATIONS
-    version = history(conn, MIGRATIONS)
+    version = history(conn)
     if not 79 <= version < 100:
         raise MigrationError('Listening preparation requires a genuine installed layout from 79 through 99')
     return version
 
 
 def _validate_schema(conn):
-    from ..migrations.current import _tokens
+    from ..schema_contract import tokens as _tokens
     for name, sql in (*SCHEMA.items(), *_triggers()):
         actual = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
         if actual is None or _tokens(actual[0]) != _tokens(sql):

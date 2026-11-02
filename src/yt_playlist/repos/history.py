@@ -6,6 +6,7 @@ from collections import Counter, OrderedDict
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from yt_playlist.core import artists, catalog, discovery_sources, entity_names, first_play, listening, listening_summaries
+from yt_playlist.core.preparation import listening_views
 from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized, snapshot_read
 
 logger = logging.getLogger(__name__)
@@ -231,29 +232,36 @@ class HistoryRepo(Repo):
         Excluded playlist events suppress only their account/day sync shadows.
         Independent and unknown coarse evidence survives; adjacent dates are not guessed.
         """
+        native = self.conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='listening_summary_state'").fetchone()
+        prefix, names = listening_views.materialized() if native else ('', {})
+        events = names.get('play_event_subjects', 'play_event_subjects')
+        eligible = names.get('eligible_listening_evidence', 'eligible_listening_evidence')
         if exclude_list_ids:
             excl = list(exclude_list_ids)
             ph = ",".join("?" * len(excl))
-            q = ("WITH kept AS (SELECT pe.account_id,pe.identity_key,pe.played_at,c.day "
-                 "FROM play_event_subjects pe JOIN play_event_calendar c ON c.event_id=pe.id "
+            q = ("WITH " + (prefix + ',' if prefix else '') +
+                 "kept AS MATERIALIZED (SELECT pe.account_id,pe.identity_key,pe.played_at,c.day "
+                 f"FROM {events} pe JOIN play_event_calendar c ON c.event_id=pe.id "
                  f"WHERE COALESCE(pe.is_generated,0)=0 AND (pe.playlist_ytm_id IS NULL OR pe.playlist_ytm_id NOT IN ({ph}))"
                  ") "
                  "SELECT k, MAX(ts) ts FROM ("
                  "  SELECT identity_key k, played_at ts FROM kept"
                  "  UNION ALL"
                  "  SELECT e.identity_key k,CAST(strftime('%s',e.day||' 12:00:00') AS REAL) ts"
-                 "  FROM eligible_listening_evidence e WHERE e.event_id IS NULL"
+                 f"  FROM {eligible} e WHERE e.event_id IS NULL"
                  "  AND NOT EXISTS (SELECT 1 FROM kept k WHERE k.account_id=e.account_id "
                  "    AND k.identity_key=e.identity_key AND k.day=e.day)"
                  "  AND (e.source<>'ytm_history' OR NOT EXISTS ("
-                 "    SELECT 1 FROM play_event_subjects pe JOIN play_event_calendar c ON c.event_id=pe.id"
+                 f"    SELECT 1 FROM {events} pe JOIN play_event_calendar c ON c.event_id=pe.id"
                  "    WHERE pe.account_id=e.account_id AND pe.identity_key=e.identity_key"
                  f"    AND pe.playlist_ytm_id IN ({ph})"
                  "    AND c.day=e.day))"
                  ") GROUP BY k ORDER BY ts DESC")
             params: tuple = (*excl, *excl)
         else:
-            q = "SELECT identity_key k,MAX(at) ts FROM listening_activity GROUP BY identity_key ORDER BY ts DESC"
+            activity = names.get('listening_activity', 'listening_activity')
+            q = (('WITH ' + prefix + ' ' if prefix else '') +
+                 f"SELECT identity_key k,MAX(at) ts FROM {activity} GROUP BY identity_key ORDER BY ts DESC")
             params = ()
         rows = self.conn.execute(q + (" LIMIT ?" if limit else ""),
                                  (*params, limit) if limit else params).fetchall()

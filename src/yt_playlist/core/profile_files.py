@@ -99,7 +99,7 @@ def install(conn, context=None):
 
 
 def validate(conn):
-    from .migrations.current import _tokens
+    from .schema_contract import tokens as _tokens
     for name, sql in definitions():
         row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
         if row is None or _tokens(row[0]) != _tokens(sql):

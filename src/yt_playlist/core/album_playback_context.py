@@ -13,8 +13,7 @@ def available(conn):
 @collection_recovery.pinned_read
 def load(conn):
     if not available(conn):
-        from .preparation import playback_publication
-        owner = playback_publication.SOURCES[KEY]
+        from .published_documents import PENDING_ALBUM as owner
         revision = owner.selected(conn)
         if revision is not None:
             return entity_names.account_document(json.loads(owner.value(conn,revision) or 'null'))

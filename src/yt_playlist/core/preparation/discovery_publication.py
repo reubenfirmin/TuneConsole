@@ -5,7 +5,7 @@ import json
 import time
 
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import bounded, discovery_artists, discovery_artist_publication, discovery_subjects as preparation, discovery_views
 
 
@@ -120,8 +120,8 @@ class Publication:
 
     def validate(self, conn):
         from .. import genre_classifications
-        from ..migrations.current import _tokens
-        from ..migrations.v086_genre_classifications import transform as classified
+        from ..schema_contract import tokens as _tokens
+        from ..genre_contract import classified_definition as classified
         from ..entity_names import predecessor_definition as transform
         renamed = conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='accounts'").fetchone()
         native = discovery_artist_publication.native(conn)
@@ -142,7 +142,7 @@ class Publication:
             return
         self.validate(conn)
         if not discovery_artist_publication.native(conn):
-            from ..migrations.current import _tokens
+            from ..schema_contract import tokens as _tokens
             for job in self.jobs:
                 # A retained publication from an earlier format can predate a
                 # newly introduced optional owner. It is no longer selectable;

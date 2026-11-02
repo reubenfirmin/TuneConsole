@@ -5,7 +5,7 @@ import time
 
 from .. import album_tracklists
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import album_occurrences as preparation
 from .selection import invalidators
 
@@ -122,7 +122,7 @@ def views():
 
 
 def validate(conn):
-    from ..migrations.current import _tokens
+    from ..schema_contract import tokens as _tokens
     # Frozen owner replacements retire source triggers, and versions 100/101
     # recreate only their canonical views. Native album owners take precedence
     # then; retained stages, originals and custody guards remain mandatory.

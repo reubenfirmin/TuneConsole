@@ -4,7 +4,7 @@ import json
 import time
 
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import bounded, recommendation_demand as preparation
 
 
@@ -83,7 +83,7 @@ def native(conn):
 
 
 def validate(conn):
-    from ..migrations.current import _tokens
+    from ..schema_contract import tokens as _tokens
     from ..entity_names import predecessor_definition as transform
     renamed = conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='accounts'").fetchone()
     for name, sql in definitions():

@@ -13,10 +13,10 @@ def available(conn):
 @collection_recovery.pinned_read
 def ids(conn):
     if not available(conn):
-        from .preparation import radio_origin_publication
-        revision = radio_origin_publication.selected(conn)
+        from . import radio_reads
+        revision = radio_reads.origin_selected(conn)
         if revision is not None:
-            return radio_origin_publication.ids(conn,revision)
+            return radio_reads.origin_ids(conn,revision)
         values = dict(conn.execute('SELECT key,value FROM settings WHERE key IN (?,?,?,?)',KEYS))
         return list(dict.fromkeys([*json.loads(values.get(KEYS[0]) or '[]'),
                                   *(values[key] for key in KEYS[1:] if values.get(key))]))

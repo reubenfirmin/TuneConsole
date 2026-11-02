@@ -11,7 +11,7 @@ from .. import fao
 import time
 
 from .. import album_note_outputs, album_note_requests, recommendation_outputs
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from ..policy_documents import _publish_encoded
 from ..recommendation_work import finite
 from .rows import Job, main as run

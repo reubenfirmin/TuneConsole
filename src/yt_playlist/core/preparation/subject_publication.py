@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import json
 import time
 
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import listening_subjects as preparation, listening_views
 
 
@@ -152,7 +152,7 @@ def views():
 
 
 def validate(conn):
-    from ..migrations.current import _tokens
+    from ..schema_contract import tokens as _tokens
     retired = native(conn)
     for name, sql in definitions():
         # Frozen v100 removes all dependent views and replaces source owners.

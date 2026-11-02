@@ -10,7 +10,7 @@ import sqlite3
 import time
 
 from .. import content_preparation_state as content
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import collection_controls, model_checkpoints as preparation
 from .selection import invalidators
 
@@ -60,7 +60,7 @@ def definitions():
 
 
 def validate(conn):
-    from ..migrations.current import _tokens
+    from ..schema_contract import tokens as _tokens
     extended = any(conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
                    for name in ADDITIVE)
     for name, sql in definitions():

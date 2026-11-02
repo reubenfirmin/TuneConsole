@@ -1,19 +1,18 @@
 """Current and requested model-selection runs retain actual run ownership."""
+from . import control_reads
 KEYS = {'rec_selection_active_run':'active_run_id','rec_selection_display_run':'display_run_id',
         'rec_selection_live_run':'live_run_id','rec_selection_restore':'restore_run_id'}
 
 
 def available(conn):
-    from .preparation import control_publication
     return (conn.execute("SELECT 1 FROM sqlite_schema WHERE name='model_selection_heads'").fetchone() is not None
-            or control_publication.installed(conn, 'model-pointers'))
+            or control_reads.installed(conn, 'model-pointers'))
 
 
 def get(conn,key,default=None):
-    from .preparation import control_publication
-    revision = control_publication.selected(conn, 'model-pointers')
+    revision = control_reads.selected(conn, 'model-pointers')
     if revision is not None:
-        return control_publication.pointer_read(conn, revision, key, default)
+        return control_reads.pointer_read(conn, revision, key, default)
     if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='model_selection_heads'").fetchone():
         row = conn.execute('SELECT value FROM main.settings WHERE key=?', (key,)).fetchone()
         return row[0] if row else default
@@ -22,9 +21,8 @@ def get(conn,key,default=None):
 
 
 def put(conn,values):
-    from .preparation import control_publication
     if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='model_selection_heads'").fetchone():
-        return control_publication.retained_write(conn, values)
+        return control_reads.retained_write(conn, values)
     if not values:
         return
     conn.execute('INSERT INTO model_selection_heads(singleton) VALUES (1) ON CONFLICT(singleton) DO NOTHING')

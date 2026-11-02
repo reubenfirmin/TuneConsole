@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import hashlib
 import time
 
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from .selection import invalidators
 
 
@@ -76,7 +76,7 @@ class DocumentPublication:
         yield from invalidators(head, {self.source: self.job})
 
     def validate(self, conn):
-        from ..migrations.current import _tokens
+        from ..schema_contract import tokens as _tokens
         from ..entity_names import predecessor_definition as transform
         renamed = conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='accounts'").fetchone()
         for name, sql in self.definitions():

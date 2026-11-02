@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from .. import recommendation_outputs as files
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 
 
 UNIT_BYTES = 128 * 1024

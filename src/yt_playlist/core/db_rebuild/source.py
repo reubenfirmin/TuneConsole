@@ -3,18 +3,16 @@
 This is a read contract, not an upgrade runner. In particular, admission of the
 released layout must never execute a populated historical migration.
 """
-import hashlib
-import json
-
+from .. import released_schema
 from ..migrations import regular
 from ..migrations.registry import MIGRATIONS
 from ..migrations.runner import MigrationError, history, validate_version
 from .build import quote
 
 
-RELEASE_VERSION = 64
+RELEASE_VERSION = released_schema.VERSION
 DEVELOPMENT_VERSION = 93
-RELEASE_DDL = '95036d09b6a69976b6b6898bd94d1eef88b6b670b089198c9092491f00bfa8b7'
+RELEASE_DDL = released_schema.DDL
 MAX_BATCH_BYTES = 8 * 1024**2
 
 
@@ -27,12 +25,7 @@ def admit(conn):
     """Check structure only, without a write reservation or library scan."""
     version = history(conn, MIGRATIONS)
     if version == RELEASE_VERSION:
-        objects = [tuple(row) for row in conn.execute(
-            "SELECT type,name,tbl_name,sql FROM main.sqlite_schema "
-            "WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name")]
-        digest = hashlib.sha256(json.dumps(objects, separators=(',', ':')).encode()).hexdigest()
-        if digest != RELEASE_DDL:
-            raise MigrationError('Schema 64 does not match the supported v0.1.18 release')
+        released_schema.validate(conn)
     elif version == DEVELOPMENT_VERSION:
         validate_version(conn, version, foreign_keys=False, data=False)
         regular.validate(conn)
@@ -59,16 +52,19 @@ def keys(conn, table):
     return keys
 
 
-def scan(conn, table, cursor, limit, *, legacy_id=False):
+def scan(conn, table, cursor, limit, *, legacy_id=False, predicate=None):
     """Read one key batch, bounded by both row count and captured byte size."""
     key_columns = keys(conn,table)
     expressions = ','.join(map(quote, key_columns))
     fields = columns(conn, table)
-    query = 'SELECT '+expressions+','+','.join(map(quote, fields))+' FROM main.'+quote(table)
+    query = 'SELECT '+expressions+','+','.join(map(quote, fields))+' FROM main.'+quote(table)+' s'
     parameters = []
+    conditions = [predicate] if predicate else []
     if cursor is not None:
-        query += ' WHERE ('+expressions+')>('+','.join('?' for _ in key_columns)+')'
+        conditions.append('('+expressions+')>('+','.join('?' for _ in key_columns)+')')
         parameters.extend(cursor)
+    if conditions:
+        query += ' WHERE '+' AND '.join('('+value+')' for value in conditions)
     query += ' ORDER BY '+expressions+' LIMIT ?'
     # Row counts alone do not bound captured JSON/vector batches. Keep one
     # original row intact, then stop at a small byte budget as well.

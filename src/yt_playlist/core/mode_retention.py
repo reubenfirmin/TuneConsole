@@ -35,8 +35,8 @@ def install(conn, context=None):
 
 
 def validate(conn):
-    from .migrations.current import _tokens
-    from .migrations.runner import MigrationError
+    from .schema_contract import tokens as _tokens
+    from .schema_contract import MigrationError
     for sql in statements():
         name = sql.split()[2]
         row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()

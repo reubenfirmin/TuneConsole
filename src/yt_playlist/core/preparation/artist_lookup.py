@@ -3,7 +3,7 @@ import hashlib
 import json
 
 from ..artist_keys import canonical_id
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from ...util.matching import normalize
 from .rows import Job
 

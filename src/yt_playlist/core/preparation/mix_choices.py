@@ -66,11 +66,21 @@ def _menus(store, state):
         offer = json.loads(fao.read_bytes(path))
         if hashlib.sha256(offer['id'].encode()).hexdigest() != path.stem:
             raise ValueError('Historical menu identity does not match its file')
+        if (offer.get('precision') == mix_choices.PRECISION and not store.conn.execute(
+                'SELECT 1 FROM mix_choice_menus WHERE opportunity_id=?', (offer['id'],)).fetchone()):
+            # Preserve an ahead-of-snapshot file without interpreting its
+            # descriptor IDs through an unrelated destination dictionary.
+            prepared.append((path, None, None, None))
+            used += size
+            continue
         projection, at = _context(store, ledger, offer)
         prepared.append((path, offer, projection, at))
         used += size
     with group_roots.writer(store):
         for path, offer, projection, at in prepared:
+            if offer is None:
+                _advance(store.conn, 'menus', path.stem)
+                continue
             identity, kind, target, digest = projection
             prior = store.conn.execute('SELECT context,source_digest FROM choice_context_projections '
                                        'WHERE source_context=? AND kind=?', (identity, kind)).fetchone()

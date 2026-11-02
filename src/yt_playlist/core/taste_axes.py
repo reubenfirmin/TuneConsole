@@ -1,5 +1,5 @@
 """Relational taste axes; encoded tokens exist only at the legacy API boundary."""
-from yt_playlist.core import genre_identity
+from yt_playlist.core import genre_identity, taste_reads
 from yt_playlist.util import genre_catalog
 
 TABLES = ('rec_weights', 'rec_lean', 'home_hidden_facet', 'rec_theme',
@@ -54,12 +54,11 @@ def identity(conn, token, *, create=False):
 
 def projection(conn, table, columns='*', *, token_name='axis'):
     if not available(conn):
-        from .preparation import taste_publication
-        prepared = taste_publication.projection(conn,table,columns,token_name=token_name)
+        prepared = taste_reads.projection(conn,table,columns,token_name=token_name)
         if prepared is not None:
             return prepared
         if compatible(conn):
-            return taste_publication.live_projection(table,columns,token_name=token_name)
+            return taste_reads.live_projection(table,columns,token_name=token_name)
         return f'SELECT {columns} FROM {table} t'
     # IDs stay stable when display names or aliases change. Existing callers
     # consume stable genre keys and family keys through their token boundary.
@@ -100,8 +99,7 @@ def matches(conn, owner, token, *, create=False):
         return 'axis_id=?', (identity(conn,token,create=create),)
     if not compatible(conn):
         return legacy+'=?', (token,)
-    from .preparation.taste_axes import axis
-    _, (kind,genre,family,value,_) = axis(conn,token)
+    _, (kind,genre,family,value,_) = taste_reads.axis(conn,token)
     if kind=='other':
         return legacy+'=?', (value,)
     prefixed,label,candidates = _legacy_parts(legacy)
@@ -151,11 +149,9 @@ def reference(conn, owner, token, *, create=False):
 
 def lookup(conn, owner, token, columns):
     """Read a selected fold, or the current compatible physical contribution(s)."""
-    from .preparation import taste_publication
-    projected = taste_publication.projection(conn,owner,'*',token_name='facet' if owner=='rec_theme' else 'axis')
+    projected = taste_reads.projection(conn,owner,'*',token_name='facet' if owner=='rec_theme' else 'axis')
     if projected is not None:
-        from .preparation.taste_axes import axis
-        _, (kind,genre,family,value,_) = axis(conn,token)
+        _, (kind,genre,family,value,_) = taste_reads.axis(conn,token)
         canonical = ('genre:'+genre if kind=='genre' else 'genre:'+family if kind=='family'
                      else 'genre:'+value if kind=='unresolved_genre' else value)
         return conn.execute('SELECT '+columns+' FROM ('+projected+') WHERE '+

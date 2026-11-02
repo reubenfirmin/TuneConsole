@@ -29,6 +29,36 @@ def song_app(store):
     thread.join(timeout=5)
 
 
+def test_readonly_song_menu_disables_writes_and_recovers_without_reload(song_app, page):
+    store = song_app['store']
+    store._evidence_recovery_pending = True
+    page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
+    page.get_by_role('button', name='More actions for Owned Song').click()
+    menu = page.get_by_role('menu', name='Song actions')
+    actions = [menu.get_by_role('menuitem', name=name, exact=True) for name in (
+        'Add song to playlist', 'Create playlist from song', 'Edit Metadata')]
+    for action in actions:
+        expect(action).to_be_disabled()
+    play = menu.get_by_role('menuitem', name='Play on YouTube Music', exact=True)
+    details = menu.get_by_role('menuitem', name='Track details', exact=True)
+    expect(play).to_be_enabled()
+    expect(details).to_be_enabled()
+    play.focus()
+    page.keyboard.press('ArrowDown')
+    expect(menu.get_by_role('menuitem', name='Songs like this', exact=True)).to_be_focused()
+    page.keyboard.press('ArrowDown')
+    expect(details).to_be_focused()
+    page.screenshot(path='/tmp/tuneconsole-686-readonly-song-menu.png')
+    store._evidence_recovery_pending = False
+    for action in actions:
+        expect(action).to_be_enabled()
+    store._evidence_recovery_pending = True
+    for action in actions:
+        expect(action).to_be_disabled()
+    assert menu.is_visible()
+    assert not song_app['main'].created and not song_app['main'].added
+
+
 @pytest.mark.parametrize("width", [1280])
 def test_create_from_album_with_readable_input_and_modal_focus(song_app, page, width, tmp_path):
     errors = []

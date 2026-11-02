@@ -8,7 +8,7 @@ import re
 import sqlite3
 
 from .. import choice_learning_state as learning, recommendation_outputs as files
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from .ordered_rows import OrderedJob
 from .rows import Job, main as run
 

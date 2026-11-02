@@ -1,27 +1,17 @@
 """Finite, typed checkpoints used to admit content-model preparation work."""
 import json
 
-KEYS = {'rec_preparation_basis':'content_basis_checkpoint',
-        'rec_preparation_full':'content_full_checkpoint','rec_preparation_fit':'content_fit_checkpoint'}
-FIELDS = {
- 'rec_preparation_basis':('serial','rows','at','reason','estimated_bytes','dimensions','input_fingerprint'),
- 'rec_preparation_full':('content','evidence','rows','at'),
- 'rec_preparation_fit':('state','reason','attempted_at','attempts','since','next_attempt_at','memory_bytes',
-                        'estimated_bytes','rows','dimensions','max_rows')}
-MODES = ('mode_count','mode_min_members','mode_match_threshold')
-CONFIG = ('embed_method','dimensions_setting','cooc_weighting','restore_run','mode_count_setting',
-          'mode_min_members_setting','mode_match_threshold_setting')
-PHASES = ('encoding','clustering','publication')
+from .content_checkpoint_contract import KEYS, FIELDS, MODES, CONFIG, PHASES
 
 
 def available(conn):
-    from .preparation import checkpoint_publication
+    from . import checkpoint_reads as checkpoint_publication
     return (conn.execute("SELECT 1 FROM sqlite_schema WHERE name='content_basis_checkpoint'").fetchone() is not None
             or checkpoint_publication.installed(conn, 'content-checkpoints'))
 
 
 def get(conn,key,default=None):
-    from .preparation import checkpoint_publication
+    from . import checkpoint_reads as checkpoint_publication
     revision = checkpoint_publication.selected(conn, 'content-checkpoints')
     if revision is not None:
         return checkpoint_publication.read(conn, 'content-checkpoints', revision, key, default)
@@ -44,7 +34,7 @@ def get(conn,key,default=None):
 
 def put(conn,values):
     if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='content_basis_checkpoint'").fetchone():
-        from .preparation.control_publication import retained_write
+        from .checkpoint_reads import retained_write
         return retained_write(conn, values)
     for key,raw in values.items():
         table = KEYS[key]

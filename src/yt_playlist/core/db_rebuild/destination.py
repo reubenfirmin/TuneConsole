@@ -14,7 +14,7 @@ from ..migrations import current, regular
 from ..migrations.registry import MIGRATIONS
 from ..migrations.runner import Context
 from ..entity_names import PREDECESSOR_COLUMNS as COLUMNS
-from . import archives, development, mix_history, mix_verification, optimized, released, runtime_history, source, verification
+from . import archives, development, mix_history, mix_verification, optimized, released, runtime_history, runtime_retention, source, verification
 from .build import Batch, Destination, Stage, _configure, quote
 
 
@@ -84,8 +84,11 @@ def _mapping(reader, table, target_columns):
     return names
 
 
-def _copy_rows(reader, target, cursor, limit, *, table, destination, mapping, retained=None):
-    values, bookmark, done = source.scan(reader,table,cursor,limit,legacy_id='_legacy_id' in mapping)
+def _copy_rows(reader, target, cursor, limit, *, table, destination, mapping, retained=None,
+               at=None, nulls=()):
+    predicate = runtime_retention.plan(reader,at=at).get(table) if at is not None else None
+    values, bookmark, done = source.scan(reader,table,cursor,limit,legacy_id='_legacy_id' in mapping,
+                                         predicate=predicate)
     scanned = len(values)
     if retained is not None:
         values = [row for row in values if row['version'] in retained]
@@ -95,7 +98,7 @@ def _copy_rows(reader, target, cursor, limit, *, table, destination, mapping, re
     query = 'INSERT INTO '+quote(destination)+'('+fields+') VALUES ('+','.join('?' for _ in mapping)+')'
     from .. import vibe_versions
     version_column = vibe_versions.COLUMNS.get(table)
-    target.executemany(query,[tuple(vibe_versions.intern(target,row[name]) if name == version_column else row[name]
+    target.executemany(query,[tuple(None if name in nulls else vibe_versions.intern(target,row[name]) if name == version_column else row[name]
                                   for name in mapping) for row in values])
     if table == 'predictions':
         from .. import vibe_provenance
@@ -108,11 +111,11 @@ def _copy_rows(reader, target, cursor, limit, *, table, destination, mapping, re
     return Batch(bookmark,scanned,done)
 
 
-def _copy(reader, target, cursor, limit, *, table, destination, mapping, retained=None):
+def _copy(reader, target, cursor, limit, *, table, destination, mapping, retained=None, at=None, nulls=()):
     from .. import vibe_versions
-    if table in vibe_versions.COLUMNS or retained is not None:
+    if table in vibe_versions.COLUMNS or retained is not None or at is not None or nulls:
         return _copy_rows(reader,target,cursor,limit,table=table,destination=destination,
-                          mapping=mapping,retained=retained)
+                          mapping=mapping,retained=retained,at=at,nulls=nulls)
     bookmark, count, done = source.window(reader,table,cursor,limit)
     if cursor is None:
         target.execute('DELETE FROM '+quote(destination))
@@ -153,8 +156,11 @@ def finish(reader, target, cursor, limit):
         elif current._tokens(existing[0]) != current._tokens(sql):
             raise ValueError('A domain writer changed the destination guard: '+name)
     if len(values)<limit:
-        from ..migrations import v107_legacy_pending_deletions
-        v107_legacy_pending_deletions.apply(target,Context(0.))
+        # Imported legacy actions have no send-admission checkpoint. Keep their
+        # pending deletion attempts uncertain until ordinary provider readback.
+        target.execute("UPDATE action_steps SET phase='uncertain',outcome='unknown' "
+            "WHERE operation='delete_playlist' AND phase='pending' AND outcome='not_sent' "
+            "AND action_id IN (SELECT id FROM actions WHERE idempotency_key='legacy-action:'||id)")
         target.execute('UPDATE prediction_id_state SET high_water=max(high_water,'
                        '(SELECT coalesce(max(id),0) FROM predictions)) WHERE id=1')
         # Preserve all retained auto-increment high-water marks, even when the
@@ -173,7 +179,7 @@ def finish(reader, target, cursor, limit):
     return Batch(values[-1][0],len(values),False)
 
 
-def for_source(path, *, split=False):
+def for_source(path, *, split=False, legacy=False):
     """Select one of the two admitted input layouts; unknown owners fail closed."""
     path = Path(path).resolve(strict=True)
     with closing(sqlite3.connect(path.as_uri()+'?mode=ro',uri=True)) as reader:
@@ -190,6 +196,7 @@ def for_source(path, *, split=False):
         from ...repos import policy_storage
         policy_closure = policy_storage.retained_closure(reader,path.stat().st_mtime) or {}
         importer = released if version==source.RELEASE_VERSION else development
+        sparse = split and not legacy
         version_signature = signature()
         # The app rebuild retains catalog, learning state and usable outputs.
         # Old diagnostic receipts are disposable; missing archive bodies must
@@ -202,6 +209,11 @@ def for_source(path, *, split=False):
         if split:
             diagnostics |= {'metadata_conflicts', 'metadata_conflict_candidates',
                             'metadata_runtime_conflicts', 'provider_refresh_frontiers'}
+        if sparse:
+            diagnostics |= runtime_retention.CHOICE_PROJECTIONS
+            if version != source.RELEASE_VERSION:
+                from .. import metadata_retention
+                diagnostics |= metadata_retention.RETIRED
         with closing(sqlite3.connect(':memory:')) as empty:
             _configure(empty)
             empty.execute('BEGIN')
@@ -269,8 +281,11 @@ def for_source(path, *, split=False):
         runtime_history.verify(reader,target,at=captured_at)
         mix_verification.verify(reader,target,at=captured_at)
 
+    from .. import metadata_retention
     stages = tuple(Stage('copy:'+table,partial(_copy,table=table,destination=destination,mapping=mapping,
-                                             retained=policy_closure.get(table)),batch_size=8192)
+                                             retained=policy_closure.get(table),
+                                             at=captured_at if sparse and version != source.RELEASE_VERSION else None,
+                                             nulls=metadata_retention.NULLS.get(table,()) if sparse else ()),batch_size=8192)
                    for table,destination,mapping in copies)
     def profiles(reader,target,cursor,limit):
         from .. import profile_files
@@ -281,13 +296,13 @@ def for_source(path, *, split=False):
         count = sum(embedding_files.prepare_batch(target,kind,min(limit,128)) for kind in ('recording','artist'))
         return Batch((cursor or 0)+count,rows=count,done=count==0)
     def with_rows(stage):
-        def copy(reader,target,cursor,limit):
+        def copy(reader,target,cursor,limit,*prepared):
             # Resume opens new connections and can skip every earlier stage.
             reader.row_factory = sqlite3.Row
             connection = target.conn if stage.repositories else target
             connection.row_factory = sqlite3.Row
-            return stage.copy(reader,target,cursor,limit)
-        return Stage(stage.name,copy,stage.repositories,stage.batch_size)
+            return stage.copy(reader,target,cursor,limit,*prepared)
+        return Stage(stage.name,copy,stage.repositories,stage.batch_size,stage.prepare)
     complete = Destination(version_signature,prepare,tuple(map(with_rows,
         (*stages,Stage('indexes',indexes),*importer.stages(),*optimized.stages(at=captured_at,metadata_active=metadata_active),
          *runtime_history.stages(captured_at),
@@ -299,33 +314,43 @@ def for_source(path, *, split=False):
     # These owners feed model preparation. Their writers are the workers held
     # behind StorageMaintenance.ready, rather than ordinary application edits.
     # Parents precede children because the installed connection enforces FKs.
-    deferred_tables = ('native_metadata_observations', 'musical_source_observations',
-        'rec_musical_profiles', 'rec_musical_source_profiles', 'recording_embeddings', 'artist_embeddings',
-        'recording_embedding_legacy_order', 'artist_embedding_legacy_order',
-        'recording_profile_files', 'source_profile_files', 'recording_embedding_files', 'artist_embedding_files')
+    deferred_tables = runtime_retention.DEFERRED if sparse else (
+        'native_metadata_observations', 'musical_source_observations', *runtime_retention.DEFERRED)
     deferred = {stage.name: stage for stage in stages if stage.name[5:] in deferred_tables}
     runtime_copies = tuple(stage for stage in stages if stage.name not in deferred)
-    imports = tuple(importer.stages())
+    imports = tuple(importer.stages(**({'sparse':True} if sparse and version == source.RELEASE_VERSION else {})))
     deferred_imports = tuple(stage for stage in imports
                              if stage.name.startswith('embedding:') or stage.name == 'released_learning_cleanup')
     runtime_imports = tuple(stage for stage in imports if stage not in deferred_imports
                             and stage.name != 'metadata:enrichment_conflict')
     runtime_metadata = tuple(stage for stage in optimized.stages(at=captured_at,
-        metadata_active=metadata_active, native=False)
+        metadata_active=metadata_active, native=False,direct=sparse and version != source.RELEASE_VERSION)
         if stage.name not in ('served-facts', 'metadata:providers', 'metadata:conflicts'))
     # Current native values are also used by foreground provider lookups. Their
     # documents and freshness must exist before activating runtime writers;
     # historical observations, profiles and embeddings remain deferred.
     native = optimized.native_stage(metadata_active=metadata_active)
-    runtime = (*runtime_copies, Stage('indexes',indexes), *runtime_imports,
+    runtime_history_stages = runtime_history.stages(captured_at) if sparse else ()
+    def verify_metadata(reader,target,cursor,limit):
+        from ..preparation.metadata_runtime_verification import verify_selected, verify_native
+        if not metadata_active:
+            verify_selected(target,source=reader if version != source.RELEASE_VERSION else None)
+            verify_native(target,reader)
+        return Batch(done=True)
+    retirement = (Stage('metadata:verify-runtime',verify_metadata),
+                  Stage('metadata:retire-staging',runtime_retention.retired_metadata)) if sparse else ()
+    receipts = (Stage('history:replay-identities',runtime_retention.receipts),) if sparse else ()
+    runtime = (*runtime_copies, Stage('indexes',indexes), *runtime_imports, *receipts,
                native, *runtime_metadata,
                Stage('metadata:refresh',partial(optimized.refresh_metadata,at=captured_at)),
+               *runtime_history_stages, *retirement,
                Stage('guards',finish))
     analytics = (*(deferred['copy:'+table] for table in deferred_tables if 'copy:'+table in deferred),
         *deferred_imports,
-        # Each impression publishes a durable file while SQLite's writer is
-        # held. Keep this batch small so foreground writes can get admission.
-        Stage('served-facts',optimized._served,batch_size=16), *runtime_history.stages(captured_at),
+        # Compression is off-writer, but each durable rename still syncs its
+        # directory. Keep that publication window small for queued edits.
+        Stage('served-facts',optimized._served,batch_size=4,prepare=optimized.prepare_served),
+        *(runtime_history.stages(captured_at) if not sparse else ()),
         Stage('profiles',profiles), Stage('vectors',vectors), *archives.stages(captured_at),
         *mix_history.stages(captured_at))
 
@@ -335,16 +360,29 @@ def for_source(path, *, split=False):
         regular.validate(target)
         for table,owner,mapping in copies:
             if ('copy:'+table not in deferred
-                    and table not in ('prediction_measurement_roots', 'prediction_provenance')):
-                verification.retained(reader,target,table,owner,mapping,retained=policy_closure.get(table))
+                    and table not in ('prediction_measurement_roots', 'prediction_provenance')
+                    and not (sparse and table in metadata_retention.RETIRED)
+                    and not (sparse and table in ('artist_credit_replays','artist_credit_retention',
+                        'taste_mode_retention','taste_mode_retired_payloads'))):
+                verification.retained(reader,target,table,owner,mapping,retained=policy_closure.get(table),
+                    predicate=runtime_retention.plan(reader,at=captured_at).get(table)
+                        if sparse and version != source.RELEASE_VERSION else None,
+                    nulls=metadata_retention.NULLS.get(table,()) if sparse else (),
+                    at=captured_at if sparse else None)
         verification.predictions(reader,target)
         verification.converted(reader,target)
         optimized.verify_refresh(target, at=captured_at)
         if not metadata_active:
             from ..preparation.metadata_runtime_verification import verify_selected
-            verify_selected(target)
+            if not sparse or version != source.RELEASE_VERSION:
+                verify_selected(target,source=reader if sparse else None)
             from ..preparation.metadata_runtime_verification import verify_native
             verify_native(target,reader)
+        if sparse:
+            runtime_history.verify(reader,target,at=captured_at)
+            if any(target.execute('SELECT 1 FROM '+quote(table)+' LIMIT 1').fetchone()
+                   for table in metadata_retention.RETIRED):
+                raise ValueError('Runtime rebuild retained obsolete metadata evidence')
 
     def verify_analytics(reader, target):
         reader.row_factory = target.row_factory = sqlite3.Row
@@ -353,7 +391,10 @@ def for_source(path, *, split=False):
                 verification.retained(reader,target,table,owner,mapping)
         # Native runtime documents were verified before cutover. Foreground
         # lookups may now advance those values and delivery heads normally.
+        from .build import _checkpoint
+        mix_verification.verify_captured(reader,target,inventory=_checkpoint(target).get('evidence'))
 
     return Destination(version_signature, prepare, tuple(map(with_rows, (*runtime,*analytics))), verify,
+                       compact=sparse and version == source.RELEASE_VERSION,
                        runtime_stages=len(runtime), verify_runtime=verify_runtime,
-                       verify_analytics=verify_analytics)
+                       verify_analytics=verify_analytics, capture=mix_verification.capture)

@@ -34,6 +34,10 @@ from yt_playlist.web.track_links import track_url
 from yt_playlist.web.request_priority import RequestPriorityMiddleware
 from yt_playlist.web.routes import build_all
 from yt_playlist.web.routes.bridge import build as build_bridge_route
+from yt_playlist.rec import account_growth, home_vibe
+
+
+home_vibe.configure_access(lambda store, now: account_growth.vibe_access(store, now))
 
 
 _UI_STARTUP_GRACE_S = 120.0
@@ -424,7 +428,9 @@ def create_app(store, client_provider, *, now_fn=time.time,
     def maintenance_notice():
         status = ctx.storage_maintenance.status()
         if not status['banner_message'] and (not ctx.storage_maintenance.ready.is_set()
-                or ctx.rec_worker.preparing or ctx.enrich_worker.busy):
+                or ctx.rec_worker.preparing or ctx.enrich_worker.busy) and not any(
+                    store.rec_proposals.has_proposals(surface) for surface in
+                    ('home_prepared', 'home_tuned', 'album_prepared', 'adaptive_group_preview')):
             status['banner_message'] = 'Preparing library data. Features will appear as they are ready.'
         return status
     templates.env.globals['storage_maintenance_status'] = maintenance_notice

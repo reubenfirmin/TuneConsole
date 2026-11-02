@@ -13,8 +13,8 @@ import re
 import sqlite3
 
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
-from ..migrations.v104_domain_contracts import CONTRACTS
+from ..schema_contract import MigrationError
+from ..domain_contracts import CONTRACTS
 from .rows import Job
 
 

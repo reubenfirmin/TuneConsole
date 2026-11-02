@@ -3,19 +3,16 @@ from dataclasses import asdict, dataclass
 import json
 import time
 
-from .. import genre_classifications
+from .. import genre_contract as genre_classifications
+from ..genre_contract import publication_table as table, selected, published_expression as expression
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import bounded, genre_classifications as preparation
 
 
 PREFIX = 'published_genre_'
 FIELDS = ('owner', 'source_key', 'raw_label', 'genre_key', 'disposition', 'source_digest')
 MAX_BYTES = 64*1024
-
-
-def table(name):
-    return PREFIX+name
 
 
 @dataclass(frozen=True)
@@ -65,7 +62,7 @@ def definitions():
 
 
 def validate(conn):
-    from ..migrations.current import _tokens
+    from ..schema_contract import tokens as _tokens
     from ..entity_names import predecessor_definition as transform
     renamed = conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='accounts'").fetchone()
     for name, sql in definitions():
@@ -243,24 +240,6 @@ def publish(conn, *, identity, clock=time.time):
         conn.commit()
     finally:
         conn.rollback()
-
-
-def selected(conn):
-    if genre_classifications.available(conn) or not conn.execute(
-            'SELECT 1 FROM main.sqlite_schema WHERE name=?', (table('head'),)).fetchone():
-        return None
-    row = conn.execute('SELECT revision FROM '+table('head')+' WHERE active=1').fetchone()
-    return row[0] if row else None
-
-
-def expression(conn, alias, owner):
-    identity = selected(conn)
-    if identity is None:
-        return alias+'.genre'
-    column = genre_classifications.OWNERS[owner]
-    return ('(SELECT CASE WHEN p.disposition=\'resolved\' THEN g.name ELSE p.raw_label END FROM main.'+
-        table('rows')+' p LEFT JOIN main.genre_catalog g ON g.key=p.genre_key WHERE p.stage='+str(identity)+
-        ' AND p.owner='+repr(owner)+' AND p.source_key=json_array('+alias+'.'+column+'))')
 
 
 def install_reads(conn):

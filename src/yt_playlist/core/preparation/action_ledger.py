@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .. import action_backup_files, action_work, playlist_scopes, policy_documents, recommendation_outputs as files
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from ..recommendation_work import finite
 from . import document_plan
 from .ordered_rows import OrderedJob

@@ -9,11 +9,10 @@ from yt_playlist.core import json_cache
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.rec import home_vibe, musical_character, musical_profiles, radio_intensity, rec_params
 from yt_playlist.rec.eligibility import home_exclusions
+from yt_playlist.rec.vibe_pool_contract import GENRE_RESERVE, POOL_LIMIT
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import normalize
 
-POOL_LIMIT = 192
-GENRE_RESERVE = 48
 _LABELS = {'wheelhouse': 'More in your wheelhouse', 'explore': 'From your catalog',
            'fresh': 'Fresh songs', 'comfort': 'Comfort listening'}
 
@@ -81,18 +80,18 @@ def prepare(store, bundles, now, policies):
         radio_intensity.prepare(store, bundles['_radio'], profiles, unique)
     bundles.setdefault('_meta', {})['musical_generation'] = musical_profiles.digest(
         sorted((key, (profile or {}).get('digest')) for key, profile in profiles.items()))
-    from yt_playlist.rec import mix_tuning, vibe_readiness
+    from yt_playlist.rec import mix_tuning, vibe_readiness_index
     request = store.rec_proposals.get_proposals('home_genre_request') or {}
     filters = ((request.get('include_genres', ()), request.get('avoid_genres', ()))
                if mix_tuning.genre_active(store, request) else ((), ()))
     # Publish ordinary pools plus bounded reserves for the current controls.
     # Requests never reconstruct missing readiness from full musical profiles.
-    readiness = vibe_readiness.prepare(bundles, include_genres=any(filters), genre_request=filters)
+    readiness = vibe_readiness_index.prepare(bundles, include_genres=any(filters), genre_request=filters)
     readiness['profile_state'] = store.musical_profiles.readiness_fingerprint(
         item['key'] for item in readiness['tracks'])
     encoded = json_cache.encode(readiness)
     bundles['_meta'].pop('vibe_readiness', None)
-    if len(encoded.encode()) <= vibe_readiness.MAX_INDEX_BYTES:
+    if len(encoded.encode()) <= vibe_readiness_index.MAX_INDEX_BYTES:
         bundles['_meta']['vibe_readiness'] = encoded
     return bundles
 

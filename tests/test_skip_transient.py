@@ -19,7 +19,7 @@ def _store():
     return s
 
 
-def _track(s, key, genre="techno", duration=200.0):
+def _track(s, key, genre="techno", duration=200):
     """Registers a track under identity_key `key` ("title|artist") and gives it a genre so it
     carries a genre: facet. duration=200 keeps skip-shaped events (position<=120s, ratio<=0.30)
     easy to construct: position=20 -> ratio 0.1, well inside the skip band and above the 3s bounce
@@ -90,7 +90,7 @@ def test_centroid_tilt_cosine_to_skipped_track_decreases():
 
     s_no_skip = _store()
     _track(s_no_skip, "base|artist", genre="jazz")
-    iid = s_no_skip.accounts.upsert_account("main2", "bridge2", None, True)
+    iid = s_no_skip.accounts.get_master_account().id
     now = 1000 * DAY
     s_no_skip.history.record_play_event(iid, "base|artist", "v_base|artist", now, source_timezone="UTC")
     tilt_no_skip = transient.centroid_tilt(s_no_skip, now, V, idx)
@@ -100,7 +100,7 @@ def test_centroid_tilt_cosine_to_skipped_track_decreases():
     s_skip = _store()
     _track(s_skip, "base|artist", genre="jazz")
     _track(s_skip, "skip|artist", genre="techno")
-    iid2 = s_skip.accounts.upsert_account("main2", "bridge2", None, True)
+    iid2 = s_skip.accounts.get_master_account().id
     s_skip.history.record_play_event(iid2, "base|artist", "v_base|artist", now, source_timezone="UTC")
     _skip(s_skip, "skip|artist", now)
     tilt_with_skip = transient.centroid_tilt(s_skip, now, V, idx)
@@ -137,7 +137,7 @@ def test_audio_centroid_tilt_cosine_to_skipped_track_decreases(monkeypatch):
 
     s_no_skip = _store()
     _track(s_no_skip, "base|artist", genre="jazz")
-    iid = s_no_skip.accounts.upsert_account("main2", "bridge2", None, True)
+    iid = s_no_skip.accounts.get_master_account().id
     s_no_skip.history.record_play_event(iid, "base|artist", "v_base|artist", now, source_timezone="UTC")
     tilt_no_skip = transient.audio_centroid_tilt(s_no_skip, now)
     assert tilt_no_skip is not None
@@ -146,7 +146,7 @@ def test_audio_centroid_tilt_cosine_to_skipped_track_decreases(monkeypatch):
     s_skip = _store()
     _track(s_skip, "base|artist", genre="jazz")
     _track(s_skip, "skip|artist", genre="techno")
-    iid2 = s_skip.accounts.upsert_account("main2", "bridge2", None, True)
+    iid2 = s_skip.accounts.get_master_account().id
     s_skip.history.record_play_event(iid2, "base|artist", "v_base|artist", now, source_timezone="UTC")
     _skip(s_skip, "skip|artist", now)
     tilt_with_skip = transient.audio_centroid_tilt(s_skip, now)
@@ -159,7 +159,7 @@ def test_audio_centroid_tilt_cosine_to_skipped_track_decreases(monkeypatch):
 def test_play_facet_leans_unaffected_by_skips():
     s_no_skip = _store()
     _track(s_no_skip, "played|artist", genre="jazz")
-    iid = s_no_skip.accounts.upsert_account("main2", "bridge2", None, True)
+    iid = s_no_skip.accounts.get_master_account().id
     now = 1000 * DAY
     s_no_skip.history.record_play_event(iid, "played|artist", "v_played|artist", now, source_timezone="UTC")
     leans_no_skip = transient.play_facet_leans(s_no_skip, now)
@@ -167,7 +167,7 @@ def test_play_facet_leans_unaffected_by_skips():
     s_skip = _store()
     _track(s_skip, "played|artist", genre="jazz")
     _track(s_skip, "skipped|artist", genre="techno")
-    iid2 = s_skip.accounts.upsert_account("main2", "bridge2", None, True)
+    iid2 = s_skip.accounts.get_master_account().id
     s_skip.history.record_play_event(iid2, "played|artist", "v_played|artist", now, source_timezone="UTC")
     _skip(s_skip, "skipped|artist", now)                # a fresh skip, same store otherwise
     leans_with_skip = transient.play_facet_leans(s_skip, now)

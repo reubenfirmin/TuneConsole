@@ -9,9 +9,8 @@ from .. import (action_work, album_tracklists,
                experiment_decision_state, legacy_evidence, playlist_recipe_state,
                recommendation_setting_outputs, road_trip_draft_storage,
                spotify_job_state, taste_control_state, workflow_settings)
-from ..migrations import v094_collection_state as collections
-from ..migrations import v096_taste_controls as taste
-from ..migrations import v101_discovery_subjects as discovery
+from . import collection_settings as collections
+from . import discovery_inputs as discovery
 from ..migrations.runner import Context
 from ..preparation.listening_subjects import describe as listening_subject
 from .build import Batch, Stage, quote
@@ -32,9 +31,10 @@ def insert(conn, table, value):
                  ','.join('?' for _ in value)+')', tuple(value.values()))
 
 
-def rows(table, convert, *, name=None, capture=None):
+def rows(table, convert, *, name=None, capture=None, predicate=None):
     def copy(reader, target, cursor, limit):
-        values, cursor, done = source.scan(reader, table, cursor, limit)
+        values, cursor, done = source.scan(reader, table, cursor, limit,
+                                          predicate=predicate(reader) if predicate else None)
         if capture is not None:
             capture(target, values)
         for value in values:
@@ -76,7 +76,7 @@ def settings(reader, target, cursor, limit):
     if cursor is None:
         original = source.settings(reader,collections.KEYS)
         collections.copy_settings(target,original,Context(0.))
-        saved = source.settings(reader,taste.KEYS)
+        saved = source.settings(reader,collections.TASTE_KEYS)
         taste_control_state.put(target,{k:v for k,v in saved.items() if k in taste_control_state.KEYS},legacy=True)
         experiment_decision_state.put(target,{k:v for k,v in saved.items() if k in experiment_decision_state.KEYS},legacy=True)
         jobs = source.settings(reader,{'spotify_library_import_job'})
@@ -92,7 +92,7 @@ def settings(reader, target, cursor, limit):
             # copy is verified before publication; normal worker polling will
             # schedule its own retention pass after analytics completes.
             value = '0'
-        if key in collections.KEYS or key in taste.KEYS or key in {
+        if key in collections.KEYS or key in collections.TASTE_KEYS or key in {
                 'spotify_library_import_job','radio_seed_offer','rec_autotune_result',
                 'trend_first_play_watermark','trend_first_play_source'}:
             continue

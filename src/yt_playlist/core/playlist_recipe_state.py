@@ -68,7 +68,7 @@ def load(conn,scope):
     if append_work.available(conn):
         append_work.load_tv(conn,row['id'],value)
     else:
-        from .preparation.append_publication import apply_tv
+        from .append_reads import apply_tv
         apply_tv(conn,row['id'],value)
     return value
 

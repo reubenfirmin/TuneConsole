@@ -13,7 +13,7 @@ import re
 import sqlite3
 
 from .. import recommendation_outputs as files, tv_recommendation_state as state
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import artist_lookup
 from .ordered_rows import OrderedJob
 from .rows import Job, main as run

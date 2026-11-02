@@ -33,8 +33,8 @@ def selected_source(conn, entry_id, field):
                            'LEFT JOIN metadata_deliveries d ON d.id=o.delivery_id '
                            f'WHERE s.{column}=? AND s.field=?', (subject, field)).fetchone()
         return row[0] if row else None
-    from .preparation import metadata_publication
-    table = metadata_publication.read_table(conn,table)
+    from . import metadata_reads
+    table = metadata_reads.read_table(conn,table)
     row = conn.execute(f'SELECT source FROM {table} WHERE {column}=? AND field=?',
                        (subject,field)).fetchone()
     return row[0] if row else None

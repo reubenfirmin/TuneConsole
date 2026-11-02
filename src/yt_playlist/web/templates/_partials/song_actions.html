@@ -5,9 +5,9 @@
        @keydown="menuKey($event)">
     <button type="button" role="menuitem" @click="play()">Play on YouTube Music</button>
     <button type="button" role="menuitem" @click="similar()">Songs like this</button>
-    <button type="button" role="menuitem" @click="openDialog('create')">Create playlist from song</button>
-    <button type="button" role="menuitem" @click="openDialog('add')">Add song to playlist</button>
-    <button type="button" role="menuitem" @click="openDialog('metadata')">Edit Metadata</button>
+    <button type="button" role="menuitem" :disabled="readOnly" @click="openDialog('create')">Create playlist from song</button>
+    <button type="button" role="menuitem" :disabled="readOnly" @click="openDialog('add')">Add song to playlist</button>
+    <button type="button" role="menuitem" :disabled="readOnly" @click="openDialog('metadata')">Edit Metadata</button>
     <a role="menuitem" :href="trackUrl(song)">Track details</a>
     <template x-if="context.playlist">
       <div role="group" aria-label="This playlist">

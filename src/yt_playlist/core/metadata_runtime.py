@@ -11,20 +11,14 @@ import time
 
 from . import fao, metadata_runtime_files as files
 from .catalog_identity import RECORDING_FIELDS, ITEM_FIELDS
+from .metadata_contract import ALTERNATIVE_SECONDS, PROVIDER_FIELDS, clock, runtime_active as active
 
-ALTERNATIVE_SECONDS = 7 * 86400
 # Append new names; these persisted numeric field codes must never be reordered.
 FIELDS = ('genre', 'bpm', 'energy', 'danceability', 'mb_recording_id', 'music_key', 'music_scale',
           'mood_happy', 'mood_sad', 'mood_relaxed', 'mood_acoustic', 'instrumental', 'title', 'artist',
           'orig_title', 'orig_artist', 'album', 'duration_s', 'available', 'video_type', 'artist_browse_id',
           'album_browse_id', 'thumbnail', 'mb_year', 'loudness', 'dynamic_complexity', 'popularity', 'gain', 'label')
 CODES = {name: index + 1 for index, name in enumerate(FIELDS)}
-
-
-def active(conn):
-    if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='metadata_runtime_state'").fetchone():
-        return False
-    return bool(conn.execute('SELECT active FROM metadata_runtime_state WHERE id=1').fetchone()[0])
 
 
 def reserve(conn):
@@ -89,8 +83,8 @@ def install(conn, context=None):
 
 
 def validate(conn):
-    from .migrations.current import _tokens
-    from .migrations.runner import MigrationError
+    from .schema_contract import tokens as _tokens
+    from .schema_contract import MigrationError
     for name, sql in definitions():
         row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
         if row is None or _tokens(row[0]) != _tokens(sql):
@@ -273,9 +267,8 @@ class Capture:
 
 
 def capture(conn, entry, provider, fields, *, run_id=None, now=None):
-    from . import metadata_values, metadata_evidence
-    from .metadata_attempts import FIELDS as allowed
-    if not isinstance(fields, dict) or fields.keys() - set(allowed):
+    from . import metadata_values
+    if not isinstance(fields, dict) or fields.keys() - set(PROVIDER_FIELDS):
         raise ValueError('Unsupported provider result fields')
     if not isinstance(provider, str) or not 0 < len(provider.encode()) <= 4096:
         raise ValueError('A provider result needs a bounded provider identity')
@@ -296,7 +289,7 @@ def capture(conn, entry, provider, fields, *, run_id=None, now=None):
     encoded = canonical(fields)
     if len(encoded) > files.MAX_BYTES-4096:
         raise ValueError('Provider result exceeds its byte budget')
-    return Capture(entry, recording, video, provider, encoded, run_id, metadata_evidence._clock(now))
+    return Capture(entry, recording, video, provider, encoded, run_id, clock(now))
 
 
 def validate_capture(conn, entry, provider, fields, captured, *, run_id=None):
@@ -313,9 +306,8 @@ def validate_capture(conn, entry, provider, fields, captured, *, run_id=None):
 
 def record_attempt(conn, entry, provider, fields, *, cycle, retry=False, now=None, retry_after=0,
                    error='', run_id=None, delivery_id=None):
-    from . import metadata_evidence
-    now = float(metadata_evidence._clock(now))
-    retry_after = metadata_evidence._clock(retry_after)
+    now = float(clock(now))
+    retry_after = clock(retry_after)
     if type(retry) is not bool:
         raise ValueError('Provider retry flag must be a boolean')
     if delivery_id is None:

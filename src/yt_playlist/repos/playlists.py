@@ -306,7 +306,7 @@ class PlaylistRepo(Repo):
                 self.conn.execute(
                     "DELETE FROM playlist_items WHERE playlist_id=? AND video_id=?", (lm_id, video_id))
 
-    @synchronized
+    @snapshot_read
     def get_playlist_track_ids(self, playlist_id) -> list:
         rows = self.conn.execute(
             "SELECT track_id FROM playlist_tracks WHERE playlist_id=? ORDER BY position",

@@ -6,7 +6,7 @@ from .. import fao
 
 from .. import append_work, collection_recovery, playlist_recipe_state, radio_checkpoint, radio_storage
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import append_operations as preparation, document_plan
 from .mapped_publication import MappedPublication
 

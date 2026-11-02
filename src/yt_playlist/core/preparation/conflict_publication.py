@@ -5,7 +5,7 @@ import json
 from types import SimpleNamespace
 
 from .. import metadata_evidence, metadata_legacy
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from ..policy_documents import _publish_encoded
 from . import metadata_conflicts as preparation
 from .mapped_publication import MappedPublication

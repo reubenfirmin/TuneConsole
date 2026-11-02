@@ -29,7 +29,7 @@ def bundles():
                            for preset in ('energize', 'relax')}}}
 
 
-def publish(store, value, format='v2'):
+def encoded_bundles(value, format):
     if format == 'plain':
         encoded = json.dumps(value)
     elif format == 'v1':
@@ -38,20 +38,30 @@ def publish(store, value, format='v2'):
     else:
         encoded = encode_proposals('mode_bundles', value)
         assert json.loads(encoded)[json_cache.MARKER] == json_cache.FORMAT
-    # The codecs remain supported private input representations. Publish the
-    # decoded value through the current owner, never recreate a retired cache.
-    decoded = json_cache.decode(encoded) or {}
-    prepared = decoded.get('_vibes') or {}
+    return encoded
+
+
+@pytest.mark.parametrize('format', ['plain', 'v1', 'v2'])
+def test_private_bundle_codecs_preserve_complete_prepared_values(format):
+    value = bundles()
+    assert json_cache.decode(encoded_bundles(value, format)) == value
+
+
+def publish(store, value):
+    # Current reads consume the same typed publication for every private input
+    # encoding. Exercise codec parity above without repeating database setup.
+    value = value or {}
+    prepared = value.get('_vibes') or {}
     items = [item for lanes in prepared.get('pools', {}).values() for rows in lanes.values() for item in rows]
     items += [item for lanes in prepared.get('genres', {}).values() for groups in lanes.values()
               for rows in groups.values() for item in rows]
-    seed_bundle_subjects(store, decoded, fresh=items)
+    seed_bundle_subjects(store, value, fresh=items)
     profiles = {item['key']: item['musical'] for item in items}
     with store._lock, store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
         store.musical_profiles.publish_recordings([(key, musical_profiles.canonical(profile), profile['version'],
             musical_profiles.digest(profile)) for key, profile in profiles.items()], 1)
-    publish_bundles(store, decoded, 1)
+    publish_bundles(store, value, 1)
 
 
 def full_decode(store):
@@ -80,34 +90,37 @@ def full_decode(store):
     return result
 
 
-@pytest.mark.parametrize('format', ['plain', 'v1', 'v2'])
 @pytest.mark.parametrize('lane', ['fresh', 'explore'])
-@pytest.mark.parametrize('include,avoid', [((), ()), (('techno',), ()), ((), ('jazz',)),
-                                          (('jazz', 'techno'), ('techno',))])
 def test_selected_vibe_read_matches_full_decode_and_skips_unrelated_profiles(
-        store, monkeypatch, format, lane, include, avoid):
+        store, monkeypatch, lane):
     value = bundles()
-    publish(store, value, format)
-    expected = vibe_pools.candidates(store, 'energize', lane, bundles=full_decode(store),
-                                     include_genres=include, avoid_genres=avoid)
+    publish(store, value)
+    decoded = full_decode(store)
     load = musical_character.load
-    visited = []
+    # Each scenario reads the same immutable publication. Keep both lanes and
+    # every filter combination, with a fresh spy for each bounded read.
+    for include, avoid in [((), ()), (('techno',), ()), ((), ('jazz',)),
+                           (('jazz', 'techno'), ('techno',))]:
+        expected = vibe_pools.candidates(store, 'energize', lane, bundles=decoded,
+                                        include_genres=include, avoid_genres=avoid)
+        visited = []
 
-    def selected(reader, keys):
-        visited.extend(keys)
-        assert len(keys) <= vibe_pools.POOL_LIMIT
-        for key in keys:
-            preset, selected_lane, family, _ = key.split(':')
-            assert preset == 'energize' and selected_lane == lane
-            if family != 'general':
-                assert (include or avoid) and family not in avoid and (not include or family in include)
-        return load(reader, keys)
+        def selected(reader, keys):
+            visited.extend(keys)
+            assert len(keys) <= vibe_pools.POOL_LIMIT
+            for key in keys:
+                preset, selected_lane, family, _ = key.split(':')
+                assert preset == 'energize' and selected_lane == lane
+                if family != 'general':
+                    assert (include or avoid) and family not in avoid and (not include or family in include)
+            return load(reader, keys)
 
-    monkeypatch.setattr(musical_character, 'load', selected)
-    assert vibe_pools.candidates(store, 'energize', lane,
-        include_genres=include, avoid_genres=avoid) == expected
-    assert len(expected) <= vibe_pools.POOL_LIMIT
-    assert visited
+        with monkeypatch.context() as scenario:
+            scenario.setattr(musical_character, 'load', selected)
+            assert vibe_pools.candidates(store, 'energize', lane,
+                include_genres=include, avoid_genres=avoid) == expected, (lane, include, avoid)
+        assert len(expected) <= vibe_pools.POOL_LIMIT
+        assert visited, (lane, include, avoid)
 
 
 def test_vibe_candidate_retry_is_detached_invalidated_and_rechecks_dislikes(store, monkeypatch):
@@ -147,5 +160,5 @@ def test_vibe_candidate_retry_is_detached_invalidated_and_rechecks_dislikes(stor
 
 @pytest.mark.parametrize('value', [None, {}, {'_vibes': {'version': 'older-preset-policy'}}])
 def test_missing_or_older_vibe_candidates_remain_empty(store, value):
-    publish(store, value, 'plain')
+    publish(store, value)
     assert vibe_pools.candidates(store, 'energize', 'fresh') == []

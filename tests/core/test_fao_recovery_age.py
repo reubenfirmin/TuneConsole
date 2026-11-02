@@ -17,7 +17,7 @@ from yt_playlist.core import (action_backup_files, album_description_files, audi
     metadata_delivery_files, policy_documents, recommendation_outputs)
 
 
-def _seed(conn, domain):
+def _seed(conn, domain, *, duplicate=False):
     """Return the real exporter and (owner key, filename, decoded value) reader."""
     if domain == 'policies':
         module = policy_documents
@@ -26,7 +26,11 @@ def _seed(conn, domain):
                          'content_digest TEXT,byte_size INTEGER,configuration_offset INTEGER)')
         for batch in range(2):
             values = [{'saved': f'{batch}-{i}', 'unicode': 'é'} for i in range(3)]
+            if duplicate:
+                values[0] = {'saved': 'same', 'unicode': 'é'}
             for i, (filename, digest, size, offset) in enumerate(module.publish_many(module.directory(conn), values)):
+                if duplicate and i:
+                    continue
                 conn.execute('INSERT INTO recommendation_policies VALUES (?,?,?,?,?)',
                              (f'{batch}-{i}', filename, digest, size, offset))
         def records(db):
@@ -41,7 +45,11 @@ def _seed(conn, domain):
                          f'{prefix}_offset INTEGER)')
         for batch in range(2):
             values = [('definition', {'saved': f'{batch}-{i}'}) for i in range(3)]
+            if duplicate:
+                values[0] = ('definition', {'saved': 'same'})
             for i, reference in enumerate(module.publish_many(module.directory(conn), values)):
+                if duplicate and i:
+                    continue
                 conn.execute('INSERT INTO group_versions VALUES (?,?,?,?,?)', (batch * 3 + i, *reference))
         def records(db):
             for table, key, kind, filename, digest, size, offset in module.references(db):
@@ -52,7 +60,11 @@ def _seed(conn, domain):
                      'raw_byte_size INTEGER,raw_offset INTEGER)')
         for batch in range(2):
             values = [module.encode({'saved': f'{batch}-{i}'}) for i in range(3)]
+            if duplicate:
+                values[0] = module.encode({'saved': 'same'})
             for i, reference in enumerate(module.publish_encoded(module.directory(conn), values)):
+                if duplicate and i:
+                    continue
                 conn.execute('INSERT INTO metadata_deliveries VALUES (?,?,?,?,?)', (batch * 3 + i, *reference))
         def records(db):
             for key, filename, digest, size, offset in module.references(db):
@@ -64,7 +76,11 @@ def _seed(conn, domain):
                          'file_offset INTEGER,filename TEXT,PRIMARY KEY(kind,source_id))')
         for batch in range(2):
             values = [module._encode('catalog', f'original text {batch}-{i}') for i in range(3)]
+            if duplicate:
+                values[0] = module._encode('catalog', 'same original text')
             for i, (filename, digest, size, offset) in enumerate(module._publish(module.directory(conn) / 'catalog', 'catalog', values)):
+                if duplicate and i:
+                    continue
                 conn.execute('INSERT INTO legacy_catalog_evidence VALUES (?,?,?,?,?,?)',
                              ('library', f'{batch}-{i}', digest, size, offset, filename))
         def records(db):
@@ -134,12 +150,28 @@ def _seed(conn, domain):
                                     'annotations', 'descriptions', 'outputs', 'collections', 'actions'])
 @pytest.mark.parametrize('compressed', [False, True])
 def test_recovery_preserves_each_owned_records_original_clocks(tmp_path, domain, compressed):
+    _check_recovery(tmp_path, domain, compressed)
+
+
+@pytest.mark.parametrize('domain', ['policies', 'groups', 'metadata', 'archives'])
+@pytest.mark.parametrize('compressed', [False, True])
+@pytest.mark.parametrize('reverse', [False, True])
+def test_equal_retained_payloads_preserve_distinct_source_clocks(tmp_path, domain, compressed, reverse):
+    _check_recovery(tmp_path, domain, compressed, duplicate=True, reverse=reverse)
+
+
+def _check_recovery(tmp_path, domain, compressed, *, duplicate=False, reverse=False):
     with closing(sqlite3.connect(tmp_path / 'source.db')) as source, closing(sqlite3.connect(tmp_path / 'restored.db')) as target:
         source.row_factory = target.row_factory = sqlite3.Row
-        module, records, directory = _seed(source, domain)
+        module, records, directory = _seed(source, domain, duplicate=duplicate)
         source_root = directory(source)
         paths = sorted({Path(filename) for _key, filename, _value in records(source)})
+        if duplicate:
+            assert len(paths) == 2
+            assert len({repr(value) for _key, _filename, value in records(source)}) == 1
         for index, path in enumerate(paths):
+            if reverse:
+                index = len(paths) - index - 1
             encoded = fao.read_bytes(path)
             # Distinct ages challenge merging records with different retention clocks.
             age = (1_000_000_000_000 + index * 1_000_000_000, 2_000_000_000_000 + index * 1_000_000_000)

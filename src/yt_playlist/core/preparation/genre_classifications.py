@@ -2,7 +2,7 @@
 import hashlib
 import json
 
-from .. import genre_classifications, genre_identity
+from .. import genre_contract as genre_classifications, genre_identity
 from .rows import Job, main as run
 
 

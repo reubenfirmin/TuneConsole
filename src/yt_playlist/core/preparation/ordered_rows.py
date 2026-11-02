@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import json
 import time
 
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 
 
 @dataclass(frozen=True)

@@ -12,11 +12,12 @@ from ..preparation.metadata_runtime_verification import verify as verify_metadat
 from .build import Batch, Stage
 
 
-def _metadata(reader, target, cursor, limit, *, stage, at, already_active):
+def _metadata(reader, target, cursor, limit, *, stage, at, already_active, direct=False):
     if already_active:
         return Batch(done=True)
     limit = min(limit, 128)
-    cursor, count = metadata_preparation.prepare_batch(target, stage, cursor, limit, at=at)
+    cursor, count = metadata_preparation.prepare_batch(target, stage, cursor, limit, at=at,
+        **({'source': reader} if direct and stage in ('recordings', 'entries', 'choices') else {}))
     return Batch(cursor, count, count < limit)
 
 
@@ -27,14 +28,20 @@ def _activate_metadata(reader, target, cursor, limit):
     return Batch(done=True)
 
 
-def _served(reader, target, cursor, limit):
-    count = served_facts.prepare_batch(target, min(limit, 128))
+def prepare_served(reader, target, cursor, limit):
+    return served_facts.staged_batch(target, min(limit, 128))
+
+
+def _served(reader, target, cursor, limit, prepared=None):
+    count = prepared() if prepared is not None else served_facts.prepare_batch(target, min(limit, 128))
+    if count is None:
+        return Batch((cursor or 0) + 1, 0, False)
     return Batch((cursor or 0) + count, count, count == 0)
 
 
-def stages(*, at, metadata_active, native=True):
+def stages(*, at, metadata_active, native=True, direct=False):
     metadata = tuple(Stage('metadata:' + name, partial(_metadata, stage=name, at=at,
-                                                     already_active=metadata_active))
+                                                     already_active=metadata_active, direct=direct))
                      for name in metadata_preparation.STAGES if native or name != 'native')
     return (*metadata, Stage('metadata:activate', _activate_metadata),
             Stage('served-facts', _served))

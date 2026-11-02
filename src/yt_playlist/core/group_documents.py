@@ -34,14 +34,15 @@ def directory(conn, memory_key=None):
 
 def publish_many(root, documents, *, age=None):
     """Yield filename/digest/size/offset for each bounded (kind, object) record."""
-    records, used = [], len(HEADER)
+    header = policy_documents.pack_header(HEADER, age)
+    records, used = [], len(header)
 
     def flush():
-        encoded = HEADER + b''.join(records)
+        encoded = header + b''.join(records)
         # This primitive only publishes immutable bytes under their SHA256. It
         # creates no shared registry or policy owner for these group files.
         filename = policy_documents._publish_encoded(root, encoded, hashlib.sha256(encoded).hexdigest(), age=age)
-        offset = len(HEADER)
+        offset = len(header)
         for record in records:
             yield filename, hashlib.sha256(record).hexdigest(), len(record), offset
             offset += len(record)
@@ -54,7 +55,7 @@ def publish_many(root, documents, *, age=None):
             raise ValueError('Musical group document exceeds its file byte budget')
         if records and used + len(encoded) > PACK_BYTES:
             yield from flush()
-            records, used = [], len(HEADER)
+            records, used = [], len(header)
         records.append(encoded)
         used += len(encoded)
     if records:

@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 from .. import home_outputs, recommendation_outputs as files, recommendation_setting_outputs as outputs
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from .ordered_rows import OrderedJob
 from .rows import Job, main as run
 

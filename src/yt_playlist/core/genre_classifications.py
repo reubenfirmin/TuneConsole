@@ -1,24 +1,12 @@
 """Current single genre selections, with explicit unresolved source labels."""
 from . import genre_identity
-
-OWNERS = {'recordings': 'id', 'albums': 'id', 'discovered_artists': 'artist_id'}
-
-
-def available(conn):
-    return any(row[1] == 'genre_key' for row in conn.execute('PRAGMA table_info(recordings)'))
-
-
-def expression(alias):
-    """A display label follows its stable key; unknown labels stay unresolved."""
-    return (f'COALESCE((SELECT g.name FROM genre_catalog g WHERE g.key={alias}.genre_key),'
-            f'{alias}.unresolved_genre)')
+from .genre_contract import OWNERS, available, expression, published_expression
 
 
 def read_expression(conn, alias, table):
     if available(conn):
         return expression(alias)
-    from .preparation import genre_publication
-    return genre_publication.expression(conn, alias, table)
+    return published_expression(conn, alias, table)
 
 
 def read(conn, table, subject):

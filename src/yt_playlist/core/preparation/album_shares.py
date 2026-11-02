@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .. import recommendation_outputs as files
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import album_occurrences, document_plan
 from .ordered_rows import OrderedJob
 from .rows import Job, main as run

@@ -10,7 +10,7 @@ import sqlite3
 import time
 
 from .. import recommendation_outputs as files, recommendation_reports as reports
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import recommendation_reports as preparation
 
 
@@ -43,7 +43,7 @@ def definitions():
 
 
 def validate(conn):
-    from ..migrations.current import _tokens
+    from ..schema_contract import tokens as _tokens
     for name, sql in definitions():
         row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
         if row is None or _tokens(row[0]) != _tokens(sql):

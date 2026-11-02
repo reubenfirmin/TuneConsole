@@ -1,6 +1,6 @@
 """Publish verified album judgments and authentication flags independently."""
 from .. import account_auth_state, album_feedback_storage, entity_names
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import collection_feedback as preparation
 from .document_publication import DocumentPublication, main as run
 

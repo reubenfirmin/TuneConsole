@@ -5,13 +5,13 @@ KEYS = {'rec_candidate_preferences':('candidate_refresh_checkpoint','preferences
 
 
 def available(conn):
-    from .preparation import checkpoint_publication
+    from . import checkpoint_reads as checkpoint_publication
     return (conn.execute("SELECT 1 FROM sqlite_schema WHERE name='candidate_refresh_checkpoint'").fetchone() is not None
             or checkpoint_publication.installed(conn, 'candidate-checkpoints'))
 
 
 def get(conn,key,default=None):
-    from .preparation import checkpoint_publication
+    from . import checkpoint_reads as checkpoint_publication
     if key != 'rec_vibe_version':
         revision = checkpoint_publication.selected(conn, 'candidate-checkpoints')
         if revision is not None:
@@ -25,7 +25,7 @@ def get(conn,key,default=None):
 
 def put(conn,values):
     if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='candidate_refresh_checkpoint'").fetchone():
-        from .preparation.control_publication import retained_write
+        from .control_reads import retained_write
         return retained_write(conn, values)
     for key,value in values.items():
         table,column = KEYS[key]

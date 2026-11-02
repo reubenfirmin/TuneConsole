@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .. import genre_identity, library_pool_state, model_projections, recommendation_outputs as files, recommendation_pools
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from .ordered_rows import OrderedJob
 from .rows import Job, main as run
 from . import document_plan, home_outputs as home_preparation

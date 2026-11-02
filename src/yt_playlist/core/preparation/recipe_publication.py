@@ -4,7 +4,7 @@ import hashlib
 import json
 
 from .. import recipe_memberships
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from ..policy_documents import _publish_encoded
 from . import recipe_memberships as preparation
 from .mapped_publication import MappedPublication

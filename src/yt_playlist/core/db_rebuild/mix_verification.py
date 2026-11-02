@@ -6,6 +6,7 @@ that a source observation or an operational group can disappear.
 """
 import hashlib
 import json
+from pathlib import Path
 
 from .. import choice_evidence_files, choice_learning_state, evidence_ledger, fao
 from .. import home_outputs, mix_choices, recommendation_reports
@@ -27,6 +28,98 @@ REPLACED = ROOTS | SCRATCH | DISPLAYS | REPORTS | mix_history.LEARNING
 KEEP_OWNER = ("NOT (kind IN ('offer','response','checkpoint') OR (kind IN ('prepared','comparison') "
               "AND (substr(external_key,-15)=':choice_context' OR substr(external_key,-21)=':album_choice_context' "
               "OR substr(external_key,1,16)='choice-learning:')))")
+
+
+def capture(reader):
+    """Freeze file identities before writable runtime admission.
+
+    The original and installed SQL databases share an appendable evidence
+    directory. Enumerating it after admission cannot recover this boundary.
+    The inventory travels with the existing durable rebuild bookmark.
+    """
+    root = evidence_ledger.directory(reader)
+    return [[str(path.relative_to(root)), list(fao._hash(path))]
+            for path in choice_evidence_files.references(reader)]
+
+
+def _captured_menu(reader, target, value, *, allow_new=False):
+    original = evidence_ledger.EvidenceLedger(evidence_ledger.directory(reader), 2**63 - 1)
+    rebuilt = evidence_ledger.EvidenceLedger(evidence_ledger.directory(target), 2**63 - 1)
+    prior = (reader.execute('SELECT context,source_digest FROM mix_choice_menus WHERE opportunity_id=?',
+                            (value['id'],)).fetchone() if mix_choices.available(reader) else None)
+    if value.get('precision') == mix_choices.PRECISION and prior is None:
+        # Files can precede this source SQL snapshot even before cutover.
+        # Their bytes remain required, but local descriptor IDs are meaningful
+        # only for menus owned by the source's committed SQL dictionary.
+        return
+    context_id = value['context']
+    captured = original.get('artifact', context_id)
+    if captured is None:
+        from ..choice_checkpoints import checkpoint
+        saved = checkpoint(original, context_id)
+        captured = saved['context'] if saved else None
+    captured = captured if isinstance(captured, dict) else {'missing_context': True}
+    kind = 'mixes' if value['format'] == 'mixes' else 'independent'
+    expected = mix_choices.context(captured, mixes=kind == 'mixes')
+    if captured.get('missing_context'):
+        expected['missing_context'] = True
+    if kind == 'mixes':
+        menu = target.execute('SELECT context,source_digest FROM mix_choice_menus WHERE opportunity_id=?',
+                              (value['id'],)).fetchone()
+        digest = prior[1] if prior is not None else hashlib.sha256(evidence_ledger.canonical(value)).digest()
+        if menu is None or menu[1] != digest:
+            raise ValueError('Rebuild changed a captured mix menu')
+        projected_context = menu[0]
+    else:
+        projection = target.execute('SELECT context,source_digest FROM choice_context_projections '
+                                    'WHERE source_context=? AND kind=?', (value['context'], kind)).fetchone()
+        if (projection is None and allow_new and captured == expected
+                and rebuilt.get('artifact', context_id) == expected):
+            return  # A foreground independent-format writer already compacted it.
+        if projection is None or projection[1] != hashlib.sha256(evidence_ledger.canonical(captured)).digest():
+            raise ValueError('Rebuild changed a captured choice context')
+        projected_context = projection[0]
+    if rebuilt.get('artifact', projected_context) != expected:
+        raise ValueError('Rebuild changed a captured choice context')
+    if kind != 'mixes':
+        return
+    options = target.execute('SELECT option_id,position FROM mix_choice_options '
+                             'WHERE opportunity_id=? ORDER BY position', (value['id'],)).fetchall()
+    if [tuple(row) for row in options] != [(str(option['id']), position)
+                                         for position, option in enumerate(value['options'], 1)]:
+        raise ValueError('Rebuild changed captured mix option identities or order')
+    projected = mix_choices.project(target, value)
+    for old, new in zip(value['options'], projected['options'], strict=True):
+        frozen, actual = mix_choices.expand(reader, old), mix_choices.expand(target, new)
+        for field in ('intent', 'label', 'note', 'genres', 'genres_complete', 'genre_origin'):
+            default = '' if field in ('intent', 'label', 'note') else None
+            if actual.get(field, default) != frozen.get(field, default):
+                raise ValueError('Rebuild changed displayed mix meaning: ' + field)
+
+
+def verify_captured(reader, target, *, inventory):
+    """Require captured immutable history while allowing new serving output."""
+    state = target.execute('SELECT phase,cursor FROM mix_choice_preparation WHERE id=1').fetchone()
+    if state is None or tuple(state) != ('ready', ''):
+        raise ValueError('Mix choice preparation is incomplete')
+    roots = target.execute('SELECT roots_complete FROM group_retention_state WHERE id=1').fetchone()
+    if roots is None or roots[0] != 1:
+        raise ValueError('Group reference inventory is incomplete')
+    original, rebuilt = evidence_ledger.directory(reader), evidence_ledger.directory(target)
+    # Existing installed bookmarks predate the inventory. Their raw legacy
+    # records and SQL-known descriptor IDs remain independently checkable;
+    # extra new-format files cannot be expanded through the old SQL snapshot.
+    required = capture(reader) if inventory is None else inventory
+    for relative, digest in required:
+        name = Path(relative)
+        if name.is_absolute() or '..' in name.parts:
+            raise ValueError('Invalid captured listening evidence path')
+        copied = rebuilt / name
+        if not copied.exists() or list(fao._hash(copied)) != digest:
+            raise ValueError('Rebuild changed original listening evidence')
+        if name.parts[0] == 'opportunity':
+            value = json.loads(fao.read_bytes(copied))
+            _captured_menu(reader, target, value, allow_new=inventory is None)
 
 
 def protected(reader, *, at):

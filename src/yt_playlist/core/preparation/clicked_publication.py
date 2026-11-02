@@ -2,7 +2,7 @@
 import hashlib
 from pathlib import Path
 
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import ranked_state as preparation
 from .mapped_publication import MappedPublication
 from .ranked_verification import source_row, verify_document

@@ -5,7 +5,8 @@ import time
 
 import pytest
 
-from yt_playlist.core.migrations import current, registry, runner
+from yt_playlist.core import schema_definition as current
+from yt_playlist.core.migrations import registry, runner
 from yt_playlist.core.migrations.audit import audit
 from yt_playlist.core.storage_maintenance import StorageMaintenance
 from yt_playlist.core.store import Store

@@ -1,4 +1,8 @@
 """#85 timestamped transient-event sources: real play_events timestamps with day-model fallback."""
+import datetime
+
+import pytest
+
 from yt_playlist.core.store import Store
 
 
@@ -129,6 +133,60 @@ def test_exclusion_respects_limit_param():
     s.history.record_play_event(1, "radio|x", "v1", 999999.0, playlist_ytm_id="PLRADIO")
     out = s.history.recent_plays_with_ts(limit=2, exclude_list_ids={"PLRADIO"})
     assert len(out) == 2 and all(k != "radio|x" for k, _ in out)
+
+
+@pytest.mark.parametrize('excluded', [None, {'PLRADIO'}])
+def test_native_recent_history_keeps_subject_probes_within_serving_work(store, excluded):
+    """Resolved subject expressions must not cause a scan for every coarse day."""
+    accounts = [store.accounts.upsert_account(name, name, None, index == 0)
+                for index, name in enumerate(('first', 'second'))]
+    day = datetime.date(2026, 1, 2)
+    noon = datetime.datetime(2026, 1, 2, 12, tzinfo=datetime.timezone.utc).timestamp()
+    expected = {}
+    with store.conn:
+        for index in range(1200):
+            key = f'subject:{index}'
+            recording = None
+            if index % 2 == 0:
+                recording = store.conn.execute('INSERT INTO recordings(identity_key) VALUES (?) RETURNING id',
+                                               (key,)).fetchone()[0]
+            unresolved = key if recording is None else None
+            generated, radio = index % 4 == 0, index % 3 == 0
+            stamp = noon + 1000 + index
+            store.conn.execute('INSERT INTO play_events(id,account_id,raw_identity_key,recording_id,'
+                'unresolved_subject_key,played_at,playlist_ytm_id,is_generated) VALUES (?,?,?,?,?,?,?,?)',
+                (index + 1, accounts[0], key, recording, unresolved, stamp,
+                 'PLRADIO' if radio else None, int(generated)))
+            store.conn.execute("INSERT INTO play_event_sources VALUES (?,'live')", (index + 1,))
+            store.conn.execute("INSERT INTO play_event_calendar VALUES (?,?,'UTC')", (index + 1, day.isoformat()))
+            observations = [(accounts[0], day, 'ytm_history'),
+                            (accounts[0], day - datetime.timedelta(days=1), 'independent')]
+            if index % 5 == 0:
+                observations.append((accounts[0], day, 'independent'))
+            if index % 7 == 0:
+                observations.append((accounts[1], day, 'independent'))
+            for account, observed_day, source in observations:
+                store.conn.execute('INSERT INTO listening_observations(account_id,raw_identity_key,'
+                    'recording_id,unresolved_subject_key,source_day,day,source,timezone,precision,'
+                    "first_observed_at,last_observed_at) VALUES (?,?,?,?,?,?,?,'UTC','calendar_day',1,1)",
+                    (account, key, recording, unresolved, observed_day.isoformat(), observed_day.isoformat(), source))
+            expected[key] = (stamp if not generated and not (excluded and radio) else
+                             noon if index % 5 == 0 or index % 7 == 0 else noon - 86400)
+    # Bound SQLite work instead of elapsed time, which varies under CI load.
+    # The unmaterialized canonical views exceed this by repeatedly scanning
+    # COALESCE(recording identity, unresolved identity) for each observation.
+    callbacks = 0
+    def progress():
+        nonlocal callbacks
+        callbacks += 1
+        return int(callbacks > 3000)
+    store.conn.set_progress_handler(progress, 1000)
+    try:
+        actual = store.history.recent_plays_with_ts(exclude_list_ids=excluded)
+    finally:
+        store.conn.set_progress_handler(None, 0)
+    assert dict(actual) == expected
+    assert [timestamp for _, timestamp in actual] == sorted(expected.values(), reverse=True)
 
 
 def test_liked_and_disliked_with_ts():

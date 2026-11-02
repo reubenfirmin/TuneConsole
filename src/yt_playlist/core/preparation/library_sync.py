@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 
 from .. import entity_names, playlist_scopes, recommendation_outputs as files, sync_state
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from .ordered_rows import OrderedJob
 from .rows import Job, main as run
 

@@ -6,9 +6,9 @@ native provider documents into arbitrary attributes or change provider policy.
 from collections.abc import Mapping
 from contextlib import contextmanager
 import sqlite3
-import time
 
 from . import metadata_values as values
+from .metadata_contract import clock as _clock
 
 
 def available(conn):
@@ -30,13 +30,6 @@ def _atomic(conn):
         raise
     finally:
         conn.execute('RELEASE metadata_evidence_mutation')
-
-
-def _clock(now):
-    now = time.time() if now is None else now
-    if type(now) not in (int, float) or not -1.7976931348623157e308 <= now <= 1.7976931348623157e308:
-        raise ValueError('Metadata evidence time must be finite')
-    return now
 
 
 def value_from_row(row):

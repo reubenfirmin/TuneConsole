@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 import json
 import time
 
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import discovery_checkpoints as preparation
 
 
@@ -78,7 +78,7 @@ class Publication:
             f'WHEN NEW.input_revision<>OLD.input_revision BEGIN UPDATE {head} SET active=0 WHERE active=1; END')
 
     def validate(self, conn):
-        from ..migrations.current import _tokens
+        from ..schema_contract import tokens as _tokens
         from ..entity_names import predecessor_definition as transform
         renamed = conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='accounts'").fetchone()
         for name, sql in self.definitions():

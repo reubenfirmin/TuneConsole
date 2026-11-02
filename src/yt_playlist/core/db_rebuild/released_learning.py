@@ -6,15 +6,12 @@ import math
 import struct
 
 from .. import genre_identity, taste_axes
-from ..migrations import (v066_explicit_keys as mood, v067_audio_annotations as audio,
-                          v068_canonical_embeddings as embeddings, v069_prepared_recording_inputs as prepared,
-                          v088_taste_axes as axes)
 from ...util import genre_catalog
-from . import development, source
+from . import development, source, released_learning_inputs as inputs, released_annotations as audio
 from .build import Batch, Stage
 
 
-CONVERTED = frozenset((*axes.OLD_TABLES,*embeddings.SOURCES,'rec_mood','rec_prepared_content',
+CONVERTED = frozenset((*inputs.AXIS_TABLES,*inputs.SOURCES,'rec_mood','rec_prepared_content',
                       'audio_vibe_feedback','audio_vibe_labels','audio_session_labels','genre_whitelist'))
 VECTOR_MAP = '_database_rebuild_embedding_owners'
 
@@ -28,7 +25,7 @@ def _axis(reader, target, row, *, table):
         ('weight','value','score','updated_at','last_graduated_day','source','factor','new_weight','created_at')]))
     value = {k:v for k,v in row.items() if k not in ('axis','facet')}
     value['axis_id'] = axis
-    destination = axes.RENAMES.get(table,table)
+    destination = inputs.AXIS_RENAMES.get(table,table)
     if table=='home_hidden_facet':
         target.execute('INSERT OR IGNORE INTO home_hidden_facet VALUES (?)',(axis,))
     elif table=='rec_theme':
@@ -55,7 +52,7 @@ def _mood(reader, target, cursor, limit):
         target.execute('INSERT INTO mood_events VALUES (?,?,?)',(event,row['created_at'],row['direction']))
         seen = set()
         for position,key in enumerate(keys):
-            owner,reason = mood._resolve(target,key)
+            owner,reason = inputs.resolve_mood(target,key)
             identity = ('recording',owner) if owner is not None else ('unresolved',key)
             if identity in seen:
                 continue
@@ -69,12 +66,12 @@ def _mood(reader, target, cursor, limit):
 
 def _input(reader, target, row):
     key,raw,digest,captured,revision = (row[k] for k in ('identity_key','payload','digest','captured_at','revision'))
-    values,empty = prepared._flatten(raw)
+    values,empty = inputs.flatten(raw)
     if hashlib.sha256(raw.encode()).hexdigest()!=digest or type(revision) is not int or revision<0:
         raise ValueError('Invalid original prepared-input identity: '+key)
     owner = target.execute('SELECT r.id,d.retired_id FROM recordings r LEFT JOIN recording_redirects d '
                             'ON d.retired_id=r.id WHERE r.identity_key=?',(key,)).fetchone()
-    value = dict(zip(prepared.FIELDS,values),input_revision=revision,digest=digest,built_at=captured)
+    value = dict(zip(inputs.FIELDS,values),input_revision=revision,digest=digest,built_at=captured)
     if owner and owner[1] is None:
         development.insert(target,'prepared_recording_inputs',dict(recording_id=owner[0],**value))
     else:
@@ -83,7 +80,7 @@ def _input(reader, target, row):
 
 
 def _vectors(reader, target, cursor, limit, *, table):
-    kind,space,column = embeddings.SOURCES[table]
+    kind,space,column = inputs.SOURCES[table]
     if cursor is None:
         target.execute('CREATE TABLE IF NOT EXISTS '+VECTOR_MAP+'('
             'source TEXT NOT NULL,raw_key TEXT NOT NULL,subject INTEGER,reason TEXT,'
@@ -91,7 +88,7 @@ def _vectors(reader, target, cursor, limit, *, table):
         target.execute('CREATE INDEX IF NOT EXISTS '+VECTOR_MAP+'_subject ON '+VECTOR_MAP+'(source,subject)')
         settings = source.settings(reader,{'rec_content_model','rec_artist_content_model','rec_fit_inputs',
             'rec_artist_fit_inputs','rec_embed_method','rec_dim'})
-        basis = embeddings._basis(reader,table,kind,space,settings)
+        basis = inputs.basis(reader,table,kind,space,settings)
         return Batch(dict(phase='owners',last=None,basis=basis,dimensions=None),0,False)
     rows,bookmark,done = source.scan(reader,table,cursor['last'],limit)
     dimensions = cursor['dimensions']
@@ -111,7 +108,7 @@ def _vectors(reader, target, cursor, limit, *, table):
                 encoder = json.loads(raw)
                 if dim!=encoder['ncat']+len(encoder['cont']):
                     raise ValueError('Original embedding differs from its encoder: '+table)
-            owner,reason = embeddings._owner(target,kind,key)
+            owner,reason = inputs.owner(target,kind,key)
             target.execute('INSERT INTO '+VECTOR_MAP+' VALUES (?,?,?,?)',(table,key,owner,reason))
         else:
             owner,reason = target.execute('SELECT subject,reason FROM '+VECTOR_MAP+' WHERE source=? AND raw_key=?',
@@ -168,11 +165,11 @@ def finish(reader, target, cursor, limit):
 
 
 def stages():
-    for table in axes.OLD_TABLES:
+    for table in inputs.AXIS_TABLES:
         yield development.rows(table,partial(_axis,table=table))
     yield Stage('mood_events',_mood)
     yield development.rows('rec_prepared_content',_input)
-    for table in embeddings.SOURCES:
+    for table in inputs.SOURCES:
         yield Stage('embedding:'+table,partial(_vectors,table=table))
     for table,kind in (('audio_vibe_feedback','feedback'),('audio_vibe_labels','development'),('audio_session_labels','session')):
         yield development.rows(table,partial(_annotation,table=table,kind=kind))

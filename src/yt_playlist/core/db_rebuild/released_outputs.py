@@ -5,10 +5,8 @@ import json
 from .. import (album_note_outputs, album_note_requests, choice_learning_state, home_offers,
                home_outputs, listening_outputs, policy_documents, recommendation_reports,
                recommendation_requests, recommendation_work)
-from ..migrations import (v070_policy_documents as policies, v071_album_descriptions as descriptions,
-                          v073_recommendation_publications as publications)
 from ...repos import recommendation_publication
-from . import development, source
+from . import development, source, released_policies as policies, released_descriptions as descriptions
 from .build import Batch, Stage
 
 
@@ -64,7 +62,7 @@ def _links(reader, target, cursor, limit):
 
 
 def _bundle(reader, target, cursor, limit):
-    plan = publications._legacy_plan(reader,destination=target)
+    plan = policies.legacy_plan(reader,destination=target)
     if plan is not None:
         recommendation_publication.import_plan(target,plan,plan.created_at)
     return Batch(done=True)

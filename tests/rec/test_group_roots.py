@@ -111,6 +111,29 @@ def test_database_close_leaves_contended_retirement_for_the_lifetime_reaper(grou
         other.conn.close()
 
 
+def test_database_close_defers_pending_retirement_during_cutover(groups):
+    from yt_playlist.core.db_rebuild import install
+
+    close = group_roots.pending(groups, context(), 10)
+    identity = roots(groups, 'pending')[0]
+    path = group_documents.directory(groups.conn) / '.pending' / (identity + '.lock')
+    state = {'format': 1, 'database': str(groups._db_path), 'phase': 'closing'}
+    install.save(groups._db_path, state)
+    groups.conn.close()
+    assert groups.conn._handle_closed and path.exists()
+    close()
+    state['phase'] = 'failed'
+    install.save(groups._db_path, state)
+    other = Store(groups._db_path)
+    other._bind_repositories()
+    try:
+        assert roots(other, 'pending') == [identity]
+        group_roots.reap_pending(other)
+        assert not roots(other, 'pending') and not path.exists()
+    finally:
+        other.conn.close()
+
+
 def test_irrelevant_historical_generation_is_not_a_choice_dependency(groups):
     jobs = []
     groups.choice_capture = CaptureQueue(lambda job: jobs.append(job) or True)

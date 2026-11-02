@@ -10,7 +10,7 @@ import hashlib
 import json
 
 from .. import metadata_legacy, metadata_values
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from .rows import Job, main as run
 
 

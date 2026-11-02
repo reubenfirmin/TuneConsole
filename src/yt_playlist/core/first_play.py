@@ -11,7 +11,7 @@ def rebuild_predecessor(conn, *, private=False):
     Keep canonical artist IDs and earlier coarse dates. A coarse timestamp is
     the date's noon marker, as in listening_days; it is not an exact play claim.
     """
-    from .preparation import subject_publication
+    from . import listening_subject_reads as subject_publication
     if subject_publication.selected(conn) is not None:
         # Canonical summaries keep coarse dates separate from exact timestamps.
         # The retained predecessor cache still requires a timestamp: its noon

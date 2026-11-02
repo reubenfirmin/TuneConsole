@@ -2,7 +2,7 @@
 import hashlib
 
 from .. import road_trip_draft_storage
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import road_trip_drafts as preparation
 from .mapped_publication import MappedPublication
 

@@ -51,7 +51,8 @@ the existing catalog owner remains a compatibility projection until the broader
 genre owner cleanup. Other than current selected values, SQL has no provider
 response, alternative list, error body, filename, path or content checksum in
 this format. Existing historical owners remain frozen until separately verified
-retirement (#626); they are not copied into the runtime-only experiment.
+compaction; they are not copied into the runtime-only experiment. The explicit
+#682 operation below removes empty delivery locator fields after compaction.
 
 Files live under `<database filename>.metadata-runtime`, beside the database.
 Their relative names are computed from existing owner primary keys and revisions:
@@ -84,10 +85,14 @@ use captured provider/run/input identity and current completion time for replay
 checks, rather than a SQL digest index. Integrity lives in the envelope and
 backup manifest. No SQL content-dedup lookup is needed for the small retained
 current documents. Installed packs still require their existing `raw_offset`
-and `raw_byte_size`; those adapters and frozen rows remain compatible until
-#626. The isolated SQL copy has zero rows in those historical owners and zero
-payload bytes in their filename/checksum indexes; it preserves their empty DDL
-and migration history rather than editing an applied migration.
+and `raw_byte_size`; those adapters and frozen rows remain compatible while
+installed history exists. The isolated SQL copy has zero rows in those owners.
+Explicit locator retirement removes `contract_digest`, `raw_filename`,
+`raw_digest`, `raw_byte_size`, `raw_offset`, `ix_metadata_delivery_raw_content`
+and `ix_metadata_delivery_raw_file` from the verified destination. It preserves
+both migration histories and the remaining empty compatibility relation needed
+by supported schema joins. Inserts into retired history are rejected; runtime
+enrichment and editing continue through their current owners.
 
 Each JSON envelope carries its owner, format and integrity digest. Backup
 manifests carry sizes and digests. SQL does not query them and stores no copy.
@@ -102,6 +107,8 @@ complete required membership before replacing any live document. Rejected or
 incomplete backups leave all existing live bytes intact. Publication uses only
 those verified private copies, preserving the FAO age clocks even if backup
 files change after validation. Temporary staging is removed on success or failure.
+Read-only custody verification checks the same membership and byte contracts
+directly, without creating another durable copy of every document.
 
 Provider alternatives and candidate details expire after seven days. Expiry
 does not remove selected facts, reset completion/retry state, or schedule a new
@@ -130,9 +137,27 @@ available. Repeat this command until `complete` is true, then pass `--activate`:
 
 If source writes invalidate final verification, `--restart` discards inactive
 progress and re-exports the source. It cannot reset an already active format.
-There is no automatic startup conversion or default activation. Destructive
-retirement of installed history and compatibility code remains #626, after
-verification of this experiment.
+There is no automatic startup conversion or default activation. Broader
+retirement of installed history and compatibility code remains #626.
+
+After compaction has emptied every superseded metadata owner, export an
+independent runtime-file recovery manifest using `metadata_runtime_files.export`.
+The explicit operation verifies all required members against current content,
+audits foreign keys and stored SQL dependencies, and fences intervening writes
+before a short atomic DDL transaction:
+
+```sh
+.venv/bin/python -m yt_playlist.core.preparation.metadata_locators VERIFIED_COPY.db --recovery-manifest RECOVERY/manifest.json
+```
+
+Inactive preparation, populated historical owners, unfinished rebuilds, damaged
+or incomplete recovery custody and concurrent writes refuse retirement without
+changing the installed schema. An interrupted DDL transaction rolls back; a
+completed operation is safe to repeat. This command does not compact data or
+delete historical files. Keep the original database and its historical file
+custody with the separately verified copy/rebuild job.
+The supported installed-format validator admits the eligible destination;
+retirement does not require a numbered schema upgrade or rewrite either history.
 
 The actual-library reproducer creates and verifies its own disposable backup,
 then leaves a separate runtime-only candidate and JSON directory:

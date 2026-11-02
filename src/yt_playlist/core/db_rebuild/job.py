@@ -3,7 +3,7 @@
 The original is retained after installation. The caller
 selects either installed-format compaction or the admitted normalized rebuild.
 """
-from contextlib import closing, contextmanager, ExitStack
+from contextlib import closing, contextmanager, ExitStack, nullcontext
 import json
 import os
 from pathlib import Path
@@ -24,6 +24,27 @@ def _tree_bytes(path):
 
 def _same_filesystem(left,right):
     return left.stat().st_dev==right.stat().st_dev
+
+
+def _owned_files(conn):
+    """Report unique retained files, including installed absolute locators.
+
+    The action backup's ``filename`` is a logical export name; its retained
+    filename is the physical locator. Relative file owners supply their own
+    references rather than being inferred from SQL text.
+    """
+    paths = {Path(path) for _, _, references in files.owners(conn) for path in references}
+    for table in policy_recovery._tables(conn):
+        columns = [row[1] for row in conn.execute('PRAGMA main.table_info('+build.quote(table)+')')
+                   if (row[1] == 'filename' or row[1].endswith('_filename'))
+                   and (table, row[1]) != ('action_backups', 'filename')]
+        for column in columns:
+            paths.update(Path(row[0]) for row in conn.execute(
+                'SELECT DISTINCT '+build.quote(column)+' FROM '+build.quote(table)+
+                ' WHERE '+build.quote(column)+' IS NOT NULL') if Path(row[0]).is_absolute())
+    stats = [path.stat() for path in paths]
+    return dict(files=len(stats), bytes=sum(stat.st_size for stat in stats),
+                allocated_bytes=sum(getattr(stat, 'st_blocks', 0)*512 for stat in stats))
 
 
 @contextmanager
@@ -60,7 +81,7 @@ def _files(conn):
 
 
 def run(store, *, destination=None, rebuild=False, resume=False, scratch=None, progress=lambda phase, detail: None,
-        cancelled=lambda: False):
+        cancelled=lambda: False, _preparation=None):
     """Fence writes, build from the original, install and reopen runtime storage.
 
     A schema owner supplies ``destination`` for a direct normalized rebuild.
@@ -88,6 +109,10 @@ def run(store, *, destination=None, rebuild=False, resume=False, scratch=None, p
                  destination=str(custody),original=str(custody/'original.db'),
                  sibling=str(sibling),phases={})
     state['operation'] = 'rebuild' if rebuilding else 'compaction'
+    if _preparation is not None:
+        # Recovery must keep the worker gate closed through the installed-file
+        # repair, including a crash between rename and publishing completion.
+        state.update(preparation=_preparation, analytics_pending=True)
     if destination is not None:
         state['destination_version'] = destination.version
     file_fences = ExitStack()
@@ -101,6 +126,13 @@ def run(store, *, destination=None, rebuild=False, resume=False, scratch=None, p
         old = db_handles.state(database)
         if old and old['phase'] in db_handles.ACTIVE:
             raise RuntimeError('Interrupted compaction needs startup recovery before retry')
+        if old and old.get('analytics_pending') and (old['phase']=='complete'
+                or old.get('analytics_complete') or old.get('preparation')):
+            if _preparation is None:
+                raise RuntimeError('Finish library analytics preparation before requesting another storage copy')
+            owner = old.get('preparation',old)
+            if owner['id']!=_preparation['id'] or not owner.get('analytics_complete'):
+                raise RuntimeError('Analytics finalization belongs to another preparation')
         if resume:
             if (not old or old['phase'] != 'failed' or old.get('failed_phase') != 'building'
                     or old.get('operation') != 'rebuild'
@@ -176,6 +208,10 @@ def run(store, *, destination=None, rebuild=False, resume=False, scratch=None, p
             if destination is None:
                 files.borrow(database, candidate)
                 state['copy'] = build.build(database,candidate,progress=phase,cancelled=cancelled)
+                if _preparation is not None:
+                    with closing(sqlite3.connect(candidate)) as target:
+                        target.execute('DROP TABLE IF EXISTS '+build.CHECKPOINT)
+                        target.commit()
             else:
                 state['copy'] = build.construct(database,candidate,destination,
                                                progress=phase,cancelled=cancelled,runtime_only=True)
@@ -256,43 +292,83 @@ def run(store, *, destination=None, rebuild=False, resume=False, scratch=None, p
 
 def finish_analytics(store, *, progress=lambda phase, detail: None, cancelled=lambda: False):
     """Finish deferred data before admitting the recommendation/enrichment worker."""
-    from ..priority import ServingLock
-    from ..store import Store
-    from .destination import for_source
     database = store._db_path
+    repair = False
     with install.owner(database):
         state = db_handles.state(database)
         if not state or not state.get('analytics_pending'):
             return state
-        original = Path(state['original'])
-        if install.digest(original) != state['original_sha256']:
-            raise ValueError('Retained analytics source changed')
-        destination = for_source(original, split=True)
-        if destination.version != state['destination_version']:
-            raise ValueError('Analytics conversion code changed; inspect the pending rebuild')
-        started = time.monotonic()
-        # Keep the public Store's connection and lock available to requests.
-        prepared = Store.open_current(database)
-        # Separate connections still compete for SQLite's single writer. Share
-        # request priority so each committed batch yields to foreground writes.
-        prepared.priority = store.priority
-        prepared._lock = ServingLock(store.priority)
-        prepared._bind_repositories()
-        def checkpoint():
-            if cancelled():
-                raise InterruptedError('Analytics copy interrupted')
-            store.priority.checkpoint(cancelled)
-        try:
-            with store.priority.background(checkpoint), _files(prepared.conn):
-                build.finish_analytics(original, prepared, destination, progress=progress, cancelled=cancelled)
-            state['analytics_pending'] = False
-            state['phases']['analytics_seconds'] = time.monotonic()-started
-            install.save(database,state)
-            with prepared.conn:
-                prepared.conn.execute('DROP TABLE '+build.CHECKPOINT)
-        finally:
-            prepared.conn.close()
-        return state
+        if state.get('preparation'):
+            parent = state['preparation']
+            if state['phase'] == 'complete':
+                return _completed_repair(database,parent,state,owned=True)
+            state, repair = parent, True
+        elif state.get('analytics_complete'):
+            repair = True
+        if not repair:
+            state = _copy_analytics(store,state,progress=progress,cancelled=cancelled)
+            repair = bool(state.get('legacy_runtime'))
+    if repair:
+        final = run(store,progress=lambda phase,detail:progress('analytics',
+            dict(stage='finalize:'+phase, **(detail or {}))),cancelled=cancelled,_preparation=state)
+        return _completed_repair(database,state,final)
+    return state
+
+
+def _completed_repair(database, preparation, finalization, *, owned=False):
+    with nullcontext() if owned else install.owner(database):
+        durable = db_handles.state(database)
+        if durable['id']!=finalization['id'] or durable['phase']!='complete':
+            raise RuntimeError('Storage ownership changed before publishing preparation completion')
+        finalization = {key:value for key,value in finalization.items() if key!='preparation'}
+        finalization['analytics_pending'] = False
+        preparation.update(analytics_pending=False,finalization=finalization)
+        install.save(database,preparation)
+        return preparation
+
+
+def _copy_analytics(store, state, *, progress, cancelled):
+    from ..priority import ServingLock
+    from ..store import Store
+    from .destination import for_source
+    database = store._db_path
+    original = Path(state['original'])
+    if install.digest(original) != state['original_sha256']:
+        raise ValueError('Retained analytics source changed')
+    destination = for_source(original, split=True)
+    pending = build._checkpoint(store.conn)
+    if pending['stages'] != [stage.name for stage in destination.stages]:
+        # Exactly one earlier shipped split plan is supported. Never rewrite
+        # its bookmark to claim that unperformed work completed.
+        earlier = for_source(original,split=True,legacy=True)
+        if pending['stages'] != [stage.name for stage in earlier.stages]:
+            raise ValueError('Installed analytics checkpoint belongs to another rebuild')
+        destination = earlier
+        state['legacy_runtime'] = True
+    started = time.monotonic()
+    # Keep the public Store's connection and lock available to requests.
+    prepared = Store.open_current(database)
+    prepared.priority = store.priority
+    prepared._lock = ServingLock(store.priority)
+    prepared._bind_repositories()
+    def checkpoint():
+        if cancelled():
+            raise InterruptedError('Analytics copy interrupted')
+        store.priority.checkpoint(cancelled)
+    try:
+        with store.priority.background(checkpoint), _files(prepared.conn):
+            build.finish_analytics(original, prepared, destination, progress=progress,
+                                   cancelled=cancelled, admission=store._lock)
+        state['analytics_complete'] = True
+        state['analytics_pending'] = bool(state.get('legacy_runtime'))
+        state['phases']['analytics_seconds'] = time.monotonic()-started
+        install.save(database,state)
+        with store._lock, prepared._lock, prepared.conn:
+            prepared.conn.execute('BEGIN IMMEDIATE')
+            prepared.conn.execute('DROP TABLE '+build.CHECKPOINT)
+    finally:
+        prepared.conn.close()
+    return state
 
 
 def main(argv=None):

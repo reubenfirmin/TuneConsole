@@ -61,6 +61,9 @@ def record_many(conn, deliveries):
     """Keep a failed admission atomic even if its caller handles the exception."""
     if not conn.in_transaction:
         raise RuntimeError('Metadata delivery admission needs an outer transaction')
+    from . import metadata_locator_contract as metadata_locators
+    if metadata_locators.retired(conn):
+        raise ValueError('Installed delivery writes are retired; use runtime metadata')
     conn.execute('SAVEPOINT metadata_delivery_admission')
     try:
         result = _record_many(conn, deliveries)

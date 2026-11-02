@@ -15,10 +15,8 @@ import time
 from typing import Callable
 
 from .. import db_handles, db_space
-from ..migrations import regular
-from ..migrations.registry import MIGRATIONS
-from ..migrations.runner import history, validate_version
 from ..policy_recovery import _verify
+from .installed_format import validate as _format
 
 
 @dataclass(frozen=True)
@@ -35,6 +33,7 @@ class Stage:
     copy: Callable
     repositories: bool = False
     batch_size: int = 128
+    prepare: Callable | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +55,7 @@ class Destination:
     runtime_stages: int | None = None
     verify_runtime: Callable | None = None
     verify_analytics: Callable | None = None
+    capture: Callable | None = None
 
 
 CHECKPOINT = '_database_rebuild_checkpoint'
@@ -154,6 +154,8 @@ def construct(source, output, destination, *, batch_size=8192, progress=lambda p
                         'singleton INTEGER PRIMARY KEY CHECK(singleton=1),document TEXT NOT NULL)')
                     initial = dict(format=1, source=identity, destination=destination.version,
                                    stages=names, stage=0, cursor=None, rows={})
+                    if destination.capture is not None:
+                        initial['evidence'] = destination.capture(reader)
                     target.execute('INSERT INTO '+CHECKPOINT+' VALUES(1,?)',
                                    (json.dumps(initial, sort_keys=True, allow_nan=False),))
                     target.commit()
@@ -242,7 +244,7 @@ def construct(source, output, destination, *, batch_size=8192, progress=lambda p
                 raise
         if runtime_only and destination.runtime_stages is not None:
             report['analytics_pending'] = True
-        elif destination.compact:
+        if destination.compact:
             # Keep the verified construction and its bookmark until the final
             # retained copy is complete. Interruption restarts only this pass;
             # the domain conversions do not run again. Relative file roots
@@ -259,12 +261,13 @@ def construct(source, output, destination, *, batch_size=8192, progress=lambda p
                     or _source_identity(source) != identity):
                 raise ValueError('Source changed during database rebuild')
             with closing(sqlite3.connect(compacted)) as target:
-                target.execute('DROP TABLE '+CHECKPOINT)
+                if not report.get('analytics_pending'):
+                    target.execute('DROP TABLE '+CHECKPOINT)
                 target.commit()
             with compacted.open('rb') as stream:
                 os.fsync(stream.fileno())
             os.replace(compacted, output)
-        else:
+        elif not report.get('analytics_pending'):
             with closing(sqlite3.connect(output)) as target:
                 target.execute('DROP TABLE '+CHECKPOINT)
                 target.commit()
@@ -274,7 +277,7 @@ def construct(source, output, destination, *, batch_size=8192, progress=lambda p
 
 
 def finish_analytics(source, store, destination, *, progress=lambda phase, detail: None,
-                     cancelled=lambda: False):
+                     cancelled=lambda: False, admission=None):
     """Continue the same SQL bookmark after runtime admission has resumed.
 
     The worker remains stopped. A separate normal Store owns bounded write
@@ -290,8 +293,7 @@ def finish_analytics(source, store, destination, *, progress=lambda phase, detai
         _configure(target, cancelled)
         target.execute('ATTACH DATABASE ? AS rebuild_source', (source.as_uri()+'?mode=ro',))
         pending = _checkpoint(target)
-        if (pending['destination'] != destination.version
-                or pending['stages'] != [stage.name for stage in destination.stages]
+        if (pending['stages'] != [stage.name for stage in destination.stages]
                 or pending['stage'] < destination.runtime_stages):
             raise ValueError('Installed analytics checkpoint belongs to another rebuild')
         while pending['stage'] < len(destination.stages):
@@ -300,23 +302,35 @@ def finish_analytics(source, store, destination, *, progress=lambda phase, detai
             stage = destination.stages[pending['stage']]
             # Admission waits before BEGIN; no cooperative pause may retain
             # SQLite's writer while a foreground request is waiting for it.
-            with store._lock, target:
-                target.execute('BEGIN IMMEDIATE')
-                _owned_transaction(target)
-                try:
-                    with target.atomic(join=True):
-                        batch = stage.copy(reader, store if stage.repositories else target,
-                                           pending['cursor'], min(128, stage.batch_size))
-                finally:
-                    target.set_authorizer(None)
-                if (not isinstance(batch, Batch) or type(batch.rows) is not int or batch.rows < 0
-                        or type(batch.done) is not bool
-                        or not batch.done and batch.cursor == pending['cursor']):
-                    raise ValueError('Analytics stage did not advance: '+stage.name)
-                pending['rows'][stage.name] = pending['rows'].get(stage.name, 0)+batch.rows
-                pending['cursor'] = None if batch.done else batch.cursor
-                pending['stage'] += int(batch.done)
-                _checkpoint(target, pending)
+            arguments = (reader, store if stage.repositories else target,
+                         pending['cursor'], min(128, stage.batch_size))
+            # Compression, durable file preparation and verification must not
+            # retain SQLite's writer. Prepared owners recheck their inputs
+            # after admission, and close unpublished files on every exit.
+            preparation = stage.prepare(*arguments) if stage.prepare else nullcontext()
+            with preparation as prepared:
+                # Queue serving writes on their connection lock until COMMIT
+                # has released SQLite's writer, including durability work.
+                # Releasing admission after BEGIN sends an ordinary write into
+                # SQLite's busy timeout while this private batch still owns it.
+                # Lookup/snapshot reads use their independent WAL connections.
+                with admission if admission is not None else nullcontext(), store._lock, target:
+                    target.execute('BEGIN IMMEDIATE')
+                    _owned_transaction(target)
+                    try:
+                        with target.atomic(join=True):
+                            batch = (stage.copy(*arguments, prepared) if stage.prepare
+                                     else stage.copy(*arguments))
+                    finally:
+                        target.set_authorizer(None)
+                    if (not isinstance(batch, Batch) or type(batch.rows) is not int or batch.rows < 0
+                            or type(batch.done) is not bool
+                            or not batch.done and batch.cursor == pending['cursor']):
+                        raise ValueError('Analytics stage did not advance: '+stage.name)
+                    pending['rows'][stage.name] = pending['rows'].get(stage.name, 0)+batch.rows
+                    pending['cursor'] = None if batch.done else batch.cursor
+                    pending['stage'] += int(batch.done)
+                    _checkpoint(target, pending)
             progress('analytics', {'stage': stage.name, 'rows': pending['rows'][stage.name]})
         if destination.verify_analytics is not None:
             with target:
@@ -357,7 +371,7 @@ def _references(conn, table, parent):
     return groups.values()
 
 
-def plan(conn, *, now):
+def plan(conn, *, now, references='1'):
     """Return table predicates; omission requires a positive domain rule.
 
     Source tables stay read-only in ``main``. Scratch sets are TEMP tables on
@@ -374,7 +388,7 @@ def plan(conn, *, now):
     conn.execute('CREATE TEMP TABLE compact_drop_generations(id INTEGER PRIMARY KEY)')
     conn.execute('INSERT INTO compact_drop_generations SELECT g.id FROM main.recommendation_generations g '
         'WHERE NOT EXISTS(SELECT 1 FROM main.recommendation_heads h WHERE h.generation_id=g.id) '
-        'AND NOT EXISTS(SELECT 1 FROM main.recommendation_generation_refs r WHERE r.generation_id=g.id) '
+        'AND NOT EXISTS(SELECT 1 FROM main.recommendation_generation_refs r WHERE r.generation_id=g.id AND ('+references+')) '
         "AND (g.status IN ('published','retiring') OR EXISTS(SELECT 1 FROM main.recommendation_builds b "
         'WHERE b.generation_id=g.id AND b.expires_at<?))', (now,))
     # Domain cleanup owns these children. An additional FK owner is evidence,
@@ -384,9 +398,13 @@ def plan(conn, *, now):
             if len(reference) != 1 or reference[0][4] not in ('id', None):
                 raise ValueError('Unsupported recommendation generation reference: ' + table)
             column = quote(reference[0][3])
+            condition = (' AND ('+references+')' if table in (
+                'recommendation_generation_refs','home_display_recommendation_roots') else '')
             conn.execute('DELETE FROM compact_drop_generations WHERE EXISTS(SELECT 1 FROM main.'
-                         + quote(table) + ' r WHERE r.' + column + '=compact_drop_generations.id)')
+                         + quote(table) + ' r WHERE r.' + column + '=compact_drop_generations.id'+condition+')')
     predicates['recommendation_generations'] = 's.id NOT IN (SELECT id FROM compact_drop_generations)'
+    if references != '1':
+        predicates['recommendation_generation_refs'] = references
     for table in owned:
         if table in tables:
             predicates[table] = 's.generation_id NOT IN (SELECT id FROM compact_drop_generations)'
@@ -436,15 +454,6 @@ def _equal_rows(conn, name, predicate, expressions=None):
     if missing:
         raise ValueError('Compaction changed retained values or IDs: ' + name)
     return actual
-
-
-def _format(conn):
-    version = history(conn, MIGRATIONS)
-    if version < 79:
-        raise ValueError('Retained-copy compaction requires a supported installed format (79 or later)')
-    validate_version(conn, version, foreign_keys=False, data=False)
-    regular.validate(conn)
-    return version
 
 
 def _configure(conn, cancelled=lambda:False):

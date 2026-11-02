@@ -9,7 +9,8 @@ import json
 import sqlite3
 import time
 
-from ..migrations.runner import MigrationError, history, validate_version
+from ..schema_admission import history, validate_version
+from ..schema_contract import MigrationError
 
 
 def _json(value):
@@ -118,14 +119,13 @@ class Job:
                     "status=CASE WHEN status='failed' THEN status ELSE 'copying' END WHERE id=1;" + reset + ' END')
 
     def _version(self, conn):
-        from ..migrations.registry import MIGRATIONS
-        version = history(conn, MIGRATIONS)
+        version = history(conn)
         if not self.minimum <= version <= self.maximum:
             raise MigrationError(f'{self.name} preparation requires installed layout {self.minimum}–{self.maximum}')
         return version
 
     def validate(self, conn):
-        from ..migrations.current import _tokens
+        from ..schema_contract import tokens as _tokens
         for name, sql in self.definitions(conn):
             row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
             if row is None and name in dict(self.additive_destinations):

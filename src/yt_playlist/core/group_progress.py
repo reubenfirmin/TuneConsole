@@ -4,8 +4,9 @@ The historical table still owns its fit/generation checkpoint. Its original
 progress fields remain retained after this independently recorded replacement.
 """
 import json
+import math
 
-from .migrations.runner import MigrationError
+from .schema_contract import MigrationError
 
 TABLE = 'group_preparation_progress'
 PHASES = ('preparing', 'ready', 'deferred', 'failed')
@@ -39,7 +40,7 @@ def definitions(conn):
 
 
 def validate(conn):
-    from .migrations.current import _tokens
+    from .schema_contract import tokens as _tokens
     for name, sql in definitions(conn):
         row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
         if row is None or _tokens(row[0]) != _tokens(sql):
@@ -47,7 +48,7 @@ def validate(conn):
 
 
 def install(conn):
-    from .migrations.current import _tokens
+    from .schema_contract import tokens as _tokens
     added = not available(conn)
     for name, sql in definitions(conn):
         row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
@@ -66,8 +67,16 @@ def read(conn, default=None):
 
 
 def write(conn, value):
-    from .preparation.model_checkpoints import group_values, GROUP
-    fields = group_values(conn, GROUP[0], value)
+    if not isinstance(value, dict) or set(value) - {'phase', 'at', 'reason'}:
+        raise ValueError('Unsupported grouping checkpoint; original retained')
+    phase, at, reason = (value.get(key) for key in ('phase', 'at', 'reason'))
+    if at is not None and (type(at) not in (int, float) or not math.isfinite(at)):
+        raise ValueError('Unsupported model checkpoint group time; original retained')
+    if reason is not None and not isinstance(reason, str):
+        raise ValueError('Unsupported model checkpoint group reason; original retained')
+    if not ((phase is None and at is None and reason is None)
+            or (isinstance(phase, str) and phase in PHASES and at is not None)):
+        raise ValueError('Grouping progress requires its phase and recorded time; original retained')
     conn.execute(f'INSERT INTO {TABLE} VALUES (1,?,?,?) ON CONFLICT(singleton) DO UPDATE SET '
                  'phase=excluded.phase,reported_at=excluded.reported_at,reason=excluded.reason',
-                 (fields['phase'], fields['reported_at'], fields['reason']))
+                 (phase, at, reason))

@@ -270,11 +270,11 @@ def test_missing_readiness_waits_for_worker_without_reading_profiles_or_ranked_p
 
 
 def test_oversized_optional_index_does_not_block_useful_menu_publication(store, monkeypatch):
-    from yt_playlist.rec import home_vibe, vibe_pools, vibe_readiness
+    from yt_playlist.rec import home_vibe, vibe_pools, vibe_readiness_index
 
     publish_vibe_menus(store)
     previous = store.recommendations.head('home')['id']
-    monkeypatch.setattr(vibe_readiness, 'MAX_INDEX_BYTES', 1)
+    monkeypatch.setattr(vibe_readiness_index, 'MAX_INDEX_BYTES', 1)
     publish_bundles(store, deepcopy(store._fixture_bundle_payload), vibes=True)
     assert store.recommendations.head('home')['id'] != previous
     assert all(len(vibe_pools.assemble(store, 1000, preset)) == 4 for preset in home_vibe.PRESETS)

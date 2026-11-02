@@ -21,6 +21,42 @@ class ProcessDied(BaseException):
     pass
 
 
+@pytest.mark.parametrize('installed', [107], indirect=True)
+def test_install_reopens_original_after_close_callback_failure(installed):
+    store, _ = installed
+    store.settings.set_setting('accepted-before-close', 'preserved')
+    original = store._db_path.stat().st_ino
+    history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
+
+    def initialize(target):
+        current.bootstrap(target, registry.MIGRATIONS, 1000)
+        target.execute('DELETE FROM schema_migrations')
+        target.executemany('INSERT INTO schema_migrations VALUES(?,?,?)', history)
+
+    def copy(source, target, cursor, limit):
+        target.execute('INSERT INTO settings VALUES(?,?)', ('accepted-before-close', 'preserved'))
+        return build.Batch(rows=1, done=True)
+
+    def fail_close():
+        raise RuntimeError('controlled reader retirement failure')
+
+    previous = store.conn
+    previous._before_close_callbacks.append(fail_close)
+    destination = build.Destination('close-failure-current-v1', initialize,
+                                    (build.Stage('settings', copy),), lambda *_: None)
+    with pytest.raises(RuntimeError, match='controlled reader retirement failure'):
+        job.run(store, destination=destination)
+    assert previous._handle_closed
+    assert store.conn is not previous and not store.conn._handle_closed
+    assert store._db_path.stat().st_ino == original
+    assert db_handles.state(store._db_path)['phase'] == 'failed'
+    assert not store.activity_paused
+    assert store.settings.get_setting('accepted-before-close') == 'preserved'
+    store.settings.set_setting('accepted-after-close-failure', 'preserved')
+    assert store.settings.get_setting('accepted-after-close-failure') == 'preserved'
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
 @pytest.mark.parametrize('blocker', ['transaction', 'maintenance', 'evidence', 'compaction'])
 def test_pending_evidence_retry_does_not_bypass_live_write_owners(development93, blocker):
     from yt_playlist.core.store import Store

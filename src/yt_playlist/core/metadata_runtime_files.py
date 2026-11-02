@@ -8,12 +8,14 @@ import json
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
+from contextlib import contextmanager
 from pathlib import Path
 import tempfile
 
 from .evidence_ledger import canonical, _sync_directory
 from .activity import check_cancellable_work, WorkBudgetExceeded
 from . import fao
+from .metadata_contract import ALTERNATIVE_SECONDS, runtime_active
 
 MAX_BYTES = 8 * 1024 * 1024
 KINDS = frozenset(('alternatives', 'native', 'choices', 'conflicts'))
@@ -71,9 +73,8 @@ def _prepared(conn, kind, owner, revision, data):
             return path, None
         # A failed transaction may leave its next revision on disk. Only a
         # committed/current revision is immutable; no snapshot owns an orphan.
-        from . import metadata_runtime as runtime
         current = None
-        if runtime.active(conn):
+        if runtime_active(conn):
             if kind in ('choices', 'conflicts'):
                 current = conn.execute('SELECT revision FROM metadata_runtime_'+kind+' WHERE id=?', owner).fetchone()
             elif kind == 'native':
@@ -158,11 +159,10 @@ def _verified_data(encoded, kind, owner, revision):
 
 def references(conn, *, include_expired=False):
     """Current serving/model facts and retained manual decisions, under a snapshot."""
-    from . import metadata_runtime as runtime
-    if not runtime.active(conn):
+    if not runtime_active(conn):
         return
     import time
-    cutoff = float('-inf') if include_expired else time.time()-runtime.ALTERNATIVE_SECONDS
+    cutoff = float('-inf') if include_expired else time.time()-ALTERNATIVE_SECONDS
     for recording, code, at in conn.execute('SELECT s.recording_id,p.id,s.at FROM enrichment_provider_state s '
         'JOIN metadata_runtime_providers p ON p.name=s.provider WHERE s.at>?', (cutoff,)):
         yield 'alternatives', (recording, code), float(at), False
@@ -199,31 +199,52 @@ def export(conn, root):
     return str(manifest)
 
 
-def restore(conn, manifest):
-    """Validate the complete backup before replacing any live owned files."""
+def _verify_backup(conn, manifest, *, staged=None, current=False):
+    """Validate membership and bytes, staging only for later publication."""
     manifest = Path(manifest)
     document = json.loads(fao.read_bytes(manifest))
     if not isinstance(document, dict) or document.get('format') != 1 or not isinstance(document.get('entries'), list):
         raise ValueError('Invalid runtime metadata backup')
     expected = {(kind, tuple(owner), revision): required for kind, owner, revision, required in references(conn, include_expired=True)}
-    with tempfile.TemporaryDirectory(prefix='tuneconsole-metadata-restore-') as staging:
-        staged = Path(staging)
-        seen = set()
-        for entry in document['entries']:
-            check_cancellable_work()
-            key = entry['kind'], tuple(entry['owner']), entry['revision']
-            if key not in expected or key in seen:
-                raise ValueError('Runtime metadata backup differs from SQL ownership')
-            seen.add(key)
-            relative_path = relative(*key)
+    seen = set()
+    for entry in document['entries']:
+        check_cancellable_work()
+        key = entry['kind'], tuple(entry['owner']), entry['revision']
+        if key not in expected or key in seen:
+            raise ValueError('Runtime metadata backup differs from SQL ownership')
+        seen.add(key)
+        relative_path = relative(*key)
+        prepared = manifest.parent / relative_path
+        if staged is not None:
             prepared = staged / relative_path
             fao.copy(manifest.parent / relative_path, prepared, max_bytes=MAX_BYTES)
-            encoded = fao.read_bytes(prepared, max_bytes=MAX_BYTES)
-            if len(encoded) != entry['bytes'] or hashlib.sha256(encoded).hexdigest() != entry['sha256']:
-                raise ValueError('Runtime metadata backup file failed verification')
-            _verified_data(encoded, *key)
-        if any(required and key not in seen for key, required in expected.items()):
-            raise ValueError('Runtime metadata backup is missing a required document')
+        encoded = fao.read_bytes(prepared, max_bytes=MAX_BYTES)
+        if len(encoded) != entry['bytes'] or hashlib.sha256(encoded).hexdigest() != entry['sha256']:
+            raise ValueError('Runtime metadata backup file failed verification')
+        _verified_data(encoded, *key)
+        if current and encoded != fao.read_bytes(directory(conn) / relative_path, max_bytes=MAX_BYTES):
+            raise ValueError('Runtime metadata backup differs from current content')
+    if any(required and key not in seen for key, required in expected.items()):
+        raise ValueError('Runtime metadata backup is missing a required document')
+    return seen
+
+
+@contextmanager
+def verified_backup(conn, manifest):
+    """Pin private verified members before publishing any restored files."""
+    with tempfile.TemporaryDirectory(prefix='tuneconsole-metadata-restore-') as staging:
+        staged = Path(staging)
+        yield staged, _verify_backup(conn, manifest, staged=staged)
+
+
+def verify_backup(conn, manifest):
+    """Establish exact independent recovery custody without rewriting live files."""
+    return len(_verify_backup(conn, manifest, current=True))
+
+
+def restore(conn, manifest):
+    """Validate the complete backup before replacing any live owned files."""
+    with verified_backup(conn, manifest) as (staged, seen):
         # Publish only the private, verified copies, so backup replacements
         # after validation cannot introduce unchecked bytes into live history.
         for key in seen:

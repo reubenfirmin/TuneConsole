@@ -2,9 +2,8 @@
 from dataclasses import asdict
 import json
 
-from ..migrations import current
-from ..migrations.runner import MigrationError
-from ..migrations import v092_installed_genre_contract as historical
+from ..schema_contract import MigrationError, tokens
+from .. import genre_contract
 from . import domain_contracts
 
 
@@ -37,12 +36,9 @@ def definitions(conn):
     if 86<=version<92:
         # Index construction is deliberately excluded. Earlier supported
         # layouts admit the three missing indexes; they are maintenance work.
-        names = set(historical.REPLACEMENTS) | {name for name in historical.ADDITIONS
+        names = set(genre_contract.REPLACEMENTS) | {name for name in genre_contract.ADDITIONS
             if not name.startswith('ix_') and (version>=89 or not name.startswith('recipe_'))}
-        for sql in current.statements(version=92):
-            name = historical._name(sql)
-            if name in names:
-                yield name,sql.strip().rstrip(';')
+        yield from genre_contract.installed_definitions(names)
     if version>=88:
         yield from guards()
 
@@ -51,17 +47,17 @@ def install(conn, context=None):
     """Run within one regular DDL transaction, without examining stored rows."""
     for name,sql in definitions(conn):
         row = conn.execute('SELECT type,sql FROM main.sqlite_schema WHERE name=?',(name,)).fetchone()
-        if row and current._tokens(row[1])==current._tokens(sql):
+        if row and tokens(row[1])==tokens(sql):
             continue
         if row:
-            if name not in historical.REPLACEMENTS:
+            if name not in genre_contract.REPLACEMENTS:
                 raise MigrationError('Incompatible installed genre repair: '+name)
             # Admission already accepted only the exact known old definition.
             conn.execute('DROP '+row[0]+' '+name)
         conn.execute(sql)
     if conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='taste_axis_legacy'").fetchone():
         columns = {row[1] for row in conn.execute('PRAGMA main.table_info(taste_axis_legacy)')}
-        for declaration in historical.ARCHIVE_COLUMNS:
+        for declaration in genre_contract.ARCHIVE_COLUMNS:
             if declaration.split()[0] not in columns:
                 conn.execute('ALTER TABLE taste_axis_legacy ADD COLUMN '+declaration)
 
@@ -74,7 +70,7 @@ def install_guards(conn):
         row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
         if row is None:
             conn.execute(sql)
-        elif current._tokens(row[0]) != current._tokens(sql):
+        elif tokens(row[0]) != tokens(sql):
             raise MigrationError('Incompatible installed genre repair: ' + name)
 
 
@@ -83,11 +79,11 @@ def validate(conn, *, allow_missing_guards=False):
         row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?',(name,)).fetchone()
         if row is None and allow_missing_guards and name.startswith('installed_taste_axis_guard_'):
             continue
-        if row is None or current._tokens(row[0])!=current._tokens(sql):
+        if row is None or tokens(row[0])!=tokens(sql):
             raise MigrationError('Incompatible installed genre repair: '+name)
     if conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='taste_axis_legacy'").fetchone():
         columns = {row[1] for row in conn.execute('PRAGMA main.table_info(taste_axis_legacy)')}
-        if not {value.split()[0] for value in historical.ARCHIVE_COLUMNS}<=columns:
+        if not {value.split()[0] for value in genre_contract.ARCHIVE_COLUMNS}<=columns:
             raise MigrationError('Installed genre archive is missing additive evidence fields')
 
 

@@ -6,8 +6,8 @@ from pathlib import Path
 import sqlite3
 
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
-from ..migrations.v105_frozen_share_membership import fences
+from ..schema_contract import MigrationError
+from ..frozen_share_contract import fences
 from .rows import Job
 
 

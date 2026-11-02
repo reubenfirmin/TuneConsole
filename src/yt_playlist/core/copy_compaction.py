@@ -3,6 +3,7 @@
 The implementation lives in core.db_rebuild. Diagnostic imports remain
 available until their existing callers move to that package.
 """
+from . import db_handles
 from .db_rebuild.job import (
     _files, _owned_files, main, run,
 )

@@ -13,7 +13,7 @@ import time
 
 from .. import db_handles, policy_documents, policy_recovery
 from ..evidence_ledger import _sync_directory
-from . import build, files
+from . import files, installed_format
 
 
 def digest(path):
@@ -158,6 +158,10 @@ def replace(store, state, guard, *, progress):
             closed = False
         except Exception:
             state['failed_phase'] = state['phase']
+            # close() finishes releasing SQLite and its lifetime lease even
+            # when a reader-retirement callback raises. Recover that closed
+            # handle before releasing requests waiting on the serving lock.
+            closed = closed or getattr(store.conn, '_handle_closed', False)
             if guard is not None:
                 guard.close()
                 guard = None
@@ -196,7 +200,7 @@ def recover(database):
             with closing(sqlite3.connect(database.as_uri()+'?mode=ro', uri=True)) as conn:
                 conn.row_factory = sqlite3.Row
                 policy_recovery._verify(conn)
-                build._format(conn)
+                installed_format.validate(conn)
                 if not pending.get('analytics_pending'):
                     files.verify(conn)
             pending.update(phase='complete', recovered=True)

@@ -5,7 +5,7 @@ import json
 import time
 
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import ranked_state as preparation
 from .ranked_verification import source_row, verify_document
 from .mapped_publication import MappedPublication

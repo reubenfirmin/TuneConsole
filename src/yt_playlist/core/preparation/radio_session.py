@@ -11,7 +11,7 @@ from .. import fao
 import time
 
 from .. import collection_recovery, entity_names, radio_checkpoint
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from ..policy_documents import _publish_encoded
 from .rows import Job, main as run
 

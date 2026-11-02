@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 import time
 
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from .selection import invalidators
 
 
@@ -94,7 +94,7 @@ class MappedPublication:
             f'UPDATE {head} SET active=0 WHERE active=1; END')
 
     def validate(self, conn):
-        from ..migrations.current import _tokens
+        from ..schema_contract import tokens as _tokens
         from ..entity_names import predecessor_definition as transform
         renamed = conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='accounts'").fetchone()
         # Frozen table replacement drops triggers attached to the retired source
@@ -112,7 +112,7 @@ class MappedPublication:
             raise MigrationError('Mapped publication requires its custody revision')
 
     def validate_preparation(self, conn):
-        from ..migrations.current import _tokens
+        from ..schema_contract import tokens as _tokens
         optional = {f'prepare_{self.job.name}_dependency_{owner}_{operation}'
             for owner in self.job.optional_dependencies for operation in ('insert', 'update', 'delete')}
         for name, sql in self.job.definitions(conn):

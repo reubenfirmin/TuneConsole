@@ -15,7 +15,7 @@ import time
 from .. import metadata_delivery_files as files, metadata_legacy, metadata_native
 from ..activity import WorkBudgetExceeded
 from ..db_revisions import keyed_reads
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import metadata_evidence as preparation, metadata_publication as publication
 
 
@@ -118,7 +118,7 @@ def definitions():
 def validate_installed(conn):
     if not conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?',(table('head'),)).fetchone():
         return
-    from ..migrations.current import _tokens
+    from ..schema_contract import tokens as _tokens
     from ..entity_names import predecessor_definition as transform
     renamed = conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='accounts'").fetchone()
     for name,sql in definitions():

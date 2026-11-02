@@ -26,9 +26,11 @@ BOUNDARIES = {
   'core/setup.py': ('prepared_config','write_config','restore_config'),
   'providers/credentials.py': ('resolve',),
   'rec/audio_vibe_cruise.py': ('_configured',), 'rec/audio_vibe_model.py': ('configured_path',),
+  'rec/audio_vibe_runtime.py': ('configured',),
  },
  'SQL/code definition, never runtime JSON': {
   'core/db_rebuild/destination.py': ('signature',),
+  'core/genre_contract.py': ('installed_definitions',),
   'core/preparation/choice_learning.py': ('_contract',),
   'core/preparation/tv_state.py': ('_frozen',),
  },

@@ -87,13 +87,15 @@ def facets_for(store, keys) -> dict:
             return facets_for(reader, keys)
     dao = store.rec_query
     genres, decades, artists = dao.track_genres(keys), dao.track_decades(keys), dao.track_artists(keys)
+    families = {genre: genre_map.family(genre, conn=store.conn) for genre in set(genres.values())}
+    subgenres = {genre: genre_map.subgenre(genre, conn=store.conn) for genre in families}
     out: dict = {}
     for k in keys:
         if k in genres:
-            fam = genre_map.family(genres[k],conn=store.conn)
+            fam = families[genres[k]]
             if fam:
                 out.setdefault(f"genre:{fam}", []).append(k)
-            sub = genre_map.subgenre(genres[k],conn=store.conn)
+            sub = subgenres[genres[k]]
             if sub and sub != fam:
                 out.setdefault(f"genre:{sub}", []).append(k)
         if k in decades:
@@ -125,16 +127,12 @@ def facet_leans(store, now) -> dict:
     skip_w, skip_hl = gp(store, "skip_transient_w"), gp(store, "skip_halflife_d")
     limit = gp(store, "recent_play_limit")
     leans: dict = {}
+    contributions = []
 
     def add(keys, signed, drop_artist=False):
         if not keys or signed == 0:
             return
-        fac = facets_for(store, keys)
-        n = len(set(keys)) or 1
-        for f, fk in fac.items():
-            if drop_artist and f.startswith("artist:"):
-                continue
-            leans[f] = leans.get(f, 0.0) + signed * (len(fk) / n)
+        contributions.append((list(dict.fromkeys(keys)), signed, drop_artist))
 
     for ts, direction, keys in store.rec_signals.recent_mood_events():
         add(keys, direction * decay_weight(now - ts, mood_hl))
@@ -158,6 +156,20 @@ def facet_leans(store, now) -> dict:
     # the read only asks the store for skips that could still matter, not the whole history.
     for k, ts in store.player_events.recent_skips_with_ts(now - 4 * skip_hl * 86400):
         add([k], -skip_w * decay_weight(now - ts, skip_hl), drop_artist=True)
+    # Capture metadata once for this snapshot, preserving each event's decay,
+    # denominator, ordering and artist suppression during accumulation.
+    by_key = {}
+    for facet, keys in facets_for(store, [key for keys, _, _ in contributions for key in keys]).items():
+        for key in keys:
+            by_key.setdefault(key, []).append(facet)
+    for keys, signed, drop_artist in contributions:
+        counts = {}
+        for key in keys:
+            for facet in by_key.get(key, ()):
+                if not drop_artist or not facet.startswith('artist:'):
+                    counts[facet] = counts.get(facet, 0) + 1
+        for facet, count in counts.items():
+            leans[facet] = leans.get(facet, 0.0) + signed * (count / len(keys))
     # Mix choices are broad raw-genre preferences, never synthetic plays or
     # centroids over whichever recordings happen to match today's catalog.
     from yt_playlist.core import mix_choices

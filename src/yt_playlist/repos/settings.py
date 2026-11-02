@@ -123,20 +123,20 @@ class SettingsRepo(Repo):
                 return owner.value(self.conn,revision,default)
         from yt_playlist.core import radio_provenance
         if key in radio_provenance.KEYS:
-            from yt_playlist.core.preparation import radio_origin_publication
-            revision = radio_origin_publication.selected(self.conn)
+            from yt_playlist.core import radio_reads
+            revision = radio_reads.origin_selected(self.conn)
             if revision is not None:
-                return radio_origin_publication.value(self.conn,key,revision,default)
+                return radio_reads.origin_value(self.conn,key,revision,default)
         if key in recommendation_setting_outputs.KEYS:
             from yt_playlist.core.preparation import saved_output_publication
             revision = saved_output_publication.selected(self.conn,key)
             if revision is not None:
                 return saved_output_publication.value(self.conn,key,revision,default)
         if key == 'radio_current_session':
-            from yt_playlist.core.preparation import radio_publication
-            revision = radio_publication.selected(self.conn)
+            from yt_playlist.core import radio_reads
+            revision = radio_reads.session_selected(self.conn)
             if revision is not None:
-                return radio_publication.value(self.conn,revision,default)
+                return radio_reads.session_value(self.conn,revision,default)
         if workflow_settings.owns(key) and workflow_settings.available(self.conn):
             return workflow_settings.get(self.conn,key,default)
         for owner in (recommendation_setting_outputs,album_tuning_state,model_selection_heads,ranking_checkpoints,taste_control_state,experiment_decision_state,spotify_job_state):

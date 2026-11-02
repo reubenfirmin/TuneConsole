@@ -4,7 +4,7 @@ from pathlib import Path
 from .. import fao
 
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from . import document_plan, ranked_state as preparation
 
 

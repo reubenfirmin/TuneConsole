@@ -8,10 +8,10 @@ from . import source
 from .build import quote
 
 
-def rows(conn, table, *, legacy_id=False):
+def rows(conn, table, *, legacy_id=False, predicate=None):
     cursor = None
     while True:
-        values,cursor,done = source.scan(conn,table,cursor,128,legacy_id=legacy_id)
+        values,cursor,done = source.scan(conn,table,cursor,128,legacy_id=legacy_id,predicate=predicate)
         yield from values
         if done:
             return
@@ -40,7 +40,8 @@ def predictions(reader, target):
             raise ValueError('Direct rebuild changed calculation provenance: '+str((expected or found)[0]))
 
 
-def retained(reader, target, table, destination, mapping, *, retained=None, at=None, required=None):
+def retained(reader, target, table, destination, mapping, *, retained=None, at=None, required=None,
+             predicate=None, nulls=()):
     """Every original key/value survives, including implicit row IDs and types.
 
     Domain writers may add exact upload admissions and vocabulary identities.
@@ -137,7 +138,7 @@ def retained(reader, target, table, destination, mapping, *, retained=None, at=N
                    'album_discovery_memberships','rec_musical_profiles','rec_musical_source_profiles',
                    *vibe_versions.COLUMNS,*(owner for owner,*_ in group_documents.OWNERS)}
     attached = any(row[1]=='rebuild_source' for row in target.execute('PRAGMA database_list'))
-    if table not in transformed and retained is None and required is None and attached:
+    if table not in transformed and retained is None and required is None and predicate is None and not nulls and attached:
         _exact_sql(reader,target,table,destination,mapping)
         return
     info = list(reader.execute('PRAGMA table_info('+quote(table)+')'))
@@ -146,7 +147,7 @@ def retained(reader, target, table, destination, mapping, *, retained=None, at=N
     query = 'SELECT '+fields+' FROM '+quote(destination)+' WHERE '+ ' AND '.join(
         quote(mapping[key])+' IS ?' for key in keys)
     count, profile_cache = 0, {}
-    for row in rows(reader,table,legacy_id='_legacy_id' in mapping):
+    for row in rows(reader,table,legacy_id='_legacy_id' in mapping,predicate=predicate):
         if retained is not None and row['version'] not in retained:
             continue
         if table == 'artist_credit_observations' and at is not None:
@@ -162,7 +163,7 @@ def retained(reader, target, table, destination, mapping, *, retained=None, at=N
             'discovery_memberships','album_discovery_memberships') else row)
         if table == 'taste_modes' and at is not None and not row['active']:
             expected_row = dict(row, centroid=b'', families='[]', rep_keys='[]')
-        expected = tuple(expected_row[key] for key in mapping)
+        expected = tuple(None if key in nulls else expected_row[key] for key in mapping)
         group_owner = next(((prefix, kind) for owner, _keys, prefix, kind in group_documents.OWNERS if owner == table), None)
         if actual is not None and group_owner is not None:
             actual = list(actual)
@@ -280,6 +281,10 @@ def _group_progress(reader, target):
         expected = captured
     actual = [tuple(row) for row in target.execute(
         'SELECT singleton,phase,reported_at,reason FROM group_preparation_progress')]
+    if not expected and actual == [(1,None,None,None)]:
+        # Importing a captured generation checkpoint can create the empty
+        # progress singleton. It asserts no preparation phase or clock.
+        actual = []
     if actual != expected:
         raise ValueError('Direct rebuild changed captured grouping progress')
 

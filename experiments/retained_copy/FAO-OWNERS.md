@@ -118,7 +118,12 @@ both saved clocks through their domain publishers too.
 Packed policy, group, metadata and compatibility-evidence recovery retains the
 verified reader's clocks per range. Repacking never combines different ages;
 source-file ordering keeps existing compact packs together within the normal
-byte limits. Annotation, paid-description, recommendation-output, collection,
+byte limits. Recovered packs include a bounded custody-clock header suffix in
+their content-addressed identity, so equal retained records from differently
+aged packs cannot overwrite each other's clocks. Metadata's temporary recovery
+map keys content by source file as well as digest; sharing within one source
+pack remains intact. No persistent SQL file registry is added.
+Annotation, paid-description, recommendation-output, collection,
 action-backup and pending-feedback copies carry the same pinned source clocks.
 New backup manifests have their own publication age and do not renew the bodies
 they describe. No additional per-path metadata registry is introduced.

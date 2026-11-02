@@ -25,16 +25,16 @@ def load_published(conn):
 
 def _load(conn, *, project):
     if not available(conn):
-        from .preparation import radio_publication
-        revision = radio_publication.selected(conn)
+        from . import radio_reads
+        revision = radio_reads.session_selected(conn)
         if revision is not None:
-            raw = radio_publication.value(conn,revision)
+            raw = radio_reads.session_value(conn,revision)
         else:
             row = conn.execute('SELECT value FROM settings WHERE key=?',(SESSION_KEY,)).fetchone()
             raw = row[0] if row else None
         value = json.loads(raw) if raw else None
         if project:
-            from .preparation.append_publication import apply_radio
+            from .append_reads import apply_radio
             apply_radio(conn,SESSION_KEY,value)
         return value,None
     row = conn.execute('SELECT s.* FROM radio_session_head h JOIN radio_sessions s ON s.id=h.session_id').fetchone()
@@ -71,7 +71,7 @@ def _load(conn, *, project):
     if append_work.available(conn):
         append_work.load_radio(conn,row['id'],state)
     else:
-        from .preparation.append_publication import apply_radio
+        from .append_reads import apply_radio
         apply_radio(conn,row['id'],state)
     return state,(row['id'],row['revision'])
 

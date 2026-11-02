@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from .. import entity_names, radio_provenance, recommendation_outputs as files
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from .ordered_rows import OrderedJob
 from .rows import Job, main as run
 

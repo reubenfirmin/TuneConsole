@@ -119,10 +119,17 @@ def test_stale_extension_explains_zero_checks_and_recovers_after_reload(vibes_en
 def test_normal_collection_predicts_and_propagates_without_rating_ui(live_app, page, store, monkeypatch):
     from tests.test_audio_vibe_embeddings import with_embedding
     from tests.rec.test_vibe_prediction import drain, fits, track
-    from yt_playlist.rec import audio_vibe_external
+    from yt_playlist.rec import (audio_vibe_cruise, audio_vibe_energize, audio_vibe_focus,
+                                 audio_vibe_relax, audio_vibe_release, audio_vibe_uplift)
 
     monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
     monkeypatch.setenv(audio_vibe_model.ENVIRONMENT_KEY, str(audio_vibe_model.DEFAULT_PATH))
+    specialists = {'cruise': audio_vibe_cruise, 'energize': audio_vibe_energize,
+                   'concentrate': audio_vibe_focus, 'relax': audio_vibe_relax,
+                   'release': audio_vibe_release, 'uplift': audio_vibe_uplift}
+    for specialist in specialists.values():
+        monkeypatch.setenv(specialist.ENVIRONMENT_KEY, str(specialist.DEFAULT_PATH))
+        monkeypatch.setenv(specialist.MODE_KEY, 'active')
     _tid, measured = track(store, 'vibe_song', artist='Observed artist')
     _tid, neighbour = track(store, 'unplayed_song', artist='Observed artist')
     value = with_embedding(sample())
@@ -153,7 +160,11 @@ def test_normal_collection_predicts_and_propagates_without_rating_ui(live_app, p
     run_id = page.evaluate('JSON.parse(localStorage.getItem(' + json.dumps(RUN) + ')).id')
     samples = store.audio_vibes.samples(run_id)
     assert len(samples) == 3
-    expected = audio_vibe_external.scores(json.loads(audio_vibe_model.DEFAULT_PATH.read_text()), samples)
+    # Each bundled specialist owns its target and aggregation contract. The
+    # retired shared model's six outputs no longer describe production scores.
+    excerpts = [sample['embedding']['values'] for sample in samples]
+    expected = {vibe: specialist.score(specialist.load(specialist.DEFAULT_PATH), excerpts)['score']
+                for vibe, specialist in specialists.items()}
     drain(store)
     assert {key: fit['score'] for key, fit in fits(store, measured).items()} == pytest.approx(expected)
     assert {fit['source'] for fit in fits(store, measured).values()} == {'audio_measurement'}

@@ -1,22 +1,20 @@
 """Temporary album controls retain canonical genre identities across label edits."""
 import json
 
-from . import genre_identity
+from . import control_reads, genre_identity
 
 KEYS = frozenset({'album_menu_tuning'})
 
 
 def available(conn):
-    from .preparation import control_publication
     return (conn.execute("SELECT 1 FROM sqlite_schema WHERE name='album_menu_controls'").fetchone() is not None
-            or control_publication.installed(conn, 'album-controls'))
+            or control_reads.installed(conn, 'album-controls'))
 
 
 def get(conn,key,default=None):
-    from .preparation import control_publication
-    revision = control_publication.selected(conn, 'album-controls')
+    revision = control_reads.selected(conn, 'album-controls')
     if revision is not None:
-        return control_publication.album_read(conn, revision, default)
+        return control_reads.album_read(conn, revision, default)
     if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='album_menu_controls'").fetchone():
         row = conn.execute('SELECT value FROM main.settings WHERE key=?', (key,)).fetchone()
         return row[0] if row else default
@@ -30,9 +28,8 @@ def get(conn,key,default=None):
 
 
 def put(conn,values):
-    from .preparation import control_publication
     if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='album_menu_controls'").fetchone():
-        return control_publication.retained_write(conn, values)
+        return control_reads.retained_write(conn, values)
     for key,raw in values.items():
         conn.execute('DELETE FROM album_menu_controls WHERE singleton=1')
         if not raw:

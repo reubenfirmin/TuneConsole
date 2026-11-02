@@ -10,6 +10,18 @@ SETTING = "home_mix_vibe"
 VERSION = 'musical-vibes-5'
 FIT_STEP = .04
 _NATURAL = ContextVar('onboarding_natural_mix', default=False)
+_access = None
+
+
+def configure_access(check):
+    """Supply the journey policy from the application or worker composition root.
+
+    Ranking is also used by the journey's natural-menu readiness checks. It
+    cannot import that higher-level service without making preparation depend
+    on its own serving gate.
+    """
+    global _access
+    _access = check
 
 
 @contextmanager
@@ -77,8 +89,9 @@ def current(store, now):
     value = store.settings.get_setting(SETTING)
     if value not in PRESETS:
         return ''
-    from yt_playlist.rec import account_growth
-    return value if account_growth.vibe_access(store, now) else ''
+    if _access is None:
+        raise RuntimeError('Vibe access policy has not been configured')
+    return value if _access(store, now) else ''
 
 
 def affinity(item, preset, profiles=None):

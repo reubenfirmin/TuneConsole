@@ -31,6 +31,20 @@ def _familiarity(summary):
     return {'level': level, 'label': label}
 
 
+def story_fragment(ctx, request):
+    """Render the prepared story pool after the caller establishes access."""
+    now = ctx.now_fn()
+    schedule = ctx.rec_worker.trigger_story_refresh if ctx.rec_worker else lambda: None
+    cards, preparing = into_recently.load(ctx.store, now, epoch=_epoch(ctx.store, "into_recently"),
+                                         schedule=schedule)
+    if cards or preparing:
+        groups = into_recently.story_groups(cards)
+        return ctx.templates.TemplateResponse(request, "_partials/into_recently.html",
+            {"cards": cards, "groups": groups, "spreads": into_recently.editorial_spreads(groups),
+             "preparing": preparing})
+    return Response(status_code=200)
+
+
 def build(ctx, views):
     router = APIRouter()
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
@@ -173,16 +187,7 @@ def build(ctx, views):
     @router.get("/home/into-recently", dependencies=[Depends(guard(ctx, 'recent'))])
     def home_into_recently(request: Request):
         """Read worker-prepared stories; the request only rotates the already decorated pool."""
-        now = now_fn()
-        schedule = ctx.rec_worker.trigger_story_refresh if ctx.rec_worker else lambda: None
-        cards, preparing = into_recently.load(store, now, epoch=_epoch(store, "into_recently"), schedule=schedule)
-        if cards or preparing:
-            groups = into_recently.story_groups(cards)
-            return templates.TemplateResponse(request, "_partials/into_recently.html",
-                                              {"cards": cards, "groups": groups,
-                                               "spreads": into_recently.editorial_spreads(groups),
-                                               "preparing": preparing})
-        return Response(status_code=200)
+        return story_fragment(ctx, request)
 
     @router.post("/home/into-recently/impressions", status_code=204, dependencies=[Depends(guard(ctx, 'recent'))])
     def story_impressions(visible: StoryImpressions):

@@ -37,7 +37,7 @@ def install_allocation(conn, context=None):
 
 
 def validate_allocation(conn):
-    from .migrations.current import _tokens
+    from .schema_contract import tokens as _tokens
     for sql in allocation_sql():
         row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (sql.split()[2],)).fetchone()
         if row is None or _tokens(row[0]) != _tokens(sql):
@@ -61,7 +61,7 @@ def install(conn, context=None):
 
 
 def validate(conn):
-    from .migrations.current import _tokens
+    from .schema_contract import tokens as _tokens
     row = conn.execute("SELECT sql FROM main.sqlite_schema WHERE name='prediction_provenance'").fetchone()
     if row is None or _tokens(row[0]) != _tokens(SQL):
         raise ValueError('Incompatible prediction provenance owner')
@@ -95,7 +95,7 @@ def install_guards(conn, context=None):
 
 
 def validate_guards(conn):
-    from .migrations.current import _tokens
+    from .schema_contract import tokens as _tokens
     for name, sql in guards():
         saved = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
         if saved is None or _tokens(saved[0]) != _tokens(sql):
@@ -121,7 +121,7 @@ def install_lifecycle(conn, context=None):
 
 
 def validate_lifecycle(conn):
-    from .migrations.current import _tokens
+    from .schema_contract import tokens as _tokens
     for name,sql in lifecycle_sql():
         row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?',(name,)).fetchone()
         if row is None or _tokens(row[0])!=_tokens(sql):

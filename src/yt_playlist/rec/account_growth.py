@@ -10,7 +10,7 @@ import math
 from yt_playlist.core import vibe_versions
 from yt_playlist.providers import deepseek, enrichment, lastfm
 from yt_playlist.rec import (artist_start, festival_layout, growth_readiness, home_preferences, home_prepared, home_vibe, into_recently,
-                             onboarding, tv, vibe_preparation)
+                             onboarding_outputs, tv, vibe_preparation)
 from yt_playlist.repos.enrichment_sql import pending_coverage
 
 _SCOPE = ("WITH scope AS (SELECT e.recording_id FROM catalog_entries e "
@@ -150,7 +150,7 @@ def _view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collec
             pending_coverage('r.id') + ') ,0) FROM scope s JOIN recordings r ON r.id=s.recording_id').fetchone()
         total, processed = coverage
         imported = reader.settings.get_setting('last_sync_at') is not None
-        mixes = onboarding.prepared_mixes_ready(reader, now) if mixes_ready is None else mixes_ready
+        mixes = onboarding_outputs.prepared_mixes_ready(reader, now) if mixes_ready is None else mixes_ready
         albums = growth_readiness.albums(reader, now) if albums_ready is None else albums_ready
         # A radio menu is an actual prepared offer, not a fitted model or a key.
         if radio is None:
@@ -175,7 +175,7 @@ def _view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collec
         playable_owned = reader.conn.execute('SELECT 1 FROM playable_library_tracks WHERE '
             + reader.rec_eligibility.track_length_clause() + ' LIMIT 1').fetchone()
         first_ready = bool(playable_owned
-                           or onboarding.starter_album(reader) or artist_start.first_set(reader, now))
+                           or onboarding_outputs.starter_album(reader) or artist_start.first_set(reader, now))
         # Read the same bounded, currently eligible outputs that each area serves.
         # A cache row or a fitted model alone does not open a destination.
         if collections is None:

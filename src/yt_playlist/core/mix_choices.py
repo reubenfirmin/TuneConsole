@@ -78,8 +78,8 @@ def install(conn, context=None):
 
 
 def validate(conn):
-    from .migrations.current import _tokens
-    from .migrations.runner import MigrationError
+    from .schema_contract import tokens as _tokens
+    from .schema_contract import MigrationError
     for name, sql in definitions():
         row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
         if row is None or _tokens(row[0]) != _tokens(sql):
@@ -175,15 +175,21 @@ def publish_menu(conn, record, context_id, *, source=None):
 
 def project(conn, record):
     """Overlay a prepared legacy menu; immutable original JSON remains until #626."""
-    if not record or 'context' not in record or not available(conn):
+    if not record or 'context' not in record:
         return record
+    installed = available(conn)
+    compact = record.get('format') == 'mixes' and record.get('precision') == PRECISION
+    if not installed:
+        return None if compact else record
     if record.get('format') != 'mixes':
         context = conn.execute("SELECT context FROM choice_context_projections WHERE source_context=? AND kind='independent'",
                                (record['context'],)).fetchone()
         return {**record, 'context': context[0]} if context else record
     menu = conn.execute('SELECT context,context_at FROM mix_choice_menus WHERE opportunity_id=?', (record['id'],)).fetchone()
     if menu is None:
-        return record
+        # An appendable file directory can be ahead of a SQL snapshot. Local
+        # descriptor IDs have meaning only after this menu's SQL publication.
+        return None if compact else record
     options = {row['option_id']: row for row in conn.execute('SELECT * FROM mix_choice_options '
                                                            'WHERE opportunity_id=?', (record['id'],))}
     result = []
@@ -212,15 +218,15 @@ def collect_unpublished(store, limit=128):
     """Reconcile SQL committed before a failed event write, under admission."""
     if not available(store.conn):
         return 0
-    from ..rec import group_roots
-    with group_roots.admission(store):
+    from . import group_admission
+    with group_admission.admission(store):
         after = getattr(store, '_mix_choice_orphan_after', '')
         with store._lock:
             identities = [row[0] for row in store.conn.execute('SELECT opportunity_id FROM mix_choice_menus '
                 'WHERE opportunity_id>? ORDER BY opportunity_id LIMIT ?', (after, limit))]
         ledger = store.rec_ledger.evidence()
         missing = [identity for identity in identities if not ledger._path('opportunity', identity).exists()]
-        with group_roots.writer(store):
+        with group_admission.writer(store):
             retire(store.conn, missing)
             collect_dictionary(store.conn, limit)
         store._mix_choice_orphan_after = identities[-1] if len(identities) == limit else ''

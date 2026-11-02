@@ -6,7 +6,7 @@ import time
 
 from .. import genre_identity
 from ..evidence_ledger import canonical
-from ..migrations.runner import MigrationError
+from ..schema_contract import MigrationError
 from ...util import genre_catalog
 from . import bounded, genre_preferences as preparation
 
@@ -85,7 +85,7 @@ def definitions():
 
 
 def validate(conn):
-    from ..migrations.current import _tokens
+    from ..schema_contract import tokens as _tokens
     from ..entity_names import predecessor_definition as transform
     renamed = conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='accounts'").fetchone()
     for name, sql in definitions():

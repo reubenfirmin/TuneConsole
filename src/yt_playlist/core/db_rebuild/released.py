@@ -24,16 +24,16 @@ def _discovery(reader, target, row, *, table):
         if label is not None:
             target.execute('INSERT INTO genre_classification_legacy(artist_id,raw_label,genre_key,resolution_reason) '
                            'VALUES (?,?,?,?)',(row['artist_id'],label,key,reason))
-    from ..migrations import v101_discovery_subjects as discovery
+    from . import discovery_inputs as discovery
     discovery.copy_row(target,table,value)
 
 
-def stages():
+def stages(*, sparse=False):
     yield Stage('genre_preferences',released_learning.preferences)
-    yield from released_catalog.stages()
+    yield from released_catalog.stages(sparse=sparse)
     yield from released_learning.stages()
     yield from released_outputs.policy_stages()
-    yield from released_groups.stages()
+    yield from released_groups.stages(sparse=sparse)
     # Reuse the development mappings after their released predecessors exist.
     for stage in development.stages():
         if stage.name=='rec_proposals':

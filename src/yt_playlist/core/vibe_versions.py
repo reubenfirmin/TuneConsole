@@ -1,5 +1,4 @@
 """Exact vibe version identities; normalization happens in an empty rebuild only."""
-from functools import lru_cache
 import re
 
 COLUMNS = {'measurements': 'model_version', 'predictions': 'policy_version',
@@ -18,7 +17,7 @@ def install(conn, context=None):
 
 
 def validate(conn):
-    from .migrations.current import _tokens
+    from .schema_contract import tokens as _tokens
     for name, sql in definitions():
         row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
         if row is None or _tokens(row[0]) != _tokens(sql):
@@ -67,17 +66,6 @@ def transform(sql, table):
     name = COLUMNS[table]
     sql = re.sub(r'\b'+name+r'\b', name+'_id', sql)
     return sql.replace(name+'_id TEXT NOT NULL', name+'_id INTEGER NOT NULL REFERENCES vibe_versions(id)')
-
-
-@lru_cache(maxsize=1)
-def contract():
-    from .migrations import current
-    statements = []
-    for sql in current.statements():
-        match = re.match(r'\s*CREATE TABLE (measurements|predictions|recording_vibes)\b', sql, re.I)
-        if match:
-            statements.append(transform(sql, match[1]))
-    return current._schema_contract(statements)
 
 
 def normalize_empty(conn):

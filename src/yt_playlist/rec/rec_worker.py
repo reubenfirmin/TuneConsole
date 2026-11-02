@@ -27,6 +27,8 @@ GROUP_PREEMPT = frozenset({Job.HOME, Job.MODES, Job.RATINGS, Job.CLEANUP})
 class RecWorker:
     def __init__(self, ctx, debounce_s=2.0, discovery_tick_s=1800, gc_tick_s=86400, gc_initial_s=60,
                  *, enabled=True):
+        from yt_playlist.rec import account_growth, home_vibe
+        home_vibe.configure_access(lambda store, now: account_growth.vibe_access(store, now))
         self.ctx = ctx
         self.debounce_s = debounce_s
         self.discovery_tick_s = discovery_tick_s   # background discovery scan cadence (~30 min)
