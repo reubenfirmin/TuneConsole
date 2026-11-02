@@ -27,8 +27,13 @@ class RecCandidatesRepo(Repo):
                 params[f'key{i}'] = key
                 names.append(f':key{i}')
             restriction = ' AND t.identity_key IN (' + ','.join(names) + ')'
+        # Identity projections are views after the subject cutover. Materialize
+        # this small lookup once so the calendar-only branch can index it instead
+        # of rescanning an account's events for each imported listening day.
         rows = self.conn.execute(
-            'WITH names AS (SELECT t.identity_key key,MIN(t.title) title,MIN(t.artist) artist,'
+            'WITH exact_days AS MATERIALIZED (SELECT pe.identity_key,pe.account_id,c.day '
+            'FROM play_event_subjects pe JOIN play_event_calendar c ON c.event_id=pe.id), '
+            'names AS (SELECT t.identity_key key,MIN(t.title) title,MIN(t.artist) artist,'
             'MIN(t.album) album,MIN(t.video_id) video_id,MIN(t.thumbnail) thumbnail,'
             f'MAX(CASE WHEN {LIKED_EXISTS} THEN 1 ELSE 0 END) liked '
             'FROM playable_library_tracks t WHERE t.video_id IS NOT NULL AND t.video_id<>\'\' '
@@ -37,8 +42,8 @@ class RecCandidatesRepo(Repo):
             'SELECT pe.identity_key,pe.played_at at FROM play_event_subjects pe JOIN names n ON n.key=pe.identity_key '
             'UNION ALL SELECT d.identity_key,d.day_ts+86400 FROM listening_days d '
             'JOIN names n ON n.key=d.identity_key WHERE NOT EXISTS ('
-            'SELECT 1 FROM play_event_subjects pe JOIN play_event_calendar c ON c.event_id=pe.id '
-            'WHERE pe.identity_key=d.identity_key AND pe.account_id=d.account_id AND c.day=d.day)), '
+            'SELECT 1 FROM exact_days pe WHERE pe.identity_key=d.identity_key '
+            'AND pe.account_id=d.account_id AND pe.day=d.day)), '
             'totals AS (SELECT identity_key,COUNT(*) plays,MAX(at) last_played FROM heard GROUP BY identity_key) '
             'SELECT n.*,COALESCE(h.plays,0) plays,h.last_played FROM names n '
             'LEFT JOIN totals h ON h.identity_key=n.key '

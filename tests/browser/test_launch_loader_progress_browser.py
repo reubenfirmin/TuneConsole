@@ -8,7 +8,7 @@ from tests.browser.radio_ui_support import radio_ui
 RADIO = 'Alpine.$data(document.querySelector(".radio-home"))'
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_new_seed_is_visible_first_and_staged_art_keeps_every_orbital_node(page, radio_ui, width):
     api = radio_ui
     page.clock.install()

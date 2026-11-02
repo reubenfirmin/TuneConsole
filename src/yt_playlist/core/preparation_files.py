@@ -94,7 +94,7 @@ def available(conn):
     return next(_owners(conn), None) is not None
 
 
-def _read(reference):
+def _read(reference, *, with_age=False):
     filename, digest, size = reference
     # The largest retained original is the bounded album-note source (512 MiB).
     # Read one file at a time; never concatenate an owner's whole history.
@@ -104,9 +104,10 @@ def _read(reference):
     path = Path(filename)
     with fao.open_reader(path) as stream:
         encoded = stream.read(size + 1)
+        age = stream.info
     if path.stem != digest or len(encoded) != size or hashlib.sha256(encoded).hexdigest() != digest:
         raise ValueError('Preparation file differs from retained bytes')
-    return encoded
+    return (encoded, age) if with_age else encoded
 
 
 def _coordinates(value, visit):
@@ -168,12 +169,12 @@ def export(conn, root):
             return reference
         check_cancellable_work()
         captured.add(identity)
-        encoded = _read(reference)
+        encoded, age = _read(reference, with_age=True)
         if graph:
             # Traversal exports every page and nested recovery/backup, including
             # units which a partially processed generation has not copied to SQL.
             _graph(encoded, lambda child: retain(domain, child, True))
-        copied = policy_documents._publish_encoded(root, encoded, reference[1])
+        copied = policy_documents._publish_encoded(root, encoded, reference[1], age=age)
         record({'type': 'file', 'domain': domain, 'reference': reference,
                 'relative_filename': str(Path(copied).relative_to(root)), 'graph': graph})
         return reference
@@ -246,7 +247,7 @@ def restore(conn, manifest):
                 raise ValueError('Preparation backup has an incomplete or cyclic file graph')
             visiting.add(identity)
             entry = retained[identity]
-            encoded = _read([str(root / entry['relative_filename']), *reference[1:]])
+            encoded, age = _read([str(root / entry['relative_filename']), *reference[1:]], with_age=True)
             if entry['graph']:
                 encoded = _graph(encoded, lambda child: install(domain, child, depth + 1))
             destination = domains_by_name[domain](conn)
@@ -254,7 +255,7 @@ def restore(conn, manifest):
             if domain == 'album_notes':
                 destination /= 'originals' if Path(reference[0]).parent.parent.name == 'originals' else 'outputs'
             digest = hashlib.sha256(encoded).hexdigest()
-            result = [policy_documents._publish_encoded(destination, encoded, digest), digest, len(encoded)]
+            result = [policy_documents._publish_encoded(destination, encoded, digest, age=age), digest, len(encoded)]
             installed[identity] = result
             visiting.remove(identity)
             return result

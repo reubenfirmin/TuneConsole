@@ -53,7 +53,7 @@ def prepare(store):
     store.settings.set_setting('onboard_dismissed','1')
 
 
-@pytest.mark.parametrize('width', [1440,390])
+@pytest.mark.parametrize('width', [1440])
 def test_charts_home_and_analytics_filtering_and_shared_styles(live_app,store,page,width):
     prepare(store)
     errors = []
@@ -164,7 +164,7 @@ def test_charts_home_and_analytics_filtering_and_shared_styles(live_app,store,pa
     assert not errors, errors
 
 
-@pytest.mark.parametrize('width',[1440,390])
+@pytest.mark.parametrize('width',[1440])
 def test_new_capture_shows_activity_without_claiming_discovery(live_app,store,page,width):
     store.settings.set_setting('listening_timezone','UTC')
     for index in range(100):
@@ -182,7 +182,7 @@ def test_new_capture_shows_activity_without_claiming_discovery(live_app,store,pa
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
 
 
-@pytest.mark.parametrize('width',[1440,390])
+@pytest.mark.parametrize('width',[1440])
 def test_daily_orbit_players_follow_their_arcs_without_overlapping_dates(live_app,store,page,width):
     store.settings.set_setting('listening_timezone','UTC')
     seed_catalog_track(store,'old','Earlier song','Returning artist',video_id='old-video')

@@ -162,7 +162,9 @@ def capture(conn, entry_id, credit_id, source, now, *, delivery_key=None, kind='
                 raise sqlite3.IntegrityError('Artist replay has no verified metadata delivery binding')
             if replay['credit_id'] != credit_id and not _same_delivered_credit(conn, replay['credit_id'], credit_id):
                 raise sqlite3.IntegrityError('A provider delivery cannot change its artist credit')
-            if not conn.execute('SELECT 1 FROM artist_credit_observations WHERE id=?', (replay['observation_id'],)).fetchone():
+            if (not conn.execute('SELECT 1 FROM artist_credit_observations WHERE id=?', (replay['observation_id'],)).fetchone()
+                    or metadata_delivery_id is not None and replay['metadata_bound'] and not conn.execute(
+                        'SELECT 1 FROM metadata_deliveries WHERE id=?', (metadata_delivery_id,)).fetchone()):
                 # A compact receipt outlives the disposable capture/delivery
                 # graph. It never creates another capture or changes a head.
                 return replay['observation_id'], False
@@ -186,9 +188,8 @@ def capture(conn, entry_id, credit_id, source, now, *, delivery_key=None, kind='
         old = head if head and head['credit_id'] == credit_id else None
     if old:
         if delivery_key is not None and receipts:
-            bound = conn.execute('SELECT metadata_delivery_id IS NOT NULL FROM artist_credit_observations WHERE id=?',
-                                 (old['id'],)).fetchone()[0]
-            credit_retention.receipt(conn, entry_id, source, delivery_key, old['id'], old['credit_id'], metadata_bound=bool(bound))
+            observation = conn.execute('SELECT * FROM artist_credit_observations WHERE id=?', (old['id'],)).fetchone()
+            credit_retention.prepare_receipt(conn, observation)
         conn.execute('UPDATE artist_credit_observations SET '
             'first_seen=CASE WHEN first_seen IS NULL THEN ? ELSE min(first_seen,?) END,'
             'last_seen=CASE WHEN last_seen IS NULL THEN ? ELSE max(last_seen,?) END,'

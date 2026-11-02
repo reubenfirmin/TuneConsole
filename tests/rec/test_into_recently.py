@@ -1,5 +1,6 @@
 from yt_playlist.rec import into_recently
 from types import SimpleNamespace
+import pytest
 from yt_playlist.web import theme
 
 
@@ -26,11 +27,12 @@ class FakeWiki:
 
 class FakeStore:
     """Just enough surface for ranked_subjects: monkeypatch transient.facet_leans separately."""
-    def __init__(self, favorites, corpus, wiki=None, recent=None):
+    def __init__(self, favorites, corpus, wiki=None, recent=None, conn=None):
         self._favorites = favorites      # [artist names], all-time order
         self._corpus = corpus            # {genre: count}
         self.wiki = wiki
         self.recent = recent
+        self.conn = conn
         self.charts = SimpleNamespace(top_artists=self.top_artists,
                                       corpus_distribution=self.corpus_distribution,
                                       story_activity=self.story_activity)
@@ -57,6 +59,12 @@ def _leans(monkeypatch, leans):
     monkeypatch.setattr(into_recently.transient, "facet_leans", lambda store, now: leans)
 
 
+@pytest.fixture
+def genre_conn(store):
+    """Genre ranking uses the current catalog while chart activity stays controlled."""
+    return store.conn
+
+
 def test_excludes_settled_favorite_artist(monkeypatch):
     store = FakeStore(favorites=["The Beatles"], corpus={})
     _leans(monkeypatch, {"artist:The Beatles": 5.0, "artist:Khruangbin": 1.0})
@@ -64,37 +72,38 @@ def test_excludes_settled_favorite_artist(monkeypatch):
     assert out == [{"kind": "artist", "subject": "artist:Khruangbin", "display": "Khruangbin"}]
 
 
-def test_suppresses_broad_staple_genre(monkeypatch):
-    store = FakeStore(favorites=[], corpus={"shoegaze": 800, "dub techno": 50, "ambient": 150})
+def test_suppresses_broad_staple_genre(monkeypatch, genre_conn):
+    store = FakeStore(favorites=[], corpus={"shoegaze": 800, "dub techno": 50, "ambient": 150},
+                      conn=genre_conn)
     _leans(monkeypatch, {"genre:shoegaze": 3.0, "genre:dub techno": 1.0})
     out = into_recently.ranked_subjects(store, now=0.0)[0]
     assert out["display"] == "dub techno"
     assert out["kind"] == "genre"
 
 
-def test_common_genre_remains_eligible_as_context(monkeypatch):
-    store = FakeStore(favorites=["Radiohead"], corpus={"rock": 1000})
+def test_common_genre_remains_eligible_as_context(monkeypatch, genre_conn):
+    store = FakeStore(favorites=["Radiohead"], corpus={"rock": 1000}, conn=genre_conn)
     _leans(monkeypatch, {"artist:Radiohead": 4.0, "genre:rock": 4.0})
     subjects = into_recently.ranked_subjects(store, now=0.0)
     assert subjects == [{'kind': 'genre', 'subject': 'genre:rock', 'display': 'rock'}]
     assert not into_recently._specific_genre_card(subjects[0])
 
 
-def test_ignores_era_facets_and_negative_leans(monkeypatch):
-    store = FakeStore(favorites=[], corpus={"jazz": 10})
+def test_ignores_era_facets_and_negative_leans(monkeypatch, genre_conn):
+    store = FakeStore(favorites=[], corpus={"jazz": 10}, conn=genre_conn)
     _leans(monkeypatch, {"era:1990s": 9.0, "artist:Boards of Canada": -2.0})
     assert into_recently.ranked_subjects(store, now=0.0) == []
 
 
-def test_specific_genres_win_over_catch_all_electronic(monkeypatch):
-    store = FakeStore(favorites=[], corpus={})
+def test_specific_genres_win_over_catch_all_electronic(monkeypatch, genre_conn):
+    store = FakeStore(favorites=[], corpus={}, conn=genre_conn)
     _leans(monkeypatch, {"genre:electronic": 10, "genre:other:electronic": 8,
                          "genre:electronic music": 6, "genre:shoegaze": 1})
     assert [s['display'] for s in into_recently.ranked_subjects(store, 0)] == ['shoegaze']
 
 
-def test_common_genres_can_supply_context_but_cannot_lead(monkeypatch):
-    store = FakeStore(favorites=[], corpus={})
+def test_common_genres_can_supply_context_but_cannot_lead(monkeypatch, genre_conn):
+    store = FakeStore(favorites=[], corpus={}, conn=genre_conn)
     _leans(monkeypatch, {
         'genre:techno': 100, 'genre:other:Techno': 90, 'genre:house': 80,
         'genre:rock': 70, 'genre:jazz': 60, 'genre:ambient': 50,

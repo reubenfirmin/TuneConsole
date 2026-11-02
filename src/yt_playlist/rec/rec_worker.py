@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 
-from yt_playlist.rec import model_selection
+from yt_playlist.rec import model_selection, measurement
 from yt_playlist.core.activity import (activity_for, cancellable_work, check_stopping, WorkClosing,
                                        work_budget, WorkBudgetExceeded)
 from yt_playlist.core.work_diagnostics import work_span
@@ -182,6 +182,8 @@ class RecWorker:
         self._threads.clear()
         from yt_playlist.rec import group_roots
         group_roots.close_retention(self.ctx.store)
+        from yt_playlist.core.preparation import managed_files
+        managed_files.close(self.ctx.store)
         self._ticker_started = False
         self.ctx.store.maintenance_diagnostics.flush(force=True)
 
@@ -278,10 +280,20 @@ class RecWorker:
         with self._lock:
             return self._model_active or self.jobs.visible
 
+    @property
+    def preparing(self):
+        """Keep the preparation notice visible between retries of runtime output."""
+        if self.busy:
+            return True
+        with self._lock:
+            return any(self.jobs.retry[job].dirty for job in
+                (Job.PREPARE, Job.FULL, Job.MODES, Job.BUNDLES, Job.HOME))
+
     def enqueue_measurement(self, offer):
         """Use this worker for analytics too; requests only pin and enqueue their offered state."""
         with self._lock:
-            if self._stop.is_set() or not self.work.accepting or getattr(self.ctx.store, 'activity_paused', False):
+            if (self._stop.is_set() or not self.work.accepting or not self._storage_ready()
+                    or getattr(self.ctx.store, 'activity_paused', False)):
                 return False
             if not self.jobs.merge(Job.MEASUREMENT, offer):
                 self.ctx.logger.warning("recommendation measurement backlog full; offer omitted: surface=%s",
@@ -420,9 +432,13 @@ class RecWorker:
         if artist_ids:
             self._schedule(full=False, artist_images=artist_ids)
 
+    def _storage_ready(self):
+        maintenance = getattr(self.ctx, 'storage_maintenance', None)
+        return maintenance is None or maintenance.ready.is_set()
+
     def _accepting(self):
         return (self.enabled and not self._stop.is_set() and self.work.accepting
-                and not getattr(self.ctx.store, 'activity_paused', False))
+                and self._storage_ready() and not getattr(self.ctx.store, 'activity_paused', False))
 
     def _schedule_projections(self, kinds):
         return self._schedule(full=False, **dict.fromkeys(kinds, True))
@@ -451,7 +467,8 @@ class RecWorker:
                   model_health=False, evidence_storage=False, retention=False):
         with self._lock:
             recovery = (evidence_storage and self.enabled and not self._stop.is_set()
-                        and self.work.accepting and not getattr(self.ctx.store, '_activity_paused', False))
+                        and self.work.accepting and self._storage_ready()
+                        and not getattr(self.ctx.store, '_activity_paused', False))
             if not self._accepting() and not recovery:
                 return False
             requested = {Job.FULL: full, Job.MODES: modes, Job.RATINGS: ratings, Job.PREPARE: prepare, Job.TRENDS: trends,
@@ -539,15 +556,27 @@ class RecWorker:
                     self.ctx.logger.warning('Listening evidence maintenance failed', exc_info=True)
             if Job.RETENTION in batch:
                 from yt_playlist.rec import group_roots
-                from yt_playlist.core.preparation import runtime_history
+                from yt_playlist.core.preparation import runtime_history, vibe_provenance, profiles, embeddings, legacy_journals, managed_files
                 state = self.jobs.retry[Job.RETENTION]
                 state.retry_at = time.monotonic() + 300
                 try:
+                    self._stage('managed file lifecycle', managed_files.maintain,
+                                self.ctx.store, self.ctx.now_fn())
+                    self._stage('prediction provenance retirement', vibe_provenance.maintain,
+                                self.ctx.store, self.ctx.now_fn())
+                    self._stage('musical profile file collection', profiles.maintain,
+                                self.ctx.store, self.ctx.now_fn())
+                    self._stage('embedding file collection', embeddings.maintain,
+                                self.ctx.store, self.ctx.now_fn())
+                    self._stage('legacy diagnostic expiry', legacy_journals.maintain,
+                                self.ctx.store, self.ctx.now_fn())
                     history = self._stage('runtime history retirement', runtime_history.maintain,
                                           self.ctx.store, self.ctx.now_fn())
                     result = self._stage('derived history retirement', group_roots.maintain_retention,
                                          self.ctx.store)
-                    if (result and result['pending']) or (history and any(history.values())):
+                    policies = self._stage('unused recommendation policies', measurement.maintain_storage,
+                                           self.ctx.store, self.ctx.now_fn(), progress=True)
+                    if (result and result['pending']) or (history and any(history.values())) or policies['pending']:
                         state.retry_at = time.monotonic() + 5
                     self.ctx.logger.debug('Derived history retirement: %s', result)
                 except WorkClosing:

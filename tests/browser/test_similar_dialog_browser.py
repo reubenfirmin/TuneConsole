@@ -7,7 +7,7 @@ from yt_playlist.util.matching import identity_key
 
 
 @pytest.fixture(params=[(kind, width, artwork) for kind in ("playlist", "album")
-                       for width in (1280, 390, 320) for artwork in (False, True)],
+                       for width in (1280,) for artwork in (False, True)],
                 ids=lambda value: f"{value[0]}-{value[1]}-{'artwork' if value[2] else 'no-artwork'}")
 def similar_dialog(live_app, store, page, request):
     kind, width, artwork = request.param

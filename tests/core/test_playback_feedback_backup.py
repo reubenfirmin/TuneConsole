@@ -1,7 +1,9 @@
 """Pending feedback and committed receipts survive independent library recovery."""
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from dataclasses import replace
 import hashlib
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -9,7 +11,7 @@ import threading
 
 import pytest
 
-from yt_playlist.core import playback_feedback, playback_feedback_backup, policy_recovery
+from yt_playlist.core import fao, playback_feedback, playback_feedback_backup, policy_recovery
 from yt_playlist.core.store import Store
 
 
@@ -38,7 +40,8 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def test_recovery_keeps_pending_feedback_and_receipts_without_source_files(source, tmp_path, monkeypatch):
+@pytest.mark.parametrize('compressed', [False, True])
+def test_recovery_keeps_pending_feedback_and_receipts_without_source_files(source, tmp_path, monkeypatch, compressed):
     store, account = source
     queue = playback_feedback.inbox(store)
     playback_feedback.capture(store, 'player', account, event(10), 100)
@@ -55,6 +58,22 @@ def test_recovery_keeps_pending_feedback_and_receipts_without_source_files(sourc
     playback_feedback.capture(store, 'player', account, event(30), 102)
     assert queue.pending() == 3
     assert store.conn.execute('SELECT count(*) FROM player_events').fetchone()[0] == 1
+    for index, path in enumerate(sorted(queue.directory.glob('*/*.json'))):
+        encoded = fao.read_bytes(path)
+        age = replace(fao.stat(path), mtime_ns=1_000_000_000_000 + index, ctime_ns=2_000_000_000_000 + index)
+        if compressed:
+            fao.write_bytes(path, encoded, age=age)
+        else:
+            path.write_bytes(encoded)
+            os.utime(path, ns=(age.mtime_ns, age.mtime_ns))
+
+    def clocks(inbox):
+        with closing(inbox.connect()) as conn:
+            return {row['capture_id']: (info.mtime_ns, info.ctime_ns)
+                    for row in conn.execute('SELECT capture_id,filename FROM playback_feedback_inbox')
+                    for info in [fao.stat(row['filename'])]}
+
+    expected_clocks = clocks(queue)
     store.conn.close()
     original = digest(store._db_path), digest(queue.path)
     report = policy_recovery.recover(store._db_path, tmp_path / 'recovered',
@@ -72,6 +91,7 @@ def test_recovery_keeps_pending_feedback_and_receipts_without_source_files(sourc
             candidate.init_schema()
             pending = playback_feedback.inbox(candidate)
             assert pending.pending() == 3
+            assert clocks(pending) == expected_clocks
             assert Path(pending.next()['filename']).is_relative_to(pending.directory)
             assert playback_feedback.drain(candidate) == 3
             assert playback_feedback.drain(candidate) == 0

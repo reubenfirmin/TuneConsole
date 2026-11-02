@@ -20,10 +20,11 @@ DAY = 86400
 def store():
     s = Store(":memory:")
     s.init_schema()
-    s.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'me','c.json',1)")
-    s.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (2,'brand','c.json',0)")
+    s.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'me','c.json',1)")
+    s.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (2,'brand','c.json',0)")
     s.conn.commit()
-    return s
+    yield s
+    s.conn.close()
 
 
 def _hist(store, ident, day, keys, source="ytm_history"):
@@ -31,7 +32,7 @@ def _hist(store, ident, day, keys, source="ytm_history"):
 
 
 def _coverage(store, lo=10, hi=19, ident=1, **overrides):
-    values = dict(identity_id=ident, fingerprint='verified-fixture', imported_at=1,
+    values = dict(account_id=ident, fingerprint='verified-fixture', imported_at=1,
                   unparsed_dates=0, account_verified=1, complete=1,
                   coverage_start=lo * DAY, coverage_end=(hi + 1) * DAY)
     values.update(overrides)
@@ -208,7 +209,7 @@ def test_deleted_rows_are_backed_up(store, tmp_path):
     assert repair.purge_phantom_history(store.conn, backup_path=p) == 1
     rows = [json.loads(line) for line in p.read_text().splitlines()]
     row, = rows
-    assert row['identity_id'] == 1 and row['identity_key'] == 'phantom'
+    assert row['account_id'] == 1 and row['identity_key'] == 'phantom'
     assert row['captured_at'] == 15 * DAY + 43200 and row['source'] == 'ytm_history'
     assert row['capture_id'] and row['capture_item_id'] and row['id'] and 'raw_identity_key' in row
     assert row['precision'] == 'legacy_unknown' and row['timezone'] is None
@@ -309,7 +310,7 @@ def test_exact_events_and_coverage_are_scoped_to_their_account(store, tmp_path):
     _ev(store, 2, 'same-song', 15)
     assert repair.purge_phantom_history(store.conn, tmp_path / 'backup.jsonl') == 1
     assert [row[0] for row in store.conn.execute(
-        "SELECT identity_id FROM listening_observations WHERE precision='legacy_unknown'")] == [2]
+        "SELECT account_id FROM listening_observations WHERE precision='legacy_unknown'")] == [2]
 
 
 @pytest.mark.parametrize('flags', [dict(account_verified=0), dict(complete=0),

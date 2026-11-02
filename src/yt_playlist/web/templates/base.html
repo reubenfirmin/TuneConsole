@@ -171,10 +171,19 @@
   <script defer src="/static/vendor/alpine.min.js"></script>
 </head>
 <body>
+  <template id="mix-launch-loader">
+    <link rel="stylesheet" href="/static/tokens.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/components.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/clusters.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/generating.css?v={{ asset_v }}">
+    <script defer src="/static/theme.js?v={{ asset_v }}"></script>
+    <script defer src="/static/generating.js?v={{ asset_v }}"></script>
+    {% include "_partials/mix_launch_loader.html" %}
+  </template>
   {% set maintenance = storage_maintenance_status() %}
   {% if setup_pending %}{% include "_partials/setup_status.html" %}{% endif %}
   <div id="storage-maintenance" class="storage-maintenance"
-       title="{{ maintenance.message }}"
        data-warning="{{ 'true' if maintenance.warning else 'false' }}"
        role="{{ 'alert' if maintenance.warning else 'status' }}"
        aria-live="{{ 'assertive' if maintenance.warning else 'polite' }}"
@@ -203,18 +212,20 @@
     {% endif %}
     {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/setup') or path.startswith('/network') or path.startswith('/enrich') or path.startswith('/discovery') or path.startswith('/audio-preview') %}
     <nav>
-      <div class="nav-group">
-        <span class="nav-group-label">Library</span>
-        <a href="/" class="{{ 'active' if path == '/' else '' }}">Home</a>
-        <a href="/playlists" class="{{ 'active' if path.startswith('/playlist') else '' }}">Playlists</a>
-        <a href="/artists" class="{{ 'active' if path.startswith('/artists') or path.startswith('/artist') else '' }}">Artists</a>
-        <a href="/albums" class="{{ 'active' if path.startswith('/albums') else '' }}">Albums</a>
-        <a href="/charts" class="{{ 'active' if path.startswith('/charts') else '' }}">Charts</a>
-      </div>
-      <div class="nav-group">
-        <span class="nav-group-label">Explore</span>
-        <a href="/clusters" class="{{ 'active' if path.startswith('/clusters') else '' }}">Clusters</a>
-        <a href="/road_trip" class="{{ 'active' if path.startswith('/road_trip') else '' }}">Road Trip</a>
+      <div class="nav-sections">
+        <div class="nav-group">
+          <span class="nav-group-label">Library</span>
+          <a href="/" class="{{ 'active' if path == '/' else '' }}">Home</a>
+          <a href="/playlists" class="{{ 'active' if path.startswith('/playlist') else '' }}">Playlists</a>
+          <a href="/artists" class="{{ 'active' if path.startswith('/artists') or path.startswith('/artist') else '' }}">Artists</a>
+          <a href="/albums" class="{{ 'active' if path.startswith('/albums') else '' }}">Albums</a>
+          <a href="/charts" class="{{ 'active' if path.startswith('/charts') else '' }}">Charts</a>
+        </div>
+        <div class="nav-group">
+          <span class="nav-group-label">Explore</span>
+          <a href="/clusters" class="{{ 'active' if path.startswith('/clusters') else '' }}">Clusters</a>
+          <a href="/road_trip" class="{{ 'active' if path.startswith('/road_trip') else '' }}">Road Trip</a>
+        </div>
       </div>
       <div class="tools-menu" x-data="{ open: false }" @click.outside="open = false" @keydown.escape.window="open = false">
         <button type="button" class="tools-btn {{ 'active' if tools_active else '' }}"

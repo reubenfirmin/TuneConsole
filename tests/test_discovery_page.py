@@ -162,6 +162,9 @@ def test_discovery_add_failed_acquisition_retains_confirmed_rating_and_can_retry
 
 
 def test_fragment_loads_do_not_count_as_album_or_artist_views(store):
+    from tests.home_fixture_support import returning_listener
+
+    returning_listener(store, 'mixes')
     store.discovery.upsert_discovered_album("album", "Artist", "Unseen album", "2026", None, 100.0)
     store.discovery.upsert_discovered_artist("New artist", 1.0, [], [], None, 100.0)
     _, c = _client(store)

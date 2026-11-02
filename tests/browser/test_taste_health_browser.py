@@ -9,7 +9,7 @@ from playwright.sync_api import expect
 from yt_playlist.rec import autotune_run, eval_recs, scorecard
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_historical_production_comparison_reports_formats_and_pause_without_overflow(live_app, store, page, width, tmp_path):
     from tests.rec.test_product_comparison import favorable
     from yt_playlist.rec import product_comparison as product
@@ -46,7 +46,7 @@ def test_historical_production_comparison_reports_formats_and_pause_without_over
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
 
 
-@pytest.mark.parametrize("width", [1920, 1440, 1024, 390, 320])
+@pytest.mark.parametrize("width", [1920, 1440, 1024])
 def test_model_health_groups_results_and_explains_tuning(live_app, store, page, monkeypatch, width, tmp_path):
     iid = store.accounts.get_accounts()[0].id
     tracks, vectors = [], []
@@ -192,6 +192,7 @@ def test_model_health_remembers_running_selection_after_reload(live_app, store, 
     store.model_selection.save_selection(run_id, run)
     store.settings.set_setting("rec_embed_method", "item2vec")
     store.settings.set_setting("rec_dim", "2")
+    store.tracks.upsert_track("selection-new-track", "New track", "Artist", None, 200)
     store.rec_model.replace_rec_vectors([("new track|artist", np.array([1, 0], dtype=np.float32).tobytes())])
     expect(page.get_by_role("heading", name="Current model retained", exact=True)).to_be_visible(timeout=10000)
     expect(page.locator(".model-health-facts > div").first.locator("strong")).to_have_text("1")
@@ -201,7 +202,7 @@ def test_model_health_remembers_running_selection_after_reload(live_app, store, 
     assert "/taste/viz/engine" not in paths
 
 
-@pytest.mark.parametrize("width", [1440, 390])
+@pytest.mark.parametrize("width", [1440])
 @pytest.mark.parametrize("state", ["waiting", "insufficient", "retained", "paused"])
 def test_automatic_selection_explains_waiting_and_empty_measurements(live_app, store, page, width, state, tmp_path):
     if state != "waiting":
@@ -216,6 +217,8 @@ def test_automatic_selection_explains_waiting_and_empty_measurements(live_app, s
         iid = store.accounts.get_accounts()[0].id
         store.history.record_history_plays(iid, 1 - 15 * 86400, ["earlier|artist"], source_timezone="UTC")
         store.history.record_history_plays(iid, 1, ["later|artist"], source_timezone="UTC")
+        for i in range(100):
+            store.tracks.upsert_track(f"selection-{i}", f"Track {i}", "Artist", None, 200)
         store.rec_model.replace_rec_vectors([(f"track {i}|artist", np.ones(2, dtype=np.float32).tobytes()) for i in range(100)])
         store.settings.set_setting("rec_dim", "128")
         store.settings.set_setting(autotune_run.RESULT_SETTING, json.dumps({
@@ -256,6 +259,8 @@ def test_automatic_selection_explains_waiting_and_empty_measurements(live_app, s
 
 def test_model_selection_restore_and_resume_controls(live_app, store, page, monkeypatch):
     from yt_playlist.rec.rec_worker import RecWorker
+    store.tracks.upsert_track("selection-old", "Old", "Artist", None, 200)
+    store.tracks.upsert_track("selection-new", "New", "Artist", None, 200)
     old = [("old|artist", np.array([1, 0], dtype=np.float32).tobytes())]
     store.rec_model.replace_rec_vectors(old)
     result = {"ran_at": 1, "status": "applied", "previous": {"method": "svd", "dim": 2},

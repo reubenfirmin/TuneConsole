@@ -1,6 +1,7 @@
 """Background execution preserves the established models and last-good serving."""
 import asyncio
 from copy import deepcopy
+from html.parser import HTMLParser
 import logging
 import sqlite3
 import threading
@@ -12,17 +13,19 @@ import pytest
 
 from yt_playlist.core.activity import Activity, WorkClosing
 from yt_playlist.core.store import Store
-from yt_playlist.rec import artist_model, embedding_training as embed, model_refresh, mode_surfaces, rec_params, taste_modes
+from yt_playlist.rec import (account_growth, artist_model, choice_evidence, embedding_training as embed,
+                             home_prepared, model_refresh, mode_surfaces, rec_params, taste_modes)
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
 from tests import model_support
 
 
-def seed(store):
+def seed(store, *, distinct_albums=False):
     iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
     tids = []
     for i in range(96):
-        tid = store.tracks.upsert_track(f'v{i}', f'Song {i:03}', f'Artist {i}', 'Album', None)
+        album = f'Album {i}' if distinct_albums else 'Album'
+        tid = store.tracks.upsert_track(f'v{i}', f'Song {i:03}', f'Artist {i}', album, None)
         store.tracks.set_track_genre(tid, ('Techno', 'Jazz', 'Rock')[i // 32])
         store.tracks.set_track_audio(tid, bpm=80 + i, energy=(i % 10) / 10)
         tids.append(tid)
@@ -50,6 +53,12 @@ def test_background_generation_matches_established_models_and_ranked_pools(store
     seed(store)
     store.settings.set_setting('rec_embed_method', method)
     expected_pools = established_pipeline(store, 2000)
+    expected_generation = store.rec_model.content_generation()['generation']
+    assert expected_pools['_radio']['generation'] == expected_generation
+    for surface in ('home', 'radio'):
+        head = store.recommendations.head(surface)
+        assert head is not None
+        assert store.recommendations.framing(surface, generation=head['id'])['radio_generation'] == expected_generation
     expected = {table: dict(getattr(store.rec_model, getter)()) for table, getter in (
         ('rec_vectors', 'get_rec_vectors'), ('rec_content_vectors', 'get_rec_content_vectors'),
         ('rec_artist_vectors', 'get_rec_artist_vectors'),
@@ -64,7 +73,19 @@ def test_background_generation_matches_established_models_and_ranked_pools(store
             for key, blob in rows:
                 np.testing.assert_allclose(np.frombuffer(blob, np.float32),
                                            np.frombuffer(expected[table][key], np.float32), atol=1e-6)
-    assert mode_surfaces.prepare_bundles(store, 2000) == expected_pools
+    actual_pools = mode_surfaces.prepare_bundles(store, 2000)
+    actual_generation = store.rec_model.content_generation()['generation']
+    assert actual_generation != expected_generation
+    assert actual_pools['_radio']['generation'] == actual_generation
+    for surface in ('home', 'radio'):
+        head = store.recommendations.head(surface)
+        assert head is not None
+        assert store.recommendations.framing(surface, generation=head['id'])['radio_generation'] == actual_generation
+    # Distinct publications own distinct receipts; all ranked content and other
+    # framing must still match the established pipeline exactly.
+    expected_content, actual_content = deepcopy(expected_pools), deepcopy(actual_pools)
+    del expected_content['_radio']['generation'], actual_content['_radio']['generation']
+    assert actual_content == expected_content
     assert store.settings.get_setting('rec_embed_method') == method
     assert store.settings.get_setting('rec_dim') == '16'
     assert not store.rec_refresh.has_pending_changes()
@@ -133,14 +154,20 @@ def test_changed_source_keeps_last_good_generation_and_notification(tmp_path, mo
         def changed(reader, now, **kwargs):
             prepared = original(reader, now, **kwargs)
             if external:
-                with sqlite3.connect(store._db_path) as writer:
-                    writer.execute('UPDATE recordings SET genre=? WHERE id='
-                        '(SELECT recording_id FROM catalog_entries WHERE id=?)', ('Ambient', tids[1]))
+                writer = Store(store._db_path)
+                try:
+                    writer.init_schema()
+                    assert writer.conn is not store.conn
+                    writer.tracks.set_track_genre(tids[1], 'Ambient')
+                    assert writer.tracks.get_track_enrichment(tids[1])[0] == 'Ambient'
+                finally:
+                    writer.conn.close()
             else:
                 store.tracks.set_track_genre(tids[1], 'Ambient')
             return prepared
         monkeypatch.setattr(model_refresh, 'prepare', changed)
         assert model_refresh.rebuild(store, 2001) is None
+        assert store.tracks.get_track_enrichment(tids[1])[0] == 'Ambient'
         assert store.rec_model.content_generation() == before
         assert store.rec_refresh.has_pending_changes()
     finally:
@@ -218,8 +245,34 @@ def test_coalesced_notifications_survive_restart_and_do_not_acknowledge_later_ch
 def test_background_fit_leaves_event_loop_and_last_good_home_available(tmp_path, monkeypatch):
     store = Store(tmp_path / 'state.db')
     store.init_schema()
-    seed(store)
+    # Distinct albums avoid diversity caps rejecting the generic model fixture;
+    # four modes and release years also supply all four playable menu lanes.
+    for index, tid in enumerate(seed(store, distinct_albums=True)):
+        store.tracks.set_track_year(tid, str(1970 + index % 50))
+    # The Fresh lane needs available discovery candidates outside the library.
+    for index in range(48):
+        store.discovery.upsert_discovered_track(
+            f'new song {index}|new artist {index}', f'new{index}', f'New song {index}',
+            f'New artist {index}', f'New album {index}', None,
+            ('Techno', 'Jazz', 'Rock')[index // 16], str(1970 + index), None, 1800,
+            duration_s=200)
+    rec_params.set_param(store, 'modes_k', 4)
     established_pipeline(store, 2000)
+    # This is a returning Mix listener. Record a real choice followed by a
+    # confirmed start so journey access survives refreshing its fitted models.
+    opportunity = choice_evidence.issue(store, 'mixes', [
+        {'id': 'previous-mix', 'label': 'Previous mix', 'genres': ['Techno']}],
+        1990, context={'at': 1990}, opportunity_id='previous-listen')
+    assert opportunity is not None
+    choice_evidence.respond(store, opportunity, 'choice', 1991, option_id='previous-mix')
+    choice_evidence.respond(store, opportunity, 'start', 1992, option_id='previous-mix')
+    choice_evidence.compile_report(store, 1993)
+    assert store.rec_proposals.choice_usage()['episodes']['mixes'] == 1
+    prepared = home_prepared.prepare(store, 2000)
+    assert prepared is not None
+    assert any(len(menu['protos']) == 4 for menu in prepared['menus']), [
+        [proto['lane'] for proto in menu['protos']] for menu in prepared['menus']]
+    assert account_growth.has_access(account_growth.view(store, 2000), 'directions')
     app = create_app(store, lambda: {}, now_fn=lambda: 2000, background_work=False)
     ctx = SimpleNamespace(store=store, work=Activity(), now_fn=lambda: 2000,
                           logger=logging.getLogger(__name__))
@@ -235,12 +288,41 @@ def test_background_fit_leaves_event_loop_and_last_good_home_available(tmp_path,
     monkeypatch.setattr(embed, 'build_vectors_from_baskets', slow_fit)
 
     async def exercise():
-        worker.trigger()
-        assert await asyncio.to_thread(started.wait, 5)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1') as client:
+            def playable_cards(response):
+                assert response.status_code == 200, response.text
+                class Cards(HTMLParser):
+                    def __init__(self):
+                        super().__init__()
+                        self.cards, self.launchable, self.current = {}, set(), None
+
+                    def handle_starttag(self, tag, attributes):
+                        attrs = dict(attributes)
+                        classes = (attrs.get('class') or '').split()
+                        if tag == 'section' and 'gen-card' in classes:
+                            self.current = attrs['id']
+                            self.cards[self.current] = []
+                        elif self.current and tag == 'li' and 'gen-row' in classes:
+                            self.cards[self.current].append((attrs['data-key'], attrs['data-vid']))
+                        elif self.current and tag == 'button' and attrs.get('hx-post') == '/home/generate':
+                            self.launchable.add(self.current)
+
+                document = Cards()
+                document.feed(response.text)
+                assert len(document.cards) == 4, response.text
+                assert document.launchable == document.cards.keys(), response.text
+                for rows in document.cards.values():
+                    assert rows and all(key and video for key, video in rows)
+                return document.cards
+
+            before = playable_cards(await asyncio.wait_for(client.get('/home/cards'), 1))
+            generation = store.rec_model.content_generation()
+            worker.trigger()
+            assert await asyncio.to_thread(started.wait, 5)
             for _ in range(3):
                 response = await asyncio.wait_for(client.get('/home/cards'), 1)
-                assert response.status_code == 200
+                assert playable_cards(response) == before
+                assert store.rec_model.content_generation() == generation
                 assert await asyncio.wait_for(asyncio.to_thread(store.rec_model.rec_vectors_count), 1) > 0
                 await asyncio.sleep(0.01)
         assert not release.is_set()

@@ -96,6 +96,13 @@ publishes its revision in the owning SQL transaction. Committed revisions are
 immutable. A rolled-back prospective revision may be replaced under the SQLite
 writer reservation, since no committed snapshot can refer to it.
 
+Restore stages all supplied members through the FAO in a temporary directory.
+It verifies transport size/digest, envelope kind/owner/revision/checksum and
+complete required membership before replacing any live document. Rejected or
+incomplete backups leave all existing live bytes intact. Publication uses only
+those verified private copies, preserving the FAO age clocks even if backup
+files change after validation. Temporary staging is removed on success or failure.
+
 Provider alternatives and candidate details expire after seven days. Expiry
 does not remove selected facts, reset completion/retry state, or schedule a new
 request. Current native model inputs and explicit manual decisions do not share
@@ -104,8 +111,12 @@ missing/corrupt required model or manual documents fail verification explicitly.
 File collection respects readers and backups pinned to older SQL snapshots.
 
 Preparation exports a bounded batch at a time, with a durable cursor and source
-revision checks. Cutover verifies the prepared source snapshot and current
-values before switching readers. Continuing writes during preparation either
+revision checks. Cutover compares complete source-derived native values and
+provenance, retained decision values/times/subjects, current choices, attribution,
+genres, alternatives and conflicts against their prepared owners. Unknown
+historical decision times remain null. All library-sized verification runs in a
+read transaction; a short writer transaction fences its data version before
+switching readers. Continuing writes during preparation either
 invalidate the affected prepared batch or cause final verification to refuse
 activation. Regular migration history is preserved. Live/native databases are
 not used as experiment destinations.

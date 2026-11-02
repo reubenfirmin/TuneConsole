@@ -6,7 +6,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from yt_playlist.rec import discover, fresh_pool, home_prepared, surfaces
+from tests.home_fixture_support import returning_listener
+from yt_playlist.core.recommendation_invalidation import clear_model_display
+from yt_playlist.rec import discover, fresh_pool, home_prepared, home_vibe, surfaces
 from yt_playlist.web.app import create_app
 
 
@@ -22,6 +24,7 @@ def client_for(store, busy="idle"):
     store.settings.set_setting("onboard_dismissed", "1")
     iid = store.accounts.upsert_account("main", "cred", None, True)
     assert home_prepared.prepare(store, 3) is not None
+    returning_listener(store, 'mixes', now=3)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 3)
     app.state.ctx.rec_worker._model_active = busy == "rebuild"
     app.state.ctx.rec_worker._discovering = busy == "discovery"
@@ -98,15 +101,22 @@ def test_discovery_survives_model_cache_invalidation_and_rechecks_eligibility(st
     client = client_for(store, 'discovery')
     assert 'Retained album' in client.get('/home/discovery').text
     with store.conn:
-        store.conn.execute("DELETE FROM rec_proposals WHERE surface IN "
-                           "('home_prepared','home_tuned','home_choice','mode_bundles','fresh_pool')")
+        store.conn.execute('BEGIN IMMEDIATE')
+        clear_model_display(store.conn)
+    assert store.rec_proposals.get_proposals('home_choice') is None
 
     def forbidden(*args, **kwargs):
         raise AssertionError('Refreshing discovery must not prepare or rank candidates')
 
     monkeypatch.setattr(home_prepared, 'prepare', forbidden)
+    monkeypatch.setattr(home_prepared, 'prepare_discovery', forbidden)
     monkeypatch.setattr(discover, 'pick_discovered_albums', forbidden)
-    monkeypatch.setattr(fresh_pool, 'pick', forbidden)
+    monkeypatch.setattr(discover.ContentProjection, 'fit', forbidden)
+    monkeypatch.setattr(surfaces, 'cold_candidates', forbidden)
+    monkeypatch.setattr(fresh_pool, 'prepare', forbidden)
+    # The journey gate may read the existing ranked Fresh reserve. Forbid
+    # ranking itself, rather than its bounded, eligibility-filtered reader.
+    monkeypatch.setattr(home_vibe, 'rank', forbidden)
     response = client.get('/home/discovery')
     assert 'Retained album' in response.text and 'Songs to discover' in response.text
     assert 'Finding new music for you' not in response.text

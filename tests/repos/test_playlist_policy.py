@@ -1,9 +1,9 @@
 import json
-from pathlib import Path
 
 import pytest
 
 from tests.test_undo_recovery import RecoveryClient
+from yt_playlist.core import fao
 from yt_playlist.core.migrations import migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
@@ -53,7 +53,7 @@ def test_recovery_preserves_policy_groups_and_remote_markers(store, tmp_path, mo
     else:
         executor.delete_playlist(store, pid, client, 40 * 86400)
     action = store.actions.get_actions()[0]
-    snapshot = json.loads(Path(json.loads(action.undo_json)['backup']).read_text())
+    snapshot = json.loads(fao.read_bytes(json.loads(action.undo_json)['backup']))
     assert snapshot['snapshot_version'] == 2
     assert snapshot['group'] == 'Road trips'
     playlist_undo.undo_action(store, action.id, {iid: client}, 40 * 86400 + 1)
@@ -70,13 +70,14 @@ def test_recovery_preserves_policy_groups_and_remote_markers(store, tmp_path, mo
 
 
 def test_populated_policy_upgrade_preserves_curation_and_is_idempotent(tmp_path):
+    from tests.historical_support import upgrade_fixture
     store = Store(tmp_path / 'state.db')
     migrate(store.conn, registry=MIGRATIONS[:18])
     store.conn.execute("INSERT INTO playlist_group VALUES ('gen','Generated')")
     store.conn.execute("INSERT INTO playlist_group VALUES ('adopted','Faves')")
     store.conn.execute("INSERT INTO rec_recipes(playlist_ytm,recipe,created_at) VALUES ('adopted','{}',1)")
     store.conn.commit()
-    store.init_schema()
+    upgrade_fixture(store)
     assert store.playlists.is_quarantined_playlist('gen')
     assert store.playlists.playlist_provenance('adopted')['adopted'] == 1
     store.playlists.set_playlist_group('gen', 'Road trips')

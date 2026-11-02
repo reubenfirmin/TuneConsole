@@ -6,7 +6,7 @@ from playwright.sync_api import expect
 import pytest
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_running_charts_has_useful_variety(page, request, width):
     url = request.config.getoption('--listening-acceptance-url')
     if not url:

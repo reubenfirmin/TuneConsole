@@ -1,5 +1,6 @@
 """Delivery identity, exact content reuse, and complete file custody on restore."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 import shutil
@@ -8,7 +9,7 @@ from threading import Barrier
 
 import pytest
 
-from yt_playlist.core import artists, metadata_deliveries as deliveries, metadata_delivery_files as files, policy_documents
+from yt_playlist.core import artists, fao, metadata_deliveries as deliveries, metadata_delivery_files as files, policy_documents
 from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations import v074_artist_credits as credits, v075_metadata_deliveries as migration
 from yt_playlist.core.migrations.runner import Context
@@ -222,6 +223,38 @@ def test_backup_round_trip_keeps_independent_owners_but_only_one_copy_of_shared_
     assert len(list(files.directory(store.conn).glob('*/*.json'))) == 1
     assert deliveries.response(store.conn, after[-1][0]) == first.response
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
+def test_export_streams_and_preserves_existing_pack_offsets_and_clocks(store, tmp_path, monkeypatch):
+    first = delivery(store, response={'value': 0})
+    record(store, *(replace(first, delivery_key=str(i), response={'value': i}) for i in range(128)))
+    before = refs(store)
+    source, = {Path(row[1]) for row in before}
+    encoded, age = source.read_bytes(), fao.stat(source)
+    opened = 0
+    original = fao.open_reader
+
+    @contextmanager
+    def counted(path, **kwargs):
+        nonlocal opened
+        if Path(path) == source:
+            opened += 1
+        with original(path, **kwargs) as stream:
+            yield stream
+
+    monkeypatch.setattr(fao, 'open_reader', counted)
+    root = tmp_path / 'backup'
+    manifest = export(store, root)
+    assert opened == 2  # One range-validation stream and one verified encoded copy.
+    copied = root / source.stem[:2] / source.name
+    assert copied.read_bytes() == encoded
+    assert (fao.stat(copied).mtime_ns, fao.stat(copied).ctime_ns) == (age.mtime_ns, age.ctime_ns)
+    document = files._read_document(manifest, 'backup-manifest')
+    chunk = files._read_document(root / document['chunks'][0][:2] / (document['chunks'][0] + '.json'), 'backup-chunk')
+    assert [(row['id'], row['offset']) for row in chunk] == [(row[0], row[4]) for row in before]
+    shutil.rmtree(files.directory(store.conn))
+    files.restore(store.conn, manifest)
+    assert [deliveries.response(store.conn, row[0]) for row in refs(store)] == [{'value': i} for i in range(128)]
 
 
 def test_missing_later_backup_record_never_partially_relocates_database(store, tmp_path):

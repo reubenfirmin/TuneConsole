@@ -177,7 +177,8 @@ def test_progress_separates_recordings_from_source_jobs_and_explains_failures(st
     from yt_playlist.rec import group_preparation
     with store.conn:
         store.conn.execute("INSERT INTO rec_content_pending(identity_key) VALUES ('pending')")
-        store.conn.execute("INSERT INTO rec_musical_sources VALUES ('source','test','artist','artist','{}',1)")
+        store.conn.execute('INSERT INTO rec_musical_sources(source_key,provider,scope,entity_id,revision) '
+                           "VALUES ('source','test','artist','artist',1)")
     group_preparation.report(store, 'failed', 1000, reason='preparation-failed')
     app = create_app(store, lambda *a, **kw: None, now_fn=lambda: 1200)
     with TestClient(app, base_url='http://127.0.0.1') as client:

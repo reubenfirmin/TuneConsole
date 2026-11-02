@@ -122,6 +122,13 @@ class RecLedgerRepo(Repo):
                 result['provenance'] = trace if trace is not None else {
                     **served_facts.reporting_trace(fact), **result['provenance']}
         result["configuration"] = policy_storage.configuration(self.conn, result['model_version'])
+        from yt_playlist.core import policy_history
+        if result['configuration'] is None and policy_history.available(self.conn):
+            status = self.conn.execute('SELECT state FROM recommendation_policy_history WHERE version=?',
+                                       (result['model_version'],)).fetchone()
+            result['configuration_status'] = status[0] if status else 'missing'
+        else:
+            result['configuration_status'] = 'available' if result['configuration'] is not None else 'missing'
         pool = result["provenance"].get("pool_policy")
         result["pool_configuration"] = policy_storage.configuration(self.conn, str(pool)) if pool else None
         inputs = (None if result["provenance"].get("policy_kind") == "counterfactual" else
@@ -296,10 +303,14 @@ class RecLedgerRepo(Repo):
                     'WHERE served_at<? ORDER BY served_at,id LIMIT ?', (before, RETENTION_BATCH_SIZE))]
                 self._prune_impression_batch(before)
                 for identity in expired:
-                    (root / served_facts.relative(identity)).unlink(missing_ok=True)
+                    from yt_playlist.core import fao
+                    fao.delete(root / served_facts.relative(identity),missing_ok=True)
                 self._prune_response_batch(before)
                 with self.conn:
                     served_facts.collect_retired(self.conn)
+                with self.conn:
+                    self.conn.execute('BEGIN IMMEDIATE')
+                    served_facts.collect_orphans(self.conn, now)
             finally:
                 unlock()
 

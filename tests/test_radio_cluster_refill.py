@@ -7,13 +7,14 @@ from tests.test_radio_catalog import catalog_track, seed
 from tests.musical_support import prepare_profiles
 from yt_playlist.core import catalog
 from yt_playlist.rec import musical_character
+from tests.recommendation_support import publish_bundles
 
 
-def indexed(store, seed, count=110, *, mixed=False):
+def indexed(store, seed, count=110, *, mixed=False, home=True):
     tracks = [catalog_track(store, f'cluster-{i}', label='Indie Rock' if mixed and i % 2 else seed['genre'])[0]
               for i in range(count)]
-    store.rec_proposals.put_proposals('mode_bundles', {
-        '1': {'wheelhouse': [seed]}, '_radio': {'generation': None, 'space': '',
+    publish_bundles(store, {
+        '1': {'wheelhouse': [seed] if home else []}, '_radio': {'generation': None, 'space': '',
         'members': {'1': [seed['key'], *[track['key'] for track in tracks]]}}})
     return tracks
 
@@ -70,10 +71,7 @@ def test_refill_rechecks_feedback_and_survives_an_unrelated_model_publication(st
 
 
 def test_indexed_cluster_without_a_home_card_is_still_available(store, seed):
-    tracks = indexed(store, seed, 3)
-    payload = store.rec_proposals.get_proposals('mode_bundles')
-    payload['1'] = {}
-    store.rec_proposals.put_proposals('mode_bundles', payload)
+    tracks = indexed(store, seed, 3, home=False)
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': 1})
     assert c.next_track([seed])['key'] in {row['key'] for row in tracks}
     assert c.seed_offer()
@@ -120,7 +118,7 @@ def test_themed_streams_pin_the_playing_genre_inside_mixed_clusters(store, seed)
 def test_pinned_refill_reads_past_a_full_page_of_other_genres(store, seed):
     wrong = [catalog_track(store, f'wrong-{i}', label='Indie Rock')[0] for i in range(CLUSTER_POOL_LIMIT)]
     matching = [catalog_track(store, f'matching-{i}', label=seed['genre'])[0] for i in range(30)]
-    store.rec_proposals.put_proposals('mode_bundles', {
+    publish_bundles(store, {
         '1': {'wheelhouse': [seed, *wrong]}, '_radio': {'generation': None, 'space': '',
         'members': {'1': [t['key'] for t in [seed, *wrong, *matching]]}}})
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': 1})

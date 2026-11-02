@@ -51,13 +51,13 @@ def encode(surface, chunk_key, value):
     return encoded
 
 
-def publish(root, encoded):
+def publish(root, encoded, *, age=None):
     if not isinstance(encoded, bytes) or len(encoded) > MAX_BYTES:
         raise ValueError('Invalid prepared output bytes')
     digest = hashlib.sha256(encoded).hexdigest()
     # Validate the exact bytes before exposing a durable path to an SQL owner.
     _decode(encoded)
-    return policy_documents._publish_encoded(root, encoded, digest), digest, len(encoded)
+    return policy_documents._publish_encoded(root, encoded, digest, age=age), digest, len(encoded)
 
 
 def _decode(encoded, surface=None, chunk_key=None):
@@ -71,16 +71,17 @@ def _decode(encoded, surface=None, chunk_key=None):
     return document
 
 
-def _read(filename, digest, size, *, surface=None, chunk_key=None):
+def _read(filename, digest, size, *, surface=None, chunk_key=None, with_age=False):
     if type(size) is not int or not 0 < size <= MAX_BYTES:
         raise ValueError('Invalid prepared output byte range')
     path = Path(filename)
     with fao.open_reader(path) as stream:
+        age = stream.info
         encoded = stream.read(size + 1)
     if path.stem != digest or len(encoded) != size or hashlib.sha256(encoded).hexdigest() != digest:
         raise ValueError('Prepared output does not match its digest')
     _decode(encoded, surface, chunk_key)
-    return encoded
+    return (encoded, age) if with_age else encoded
 
 
 def read(filename, digest, size, *, surface, chunk_key):
@@ -127,10 +128,11 @@ def _export(conn, root, *, directory, references):
     entries, chunks = [], []
     for owner, identity, surface, key, filename, digest, size in references(conn):
         check_cancellable_work()
-        encoded = _read(filename, digest, size, surface=surface, chunk_key=key)
-        copied, actual, actual_size = publish(root, encoded)
-        if (actual, actual_size) != (digest, size):
-            raise ValueError('Prepared output backup changed its content')
+        _read(filename, digest, size, surface=surface, chunk_key=key)
+        copied = root / digest[:2] / (digest + '.json')
+        # Preserve the existing encoding after domain validation. FAO checks
+        # the owner's digest again before replacing any earlier backup.
+        fao.copy(filename, copied, max_bytes=MAX_BYTES, digest=digest)
         entries.append({'owner': owner, 'id': identity, 'surface': surface, 'chunk_key': key, 'digest': digest, 'byte_size': size,
                         'relative_filename': str(Path(copied).relative_to(root))})
         if len(entries) == 512:
@@ -201,9 +203,9 @@ def _restore(conn, manifest, *, directory, references, owners, relocate):
             raise ValueError('Prepared output backup does not match database owners')
         files = {}
         for key, entry in entries.items():
-            encoded = _read(root / entry['relative_filename'], entry['digest'], entry['byte_size'],
-                            surface=entry['surface'], chunk_key=entry['chunk_key'])
-            files[key] = publish(directory(conn), encoded)[0]
+            encoded, age = _read(root / entry['relative_filename'], entry['digest'], entry['byte_size'],
+                                surface=entry['surface'], chunk_key=entry['chunk_key'], with_age=True)
+            files[key] = publish(directory(conn), encoded, age=age)[0]
         # All files are durable before any owner is relocated.
         relocate(conn, files)
         conn.commit()
@@ -271,8 +273,9 @@ class OrphanCollector:
                             check_cancellable_work()
                             if str(path) not in owned:
                                 try:
-                                    length = path.stat().st_size
-                                    path.unlink()
+                                    length = fao.stat(path).compressed_bytes
+                                    if not fao.delete(path, missing_ok=True):
+                                        continue
                                 except FileNotFoundError:
                                     continue
                                 changed.add(path.parent)

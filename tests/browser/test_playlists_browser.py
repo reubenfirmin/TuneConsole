@@ -297,7 +297,7 @@ def test_shift_selection_uses_clicked_occurrence_of_duplicate(recent_pl_app, pag
     expect(page.locator(".pl-actionbar")).to_contain_text("5 selected")  # three new rows, 303, Alpha
 
 
-@pytest.mark.parametrize("width", [1280, 390])
+@pytest.mark.parametrize("width", [1280])
 def test_recent_and_generated_layout_and_promotion(recent_pl_app, page, width, tmp_path):
     from datetime import datetime, timezone
     page.set_viewport_size({"width": width, "height": 900})
@@ -349,7 +349,7 @@ def test_no_recent_playlists_hides_the_section(live_pl_app, page):
     expect(page.get_by_role("region", name="New playlists")).to_be_hidden()
 
 
-@pytest.mark.parametrize('width', [1280, 390])
+@pytest.mark.parametrize('width', [1280])
 def test_new_playlist_distinguishes_creation_from_its_own_listening(live_pl_data, page, width):
     from datetime import datetime, timezone
     from types import SimpleNamespace

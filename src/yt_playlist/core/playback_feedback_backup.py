@@ -10,7 +10,7 @@ from pathlib import Path
 import sqlite3
 import time
 
-from yt_playlist.core import policy_documents
+from yt_playlist.core import fao, policy_documents
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.playback_inbox import Inbox
 
@@ -40,11 +40,13 @@ def _copy(source, target):
         with copied:
             for row in source.execute('SELECT * FROM playback_feedback_inbox ORDER BY sequence'):
                 Inbox.body(row)
-                encoded = Path(row['filename']).read_bytes()
+                with fao.open_reader(row['filename'], max_bytes=row['byte_size']) as stream:
+                    encoded = stream.read(row['byte_size'] + 1)
+                    age = stream.info
                 if (len(encoded) != row['byte_size']
                         or hashlib.sha256(encoded).hexdigest() != row['content_digest']):
                     raise ValueError('Playback observation changed while backing up')
-                filename = policy_documents._publish_encoded(target.directory, encoded, row['content_digest'])
+                filename = policy_documents._publish_encoded(target.directory, encoded, row['content_digest'], age=age)
                 copied.execute('INSERT INTO playback_feedback_inbox VALUES (?,?,?,?,?,?,?,?,?,?)',
                     (row['sequence'], row['capture_id'], row['kind'], row['account_id'], row['observed_at'],
                      row['video_id'], row['rating_status'], str(filename), row['content_digest'], row['byte_size']))

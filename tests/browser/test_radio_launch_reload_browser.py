@@ -15,15 +15,16 @@ def test_uncertain_seed_survives_reload(page, radio_ui, wait_for_deadline):
     assert len(radio_ui.starts) == 1
     if wait_for_deadline:
         radio_ui.starts[0].abort('connectionreset')
-        expect(page.locator('.radio-launch-recovery')).to_be_visible()
+        expect(page.locator('.radio-launch-actions')).to_be_visible()
         page.clock.fast_forward(30_100)
     # Cover reload while the POST is still in flight as well as after its
     # missing receipt and bounded status check have become explicit.
     page.reload()
-    recovery = page.locator('.radio-launch-recovery')
+    expect(page.locator('.radio-launch-recovery')).to_have_count(0)
+    recovery = page.locator('.radio-launch')
     expect(recovery).to_be_visible()
     expect(recovery.get_by_role('heading', name=selected['title'], exact=True)).to_be_visible()
-    expect(recovery.get_by_text(selected['artist'], exact=True)).to_be_visible()
+    expect(recovery).to_contain_text(selected['artist'])
     expect(recovery.get_by_role('button', name='Check playback', exact=True)).to_be_visible()
     expect(page.locator('.radio-seed-start').first).to_be_disabled()
     assert len(radio_ui.starts) == 1

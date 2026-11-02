@@ -1,13 +1,16 @@
 """Exact parametrized-case coverage and measurements across isolated serial runners."""
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
 
-from ci_test_shards import BASELINE, partition, pytest_configure as configure_shard, verify
+from ci_test_shards import BASELINE, DIAGNOSTIC_BYTES, _diagnostic, load_report, partition, pytest_configure as configure_shard, verify
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "packaging"))
 from ci_plan import timing_source
@@ -145,6 +148,74 @@ def test_intentional_setup_skips_are_retained_as_completed_cases():
     phases.pop("call")
     result = verify(rows, "unit")
     assert result["cases"] == 3 and result["skipped"] == [node]
+
+
+def test_killed_shard_retains_completed_phases_failure_details_and_active_call(tmp_path):
+    report = tmp_path / 'evidence' / 'shard.json'
+    blocked = tmp_path / 'blocked'
+    case = tmp_path / 'test_receipts.py'
+    case.write_text('''from pathlib import Path
+import time
+def test_pass():
+    assert True
+def test_failure():
+    print("retained captured output")
+    assert False, "retained assertion diagnostic"
+def test_block():
+    Path(__file__).with_name("blocked").write_text("call entered")
+    time.sleep(300)
+def test_unknown_tail():
+    raise AssertionError("must remain unexecuted")
+''')
+    configuration = tmp_path / 'pytest.ini'
+    configuration.write_text('[pytest]\n')
+    env = {**os.environ, 'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1'}
+    with (tmp_path / 'child.log').open('w') as output:
+        child = subprocess.Popen([sys.executable, '-m', 'pytest', '-p', 'ci_test_shards',
+            '-c', str(configuration), '--rootdir', str(tmp_path), str(case),
+            '--ci-shard=1/1', '--ci-suite=unit', '--ci-shard-report=' + str(report)],
+            cwd=Path(__file__).resolve().parents[1], env=env, stdout=output, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 30
+            while not blocked.exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert blocked.exists(), (tmp_path / 'child.log').read_text()
+            child.kill()
+            child.wait(timeout=5)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+    recovered = load_report(report)
+    nodes = recovered['selected']
+    assert len(nodes) == 4
+    assert recovered['executions'] == nodes[:3]
+    assert recovered['active'] == {'nodeid': nodes[2], 'phase': 'call'}
+    for node in nodes[:2]:
+        assert set(recovered['tests'][node]) == {'setup', 'call', 'teardown'}
+    failed = recovered['tests'][nodes[1]]['call']
+    assert failed['outcome'] == 'failed'
+    assert 'retained assertion diagnostic' in failed['diagnostic']
+    assert 'retained captured output' in failed['captured']
+    assert set(recovered['tests'][nodes[2]]) == {'setup'}
+    assert nodes[3] not in recovered['tests'] and 'exitstatus' not in recovered
+    with pytest.raises(ValueError, match='did not pass'):
+        verify([recovered], 'unit', total=1)
+    # Even a forged success cannot turn the interrupted active call into coverage.
+    recovered['exitstatus'] = 0
+    with pytest.raises(ValueError, match='incomplete'):
+        verify([recovered], 'unit', total=1)
+    with report.with_suffix('.events.jsonl').open('ab') as stream:
+        stream.write(b'{"event":"partial')
+    partial = load_report(report)
+    assert partial['journal_incomplete'] and partial['tests'] == recovered['tests']
+
+
+def test_retained_diagnostics_are_bounded_and_keep_exception_tail():
+    text = 'first line\n' + ('verbose output\n' * DIAGNOSTIC_BYTES) + 'last exception'
+    retained = _diagnostic(text)
+    assert len(json.dumps(retained, ensure_ascii=False).encode()) <= DIAGNOSTIC_BYTES
+    assert retained.startswith('first line') and retained.endswith('last exception')
 
 
 def test_all_shards_pin_one_trusted_unexpired_baseline_artifact():

@@ -2,10 +2,12 @@
 the on-screen playlist, curate that playlist (cross a slot out, move a slider), and only then save
 it - confirming the resulting playlist is tagged Generated (taste-model quarantine + GC eligibility)
 and that nothing reached YouTube before the save."""
+import re
 import socket
 import threading
 import time
 from urllib.parse import parse_qs
+from uuid import uuid4
 
 import pytest
 import uvicorn
@@ -32,9 +34,10 @@ def _free_port():
 
 
 @pytest.fixture
-def live_road_trip_app(monkeypatch):
+def live_road_trip_app(monkeypatch, unlocked_home_controls):
     store = Store(":memory:")
     store.init_schema()
+    store.genres.configure_catalog()
     iid = store.accounts.upsert_account("Main", "cred", None, True)
     # A handful of songs of your own, not one: your side of the mix is the whole collection, so a
     # one-song library leaves nothing to swap in when a slot is crossed out.
@@ -64,6 +67,10 @@ def live_road_trip_app(monkeypatch):
              "artists": [{"name": "Tame Impala", "id": "UC1"}],
              "album": {"name": "Currents", "id": "MPRE1"}, "duration_seconds": 245}
             for i in range(12)]}}})
+    # A successful provider write must be verifiable by reading back every song.
+    client._catalog.update({f'v{i}': _track(f'v{i}', f'My Song {i}', f'My Artist {i}')
+                            for i in range(6)})
+    client._catalog.update({row['videoId']: row for row in client._artists['UC1']['songs']['results']})
     app = create_app(store, lambda: {iid: client}, now_fn=lambda: 1000.0)
     port = _free_port()
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
@@ -165,8 +172,11 @@ def test_progress_preserves_queued_and_uncommitted_edits_then_resumes(
         with page.expect_request(f'**/road_trip/draft/{rid}/progress'):
             page.evaluate("""rid => { htmx.ajax('GET', '/road_trip/draft/' + rid + '/progress',
               {target: '#road-trip-body', swap: 'innerHTML'}); }""", rid)
-        # Pump Playwright until the interception has read the server's old snapshot.
-        page.wait_for_timeout(50)
+        # The request event precedes the route's response body, especially when
+        # a current-owner snapshot must be opened. Wait for that exact capture.
+        deadline = time.monotonic() + 10
+        while len(pending) == count and time.monotonic() < deadline:
+            page.wait_for_timeout(10)
         assert len(pending) == count + 1
         return pending[-1]
 
@@ -179,6 +189,10 @@ def test_progress_preserves_queued_and_uncommitted_edits_then_resumes(
         page.locator('.rt-step summary').filter(has_text='Passenger music').click()
         genre = page.get_by_role('combobox', name='Add a passenger genre', exact=True)
         genre.fill('Funk')
+        page.wait_for_function('Array.isArray(window.__genreOpts)')
+        # The full taxonomy has more than eight subgenres containing "funk".
+        # Its exact match must still be offered inside the bounded suggestion list.
+        expect(page.locator('.rt-select-menu:visible .rt-suggestion').first.locator('span')).to_have_text('funk')
         page.locator('.rt-suggestion').get_by_text('funk', exact=True).click()
     elif edit == 'duration':
         page.get_by_role('button', name='30 min', exact=True).click()
@@ -341,10 +355,10 @@ def test_build_curate_then_save_road_trip_recipe(live_road_trip_app, page, monke
         with page.expect_popup() as opened:
             page.get_by_role("button", name="Save to YouTube").click()
         loading = opened.value
-        expect(loading).to_have_url(f"{base_url}/home/generating")
-        expect(loading.get_by_role("heading", name="Wiring up your playlist")).to_be_visible()
+        expect(loading).to_have_url(re.compile(r'^blob:' + re.escape(base_url) + '/'))
+        expect(loading.get_by_role("heading", name="Your Mix Tape", exact=True)).to_be_visible()
         expect(page.get_by_role("button", name="Save to YouTube")).to_be_disabled()
-        assert saving.is_set()
+        assert saving.wait(5), 'The save request did not reach the provider boundary'
         assert store.road_trip.get_road_trip_recipe(rid)["last_playlist_id"] is None
     finally:
         release.set()
@@ -358,6 +372,15 @@ def test_build_curate_then_save_road_trip_recipe(live_road_trip_app, page, monke
     assert store.playlists.get_playlist_groups()[last_ytm] == GENERATED_GROUP
     playlist = next(p for p in store.playlists.get_playlists() if p.provider_playlist_id == last_ytm)
     expect(page).to_have_url(f"{base_url}/playlist/{playlist.id}")
+    songs = store.playlists.get_playlist_tracks_with_meta(playlist.id)
+    assert any(row[1].startswith('vt') for row in songs), 'The saved mix must contain passenger music'
+    assert all(row[2].strip() and row[3].strip() for row in songs), songs
+    assert all((row[2], row[3]) == (f'Their Song {row[1][2:]}', 'Tame Impala')
+               for row in songs if row[1].startswith('vt')), songs
+    for _, _, title, artist, *_ in songs:
+        expect(page.get_by_text(title, exact=True).first).to_be_visible()
+        expect(page.get_by_text(artist, exact=True).first).to_be_visible()
+    page.screenshot(path='/tmp/tuneconsole-ready-715-save-labels.png', full_page=True)
 
 
 def test_failed_save_closes_loading_screen_and_keeps_the_draft(live_road_trip_app, page, monkeypatch):
@@ -365,6 +388,7 @@ def test_failed_save_closes_loading_screen_and_keeps_the_draft(live_road_trip_ap
     rid = store.road_trip.save_road_trip_recipe(None, "Save failure", 100, [], [], 20, 1000)
     state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=7)
     road_trip_rec.finish_draft(state, store, 1000)
+    state['revision'] = uuid4().hex
     store.road_trip.save_road_trip_draft(rid, state, 1000)
     release = threading.Event()
 
@@ -378,7 +402,7 @@ def test_failed_save_closes_loading_screen_and_keeps_the_draft(live_road_trip_ap
         with page.expect_popup() as opened:
             page.get_by_role("button", name="Save to YouTube").click()
         loading = opened.value
-        expect(loading.get_by_role("heading", name="Wiring up your playlist")).to_be_visible()
+        expect(loading.get_by_role("heading", name="Your Mix Tape", exact=True)).to_be_visible()
     finally:
         release.set()
     expect(page.locator(".gen-done")).to_contain_text("Couldn't save")
@@ -401,6 +425,7 @@ def test_passenger_balance_stays_visible_during_background_search(live_road_trip
     state["own_facts_left"] = 0
     state["targets"]["theirs"] = {"genre:Rock": .5, "genre:Pop": .3, "genre:Jazz": .2}
     road_trip_rec.finish_draft(state, store, 1000)
+    state['revision'] = uuid4().hex
     store.road_trip.save_road_trip_draft(rid, state, 1000)
     held = []
     monkeypatch.setattr(road_trip_route, "_spawn", held.append)
@@ -460,6 +485,7 @@ def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_t
     state["done_inputs"] = genres.copy()
     state["own_facts_left"] = 0
     road_trip_rec.finish_draft(state, store, 1000)
+    state['revision'] = uuid4().hex
     store.road_trip.save_road_trip_draft(rid, state, 1000)
     held = []
     monkeypatch.setattr(road_trip_route, "_spawn", held.append)
@@ -514,7 +540,7 @@ def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_t
         expect(passenger.locator(".rt-axis-context").filter(has_text="Like Journey")).to_be_visible()
 
 
-def test_track_sources_distinguish_blend_on_desktop_and_mobile(live_road_trip_app, page, monkeypatch):
+def test_track_sources_distinguish_blend_on_desktop(live_road_trip_app, page, monkeypatch):
     base_url, store = live_road_trip_app
     songs = [{"key": f"own-{i}", "video_id": f"own-{i}", "title": f"Library song {i}",
               "artist": f"Library artist {i}", "album": "", "thumbnail": None, "duration": 300,
@@ -534,6 +560,7 @@ def test_track_sources_distinguish_blend_on_desktop_and_mobile(live_road_trip_ap
     state["picked"] = [c for c in state["picked"] if c["mix_source"] != "blend" or c is first_blend]
     state["picks"] = [c["video_id"] for c in state["picked"]]
     state.pop("mix_version")
+    state['revision'] = uuid4().hex
     store.road_trip.save_road_trip_draft(rid, state, 1000)
     page.goto(f"{base_url}/road_trip")
     expect(page.locator(".rt-pool-counts")).to_have_text("4 Yours · 4 Theirs · 4 Blend")
@@ -542,7 +569,6 @@ def test_track_sources_distinguish_blend_on_desktop_and_mobile(live_road_trip_ap
         badges = page.locator(f".rt-c-src.is-{source}")
         expect(badges).to_have_count(4)
         expect(badges.first).to_have_text(source.capitalize())
-    page.set_viewport_size({"width": 390, "height": 844})
     for source in ("yours", "theirs", "blend"):
         row = page.locator(f'.rt-row[data-mix-source="{source}"]').first
         badge = row.locator(".rt-c-src")
@@ -573,6 +599,7 @@ def test_saved_overallocated_passenger_balance_is_normalized(live_road_trip_app,
         row["target"] = state["targets"]["theirs"].get(row["key"])
         if legacy_backend:
             row.pop("balance_pct", None)
+    state['revision'] = uuid4().hex
     store.road_trip.save_road_trip_draft(rid, state, 1000)
     held = []
     monkeypatch.setattr(road_trip_route, "_spawn", held.append)

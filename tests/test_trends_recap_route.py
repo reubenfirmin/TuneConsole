@@ -8,6 +8,7 @@ from starlette.testclient import TestClient
 from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.home_fixture_support import returning_listener
 from tests.onboarding_support import publish_personal_mix
 
 _AURA = {"hue": "#8b7cff", "turbulence": 0.5, "reach": 0.6, "warmth": 0.4}
@@ -79,6 +80,7 @@ def _client(story, synced=True, now_fn=lambda: _NOW):
     if synced:
         store.settings.set_setting("last_sync_at", "1700000000")
         publish_personal_mix(store, now=now_fn())
+        returning_listener(store, 'mixes', now=now_fn())
     if story is not None:
         store.rec_proposals.put_proposals("trend_rollups", {"story": story}, 1000.0)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=now_fn)

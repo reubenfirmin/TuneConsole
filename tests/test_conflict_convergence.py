@@ -36,7 +36,9 @@ def test_agreement_retires_conflicts_but_keeps_historical_evidence(store, confli
     assert all(row["resolved"] == 2 for row in current.values())
     assert {field: row["candidates"] for field, row in current.items()} == {
         field: row["candidates"] for field, row in previous.items()}
-    assert store.conn.execute("SELECT COUNT(*) FROM enrichment_log").fetchone()[0] == 8
+    assert store.conn.execute("SELECT COUNT(*) FROM enrichment_log WHERE track_id=? "
+                              "AND provider IN ('musicbrainz','discogs') AND field IN ('genre','year')",
+                              (track['id'],)).fetchone()[0] == 8
     assert store.tracks.get_track_enrichment(track["id"]) == ("Rock", "2000")
     # Even the original options become a current disagreement again after automatic retirement.
     providers[1]._by_title = {"Hyperballad": {"genre": "Pop", "year": "2001"}}

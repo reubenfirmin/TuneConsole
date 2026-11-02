@@ -10,6 +10,7 @@ import threading
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.core.test_db_rebuild_destination import development93, production64
 from yt_playlist.core import db_handles
 from yt_playlist.core.db_rebuild import build, install, job
 from yt_playlist.core.migrations import current, registry
@@ -20,9 +21,77 @@ class ProcessDied(BaseException):
     pass
 
 
+@pytest.mark.parametrize('blocker', ['transaction', 'maintenance', 'evidence', 'compaction'])
+def test_pending_evidence_retry_does_not_bypass_live_write_owners(development93, blocker):
+    from yt_playlist.core.store import Store
+
+    store = Store(development93)
+    try:
+        store.init_schema(defer_metadata=True)
+        store._evidence_recovery_pending = True
+        if blocker == 'transaction':
+            store.conn.execute('BEGIN IMMEDIATE')
+        elif blocker == 'maintenance':
+            store.activity_paused = True
+        elif blocker == 'evidence':
+            store._evidence_maintenance = 1
+        with pytest.raises(RuntimeError, match='idle write admission'):
+            job.run(store, rebuild=blocker != 'compaction')
+        assert store.conn.in_transaction == (blocker == 'transaction')
+        assert db_handles.state(development93) is None
+        assert store._evidence_recovery_pending
+    finally:
+        store.conn.rollback()
+        store.conn.close()
+
+
+@pytest.mark.parametrize(('source_fixture', 'changed'), [
+    ('production64', False), ('development93', False), ('development93', True)])
+def test_startup_reuses_unchanged_source_and_restarts_after_accepted_edits(request,source_fixture,changed,monkeypatch):
+    from yt_playlist.core.store import Store
+    path = request.getfixturevalue(source_fixture)
+    store = Store(path)
+    store.init_schema()
+    first = StorageMaintenance(store)
+    progress = first._progress
+    def interrupted(phase,detail):
+        progress(phase,detail)
+        if detail.get('stage') == 'copy:playlist_items':
+            raise InterruptedError('controlled background checkpoint')
+    monkeypatch.setattr(first,'_progress',interrupted)
+    try:
+        first.start()
+        first.join(30)
+        assert first.phase == 'deferred',first.error
+        state = db_handles.state(path)
+        assert state['phase'] == 'failed' and state['failed_phase'] == 'building'
+        if changed:
+            store.settings.set_setting('accepted-between-attempts', 'preserved')
+        second = StorageMaintenance(store)
+        second.start()
+        second.join(30)
+        assert second.phase == 'done',second.error
+        if changed:
+            assert second.report['id'] != state['id']
+            assert store.settings.get_setting('accepted-between-attempts') == 'preserved'
+        else:
+            assert second.report['id'] == state['id'] and second.report['resumed']
+        assert second.ready.is_set() and not store.activity_paused
+        assert store.conn.execute('SELECT max(version) FROM database_rebuild_source_history').fetchone()[0] == (
+            64 if source_fixture == 'production64' else 93)
+        store.settings.set_setting('after-automatic-resume','accepted')
+    finally:
+        first.stop()
+        first.join(30)
+        if 'second' in locals():
+            second.stop()
+            second.join(30)
+        store.conn.close()
+
+
 @pytest.mark.parametrize('installed', [107], indirect=True)
 @pytest.mark.parametrize('outcome', ['complete', 'reject', 'resume', 'restart', 'changed'])
-def test_direct_destination_uses_verified_snapshot_and_shared_install(installed, outcome, tmp_path, monkeypatch):
+def test_direct_destination_uses_readonly_original_and_shared_install(installed, outcome, tmp_path, monkeypatch):
     store, _ = installed
     store.settings.set_setting('personal', 'Mixed case')
     original = store._db_path.stat().st_ino
@@ -42,7 +111,7 @@ def test_direct_destination_uses_verified_snapshot_and_shared_install(installed,
         target.executemany('INSERT INTO schema_migrations VALUES(?,?,?)', history)
 
     def copy(source, target, cursor, limit):
-        assert Path(source.execute('PRAGMA database_list').fetchone()[2]).name == 'verified-original.db'
+        assert Path(source.execute('PRAGMA database_list').fetchone()[2]) == store._db_path
         with pytest.raises(sqlite3.OperationalError, match='readonly'):
             source.execute("UPDATE settings SET value='changed source' WHERE key='personal'")
         value = source.execute("SELECT value FROM settings WHERE key='personal'").fetchone()[0]
@@ -84,7 +153,7 @@ def test_direct_destination_uses_verified_snapshot_and_shared_install(installed,
         assert not store.activity_paused
         if outcome == 'changed':
             store.settings.set_setting('personal', 'Newer accepted value')
-            with pytest.raises(ValueError, match='changed values'):
+            with pytest.raises(ValueError, match='source changed'):
                 job.run(store, destination=destination, resume=True, progress=progress)
             assert store._db_path.stat().st_ino == original
             assert store.settings.get_setting('personal') == 'Newer accepted value'

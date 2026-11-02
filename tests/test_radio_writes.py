@@ -1,9 +1,9 @@
 """Uncertain playlist writes, readback and substitution acknowledgements."""
-import json
 import threading
 
 import pytest
 from yt_playlist.web import radio_session
+from yt_playlist.core import radio_storage
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending
 from tests.radio_session_support import poc, play
@@ -91,7 +91,7 @@ def test_acknowledged_upload_substitution_is_confirmed_without_merging_recording
     if lost_read:
         with pytest.raises(RuntimeError, match="Read response lost"):
             play(c, "v3")
-        saved = json.loads(c.ctx.store.settings.get_setting("radio_current_session"))
+        saved = c.persistence.load()
         assert saved["pending_result"]["videoId"] == "v31"
         restored = PlaylistRadio(c.ctx)
         restored.join()
@@ -145,13 +145,14 @@ def test_add_receipt_handles_video_and_artist_substitution(poc, replacement, res
     else:
         with pytest.raises(RuntimeError, match="Read response lost"):
             play(c, "v3")
-        saved = json.loads(c.ctx.store.settings.get_setting("radio_current_session"))
+        saved = c.persistence.load()
         receipt = saved["replacement"]["receipt"] if replacement else saved["pending_result"]
         assert receipt == {"status": "STATUS_SUCCEEDED", "videoId": "v4", "setVideoId": "set-v31"}
         if resume == "conflict":
             saved.update(phase=Phase.CONFLICT, halted=True,
                          error="The playlist was changed elsewhere. Radio stopped to preserve those changes.")
-            c.ctx.store.settings.set_setting("radio_current_session", json.dumps(saved))
+            with c.ctx.store.conn:
+                radio_storage.save(c.ctx.store.conn, saved, expected=c.persistence.revision)
         c = PlaylistRadio(c.ctx)
         c.join()
         if resume == "conflict":
@@ -229,7 +230,7 @@ def test_direction_replacement_recovers_an_acknowledged_substitution(poc, lost_r
     if lost_read:
         with pytest.raises(RuntimeError, match="Read response lost"):
             play(c, "v3")
-        saved = json.loads(c.ctx.store.settings.get_setting("radio_current_session"))
+        saved = c.persistence.load()
         assert saved["replacement"]["receipt"]["videoId"] == "v31"
         restored = PlaylistRadio(c.ctx)
         restored.join()

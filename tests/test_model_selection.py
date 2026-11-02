@@ -214,7 +214,7 @@ def test_publication_failure_rolls_back_vectors_and_configuration(store):
     result = _result()
     run_id = store.model_selection.start_selection(1000, _result(status='running'))
     with store.conn:
-        store.conn.execute("CREATE TRIGGER fail_selected_vector BEFORE INSERT ON recording_embeddings "
+        store.conn.execute("CREATE TRIGGER fail_selected_vector BEFORE INSERT ON recording_embedding_files "
             "WHEN NEW.space='collaborative' BEGIN SELECT RAISE(ABORT,'controlled publication failure'); END")
     with pytest.raises(sqlite3.IntegrityError, match='controlled publication failure'):
         store.model_selection.save_selection(run_id, result, rows=[challenger])

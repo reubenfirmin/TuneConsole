@@ -6,6 +6,7 @@ from playwright.sync_api import expect
 
 from tests.browser.test_song_actions_browser import song_app
 from tests.onboarding_support import publish_personal_mix
+from tests.home_fixture_support import returning_listener
 from tests.visual_support import capture
 
 
@@ -71,14 +72,17 @@ def test_genre_badge_fits_its_column(song_app, page, monkeypatch, tmp_path, surf
         store.settings.set_setting("last_sync_at", "1")
         store.settings.set_setting("onboard_dismissed", "1")
         publish_personal_mix(store, now=100)
+        returning_listener(store, 'radio')
         history = store.charts.playlist_tracks_detail(source)
         state = {"active": True, "starting": False, "local_id": source,
                  "playlist_id": "SOURCE", "history_count": len(history), "history": history,
                  "tracks": history, "title": "Radio Session", "directions": [], "exhausted": True}
         radio = song_app["app"].state.ctx.radio
-        monkeypatch.setattr(radio, "state", lambda: state)
+        monkeypatch.setattr(radio, "state", lambda **kwargs: state)
         monkeypatch.setattr(radio, "status", lambda: state)
         monkeypatch.setattr(radio, "prepare", lambda: None)
+        page.route('**/bridge/status', lambda route: route.fulfill(
+            json={'connected': True, 'now_playing': None}))
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.set_viewport_size({"width": width, "height": 850})
@@ -138,6 +142,8 @@ def test_genre_badge_fits_its_column(song_app, page, monkeypatch, tmp_path, surf
         path=tmp_path / f"genre-badges-{surface}-{width}-{root_size}.png")
     for video, genre in genres.items():
         badge = page.locator(f'tr[data-vid="{video}"] .gtag')
+        badge.scroll_into_view_if_needed()
+        expect(badge).to_be_in_viewport()
         assert_badge_padding(badge, genre, clipped=video == "long-genre",
                              full_label=(video == "progressive-trance" and surface == "radio"
                                          and (width, root_size) == (2048, 16)))

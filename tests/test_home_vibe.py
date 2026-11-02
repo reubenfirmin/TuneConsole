@@ -35,7 +35,8 @@ def established_vibe_access(monkeypatch):
                 {"mood_aggressive": .05, "energy": .9, "bpm": 160}),
     ("uplift", {"mood_happy": .9, "energy": .2}, {"mood_happy": .1, "energy": .9}),
 ])
-def test_vibes_favor_their_measured_sound_before_selection(store, monkeypatch, preset, preferred, other):
+def test_vibes_favor_their_measured_sound_before_selection(file_backed_store, monkeypatch, preset, preferred, other):
+    store = file_backed_store
     # This two-track unit exercises ranking; the integrated journey checks
     # establish when a complete four-card Vibes menu may be exposed.
     monkeypatch.setattr(home_vibe, 'current', lambda _store, _now: preset)
@@ -83,7 +84,7 @@ def test_library_audio_takes_precedence_and_keeps_extra_discovery_features(store
     assert profile['dimensions']['relaxed']['value'] == .8
 
 
-def test_mix_journey_keeps_exact_profiles_and_outcomes_after_preparation_changes(store, monkeypatch):
+def test_mix_journey_uses_profiles_and_keeps_visible_choice_after_preparation_changes(store, monkeypatch):
     from yt_playlist.rec import choice_evidence, home_cards, home_prepared
 
     tid = store.tracks.upsert_track('measured', 'Measured', 'Artist', '', 180)
@@ -107,6 +108,7 @@ def test_mix_journey_keeps_exact_profiles_and_outcomes_after_preparation_changes
     assert served['absent']['serving_context']['intensity'] is None
     assert served['absent']['serving_context']['musical_digest'] is None
     oid = choice_evidence.issue(store, 'mixes', [{'id': 'chosen', 'tracks': ordered,
+        'label': 'Energy arc', 'intent': 'energy_arc', 'genres': ['House'],
         'recipe': {'vibe': None, 'vibe_policy': home_vibe.VERSION,
                    'musical_version': musical_character.VERSION}}], 1000, context={})
     captured = store.rec_ledger.evidence().get('opportunity', oid)
@@ -120,7 +122,10 @@ def test_mix_journey_keeps_exact_profiles_and_outcomes_after_preparation_changes
     event = store.rec_ledger.evidence().records('response')[-1]
     assert event['opportunity_id'] == oid
     assert store.rec_ledger.evidence().get('opportunity', event['opportunity_id']) == captured
-    assert captured['options'][0]['tracks'] == ordered
+    from yt_playlist.core import mix_choices
+    option = mix_choices.expand(store.conn, captured['options'][0])
+    assert (option['label'], option['intent'], option['genres']) == ('Energy arc', 'energy_arc', ['House'])
+    assert 'tracks' not in option and 'recipe' not in option
 
 
 def test_vibe_changes_offered_styles_as_well_as_track_order(store):
@@ -144,7 +149,8 @@ def seed_sounds(store, *, by_mode=False):
                 item['video_id'] = item['key']
                 audio = {'energy': energy, 'bpm': 70 if i >= 12 else 160, 'mood_relaxed': 1 - energy}
                 if lane == 'fresh':
-                    store.discovery.upsert_discovered_track(item['key'], item['video_id'], item['title'], item['artist'],
+                    # A new upload can resolve to a different canonical recording key.
+                    item['key'] = store.discovery.upsert_discovered_track(item['key'], item['video_id'], item['title'], item['artist'],
                         '', None, item['genre'], None, None, 1, audio=audio)
                 else:
                     # seed_genres already owns these exact catalog subjects.
@@ -158,7 +164,8 @@ def seed_sounds(store, *, by_mode=False):
     bundles['all'] = {lane: [item for mid in range(6) for item in bundles[str(mid)][lane]]
                       for lane in mode_surfaces.CARD_SURFACES}
     prepare_profiles(store)
-    publish_bundles(store, bundles, 1, vibes=True)
+    # Ordinary Fresh reads have a separate owner from Vibes' candidate pools.
+    publish_bundles(store, bundles, 1, fresh=bundles['all']['fresh'], vibes=True)
 
 
 def test_vibe_changes_rendered_tracks_persists_and_expires_without_learning(store, monkeypatch):
@@ -177,16 +184,19 @@ def test_vibe_changes_rendered_tracks_persists_and_expires_without_learning(stor
     assert 'data-vibe="relax"' in response.text
     assert '"vibe": "relax"' in response.text
     assert response.headers["X-Mix-Tuning-Active"] == "true"
-    # Whole-context outcomes resolve to the intent and policy that produced
-    # this menu, even after a later model or temporary-vibe change.
+    # Mix outcomes retain the visible theme/raw genres after a later temporary
+    # vibe change; #688 deliberately retires hidden recipe/profile precision.
     opportunities = [row for row in store.rec_ledger.evidence().records('opportunity')
                      if row['format'] == 'mixes']
     assert opportunities
     offered = opportunities[-1]
-    for option in offered['options']:
-        assert option['recipe']['vibe'] == 'relax'
-        assert option['recipe']['vibe_policy'] == home_vibe.VERSION
-        assert option['recipe']['musical_version'] == musical_character.VERSION
+    rendered_genres = [json.loads(html.unescape(value)) for value in
+                       re.findall(r"data-genres='([^']*)'", response.text)]
+    from yt_playlist.core import mix_choices
+    options = [mix_choices.expand(store.conn, option) for option in offered['options']]
+    assert [option['genres'] for option in options] == [sorted(set(g)) for g in rendered_genres]
+    assert all(option['label'] and option['intent'] and 'recipe' not in option
+               and 'tracks' not in option for option in options)
     cards = mode_surfaces.assemble_cards(store, clock[0], 0)
     assert cards
     assert all(sum(musical_character.intensity(t) < .5 for t in card['tracks']) >= 8 for card in cards)
@@ -203,7 +213,7 @@ def test_vibe_changes_rendered_tracks_persists_and_expires_without_learning(stor
     assert match
     revised = choice_evidence.opportunity(store, json.loads(html.unescape(match[1]))['opportunity_id'])
     assert revised['id'] != offered['id']
-    assert all(option['recipe']['vibe_policy'] == home_vibe.VERSION for option in revised['options'])
+    assert all('recipe' not in option and 'tracks' not in option for option in revised['options'])
     assert store.rec_ledger.evidence().get('opportunity', offered['id']) == offered
 
     clock[0] += mix_tuning.TTL_S

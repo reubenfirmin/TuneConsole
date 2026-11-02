@@ -284,9 +284,12 @@ def test_a_barely_played_song_is_still_reachable_when_its_genre_is_asked_for(sto
     assert len(rock) > 4
 
 
-def test_one_genre_gets_one_bar_whatever_spelled_it(store, monkeypatch):
+@pytest.mark.parametrize("enabled", [None, ["Techno"], ["Alternative Rock"]])
+def test_one_genre_gets_one_bar_whatever_spelled_it(enabled, monkeypatch):
     """The same genre arrives as "Alternative Rock" (Last.fm), "alternative rock" (typed into the
     recipe) and "ALT ROCK". Three bars would each hold a quota the other two ignore."""
+    monkeypatch.setattr(axes.genre_names, "_active",
+                        None if enabled is None else axes.genre_names.build_canon(enabled))
     assert (axes.canonical_genre("alternative rock") == axes.canonical_genre("ALT ROCK")
             == axes.canonical_genre("Alternative Rock") == "Alternative Rock")
     assert axes.canonical_genre("bagpipe funk") == "Bagpipe Funk"    # unknown: just tidied

@@ -4,6 +4,71 @@ Current owners have one physical name. Explicit writer identifiers and read
 projections keep installed predecessors authoritative during preparation.
 """
 from dataclasses import dataclass
+import re
+
+
+# Runtime compatibility owns this finite vocabulary independently of frozen DDL
+# history. Remove it with predecessor storage/writer retirement in #626.
+PREDECESSOR_NAMES = {
+    'identities': 'accounts', 'identity_id': 'account_id', 'scope_ref': 'playlist_scope_id',
+    'ytm_playlist_id': 'provider_playlist_id', 'playlist_ref': 'playlist_scope_id',
+    'ix_playlist_scope': 'ix_playlist_scope_account',
+}
+PREDECESSOR_COLUMNS = {
+    'playlists': {'identity_id': 'account_id', 'scope_ref': 'playlist_scope_id',
+                  'ytm_playlist_id': 'provider_playlist_id'},
+    'playlist_scopes': {'identity_id': 'account_id', 'ref': 'id', 'provider_id': 'provider_playlist_id'},
+    'playlist_membership_refs': {'identity_id': 'account_id', 'scope_ref': 'playlist_scope_id'},
+    'playlist_library_revisions': {'identity_id': 'account_id', 'scope_ref': 'playlist_scope_id'},
+    'item_ratings': {'identity_id': 'account_id'},
+    'listening_calendars': {'identity_id': 'account_id'},
+    'listening_capture_receipts': {'identity_id': 'account_id'},
+    'listening_observations': {'identity_id': 'account_id'},
+    'listening_rating_actions': {'identity_id': 'account_id'},
+    'play_events': {'identity_id': 'account_id'},
+    'player_events': {'identity_id': 'account_id'},
+    'spotify_history_listens': {'identity_id': 'account_id'},
+    'takeout_imports': {'identity_id': 'account_id'},
+    'youtube_playback_alternates': {'identity_id': 'account_id'},
+    'cleanup_ignored': {'ytm': 'playlist_scope_id'},
+    'ignored_merge_members': {'playlist_ref': 'playlist_scope_id'},
+    'suppressed_overlaps': {'a': 'first_playlist_scope_id', 'b': 'second_playlist_scope_id'},
+    'overlap_kept': {'a': 'first_playlist_scope_id', 'b': 'second_playlist_scope_id'},
+    'rec_mode_picks': {'playlist_id': 'membership_ref_id'},
+}
+_SQL_TOKENS = re.compile(r"--[^\n]*|/\*.*?\*/|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|"
+                         r"`(?:``|[^`])*`|\[[^]]*\]|[A-Za-z_]\w*|\S", re.S)
+
+
+def predecessor_definition(sql):
+    """Name retained schema definitions for validation, preserving literals.
+
+    This is used only for known DDL contracts, never application statements,
+    provider input or recovery documents. Frozen upgrades keep their own copy.
+    """
+    tokens = [match.group() for match in _SQL_TOKENS.finditer(sql)]
+    identifiers = {token.strip('"`[]').lower() for token in tokens
+                   if not token.startswith(("'", '--', '/*'))}
+    names = dict(PREDECESSOR_NAMES)
+    if 'playlist_scopes' in identifiers:
+        names.update(ref='id', provider_id='provider_playlist_id')
+    if identifiers & {'cleanup_ignored', 'quarantined_playlists'}:
+        names['ytm'] = 'playlist_scope_id'
+    if identifiers & {'suppressed_overlaps', 'overlap_kept'}:
+        names.update(a='first_playlist_scope_id', b='second_playlist_scope_id')
+    if 'rec_mode_picks' in identifiers:
+        names['playlist_id'] = 'membership_ref_id'
+
+    def replace(match):
+        token = match.group()
+        if token.startswith(("'", '--', '/*')):
+            return token
+        quoted = token.startswith(('"', '`', '['))
+        key = token[1:-1] if quoted else token
+        value = names.get(key.lower())
+        return token if value is None else token[0]+value+token[-1] if quoted else value
+
+    return _SQL_TOKENS.sub(replace, sql)
 
 
 @dataclass(frozen=True)
@@ -23,13 +88,11 @@ def owner(conn, name):
     their own transactions, UPSERTs, row counts and inserted row identities.
     #626 tracks removal after retained layouts and their writers are retired.
     """
-    from .migrations.v103_entity_names import COLUMNS
-
-    if name not in COLUMNS and name != 'accounts':
+    if name not in PREDECESSOR_COLUMNS and name != 'accounts':
         raise ValueError('Unsupported account naming owner: ' + name)
     modern = conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='accounts'").fetchone()
     physical = 'identities' if name == 'accounts' and not modern else name
-    columns = {} if modern else {new: old for old, new in COLUMNS.get(name, {}).items()}
+    columns = {} if modern else {new: old for old, new in PREDECESSOR_COLUMNS.get(name, {}).items()}
     return Owner('main.' + physical, columns)
 
 
@@ -68,10 +131,9 @@ def predecessor_reads(conn):
     """
     if conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='accounts'").fetchone():
         return
-    from .migrations.v103_entity_names import COLUMNS, COMMON
-    mappings = {'identities':{},**COLUMNS,'quarantined_playlists':{'ytm':'playlist_scope_id'}}
+    mappings = {'identities':{},**PREDECESSOR_COLUMNS,'quarantined_playlists':{'ytm':'playlist_scope_id'}}
     for name, in conn.execute("SELECT name FROM main.sqlite_schema WHERE type='view'"):
-        mappings.setdefault(name,COMMON)
+        mappings.setdefault(name,PREDECESSOR_NAMES)
     installed = []
     quote = lambda name:'"'+name.replace('"','""')+'"'
     def project(table,target,mapping):
@@ -89,7 +151,7 @@ def predecessor_reads(conn):
     for table,target in (('play_events','play_event_subjects'),
                          ('listening_observations','listening_observation_subjects')):
         if not conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?',(target,)).fetchone():
-            project(table,target,COLUMNS[table])
+            project(table,target,PREDECESSOR_COLUMNS[table])
     if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='recording_listening_artists'").fetchone():
         from .artist_credits import projection_table
         conn.execute('CREATE TEMP VIEW IF NOT EXISTS recording_listening_artists AS '

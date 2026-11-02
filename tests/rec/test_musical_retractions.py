@@ -3,12 +3,15 @@ import json
 
 import pytest
 
-from yt_playlist.core.migrations import registry
+from yt_playlist.core import metadata_native
+from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.store import Store
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import musical_preparation, vibe_preparation
 from yt_playlist.rec.progressive import Preparation
 from tests.musical_support import prepare_profiles
+from tests.historical_support import upgrade_fixture
+from yt_playlist.rec import musical_profiles
 
 
 def deliver(store, entry, entities, run):
@@ -38,8 +41,23 @@ def source_rows(store):
 
 
 def versions(store):
-    return json.loads(store.conn.execute(
-        "SELECT payload FROM rec_musical_profiles WHERE identity_key='song|artist'").fetchone()[0])['source_versions']
+    return store.musical_profiles.by_keys(['song|artist'])['song|artist']['source_versions']
+
+
+def test_profiles_drain_after_a_bounded_capture_defers(store, monkeypatch):
+    entry = store.tracks.upsert_track('video', 'Song', 'Artist', '', 200)
+    deliver(store, entry, ('a',), 'initial')
+    original = Preparation.capture
+    calls = []
+
+    def defer_once(self, now):
+        calls.append(now)
+        return False if len(calls) == 1 else original(self, now)
+
+    monkeypatch.setattr(Preparation, 'capture', defer_once)
+    settled(store)
+    assert len(calls) > 1
+    assert set(versions(store)) == {source_rows(store)['a']['digest']}
 
 
 @pytest.mark.parametrize(('initial', 'corrected'), [(('a', 'b'), ('a',)), (('a',), ('b',))])
@@ -60,35 +78,72 @@ def test_delivery_contraction_and_replacement_rebuild_from_current_links(store, 
     assert set(versions(store)) == {current[entity]['digest'] for entity in corrected}
     assert all(current[entity] == row for entity, row in before.items())
     assert store.prepared_content.counters() == counters
-    assert store.conn.execute("SELECT COUNT(*) FROM metadata_findings WHERE provider='fixture-retraction'").fetchone()[0] == len(initial) + len(corrected)
+    observations = store.enrichment_state.metadata_observations('song|artist')
+    assert len([row for row in observations if row['provider'] == 'fixture-retraction']) == len(initial) + len(corrected)
 
 
 @pytest.mark.parametrize('contracted', [False, True])
-def test_schema_63_upgrade_recovers_only_stranded_retracted_profiles(tmp_path, monkeypatch, contracted):
+def test_schema_63_upgrade_recovers_only_stranded_retracted_profiles(tmp_path, contracted):
     path = tmp_path / 'library.db'
     store = Store(path)
-    with monkeypatch.context() as patch:
-        patch.setattr(registry, 'MIGRATIONS', tuple(m for m in registry.MIGRATIONS if m.version <= 63))
-        store.init_schema()
-    entry = store.tracks.upsert_track('video', 'Song', 'Artist', '', 200)
-    deliver(store, entry, ('a', 'b'), 'initial')
-    settled(store)
-    before, old_versions = source_rows(store), versions(store)
+    migrate(store.conn, registry=registry.MIGRATIONS[:63])
+    # Populate the frozen predecessor without invoking today's repository API.
+    with store.conn:
+        recording = store.conn.execute("INSERT INTO recordings(identity_key,title,artist) VALUES ('song|artist','Song','Artist')").lastrowid
+        store.conn.execute("INSERT INTO youtube_items(video_id,recording_id,title,artist,duration_s) VALUES ('video',?,'Song','Artist',200)", (recording,))
+        entry = store.conn.execute("INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,'video')", (recording,)).lastrowid
+        store.conn.execute("INSERT INTO library_memberships VALUES (?,'fixture',NULL)", (entry,))
+        store.conn.execute("INSERT INTO recording_aliases VALUES ('song|artist',?,'fixture')", (recording,))
+
+    def historical_delivery(entities, delivery):
+        with store.conn:
+            for entity in entities:
+                provenance = {'schema': 1, 'scope': 'artist', 'entity_id': entity,
+                              'kind': 'reported', 'delivery_id': delivery,
+                              'match_evidence': {'method': 'title_artist_match'}}
+                store.conn.execute('INSERT INTO metadata_findings(entry_id,recording_id,provider,field,value_json,provenance_json,observed_at) VALUES (?,?,?,?,?,?,10)',
+                    (entry, recording, 'fixture-retraction', 'tags', json.dumps([{'name': 'Ambient' if entity == 'a' else 'Metal'}]), json.dumps(provenance)))
+
+    historical_delivery(('a', 'b'), 'initial')
+    sources = []
+    with store.conn:
+        for row in store.conn.execute('SELECT * FROM rec_musical_sources').fetchall():
+            profile = musical_profiles.source_profile({**dict(row), 'observations': json.loads(row['payload'])})
+            sources.append(profile)
+            store.conn.execute('INSERT INTO rec_musical_source_profiles VALUES (?,?,?,?,?)',
+                (row['source_key'], musical_profiles.canonical(profile), musical_profiles.VERSION, musical_profiles.digest(profile), 1000))
+        profile = musical_profiles.resolve(sources)
+        store.conn.execute('INSERT INTO rec_musical_profiles VALUES (?,?,?,?,?)',
+            ('song|artist', musical_profiles.canonical(profile), musical_profiles.VERSION, musical_profiles.digest(profile), 1000))
+        store.conn.execute('DELETE FROM rec_musical_pending')
+        store.conn.execute('DELETE FROM rec_content_pending')
+    before = source_rows(store)
+    old_versions = json.loads(store.conn.execute('SELECT payload FROM rec_musical_profiles').fetchone()[0])['source_versions']
     if contracted:
-        deliver(store, entry, ('a',), 'old-contraction')
-        assert not store.prepared_content.has_pending() and source_rows(store) == before
-        assert versions(store) == old_versions
+        historical_delivery(('a',), 'old-contraction')
+        assert not store.conn.execute('SELECT 1 FROM rec_content_pending').fetchone()
+        assert source_rows(store) == before
+        assert json.loads(store.conn.execute('SELECT payload FROM rec_musical_profiles').fetchone()[0])['source_versions'] == old_versions
     store.conn.close()
 
     reopened = Store(path)
     try:
-        reopened.init_schema()
-        assert reopened.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] >= 64
-        assert source_rows(reopened) == before and versions(reopened) == old_versions
-        assert [row[0] for row in reopened.prepared_content.pending(32)] == (['song|artist'] if contracted else [])
+        migrate(reopened.conn, registry=registry.MIGRATIONS[:64])
+        assert reopened.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 64
+        assert source_rows(reopened) == before
+        assert json.loads(reopened.conn.execute('SELECT payload FROM rec_musical_profiles').fetchone()[0])['source_versions'] == old_versions
+        assert [row[0] for row in reopened.conn.execute('SELECT identity_key FROM rec_content_pending')] == (['song|artist'] if contracted else [])
+        # Establish the selective v64 repair before later format changes enqueue
+        # their own work, then exercise the current bounded preparation worker.
+        upgrade_fixture(reopened)
         settled(reopened)
         assert set(versions(reopened)) == {before[entity]['digest'] for entity in (('a',) if contracted else ('a', 'b'))}
-        assert source_rows(reopened) == before
+        current = source_rows(reopened)
+        for entity, original in before.items():
+            # v80 replaces the source JSON column with retained observation
+            # owners. Compare the same evidence through that current boundary.
+            assert current[entity] == {key: value for key, value in original.items() if key != 'payload'}
+            assert metadata_native.source_values(reopened.conn, original['source_key']) == json.loads(original['payload'])
         reopened.init_schema()
         assert not reopened.prepared_content.has_pending()
         assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()

@@ -242,14 +242,14 @@ def test_actual_library_recovers_while_cached_home_remains_usable(request, tmp_p
             home = client.get('/')
             report['home_seconds_during_recovery'] = time.monotonic() - started
             assert home.status_code == 200
-            assert 'Library updates are paused.' in home.text
+            assert 'Updating library storage; browsing and playback remain available.' in home.text
             assert 'class="gen-card-body' in home.text
             assert client.get('/playlists').status_code == 200
             assert client.get('/storage-maintenance/status').json()['active']
             assert report['home_seconds_during_recovery'] < 3
             assert not future.done()
             page.goto(f'http://127.0.0.1:{port}/', wait_until='domcontentloaded')
-            expect(page.locator('#storage-maintenance')).to_have_text('Library updates are paused.')
+            expect(page.locator('#storage-maintenance')).to_have_text('Updating library storage; browsing and playback remain available.')
             expect(page.locator('#home-mode-cards .gen-card-body').first).to_be_visible()
             page.screenshot(path=str(tmp_path / 'recovery-pending.png'), full_page=True)
         finally:

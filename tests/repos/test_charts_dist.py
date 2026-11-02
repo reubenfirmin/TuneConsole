@@ -39,12 +39,12 @@ def _seed(store):
 def test_listen_distribution_genre_windowed_excludes_old(store):
     _seed(store)
     since = NOW - 7 * 86400
-    assert store.charts.listen_distribution("genre", since=since) == {"techno": 2, "house": 1}
+    assert store.charts.listen_distribution("genre", since=since) == {"Techno": 2, "House": 1}
 
 
 def test_listen_distribution_genre_alltime_includes_old(store):
     _seed(store)
-    assert store.charts.listen_distribution("genre", since=None) == {"techno": 3, "house": 1}
+    assert store.charts.listen_distribution("genre", since=None) == {"Techno": 3, "House": 1}
 
 
 def test_album_browse_ids_maps_release_key_to_browse(store):
@@ -75,7 +75,7 @@ def test_listen_distribution_respects_until_bound(store):
     _seed(store)
     # disjoint period (8d..365d ago): excludes the NOW snapshot, keeps the ~100d-old one (Gamma).
     out = store.charts.listen_distribution("genre", since=NOW - 365 * 86400, until=NOW - 7 * 86400)
-    assert out == {"techno": 1}
+    assert out == {"Techno": 1}
 
 
 def test_listen_distribution_year_buckets_by_decade(store):
@@ -111,7 +111,7 @@ def test_corpus_distribution_artist_counts_distinct_songs(store):
 
 def test_corpus_distribution_genre_counts_distinct_songs(store):
     _seed(store)
-    assert store.charts.corpus_distribution("genre") == {"techno": 2, "house": 1}
+    assert store.charts.corpus_distribution("genre") == {"Techno": 2, "House": 1}
 
 
 def test_corpus_distribution_year_decades(store):

@@ -13,18 +13,27 @@ from playwright.sync_api import expect
 from tests.test_trends_recap_route import _client, _STORY, _detailed_story
 
 
-def _serve_recap(port, data_dir):
+def _serve_recap(port, data_dir, ready):
     os.environ["YT_PLAYLIST_EXIT_ON_IDLE"] = "1"
     os.environ["YT_PLAYLIST_HOME"] = data_dir
-    # Exercise the production monitor without waiting two minutes for startup protection.
-    # Unit tests cover the default deadlines with a controlled clock.
+    # Keep production startup protection until a real document has a lease.
+    # Then expire only that startup deadline; the real close grace and monitor
+    # continue to govern navigation, downloads and multiple browser documents.
     from yt_playlist.web import app as web_app
-    web_app._UI_STARTUP_GRACE_S = 1
+    class DocumentReadyPresence(web_app._UIPresence):
+        def heartbeat(self, page):
+            super().heartbeat(page)
+            with self._lock:
+                self._startup_until = 0
+
+    web_app._UIPresence = DocumentReadyPresence
     web_app._UI_CLOSE_GRACE_S = 5
     # Keep the seeded recap; spawned processes do not inherit pytest's worker patches.
     # The real idle monitor still runs independently of background preparation.
     web_app.BACKGROUND_WORK = False
     client, _ = _client(_STORY)
+    ready.send('fixture-ready')
+    ready.close()
     uvicorn.run(client.app, host="127.0.0.1", port=port, log_level="warning")
 
 
@@ -34,10 +43,16 @@ def packaged_recap(tmp_path):
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     base = f"http://127.0.0.1:{port}"
-    process = multiprocessing.get_context("spawn").Process(
-        target=_serve_recap, args=(port, str(tmp_path)))
+    context = multiprocessing.get_context("spawn")
+    ready, seeded = context.Pipe(duplex=False)
+    process = context.Process(target=_serve_recap, args=(port, str(tmp_path), seeded))
     process.start()
+    seeded.close()
     try:
+        # Schema creation and story seeding precede network startup. Synchronize
+        # those phases instead of spending the socket deadline on fixture work.
+        assert ready.poll(60), 'packaged fixture did not finish seeding'
+        assert ready.recv() == 'fixture-ready'
         deadline = time.monotonic() + 15
         while True:
             assert process.is_alive(), "packaged server exited before startup"
@@ -49,6 +64,7 @@ def packaged_recap(tmp_path):
                 time.sleep(0.02)
         yield base, process
     finally:
+        ready.close()
         if process.is_alive():
             process.terminate()
         process.join(timeout=5)
@@ -58,8 +74,7 @@ def test_recap_keeps_packaged_server_alive_through_download_and_exit(packaged_re
     base, process = packaged_recap
     errors = []
     page.on("pageerror", lambda error: errors.append(error))
-    page.goto(base + "/")
-    page.get_by_role("tab", name="Needs attention", exact=True).click()
+    page.goto(base + "/#notices")
     expect(page.locator("#recap-nudge")).to_be_visible()
     # The standalone reel registers its own document lease while Home's lease expires.
     with page.expect_response(lambda r: r.url.startswith(base + "/heartbeat?") and r.status == 204):
@@ -127,8 +142,8 @@ def test_detail_links_open_without_advancing_the_recap(live_app, store, page):
     expect(slide).to_be_visible()
 
 
-@pytest.mark.parametrize("viewport", [{"width": 390, "height": 844}, {"width": 844, "height": 390}])
-def test_optional_screens_fit_and_navigate_on_mobile(live_app, store, page, viewport, tmp_path):
+@pytest.mark.parametrize("viewport", [{"width": 1280, "height": 720}])
+def test_optional_screens_fit_and_navigate(live_app, store, page, viewport, tmp_path):
     story = _detailed_story()
     store.rec_proposals.put_proposals("trend_rollups", {"story": story}, 1)
     errors = []

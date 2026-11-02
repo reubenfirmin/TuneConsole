@@ -1,5 +1,6 @@
 """Coalescing, ordering, retry and cancellation across scheduler handoffs."""
 import logging
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,27 @@ from yt_playlist.core.activity import WorkClosing
 from yt_playlist.rec import rec_worker
 from yt_playlist.rec.maintenance import Projections
 from yt_playlist.rec.worker_queue import Job, PendingJobs, Retry
+
+
+def test_requests_cannot_start_worker_until_storage_is_ready(scheduled, monkeypatch):
+    worker, targets = scheduled
+    ready = threading.Event()
+    worker.ctx.storage_maintenance = SimpleNamespace(ready=ready)
+    worker.ctx.store.settings.set_setting('runtime-is-writable', 'yes')
+    calls = []
+    offer = SimpleNamespace(surface='home', run=lambda: calls.append('measurement'), close=lambda: None)
+    monkeypatch.setattr(worker.tasks, 'ratings', lambda: calls.append('ratings') or set())
+    worker.trigger_rating_update()
+    assert not worker.enqueue_measurement(offer)
+    assert not worker._schedule(full=False, evidence_storage=True)
+    assert not targets and not worker.jobs
+    assert worker.ctx.store.settings.get_setting('runtime-is-writable') == 'yes'
+    ready.set()
+    worker.trigger_rating_update()
+    assert worker.enqueue_measurement(offer)
+    assert len(targets) == 1
+    targets.pop()()
+    assert calls == ['measurement', 'ratings']
 
 
 def test_detached_batches_preserve_new_arrivals_and_bound_artwork():

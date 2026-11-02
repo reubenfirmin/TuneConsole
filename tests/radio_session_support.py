@@ -96,6 +96,7 @@ def poc(monkeypatch, store):
     class Candidates:
         def __init__(self, store, now, tuning=None, *, now_source=None, comparison=None):
             self.store = store
+            self.prepared = None
             self.comparison = getattr(now_source, 'comparison', comparison)
             self.tuning = radio_session.radio_tuning.controls(tuning or radio_session.radio_tuning.DEFAULTS)
             self.now_sampled_at = now

@@ -163,8 +163,10 @@ class PreparedContentRepo(Repo):
     @synchronized
     def missing_previous_inputs(self):
         """Bootstrap a previously fitted catalog without shrinking its usable cohort."""
+        from yt_playlist.core import embedding_files
+        table = embedding_files.relation(self.conn, 'recording')
         return self.conn.execute(
-            'SELECT EXISTS(SELECT 1 FROM recording_embeddings v '
+            f'SELECT EXISTS(SELECT 1 FROM {table} v '
             'LEFT JOIN prepared_recording_inputs p ON p.recording_id=v.recording_id '
             "WHERE v.space IN ('content_library','content_discovery') AND p.recording_id IS NULL)").fetchone()[0]
 
@@ -195,8 +197,10 @@ class PreparedContentRepo(Repo):
     def vector_storage_bytes(self):
         """Bound old serialized vectors and Python lookup overhead during publication prep."""
         with column_group_reads(self._store,'recordings','identity'):
-            return self.conn.execute('SELECT COALESCE(SUM(length(e.vector)+4*length(r.identity_key)+512),0) '
-                'FROM recording_embeddings e JOIN recordings r ON r.id=e.recording_id '
+            from yt_playlist.core import embedding_files
+            table = embedding_files.relation(self.conn, 'recording')
+            return self.conn.execute('SELECT COALESCE(SUM(e.dimensions*4+4*length(r.identity_key)+512),0) '
+                f'FROM {table} e JOIN recordings r ON r.id=e.recording_id '
                 "WHERE e.space IN ('content_library','content_discovery')").fetchone()[0]
 
     @synchronized

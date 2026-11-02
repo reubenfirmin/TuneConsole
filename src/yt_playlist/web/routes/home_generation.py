@@ -1,7 +1,9 @@
 """Materialize Home mixes and navigate the connected player after confirmation."""
 import json
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import Response
 
 from yt_playlist.core.accounts import client_for
 from yt_playlist.core.activity import activity_for
@@ -10,11 +12,13 @@ from yt_playlist.library.playlist_writes import PlaylistAddUncertain
 from yt_playlist.rec import choice_evidence, measurement
 from yt_playlist.web.context import request_form
 from yt_playlist.web.jobs import start_playlist_enrichment
+from yt_playlist.web import generated_playlist
 
 
 def build(ctx):
     router = APIRouter()
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
+    router.include_router(generated_playlist.build(ctx))
 
     @router.post("/home/generate")
     def home_generate(request: Request, form=Depends(request_form)):
@@ -57,6 +61,14 @@ def build(ctx):
                     activity_for(ctx).start_thread(playlist_navigation.navigate_when_ready,
                         args=(client, bridge, res["new_ytm"], watch_url), kwargs={"intent": intent})
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
+                if res['pid'] is None:
+                    receipt = ctx.jobs.create(kind='generated_playlist')
+                    receipt.parameters = {'account_id': account_id, 'ytm': res['new_ytm']}
+                    receipt.result = {**res, 'recipe': recipe}
+                    receipt.done = True
+                    result['playlist_url'] = f'/playlist/saved/{account_id}/{quote(res["new_ytm"], safe="")}'
+                else:
+                    result['playlist_url'] = f'/playlist/{res["pid"]}'
                 if res.get("pid") and res.get("added"):
                     measurement.record_action(store, "save", now_fn(), playlist_id=res["pid"],
                                               event_id=f"generate:{res['new_ytm']}", generated=True)
@@ -82,6 +94,15 @@ def build(ctx):
                 result.update(save_uncertain=True, error="We couldn’t confirm playback.",
                               selected_tracks=[track for track in tracks if isinstance(track, dict)]
                               if isinstance(tracks, list) else [])
+        if (request.headers.get('HX-Request') == 'true' and form.get('artist_start') != '1'
+                and result.get('ytm') and not result.get('error')):
+            # Navigate before any card swap. Rendering the saved confirmation
+            # inside the focused mix briefly exposes an incomplete playlist UI.
+            return Response(headers={
+                'HX-Redirect': result['playlist_url'],
+                'HX-Trigger': json.dumps({'generated-playlist-saved': {
+                    'launch_id': result['launch_id'], 'playlist': result['ytm']}}),
+            })
         template = ('_partials/artist_playback.html' if form.get('artist_start') == '1'
                     else '_partials/generated_result.html')
         return templates.TemplateResponse(request, template, result)

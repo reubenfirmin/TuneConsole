@@ -28,6 +28,7 @@ class WorkBudgetExceeded(RuntimeError):
 @dataclass
 class _CancellationState:
     should_stop: Callable[[], bool]
+    stop_on_shutdown: bool = True
     interrupted: bool = False
 
 
@@ -180,7 +181,8 @@ def check_stopping():
     current = _CURRENT_WORK.get()
     cancellation = _CANCELLATION.get()
     def stopped():
-        return ((current is not None and current[0].closing_reason == "shutdown")
+        return ((current is not None and current[0].closing_reason == "shutdown"
+                 and (cancellation is None or cancellation.stop_on_shutdown))
                 or (cancellation is not None and cancellation.should_stop()))
 
     deadline = _DEADLINE.get()
@@ -192,13 +194,13 @@ def check_stopping():
 
 
 @contextmanager
-def cancellable_work(should_stop):
+def cancellable_work(should_stop, *, stop_on_shutdown=True):
     """Allow disposable background calculations to stop, including inside SQLite.
 
     Cancellation is local to this thread/context. Other admitted work, especially
     remote mutations and their local bookkeeping, keeps draining normally.
     """
-    token = _CANCELLATION.set(_CancellationState(should_stop))
+    token = _CANCELLATION.set(_CancellationState(should_stop, stop_on_shutdown))
     try:
         check_stopping()
         try:
@@ -224,7 +226,11 @@ def work_budget(seconds):
     parent_deadline = _DEADLINE.get()
     token = _DEADLINE.set(min(parent_deadline, deadline) if parent_deadline is not None else deadline)
     try:
-        with cancellable_work(previous.should_stop if previous else lambda: False):
+        # A budget bounds reads used by admitted mutations too. It must not turn
+        # their bookkeeping into disposable shutdown work. Explicit cancellation
+        # scopes keep their original shutdown behavior through nested budgets.
+        with cancellable_work(previous.should_stop if previous else lambda: False,
+                              stop_on_shutdown=previous.stop_on_shutdown if previous else False):
             yield
     finally:
         _DEADLINE.reset(token)

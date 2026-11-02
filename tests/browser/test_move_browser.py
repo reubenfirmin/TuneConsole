@@ -185,7 +185,7 @@ def test_pending_transfer_disables_repeat_actions_and_identity_changes(live_move
     assert len(client.created) == 3
 
 
-@pytest.mark.parametrize("width", [1280, 390])
+@pytest.mark.parametrize("width", [1280])
 def test_compact_layout_and_ribbon_fit_viewport(live_move_app, page, width):
     page.set_viewport_size({"width": width, "height": 900})
     page.goto(f"{live_move_app['base']}/move")

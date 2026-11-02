@@ -447,7 +447,9 @@ def test_visible_demand_is_coalesced_bounded_and_expires(store):
 
 def test_held_menu_poll_preserves_demand_after_preparation_changes(store):
     from tests.test_album_web import _client
+    from tests.home_fixture_support import returning_listener
     from yt_playlist.rec import choice_evidence
+    returning_listener(store, 'albums')
     client, _, _ = _client(store)
     opportunity = choice_evidence.present(store, 'albums', [{**ALBUM, 'id': ALBUM['browse_id']}], 1,
                                           context={}, window=0)

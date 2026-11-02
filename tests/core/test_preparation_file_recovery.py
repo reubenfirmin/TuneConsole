@@ -7,7 +7,7 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import installed
-from yt_playlist.core import policy_recovery, preparation_files as recovery
+from yt_playlist.core import fao, policy_recovery, preparation_files as recovery
 from yt_playlist.core.preparation import document_plan
 from yt_playlist.core.store import Store
 
@@ -82,6 +82,60 @@ def sql_custody(conn):
     return result
 
 
+def assert_sql_custody(conn, expected, *, original):
+    expected = dict(expected)
+    if not original:
+        # Compact recovery admits the additive mix-choice extension. Historical
+        # verified backups retain their original schema. The new owner must be
+        # present and empty; every existing owner and row still compares exactly.
+        expected.setdefault('prepared_choice_interest_mix_descriptors', [])
+    assert sql_custody(conn) == expected
+
+
+@pytest.mark.parametrize('installed', [79], indirect=True)
+@pytest.mark.parametrize('compressed', [False, True], ids=['plain', 'compressed'])
+def test_preparation_relocation_preserves_file_age(installed, tmp_path, compressed):
+    producer, _ = installed
+    root, read, selected = selected_owner(producer, 'documents')
+    expected, selection = read(producer), selected(producer.conn)
+    if not compressed:
+        for path in root.rglob('*.json'):
+            path.write_bytes(fao.read_bytes(path))
+    clocks = {str(path): (fao.stat(path).mtime_ns, fao.stat(path).ctime_ns)
+              for path in root.rglob('*.json')}
+    with producer.conn:
+        producer.conn.execute('BEGIN')
+        manifest = recovery.export(producer.conn, tmp_path / 'export')
+    manifest_path = Path(manifest)
+    export_root = manifest_path.parent.parent
+    records = [entry for digest in recovery.files._load_manifest(manifest_path)['chunks']
+               for entry in recovery.files._load_manifest(export_root / digest[:2] / (digest + '.json'))['records']
+               if entry['type'] == 'file']
+    assert any(entry['graph'] for entry in records)
+    for entry in records:
+        copied = fao.stat(export_root / entry['relative_filename'])
+        assert (copied.mtime_ns, copied.ctime_ns) == clocks[entry['reference'][0]]
+    candidate = Store(tmp_path / 'relocated.db')
+    producer.conn.backup(candidate.conn)
+    candidate.init_schema(defer_metadata=True)
+    hidden = root.with_name(root.name + '-unavailable')
+    root.rename(hidden)
+    try:
+        recovery.restore(candidate.conn, manifest)
+        assert read(candidate) == expected
+        assert selected(candidate.conn) == selection
+        originals = {(entry['table'], tuple(entry['keys'].items()), tuple(entry['columns'])):
+                     clocks[entry['reference'][0]] for entry in recovery.references(producer.conn)}
+        for owner in recovery.references(candidate.conn):
+            copied = fao.stat(owner['reference'][0])
+            assert (copied.mtime_ns, copied.ctime_ns) == originals[
+                (owner['table'], tuple(owner['keys'].items()), tuple(owner['columns']))]
+        assert not candidate.conn.execute('PRAGMA foreign_key_check').fetchone()
+    finally:
+        candidate.conn.close()
+        hidden.rename(root)
+
+
 @pytest.mark.parametrize('installed', [79], indirect=True)
 @pytest.mark.parametrize('kind', ['home', 'listening', 'documents', 'models', 'reports'])
 @pytest.mark.parametrize('original', [False, True], ids=['compact', 'verified-backup'])
@@ -109,7 +163,7 @@ def test_selected_files_read_exactly_without_producer(installed, tmp_path, kind,
         candidate.init_schema(defer_metadata=True)
         assert read(candidate) == expected
         assert selected(candidate.conn) == selection
-        assert sql_custody(candidate.conn) == custody
+        assert_sql_custody(candidate.conn, custody, original=original)
         assert not candidate.conn.execute('PRAGMA foreign_key_check').fetchone()
         # Selected readers can conceal missing plans. Open every retained plan,
         # including its last indexed unit, while the original root is hidden.
@@ -187,7 +241,7 @@ def test_native_operation_captures_survive_owner_rename_and_recovery(installed, 
             if original:
                 policy_recovery._restore_files(candidate.conn, report['verified_backup_file_manifests'])
             candidate.init_schema(defer_metadata=True)
-            assert sql_custody(candidate.conn) == before
+            assert_sql_custody(candidate.conn, before, original=original)
             assert candidate.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 107
             for owner in recovery.references(candidate.conn):
                 assert Path(owner['reference'][0]).is_relative_to(path.with_name(path.name + '.preparation'))
@@ -356,7 +410,7 @@ def test_unfinished_nested_plans_and_backups_resume_without_producer(installed, 
         if original:
             policy_recovery._restore_files(candidate.conn, report['verified_backup_file_manifests'])
         candidate.init_schema(defer_metadata=True)
-        assert sql_custody(candidate.conn) == custody
+        assert_sql_custody(candidate.conn, custody, original=original)
         for owner in recovery.references(candidate.conn):
             assert Path(owner['reference'][0]).is_relative_to(path.with_name(path.name + '.preparation'))
             recovery._read(owner['reference'])

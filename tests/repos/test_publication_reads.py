@@ -12,6 +12,7 @@ from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.rec import content_model, radio_candidates
 from yt_playlist.repos.rec_proposals import encode_proposals
+from tests.recommendation_support import publish_bundles
 
 
 @pytest.mark.parametrize('commit', [True, False])
@@ -124,12 +125,18 @@ def test_settings_lookup_reuses_available_connection_and_owned_transaction(
 
 
 def test_radio_inputs_are_coherent_and_reader_closes_before_decode(tmp_path, monkeypatch):
+    from yt_playlist.core import recommendation_outputs
     store = Store(tmp_path / 'radio.db')
     store.init_schema()
+    store.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
     old_model = json.dumps({'cat': {'old': 0}})
     new_model = json.dumps({'cat': {'new': 0}})
     store.settings.set_values({'rec_content_generation': 'old', 'rec_content_model': old_model})
-    store.rec_proposals.put_proposals('mode_bundles', {'_meta': {'generation': 'old'}}, 1)
+    publish_bundles(store, {'_meta': {'musical_generation': 'old'},
+        'all': {'wheelhouse': [{'key': 'song|artist', 'video_id': 'video',
+                               'title': 'Song', 'artist': 'Artist', 'reason': 'Retained explanation'}]}}, 1)
+    from yt_playlist.rec.stored_radio import PreparedRadio
+    prepared_radio = PreparedRadio(store, 1)
     original_reader, connections = store._make_reader, []
 
     def reader():
@@ -138,6 +145,14 @@ def test_radio_inputs_are_coherent_and_reader_closes_before_decode(tmp_path, mon
         return view
 
     space_id = radio_candidates.vectors.content_space_id
+    # Stage outside the input reader: only the head/settings commit belongs
+    # inside the deliberately pinned read.
+    from yt_playlist.rec import bundle_storage
+    policy = store.recommendations.head('home')['policy_version']
+    plan = bundle_storage.prepare(store.conn, {'_meta': {'musical_generation': 'new'}}, [],
+        external_key='coherent-new', policy_version=policy, input_revision=1, created_at=2)
+    build = store.recommendations.claim(plan)
+    store.recommendations.stage(plan, build)
 
     def publish_during_read(view, **kwargs):
         assert view.conn is not store.conn
@@ -147,26 +162,40 @@ def test_radio_inputs_are_coherent_and_reader_closes_before_decode(tmp_path, mon
             store.conn.execute('BEGIN IMMEDIATE')
             store.settings.publish_values({'rec_content_generation': 'new',
                                            'rec_content_model': new_model})
-            store.rec_proposals.publish_prepared_bundles('{"_meta":{"generation":"new"}}', '[]', 2)
+            store.recommendations.publish(build, 2)
         return result
 
-    decode = json_cache.decode
+    def no_global_decode(*args, **kwargs):
+        pytest.fail('Typed Radio inputs inflated a retired global JSON bundle')
 
-    def after_close(encoded, **kwargs):
+    original_decode, observations = recommendation_outputs._decode, []
+
+    def decode(encoded, *args, **kwargs):
+        assert not store._lock.held_by_current_thread
+        for connection in connections:
+            with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+                connection.execute('SELECT 1')
+        observations.append(True)
+        return original_decode(encoded, *args, **kwargs)
+
+    monkeypatch.setattr(store, '_make_reader', reader)
+    monkeypatch.setattr(radio_candidates.vectors, 'content_space_id', publish_during_read)
+    monkeypatch.setattr(json_cache, 'decode', no_global_decode)
+    monkeypatch.setattr(recommendation_outputs, '_decode', decode)
+    try:
+        generation, encoding_model, space, modes, bundles = radio_candidates._prepared_inputs(store, prepared=prepared_radio)
+        assert generation == 'old' and encoding_model == old_model
+        assert space == content_model.content_model_fingerprint(json.loads(old_model))
+        assert modes == {} and bundles['_meta']['musical_generation'] == 'old'
+        assert bundles['all']['wheelhouse'][0]['key'] == 'song|artist'
+        assert bundles['all']['wheelhouse'][0]['reason'] == 'Retained explanation'
+        assert observations, 'The fixture must reach real nonempty output decoding'
+        assert store.recommendations.framing('home')['musical_generation'] == 'new'
         assert not store._lock.held_by_current_thread
         assert len(connections) == 1
         with pytest.raises(sqlite3.ProgrammingError, match='closed'):
             connections[0].execute('SELECT 1')
-        return decode(encoded, **kwargs)
-
-    monkeypatch.setattr(store, '_make_reader', reader)
-    monkeypatch.setattr(radio_candidates.vectors, 'content_space_id', publish_during_read)
-    monkeypatch.setattr(json_cache, 'decode', after_close)
-    try:
-        generation, encoding_model, space, modes, bundles = radio_candidates._prepared_inputs(store)
-        assert generation == 'old' and encoding_model == old_model
-        assert space == content_model.content_model_fingerprint(json.loads(old_model))
-        assert modes == {} and bundles == {'_meta': {'generation': 'old'}}
         assert store.settings.get_setting('rec_content_generation') == 'new'
     finally:
+        prepared_radio.close()
         store.conn.close()

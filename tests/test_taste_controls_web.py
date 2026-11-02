@@ -248,6 +248,7 @@ def test_recommendation_controls_are_all_available_and_rendered_once(store):
 
 def test_first_change_saves_recovery_point_and_later_changes_keep_it(store):
     client = _client(store)
+    store.tracks.upsert_track("checkpoint-song", "Song", "Artist", None, 200)
     store.rec_model.set_weight("genre:rock", 0, lo=0, now=-1000)
     store.rec_model.set_weight("era:1990s", 1.7, now=-500)
     original_weights = store.rec_model.weight_records()

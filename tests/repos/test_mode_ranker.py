@@ -3,6 +3,7 @@ import sqlite3
 import pytest
 from yt_playlist.core.store import Store
 from tests.mode_fixtures import seed_modes
+from tests.historical_support import upgrade_fixture
 
 
 @pytest.fixture
@@ -24,7 +25,7 @@ def test_migration_adds_ranker_columns_to_old_db(tmp_path):
     raw.commit()
     raw.close()
     s = Store(str(db))
-    s.init_schema()
+    upgrade_fixture(s)
     icols = {r["name"] for r in s.conn.execute("PRAGMA table_info(rec_mode_impressions)")}
     pcols = {r["name"] for r in s.conn.execute("PRAGMA table_info(rec_mode_picks)")}
     assert "ranker" in icols
@@ -41,8 +42,8 @@ def test_impressions_persist_ranker_and_accept_legacy_two_tuple(store):
 def test_picks_persist_ranker_and_accept_legacy_pick(store):
     store.modes.log_pick(10, 1, 100.0, ranker="ppr")
     store.modes.log_pick(11, 2, 200.0)
-    rows = store.conn.execute('SELECT playlist_id, ranker FROM rec_mode_picks ORDER BY playlist_id').fetchall()
-    assert [(row['playlist_id'], row['ranker']) for row in rows] == [(10, 'ppr'), (11, None)]
+    rows = store.conn.execute('SELECT membership_ref_id, ranker FROM rec_mode_picks ORDER BY membership_ref_id').fetchall()
+    assert [(row['membership_ref_id'], row['ranker']) for row in rows] == [(10, 'ppr'), (11, None)]
 
 
 def test_legacy_pick_rows_unchanged(store):

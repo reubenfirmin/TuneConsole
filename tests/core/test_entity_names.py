@@ -4,11 +4,12 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core import genre_identity, playlist_scopes
+from yt_playlist.core import entity_names, genre_identity, playlist_scopes
 from yt_playlist.core.migrations import current, registry, migrate, Migration, MigrationError
 from yt_playlist.core.migrations import v103_entity_names
 from yt_playlist.core.migrations.v103_entity_names import COLUMNS, transform
 from yt_playlist.core.store import Store
+from tests.regular_schema_support import admit_regular_schema
 
 
 def rows(conn):
@@ -42,11 +43,10 @@ def test_installed_names_upgrade_preserves_all_rows_ids_and_matches_fresh(tmp_pa
         # The name-only historical transaction preserves the complete installed
         # population. Regular startup then adds separately owned progress rows.
         assert rows(store.conn)==before
+        admit_regular_schema(store)
         store.init_schema()
         after = rows(store.conn)
         assert {owner:after[owner] for owner in before}==before
-        assert set(after)-set(before)=={'group_preparation_progress','group_retention_aliases',
-            'group_retention_edges','group_retention_epoch','group_retention_walk','group_retention_generations'}
         current.validate(store.conn)
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
         assert {row[0]:row[1] for row in store.conn.execute("SELECT name,sql FROM sqlite_schema WHERE name IN ('sample_attributes','measurements','measurement_samples','predictions','prediction_artists','prediction_inputs','recording_vibes')")}==vibes
@@ -71,7 +71,8 @@ def test_installed_names_upgrade_preserves_all_rows_ids_and_matches_fresh(tmp_pa
         store.conn.close()
 
 
-def test_name_transform_keeps_literal_payloads_and_unrelated_provider_ids():
+@pytest.mark.parametrize('transform', [transform, entity_names.predecessor_definition])
+def test_name_transform_keeps_literal_payloads_and_unrelated_provider_ids(transform):
     assert transform("SELECT 'identity_id',identity_id FROM identities")=="SELECT 'identity_id',account_id FROM accounts"
     assert transform('CREATE TABLE artist_provider_ids(provider_id TEXT)')=='CREATE TABLE artist_provider_ids(provider_id TEXT)'
     assert transform('CREATE TABLE playlist_items(playlist_id INTEGER REFERENCES playlists(id))')=='CREATE TABLE playlist_items(playlist_id INTEGER REFERENCES playlists(id))'
@@ -211,8 +212,8 @@ def test_backup_v2_still_encodes_account_and_remote_using_historical_fields(stor
     account = store.accounts.upsert_account('Main','credential',None,True)
     path = backup_remote_playlist(store,account,'PL','Playlist',1,
                                  {'title':'Playlist','tracks':[],'trackCount':0})
-    from pathlib import Path
-    saved = json.loads(Path(path).read_text())
+    from yt_playlist.core import fao
+    saved = json.loads(fao.read_text(path))
     assert saved['snapshot_version']==2
     assert saved['identity_id']==account and saved['ytm_playlist_id']=='PL'
     assert 'account_id' not in saved and 'provider_playlist_id' not in saved

@@ -4,13 +4,19 @@ from fastapi.testclient import TestClient
 from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
 
 
 @pytest.fixture
 def store():
     s = Store(":memory:")
-    s.init_schema()
-    return s
+    try:
+        s.init_schema()
+        yield s
+    finally:
+        s.conn.close()
 
 
 def _seed_bundles(store):
@@ -29,7 +35,8 @@ def _seed_bundles(store):
     for surf in ms.CARD_SURFACES:
         payload["1"][surf] = items(f"{surf}h", "house")
         payload["2"][surf] = items(f"{surf}t", "techno")
-    store.rec_proposals.put_proposals("mode_bundles", payload, 1.0)
+    seed_bundle_subjects(store, payload)
+    publish_bundles(store, payload, 1.0)
 
 
 def _client(store, now=1000.0):

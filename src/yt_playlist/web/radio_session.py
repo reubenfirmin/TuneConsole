@@ -65,6 +65,9 @@ class PlaylistRadio:
 
     def prepare(self):
         """Schedule preparation without waiting on session work or browser replies."""
+        maintenance = getattr(self.ctx, 'storage_maintenance', None)
+        if self.ctx.store.activity_paused or (maintenance is not None and not maintenance.ready.is_set()):
+            return
         # Playback heartbeats call this from the WebSocket response pump. A busy
         # session can retry on the next heartbeat; it must not hold up its own replies.
         if not self.lock.acquire(blocking=False):
@@ -81,6 +84,8 @@ class PlaylistRadio:
             self.lock.release()
         def warm():
             try:
+                if self.ctx.store.activity_paused or (maintenance is not None and not maintenance.ready.is_set()):
+                    return
                 self.join()
                 self.checked_playlist = playing
                 if self.offer is None:
@@ -96,19 +101,20 @@ class PlaylistRadio:
             self.preparing = False
             raise
 
-    def state(self):
+    def state(self, *, reader=None):
         """Project the live or saved session without loading and filtering seed menus."""
-        return self.status() if self.session is not None else self.launch.checkpoint_view(self._playing())
+        return self.status() if self.session is not None else self.launch.checkpoint_view(self._playing(), reader=reader)
 
-    def bootstrap(self):
+    def bootstrap(self, *, reader=None):
         """Return the panel's session and currently eligible seed suggestions."""
-        state = self.state()
+        state = self.state(reader=reader)
+        store = self.ctx.store if reader is None else reader
         try:
-            offer = json.loads(self.ctx.store.settings.get_setting("radio_seed_offer") or "{}")
+            offer = json.loads(store.settings.get_setting("radio_seed_offer") or "{}")
         except (ValueError, TypeError):
             offer = {}
         tracks = self.offer if self.offer is not None else offer.get("tracks", [])
-        return {"state": state, "seeds": self._eligible_seeds(tracks),
+        return {"state": state, "seeds": self._eligible_seeds(tracks, store=store),
                 "seedMenu": self.offer_id or offer.get("menu_id"),
                 "playback": {"connected": self.ctx.bridge.connected, "now_playing": self._playing() or None}}
 
@@ -162,13 +168,11 @@ class PlaylistRadio:
             s.monitoring = False
             raise
 
-    def _eligible_seeds(self, tracks):
+    def _eligible_seeds(self, tracks, *, store=None):
         """Recheck cached suggestions without rebuilding models or changing the offer."""
-        if not tracks:
-            return []
-        blocked = self.ctx.store.rec_model.suppressed_keys(
-            'for_you', self.ctx.now_fn(), keys=[track['key'] for track in tracks])
-        return [track for track in tracks if track['key'] not in blocked]
+        from yt_playlist.rec.radio_candidates import eligible_seeds
+        store = self.ctx.store if store is None else store
+        return eligible_seeds(store, tracks, self.ctx.now_fn())
 
     def seeds(self):
         with self.operation:
@@ -188,15 +192,19 @@ class PlaylistRadio:
             return status_view(s, active=bool(self._is_current(s)),
                                connected=self.ctx.bridge.connected, now=time.monotonic())
 
-    def history_tracks(self, state):
+    def history_tracks(self, state, *, reader=None):
         """Render live metadata even when repair deliberately discarded catalog writes."""
         history = state.get('history', [])
-        stored = {t['video_id']: t for t in self.ctx.store.charts.video_tracks_detail(
+        store = self.ctx.store if reader is None else reader
+        stored = {t['video_id']: t for t in store.charts.video_tracks_detail(
             [t['video_id'] for t in history])}
         return [{**t, **stored.get(t['video_id'], {})} for t in history]
 
     def retain_provenance(self):
-        self.launch.retain_provenance()
+        with self.operation:
+            if self.session and self.session.candidates.prepared is not None:
+                self.session.candidates.prepared.retain(self.ctx.now_fn())
+            self.launch.retain_provenance()
 
     def stop(self):
         with self.lock:

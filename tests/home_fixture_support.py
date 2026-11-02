@@ -1,6 +1,33 @@
 """Small published Home menus for tests of consumers, not preparation."""
+import pytest
+
 from tests.conftest import seed_catalog_track
+from yt_playlist.core.store import Store
 from yt_playlist.rec import home_cards, home_prepared
+
+
+@pytest.fixture
+def browser_store(tmp_path):
+    """Exercise live serving and background writes through installed WAL readers."""
+    database = Store(tmp_path / 'home.db')
+    try:
+        database.init_schema()
+        yield database
+    finally:
+        database.conn.close()
+
+
+def returning_listener(store, *formats, now=1):
+    """Retain completed setup and past listening, independently of today's menus."""
+    usage = store.rec_proposals.choice_usage()
+    episodes = usage.setdefault('episodes', {})
+    for format in formats:
+        if format == 'vibes':
+            usage['vibe_episodes'] = max(1, usage.get('vibe_episodes', 0))
+        else:
+            episodes[format] = max(1, episodes.get(format, 0))
+    store.rec_proposals.put_proposals('listening_choices', {'home_format': usage}, now)
+    store.settings.set_setting('onboard_setup_complete', '1')
 
 
 def publish_menu(store, now=1000, *, prefix='prepared', count=4, tracks_per_card=4,

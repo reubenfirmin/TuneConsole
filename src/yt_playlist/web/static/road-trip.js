@@ -207,7 +207,10 @@ function roadTripForm(initial, context) {
     genreSuggest(query) {
       const q = query.trim().toLowerCase();
       if (!q) return [];
-      return this.genreOpts.filter(o => o.name.toLowerCase().includes(q)).slice(0, 8);
+      const matches = this.genreOpts.filter(o => o.name.toLowerCase().includes(q));
+      // Keep an exact genre reachable even when many subgenres contain its name.
+      const exact = matches.find(o => o.name.toLowerCase() === q);
+      return (exact ? [exact, ...matches.filter(o => o !== exact)] : matches).slice(0, 8);
     },
     addGenre(name) {
       if (!this.genres.includes(name)) this.genres.push(name);

@@ -68,6 +68,9 @@ def test_earlier_install_is_admitted_and_numbered_upgrade_preserves_references(t
 def test_unknown_trigger_damage_is_rejected_without_repair(tmp_path):
     conn = earlier_database(tmp_path / 'damaged.db')
     try:
+        # A previously admitted connection must still reject later damage;
+        # cached reference definitions never cache live admission results.
+        migrate(conn, defer_validation=True)
         with conn:
             conn.execute('DROP TRIGGER catalog_tracks_update')
             conn.execute('CREATE TRIGGER catalog_tracks_update INSTEAD OF UPDATE ON catalog_tracks '

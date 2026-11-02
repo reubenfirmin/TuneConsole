@@ -25,8 +25,18 @@ def test_kept_pair_is_unordered(store):
 
 
 @pytest.mark.parametrize('count', [4, 40])
-def test_bulk_suppression_resolves_each_reference_once_and_commits_once(store, count):
+def test_bulk_suppression_resolves_each_reference_once_and_commits_once(store, monkeypatch, count):
+    from yt_playlist.repos import overlaps
+
     store.overlaps.suppress_overlap('ROOT', 'PL0', now=1)
+    resolved = []
+    ensure = overlaps.ensure
+
+    def resolve_once(conn, reference):
+        resolved.append(reference)
+        return ensure(conn, reference)
+
+    monkeypatch.setattr(overlaps, 'ensure', resolve_once)
     pairs = [[f'PL{i}', 'ROOT'] for i in range(count)]
     pairs += [pair[::-1] for pair in pairs] * 3
     pairs += [[], ['one'], 'junk', [None, 'ROOT'], [1, 'ROOT'], [{}, 'ROOT']]
@@ -38,7 +48,8 @@ def test_bulk_suppression_resolves_each_reference_once_and_commits_once(store, c
         store.conn.set_trace_callback(None)
     assert sum(q == 'BEGIN ' or q == 'BEGIN' for q in queries) == 1
     assert queries.count('COMMIT') == 1
-    assert sum(q.startswith('SELECT 1 FROM playlist_scopes WHERE ref=') for q in queries) == count + 1
+    assert len(resolved) == count + 1
+    assert set(resolved) == {'ROOT', *(f'PL{i}' for i in range(count))}
     assert set(store.overlaps.get_suppressed_overlaps()) == {
         (f'PL{i}', 'ROOT', 1 if i == 0 else 2) for i in range(count)}
 
@@ -46,11 +57,11 @@ def test_bulk_suppression_resolves_each_reference_once_and_commits_once(store, c
 def test_bulk_suppression_rolls_back_pairs_and_new_scopes_on_failure(store):
     store.overlaps.suppress_overlap('KEEP', 'STAY', now=1)
     store.conn.execute("CREATE TEMP TRIGGER reject_test_pair BEFORE INSERT ON suppressed_overlaps "
-                       "WHEN NEW.b='PLZ' BEGIN SELECT RAISE(ABORT,'rejected pair'); END")
+                       "WHEN NEW.second_playlist_scope_id='PLZ' BEGIN SELECT RAISE(ABORT,'rejected pair'); END")
     with pytest.raises(sqlite3.IntegrityError, match='rejected pair'):
         store.overlaps.suppress_overlaps([['PLA', 'PLB'], ['PLA', 'PLZ']], now=2)
     assert store.overlaps.get_suppressed_overlaps() == [('KEEP', 'STAY', 1)]
-    assert {row[0] for row in store.conn.execute('SELECT ref FROM playlist_scopes')} == {'KEEP', 'STAY'}
+    assert {row[0] for row in store.conn.execute('SELECT id FROM playlist_scopes')} == {'KEEP', 'STAY'}
 
 
 def test_bulk_suppression_normalizes_account_references_before_deduplication(store):

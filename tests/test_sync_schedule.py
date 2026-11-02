@@ -87,7 +87,7 @@ def test_two_accounts_retry_only_four_incomplete_playlists_and_failed_listing(st
     assert sync_due(store, 86500, 86400)
     # Mixed-age reads preserve neutral ratings and their old freshness. The
     # regular daily sweep reads every context together and completes recovery.
-    assert result["accounts"][str(first)]["resources"]["ratings"]["last_success_at"] is None
+    assert result["accounts"][str(first)]["resources"]["ratings"].get("last_success_at") is None
     result = sync.sync_all(store, clients, 86500, automatic=True)
     assert result["status"] == "complete"
     assert result["accounts"][str(first)]["resources"]["ratings"]["last_success_at"] == 86500

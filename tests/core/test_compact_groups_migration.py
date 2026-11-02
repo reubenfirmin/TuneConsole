@@ -6,12 +6,12 @@ import time
 
 import pytest
 
-from yt_playlist.core import group_documents, group_storage, policy_documents, policy_recovery
+from yt_playlist.core import choice_evidence_files, group_documents, group_storage, policy_documents, policy_recovery, sample_files
 from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations import v070_policy_documents as policies, v071_album_descriptions as descriptions
 from yt_playlist.core.migrations import v072_compact_groups as migration
 from yt_playlist.core.migrations.runner import Context, MigrationError
-from yt_playlist.repos import group_queries
+from yt_playlist.repos import group_queries, policy_storage
 
 
 @pytest.fixture
@@ -36,7 +36,7 @@ def predecessor(tmp_path):
                 version = generation + '-' + group
                 definition = json.dumps({'name': group, 'leaf': group == 'leaf', 'legacy': False,
                     'membership_known': True, 'size': len(members), 'depth': int(group == 'leaf'),
-                    'rep_keys': ['one'], 'naming_policy': 'naming-1'})
+                    'rep_keys': ['one'], 'naming_policy': 'naming-1', 'genres': [['House', 1.0]]})
                 conn.execute('INSERT INTO rec_group_definitions VALUES (?,?,?,?,?)',
                              (version, generation, group, parent, definition))
                 conn.executemany('INSERT INTO rec_group_members VALUES (?,?,?,?)',
@@ -241,12 +241,12 @@ def test_interrupted_group_relocation_preserves_original_history_and_can_restart
     original = list(conn.iterdump())
     publish = policy_documents._publish_encoded
     calls = 0
-    def interrupted(*args):
+    def interrupted(*args, **kwargs):
         nonlocal calls
         calls += 1
         if calls == 4:
             raise OSError('controlled group relocation interruption')
-        return publish(*args)
+        return publish(*args, **kwargs)
     monkeypatch.setattr(policy_documents, '_publish_encoded', interrupted)
     with pytest.raises(OSError, match='controlled group relocation interruption'):
         apply(conn)
@@ -313,6 +313,78 @@ def test_group_backup_restores_all_owned_files_after_originals_are_lost(predeces
     assert list(conn.iterdump()) == before
 
 
+@pytest.mark.parametrize('kind', ['compact', 'verified-backup'])
+def test_populated_sample_and_choice_owners_recover_without_producer(tmp_path, kind):
+    from contextlib import closing
+    from tests.test_audio_vibes import sample
+    from yt_playlist.core.store import Store
+    from yt_playlist.rec import choice_evidence
+
+    source_path = tmp_path / 'producer' / 'state.db'
+    source_path.parent.mkdir()
+    source = Store(source_path)
+    try:
+        source.init_schema()
+        samples = [sample(run_id='recovery', point=point) for point in ('thirty', 'middle', 'two_thirds')]
+        for index, value in enumerate(samples):
+            source.audio_vibes.save_sample(value, 100 + index)
+        opportunity = choice_evidence.issue(source, 'mixes', [
+            {'id': 'close', 'label': 'Stay close', 'genres': ['Deep House']},
+            {'id': 'explore', 'label': 'Explore', 'genres': ['Jazz']}],
+            100, context={'at': 100}, opportunity_id='recovery-menu')
+        assert opportunity == 'recovery-menu'
+        choice_evidence.respond(source, opportunity, 'visible', 101, visible=['close', 'explore'])
+        choice_evidence.respond(source, opportunity, 'choice', 102, option_id='close')
+        expected_report = choice_evidence.compile_report(source, 110)['formats']
+        samples_root = sample_files.directory(source.conn)
+        choices_root = choice_evidence_files.directory(source.conn)
+
+        def sample_bytes(conn):
+            return {identity: sample_files._encoded(filename)
+                    for identity, filename in conn.execute('SELECT id,filename FROM sample_attributes')}
+
+        def choice_bytes(conn):
+            root = choice_evidence_files.directory(conn)
+            return {str(path.relative_to(root)): choice_evidence_files._read(path)
+                    for path in choice_evidence_files.references(conn)}
+
+        expected_samples, expected_choices = sample_bytes(source.conn), choice_bytes(source.conn)
+        assert len(expected_samples) == 3 and expected_choices
+        source_sql = list(source.conn.iterdump())
+        report = policy_recovery.recover(source_path, tmp_path / 'recovered', progress=lambda _: None)
+        candidate_path = Path(report['compact_database'])
+        if kind == 'verified-backup':
+            candidate_path = tmp_path / 'independent' / 'state.db'
+            candidate_path.parent.mkdir()
+            with closing(sqlite3.connect(report['verified_backup'])) as backup, \
+                    closing(sqlite3.connect(candidate_path)) as target:
+                backup.backup(target)
+                target.row_factory = sqlite3.Row
+                policy_recovery._restore_files(target, report['verified_backup_file_manifests'])
+        hidden_samples, hidden_choices = samples_root.with_name('hidden-samples'), choices_root.with_name('hidden-choices')
+        samples_root.rename(hidden_samples)
+        choices_root.rename(hidden_choices)
+        try:
+            recovered = Store(candidate_path)
+            try:
+                recovered.init_schema(defer_metadata=True)
+                assert recovered.audio_vibes.samples('recovery') == samples
+                assert sample_bytes(recovered.conn) == expected_samples
+                assert choice_bytes(recovered.conn) == expected_choices
+                assert choice_evidence.compile_report(recovered, 110)['formats'] == expected_report
+                assert not recovered.conn.execute('PRAGMA foreign_key_check').fetchall()
+            finally:
+                recovered.conn.close()
+        finally:
+            hidden_samples.rename(samples_root)
+            hidden_choices.rename(choices_root)
+        assert list(source.conn.iterdump()) == source_sql
+        assert sample_bytes(source.conn) == expected_samples
+        assert choice_bytes(source.conn) == expected_choices
+    finally:
+        source.conn.close()
+
+
 def test_interrupted_group_restore_leaves_every_database_reference_unchanged(predecessor, tmp_path, monkeypatch):
     conn = predecessor
     apply(conn)
@@ -322,12 +394,12 @@ def test_interrupted_group_restore_leaves_every_database_reference_unchanged(pre
     original = list(conn.iterdump())
     publish = policy_documents._publish_encoded
     calls = 0
-    def interrupted(*args):
+    def interrupted(*args, **kwargs):
         nonlocal calls
         calls += 1
         if calls == 2:
             raise OSError('controlled restore interruption')
-        return publish(*args)
+        return publish(*args, **kwargs)
     monkeypatch.setattr(group_documents, 'PACK_BYTES', 1)
     monkeypatch.setattr(policy_documents, '_publish_encoded', interrupted)
     with pytest.raises(OSError, match='controlled restore interruption'):
@@ -374,6 +446,13 @@ def test_group_backup_rejects_wrong_owner_sets_and_file_ranges(predecessor, tmp_
 def test_recovery_bundle_preserves_group_and_policy_owners_together(predecessor, tmp_path):
     conn = predecessor
     apply(conn)
+    members = {version: list(group_storage.version_rows(conn, version))
+               for version, in conn.execute('SELECT id FROM group_versions')}
+    configs = {version: policy_storage.configuration(conn, version)
+               for version, in conn.execute('SELECT version FROM recommendation_policies')}
+    assert members and all(members.values()) and configs
+    links = {table: list(map(tuple, conn.execute('SELECT id,policy_version FROM '+table+' ORDER BY id')))
+             for table in ('group_versions', 'group_generations')}
     restored = sqlite3.connect(tmp_path / 'restored.db')
     restored.row_factory = sqlite3.Row
     try:
@@ -382,15 +461,22 @@ def test_recovery_bundle_preserves_group_and_policy_owners_together(predecessor,
             conn.execute('BEGIN')
             manifests = policy_recovery._export_files(conn, tmp_path / 'restored.db', backup_root=tmp_path / 'backup')
             conn.backup(restored)
-        assert set(manifests) == {'annotations', 'policies', 'descriptions', 'groups'}
+        assert set(manifests) == {'annotations', 'policies', 'descriptions', 'groups', 'samples', 'choice_evidence'}
+        # This predecessor has no samples or choice evidence. Populated custody
+        # is covered by their separate recovery tests, rather than inferred here.
+        assert list(sample_files._entries(manifests['samples'])) == []
+        assert json.loads(choice_evidence_files._read(Path(manifests['choice_evidence']))) == {
+            'format': 'choice-evidence-1', 'pages': []}
         for root in (group_documents.directory(conn), policy_documents.directory(conn)):
             for path in root.glob('*/*.json'):
                 path.unlink()
         restored.execute('PRAGMA foreign_keys=ON')
         policy_recovery._restore_files(restored, manifests)
         migration.validate(restored)
-        for version_id, in restored.execute('SELECT id FROM group_versions'):
-            assert list(group_storage.version_rows(restored, version_id))
+        assert {version: list(group_storage.version_rows(restored, version)) for version in members} == members
+        assert {version: policy_storage.configuration(restored, version) for version in configs} == configs
+        assert {table: list(map(tuple, restored.execute('SELECT id,policy_version FROM '+table+' ORDER BY id')))
+                for table in links} == links
         assert not restored.execute('PRAGMA foreign_key_check').fetchall()
     finally:
         restored.close()

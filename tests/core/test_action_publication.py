@@ -64,8 +64,8 @@ def test_preopened_readers_use_selected_actions_and_preserve_external_formats(in
         assert recovered['deletions'][0]['phase'] == 'uncertain'
         assert recovered['recovery']['version'] == 2
         assert recovered['recovery']['steps'][0]['kind'] == 'backup'
-        assert Path(recovered['backups'][0]).read_bytes() == path.read_bytes()
-        assert path.read_bytes() == Path(recovered['deletions'][0]['backup']).read_bytes()
+        assert action_backup_files.verified(recovered['backups'][0])[0] == path.read_bytes()
+        assert path.read_bytes() == action_backup_files.verified(recovered['deletions'][0]['backup'])[0]
         after = store.conn.execute("SELECT seq FROM main.sqlite_sequence WHERE name='actions'").fetchone()
         assert (tuple(after) if after is not None else None) == sequence
         regular.validate(preopened.conn)
@@ -160,7 +160,7 @@ def test_backup_changes_reject_publication_missing_original_uses_exact_custody(i
     path.unlink()
     publication.OWNER.publish(store.conn, stage=selected)
     undo = json.loads(store.actions.get_action(identities[0]).undo_json)
-    assert Path(undo['backups'][0]).read_bytes() == original
+    assert action_backup_files.verified(undo['backups'][0])[0] == original
     path.write_bytes(original)
     Path(undo['backups'][0]).unlink()
     with pytest.raises(FileNotFoundError):

@@ -138,8 +138,15 @@ def test_application_import_graph_is_acyclic_including_local_imports():
 def test_callers_name_repository_owners_and_retired_modules_stay_retired():
     modules = _modules()
     methods = {node.name for name, tree in modules.items() if name.startswith("yt_playlist.repos.")
-               for cls in tree.body if isinstance(cls, ast.ClassDef)
-               for node in cls.body if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")}
+               for cls in tree.body if isinstance(cls, ast.ClassDef) and cls.name.endswith('Repo')
+               for node in cls.body if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
+               and not any(isinstance(decorator, ast.Name) and decorator.id == 'property'
+                           for decorator in node.decorator_list)}
+    # Store's own lifetime and connection API is not a forwarded repository
+    # method merely because a repository has a method with the same name.
+    methods -= {node.name for cls in modules['yt_playlist.core.store'].body
+                if isinstance(cls, ast.ClassDef) and cls.name == 'Store'
+                for node in cls.body if isinstance(node, ast.FunctionDef)}
     retired = {"yt_playlist.repos.rec", "yt_playlist.rec.rec_dao", "yt_playlist.rec.recommend"}
     violations = []
     files = [*(SOURCE / "yt_playlist").rglob("*.py"), *(ROOT / "tests").rglob("*.py")]

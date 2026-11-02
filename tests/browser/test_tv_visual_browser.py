@@ -3,7 +3,7 @@ import pytest
 from PIL import Image
 from playwright.sync_api import expect
 
-from tests.browser.test_tv_browser import tv_ui
+from tests.browser.test_tv_browser import store, tv_ui
 from tests.browser.test_tv_stream_browser import MODEL, publish_pool
 from tests.conftest import FakeClient
 from tests.test_tv_visual import frame, sheet, storyboard
@@ -12,6 +12,8 @@ from yt_playlist.rec import tv_visual
 
 def test_only_two_ahead_is_sampled_and_static_replacements_stay_hidden(page, live_app, tv_ui, store, monkeypatch):
     publish_pool(store, live_app, 7)
+    assert tv_visual.cached(store, 'visual00002', 1) is None
+    assert tv_visual.cached(store, 'visual00003', 1) is None
     checked = []
     def previews(self, video_id):
         checked.append(video_id)
@@ -23,8 +25,14 @@ def test_only_two_ahead_is_sampled_and_static_replacements_stay_hidden(page, liv
         return sheet(frame().transpose(Image.Transpose.FLIP_LEFT_RIGHT))
     monkeypatch.setattr(tv_visual, '_read_image', read)
     page.goto(live_app + '/#tv')
-    page.get_by_role('button', name='Play TV', exact=True).click()
-    page.wait_for_function(f'{MODEL}.playing && !{MODEL}.items.some(item => item.video_id === "visual00002")')
+    # Observe the player's own replacement check. A second request from the
+    # test would compete with that check and could finish before it is applied.
+    with page.expect_response(lambda response: response.url.endswith('/visual-check')
+                              and response.request.post_data == 'video_id=visual00003'
+                              and response.status == 200) as replacement_check:
+        page.get_by_role('button', name='Play TV', exact=True).click()
+        page.wait_for_function(f'{MODEL}.playing && !{MODEL}.items.some(item => item.video_id === "visual00002")')
+    assert replacement_check.value.json()['verdict'] == 'moving'
     expect(page.locator('.tv-filmstrip button')).to_have_count(2)
     assert page.evaluate(f'{MODEL}.items.slice(0, 3).map(item => item.video_id)') == [
         'visual00000', 'visual00001', 'visual00003']
@@ -32,10 +40,7 @@ def test_only_two_ahead_is_sampled_and_static_replacements_stay_hidden(page, liv
     assert page.evaluate('window.tvPlayer.id') == 'visual00000'
     assert page.evaluate('window.tvCalls') == [['play', 'visual00000']]
     expect(page.locator('.tv-filmstrip button').nth(1)).to_have_attribute('aria-label', 'Up next: Video 1')
-    # Wait for the replacement's completed check before advancing.
-    page.wait_for_function("async () => (await (await fetch('/home/tv/playlist/' + "
-        + MODEL + ".playlistId + '/visual-check', {method:'POST', body:new URLSearchParams({video_id:'visual00003'})})).json()).verdict === 'moving'")
-    assert checked == ['visual00002', 'visual00003']
+    assert checked == ['visual00002', 'visual00003'], store.rec_proposals.get_proposals(tv_visual.SURFACE)
     assert tv_visual.static_ids(store) == {'visual00002'}
     assert all(event['video_id'] != 'visual00002' for event in store.history.play_events_since(0))
     page.screenshot(path='/tmp/tuneconsole-439-hidden-visual-check.png')

@@ -80,7 +80,10 @@ def test_file_reader_pins_committed_state_without_copying_database(tmp_path, mon
                 reader.conn.execute("INSERT INTO settings VALUES ('forbidden','write')")
         assert Analytics(store).value() == 'new'
         added = set(tmp_path.iterdir()) - before
-        assert added <= {tmp_path / ('state.db.' + domain) for domain in ('policies', 'groups', 'recommendations')}
+        assert added <= {tmp_path / ('state.db.' + domain) for domain in (
+            'policies', 'groups', 'recommendations', 'evidence', 'served', 'collections',
+            'metadata', 'metadata-runtime', 'archives', 'vibe-provenance', 'profiles',
+            'embeddings', 'legacy-journals', 'policy-history')}
         # Empty owner stores still establish their reader-lifetime lock before
         # pinning SQL. They must not create a database or output snapshot.
         for directory in added:

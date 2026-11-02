@@ -19,7 +19,6 @@
             banner.setAttribute('aria-live', warning ? 'assertive' : 'polite');
           }
           banner.dataset.warning = String(warning);
-          banner.title = state.message || '';
           if (banner.textContent !== message) banner.textContent = message;
           banner.hidden = !message;
         }

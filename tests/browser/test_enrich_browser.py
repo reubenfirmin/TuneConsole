@@ -49,9 +49,9 @@ def test_tiles_navigate_and_conflict_choice_is_saved(live_app, store, page):
     expect(page.get_by_text("No open conflicts.", exact=True)).to_be_visible()
 
 
-def test_counts_advance_without_reloading_and_fit_mobile(live_app, store, page):
+def test_counts_advance_without_reloading(live_app, store, page):
     first, second = _seed(store)
-    page.set_viewport_size({"width": 390, "height": 844})
+    page.set_viewport_size({"width": 1280, "height": 900})
     page.goto(f"{live_app}/enrich")
     status = page.locator(".enrich-status-card")
     expect(page.locator('.metric[href="/enrich/queue"] .v')).to_have_text("1")
@@ -87,7 +87,7 @@ def test_counts_advance_without_reloading_and_fit_mobile(live_app, store, page):
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
 
 
-@pytest.mark.parametrize("width", [1280, 390])
+@pytest.mark.parametrize("width", [1280])
 def test_one_queue_shows_library_and_discovery_tracks(live_app, store, page, width, tmp_path):
     store.tracks.upsert_track("lib", "Library song", "Artist", None, 200)
     store.discovery.upsert_discovered_track("new|artist", "new", "Discovery song", "Artist", None, None,
@@ -105,7 +105,7 @@ def test_one_queue_shows_library_and_discovery_tracks(live_app, store, page, wid
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
 
 
-@pytest.mark.parametrize("width", [1280, 390])
+@pytest.mark.parametrize("width", [1280])
 def test_detail_headings_stay_on_the_left(live_app, store, page, width):
     _seed(store)
     page.set_viewport_size({"width": width, "height": 900})

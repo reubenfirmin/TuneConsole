@@ -13,7 +13,7 @@ from pathlib import Path
 from statistics import median
 
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
-from yt_playlist.core import features
+from yt_playlist.core import fao, features
 from yt_playlist.core import audio_vibe_metadata as metadata_features
 from yt_playlist.core import audio_embedding
 from yt_playlist.rec import audio_vibe_cruise, audio_vibe_energize, audio_vibe_external, audio_vibe_focus, audio_vibe_relax, audio_vibe_release, audio_vibe_uplift
@@ -163,7 +163,7 @@ def validate(model):
 def _load(path, modified, size):
     if size > 262144:
         raise ValueError('Listening model exceeds 256 KiB')
-    with Path(path).open('rb') as stream:
+    with fao.open_reader(path, max_bytes=262144) as stream:
         content = stream.read(262145)
     if len(content) > 262144:
         raise ValueError('Listening model exceeds 256 KiB')
@@ -190,8 +190,8 @@ def identity():
     path = configured_path()
     if path:
         try:
-            stat = Path(path).stat()
-            return _load(path, stat.st_mtime_ns, stat.st_size)[1]
+            info = fao.stat(path)
+            return _load(path, info.identity, info.logical_bytes)[1]
         except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
             pass
     return 'heuristic'
@@ -203,8 +203,8 @@ def apply(samples, prediction, metadata=None):
     if not path:
         return prediction
     try:
-        stat = Path(path).stat()
-        model, digest = _load(path, stat.st_mtime_ns, stat.st_size)
+        info = fao.stat(path)
+        model, digest = _load(path, info.identity, info.logical_bytes)
         external = model.get('format') == audio_vibe_external.FORMAT
         if external:
             if prediction.get('taxonomy_version') != model['taxonomy_version']:

@@ -98,6 +98,25 @@ def test_unknown_reference_owner_preserves_generation_and_complete_pool(ranked,t
         assert not copied.execute('PRAGMA foreign_key_check').fetchone()
 
 
+def test_metadata_retirement_refuses_an_unaudited_history_reference(tmp_path):
+    from yt_playlist.core import metadata_runtime
+    store = Store(tmp_path/'history.db')
+    try:
+        store.init_schema()
+        with store.conn:
+            metadata_runtime.activate(store.conn)
+            store.conn.execute('CREATE TABLE future_metadata_owner(id INTEGER PRIMARY KEY,'
+                               'observation_id INTEGER REFERENCES metadata_observations(id))')
+        before = list(store.conn.iterdump())
+        output = tmp_path/'rejected.db'
+        with pytest.raises(ValueError, match='new reference audit: future_metadata_owner.observation_id'):
+            retained_copy.build(store._db_path, output)
+        assert not output.exists()
+        assert list(store.conn.iterdump()) == before
+    finally:
+        store.conn.close()
+
+
 @pytest.mark.parametrize('failure',['cancelled','concurrent-write','validation'])
 @pytest.mark.parametrize('installed',[79],indirect=True)
 def test_failed_build_cannot_be_installed_and_leaves_source_exact(installed,tmp_path,monkeypatch,failure):

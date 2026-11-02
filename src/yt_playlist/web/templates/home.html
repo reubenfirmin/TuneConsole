@@ -155,7 +155,7 @@
     </section>
     <section class="dash-panel" data-dash="album-choices" role="tabpanel" x-show="panel === 'album-choices'" x-cloak>
       <div hx-get="/home/album-choices" hx-trigger="home-area-open" hx-swap="innerHTML"
-           x-effect="if (panel === 'album-choices' && areaAccessible('album-choices') && !$el.dataset.loaded) $nextTick(() => htmx.trigger($el, 'home-area-open'))"
+           x-effect="if (panel === 'album-choices' && areaAccessible('album-choices') && !$el.dataset.loaded) $nextTick(() => loadHomeArea($el))"
            @htmx:after-request.camel="$el.dataset.loaded = $event.detail.successful ? '1' : ''"></div>
     </section>
     <section class="dash-panel dash-tv" data-dash="tv" role="tabpanel" x-show="panel === 'tv'" x-cloak>
@@ -175,13 +175,13 @@
       {% include "_partials/rediscover.html" %}
       {% else %}
       <div hx-get="/home/revisit" hx-trigger="home-area-open" hx-swap="innerHTML"
-           x-effect="if (panel === 'rediscover' && areaAccessible('rediscover') && !$el.dataset.loaded) $nextTick(() => htmx.trigger($el, 'home-area-open'))"
+           x-effect="if (panel === 'rediscover' && areaAccessible('rediscover') && !$el.dataset.loaded) $nextTick(() => loadHomeArea($el))"
            @htmx:after-request.camel="$el.dataset.loaded = $event.detail.successful ? '1' : ''"></div>
       {% endif %}
     </section>
     <section class="dash-panel dash-async" data-dash="recent" role="tabpanel" x-show="panel === 'recent'" x-cloak>
       <div hx-get="/home/into-recently" hx-trigger="home-area-open" hx-swap="innerHTML"
-           x-effect="if (panel === 'recent' && areaAccessible('recent') && !$el.dataset.loaded) $nextTick(() => htmx.trigger($el, 'home-area-open'))"
+           x-effect="if (panel === 'recent' && areaAccessible('recent') && !$el.dataset.loaded) $nextTick(() => loadHomeArea($el))"
            @htmx:after-request.camel="$el.dataset.loaded = $event.detail.successful ? '1' : ''"></div>
     </section>
     <section class="dash-panel dash-async" data-dash="discover" role="tabpanel" x-show="panel === 'discover'" x-cloak>
@@ -189,7 +189,7 @@
       {% include "_partials/home_discovery.html" %}
       {% else %}
       <div hx-get="/home/discovery" hx-trigger="home-area-open" hx-swap="innerHTML"
-           x-effect="if (panel === 'discover' && areaAccessible('discover') && !$el.dataset.loaded) $nextTick(() => htmx.trigger($el, 'home-area-open'))"
+           x-effect="if (panel === 'discover' && areaAccessible('discover') && !$el.dataset.loaded) $nextTick(() => loadHomeArea($el))"
            @htmx:after-request.camel="$el.dataset.loaded = $event.detail.successful ? '1' : ''"></div>
       {% endif %}
     </section>

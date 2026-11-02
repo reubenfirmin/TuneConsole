@@ -5,7 +5,19 @@ from fastapi.testclient import TestClient
 from yt_playlist.web.app import create_app
 from tests.setup_support import _FakeRuntime
 def test_home_format_setting_is_in_setup_and_persists(store):
-    c = TestClient(create_app(store, lambda: {}, now_fn=lambda: 1.0), base_url='http://127.0.0.1')
+    import json
+    from tests.onboarding_support import publish_personal_mix
+    from tests.test_growth_journey import early_journey
+
+    early_journey(store)
+    tracks = publish_personal_mix(store)
+    store.settings.set_setting('radio_seed_offer', json.dumps({
+        'menu_id': 'setup-radio', 'tracks': tracks[:4]}))
+    store.enrichment_queue.mark_enriched([row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1000)
+    store.discovery.mark_discovered_enriched([row[0] for row in store.conn.execute(
+        'SELECT identity_key FROM discovered_tracks')], 1000)
+    c = TestClient(create_app(store, lambda: {}, now_fn=lambda: 1000.0), base_url='http://127.0.0.1')
+    assert all(c.get('/home/growth').json()['ready_formats'].values())
     html = c.get('/setup?tab=home').text
     assert 'class="setup-home-formats"' in html
     assert 'Follow my listening' not in html

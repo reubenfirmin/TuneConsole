@@ -1,7 +1,8 @@
 # External datasets for the vibe model
 
 Related issues: #530 (current work), #507 (earlier experiments), #406, #405 and
-#136. Acquisition status updated on 29 October 2026.
+#136. Acquisition catalogue updated on 29 October 2026; additional dataset and
+paper research recorded on 1 November 2026 at the end of this document.
 
 ## Product checkpoint and next experiments
 
@@ -512,3 +513,234 @@ observations. Do not force distant sections of a changing song to have identical
 moods. Recheck the candidate against the fixed external and direct-vibe holdouts.
 This gives unattended playback a concrete experimental role without turning the
 model's predictions into human labels or requiring regular users to rate vibes.
+
+## Additional research, 1 November 2026
+
+There are useful directions beyond adding more static emotion corpora. The
+strongest immediate hypotheses concern information missing from the current
+audio representation: intermediate MERT layers, explicit harmonic features,
+and human judgments of perceptual musical properties. A verified publisher
+listing also gives the existing WCMED annotations a substantially better audio
+route. These are research proposals, not evidence for replacing a product model.
+All proposed implementation and acquisition can stay inside `experiments/`.
+
+### What would actually be new
+
+Emotify+, MERGE, and a weak static MERP pilot already exist here. So do shared
+nonlinear representations with separate native corpus targets in
+`audio_lab_tools/external_multitask.py`, static versus aligned DEAM/PMEmo
+targets, consistency training, and multiwindow Emotify/ManyMusic comparisons.
+Repeating those ideas under a new name is not the next experiment. The recent
+MERT comparison (#708), however, extracted only a mean of the final transformer
+layer. It did not test intermediate layers or harmonic descriptors. See
+[the encoder protocol](ENCODER_COMPARISON_PLAN.md) and
+[its retained results](ENCODER_COMPARISON_RESULTS.md).
+
+| Order | Concrete experiment | New evidence it could provide |
+| --- | --- | --- |
+| 1 | Fixed MERT layer-5/layer-6 representation versus the existing final-layer representation | Tests whether the recent negative/mixed encoder result depends on layer choice, without another dataset acquisition. |
+| 2 | Existing embeddings plus a fixed 72-dimensional chroma summary | Tests whether harmonic information improves native emotion prediction and transfer beyond the existing embeddings. |
+| 3 | Acquire and audit the 5,000-excerpt mid-level perceptual release; start with verified local audio intersections | Adds human musical-property supervision rather than another remapping of the same emotion categories. Downloads remain unresolved here. |
+| 4 | Recover the exact WCMED source recordings from the maintained Saarland publisher page | Adds a separately reported classical ranking/transfer test using already acquired annotations. |
+| Later | Audit MERP timeline alignment, then compare time-aligned and weak-static training | Uses information discarded by the current 50-song static pilot. Exact timing must be established before fitting. |
+
+### Intermediate MERT layers and harmonic information
+
+Kang and Herremans' [unified emotion-recognition paper, version 3](https://arxiv.org/html/2502.03979v3)
+uses the same MERT-v1-95M family but concatenates layers 5 and 6. It also reports
+gains from chord/key information. This supports two distinct hypotheses; it does
+not establish that either transfers to our ten-second inputs or six purposes.
+The paper uses longer segments and random VA splits, so its scores are not
+directly comparable with our artist-grouped results. EmoMusic is a DEAM subset;
+their names must never imply independent training/test corpora here.
+
+For the layer experiment, retain exactly #708's 288-recording, 576-chunk
+comparison cohort, PCM intervals, model revision, grouping, native ridge heads,
+and mapping procedure. Predeclare final-layer mean versus concatenated means of
+transformer layers 5 and 6. Record the precise hidden-state indexing, including
+whether index zero represents the convolutional input. Keep preprocessing
+variants paired and select ridge penalties only within training groups. The
+stored final-layer vectors cannot reconstruct middle layers: extraction must
+run again on the same PCM. One encoder forward pass can expose all required
+hidden states. Recompute resource bounds rather than assuming their memory
+cost equals the last-layer worker's. This cohort is already explored, so its
+results would be development evidence, not fresh confirmation.
+
+Ching and Widmer's [distribution-gap study](https://arxiv.org/html/2510.04688v1)
+finds poor cross-corpus transfer despite apparently similar VA labels, and tests
+chroma alongside pretrained embeddings. Its 72-dimensional representation
+summarizes twelve chroma bins with means and standard deviations of the signal
+and its first two differences. This is a smaller, more isolated next test than
+copying a complete chord Transformer or training another large encoder. The
+paper's reported DEAM transfer includes a source dataset overlapping DEAM, so
+its headline transfer score is not independent confirmation for our use.
+
+Extract chroma from the exact rated intervals used by our baseline. Compare
+embedding only, chroma only, and concatenation with the same native targets,
+folds and regularized head. Fit all feature scaling within training partitions.
+Keep native corpus scales separate and exclude target identities before any
+source-only transfer fitting. Compare popular, soundtrack, instrumental and
+classical domains separately. If the chroma addition helps, chord/key features
+become a justified second-stage ablation. A lower emotion error alone does not
+establish better Focus or cathartic Release recommendations.
+
+### New auxiliary data: human mid-level musical properties
+
+Aljanaki and Soleymani's [mid-level perceptual dataset paper](https://arxiv.org/html/1806.04903v1)
+describes 5,000 excerpts with human ratings for melodiousness, articulation,
+rhythmic complexity, rhythmic stability, dissonance, tonal stability and modality.
+Most new material comes from Jamendo/Magnatune, with approximately fifteen-second
+excerpts. Existing emotion corpora, including Soundtracks and the 903-song
+Coimbra collection, are reused. These are not 5,000 new independent emotion
+examples. Agreement is weaker for rhythmic complexity and tonal stability.
+
+The [OSF project](https://osf.io/5aupt/)'s public API was reachable. It lists:
+
+| File | Published bytes | Published SHA-256 |
+| --- | ---: | --- |
+| `metadata_annotations.zip` | 318,090 | `f0a36e901ed6d9e4f21d61d49cd2631642140e3329bb7e41c7524e09688fe1ac` |
+| `audio.zip` | 1,182,493,865 | `69c33f323ab8cdcbf915be643088a5ec88aee167b2b4543c9fc4e1a5a7d78c0e` |
+
+These are publisher hashes, not locally verified archive hashes. OSF download
+requests returned HTTP 403 or timed out; neither archive was acquired. The
+project API exposes no node license. Verify the archive README, per-recording
+terms, actual rating scales and which reused clips are supplied before fitting.
+The papers differ in their description of rating endpoints, so do not infer
+the parser's scale from prose alone. No numerical local intersection has yet
+been established for this release.
+
+Chowdhury et al.'s [mid-level emotion model](https://arxiv.org/html/1907.03572v1)
+provides a concrete use: predict the musical properties as an intermediate
+representation, then predict native emotions from them. Compare direct audio
+prediction, predicted-property augmentation, and an optional property bottleneck.
+Use out-of-fold property predictions for training downstream heads; exclude
+held-out artists/recordings from every auxiliary fitting stage as well. Published
+pretrained property models can already include Soundtracks, so their provenance
+cannot be assumed independent. Human properties supplied at test time would be
+an oracle diagnostic, not deployable performance. Rhythmic stability and
+complexity are candidate explanatory signals, not concentration labels.
+
+### WCMED: a verified source-audio route
+
+The acquired WCMED release contains **400 excerpts from 61 source recordings**,
+with exact start/stop times. This differs from the piano subset/counts described
+in the later distribution-gap paper. Its README identifies the Saarland Western
+Music collection; the separate Disklavier MIDI-piano archive is not a substitute.
+
+An exact filename join against the maintained
+[Saarland Western Music publisher listing](https://www.audiolabs-erlangen.de/resources/MIR/SMD/western-music)
+finds **387 excerpt rows across 58 recordings with download links**. Of those,
+**288 excerpts supply at least ten seconds** according to the released metadata.
+Three recordings have no linked download: Debussy `L140-01_107_20070109`,
+`L140-02_107_20070109`, and `L140-03_111_20080519`. A HEAD request to one matched
+MP3 returned HTTP 200 with an audio content type and 9,182,144-byte length.
+That establishes a working example endpoint, not successful acquisition or
+alignment of the entire set. No audio was downloaded in this audit. The source
+page states CC BY-NC-SA 3.0 terms.
+
+Recover only listed original recordings; verify decoding, durations, excerpt
+alignment and the original short attack/decay treatment. Exclude excerpts under
+ten seconds from this protocol instead of padding them or borrowing extra
+music. Keep same-recording excerpts together, connect related compositions and
+anonymous performer identifiers, and report the resulting independent group
+count before defining folds. Multiple excerpts are not independent recordings.
+
+The release supplies global arousal/valence rankings and linear conversions of
+rank to a continuous value. Those converted values are not separate absolute
+listener ratings. Begin with a frozen source-only transfer test scored by native
+rank agreement, with uncertainty clustered by recording and related groups.
+Do not call the derived rank pairs raw pairwise votes. If the source then becomes
+training data, reserve a separate split first and retain its source identity.
+
+### SiTunes: relevant outcomes, insufficient current audio intersection
+
+The [SiTunes author release](https://github.com/JiayuLi-997/SiTunes_dataset)
+contains listening observations with before/after valence and arousal. This is
+closer to mood change than perceived-emotion tags, but remains observational.
+The downloaded and Git-blob-verified metadata, pinned at
+`aea53feca9ba092406b5b95a3976dba0b44c568f`, yields:
+
+- 2,006 interactions from 30 participants on 307 distinct items.
+- 1,406 before/after interactions in stages 2 and 3; stage 1 lacks before ratings.
+- 936 item-metadata rows, with nine listened item IDs absent from that table,
+  affecting 153 interactions across all stages.
+- Twelve distinct artist/title candidates in our acquired audio-feature pool,
+  covering 69 interactions, of which only **39** have before/after ratings.
+
+These are normalized exact artist/title candidates, not verified recording or
+excerpt matches. Repeated appearances in feature manifests do not add items.
+No music audio or explicit repository license file was found in the pinned tree.
+A generalizable audio mood-change model is not supported by this intersection.
+The useful next step is a metadata feasibility study: separate initial mood,
+participant and context effects before considering audio recovery. Compare
+against initial-mood and participant baselines, and hold out participants and
+tracks where feasible. Spotify's supplied valence is an existing model feature,
+not a human outcome. VA change provides neither anger-relief truth nor cognitive
+task performance. This route requires no new ratings from TuneConsole users.
+
+### Lower-priority leads and research receipts
+
+| Lead | Finding and disposition |
+| --- | --- |
+| [CP-WTC](https://github.com/CPJKU/The-CP-WTC-Dataset) | 288 first-eight-bar excerpts of 48 Bach pieces performed by six pianists, with 7,652 individual human annotations and released features. Commercial recording audio is explicitly excluded. Useful for a feature-level performance diagnostic; not immediately usable with our waveform extractor. Keep pieces and performers explicit and never count snippets as new compositions. |
+| [MuMeDB v2](https://data.mendeley.com/datasets/9zdww6wnyx/2) | Publisher advertises 1,412 multimodal records and CC BY 4.0. File-list requests failed; fresh human-label provenance, recording overlap and usable supplied audio remain unverified. Do not book 1,412 new training tracks from the description. |
+| [MusicSem](https://huggingface.co/datasets/AMSRNA/MusicSem), [paper](https://arxiv.org/html/2602.17769v1) | Reddit-derived language and track identifiers, with LLM processing; no packaged audio, and the paper's human-validated test set is private. Potential weak situational retrieval supervision, with thread/recording grouping and source text retained. Generated descriptions are not additional human votes. Keep behind supplied-audio human judgments. |
+
+Receipts live in `local/datasets/discovery/research-20261101/`: OSF project/file
+API responses, `smd-western.html`, `wcmed-smd-intersection-audit.json`, the SiTunes
+pinned tree, six checked metadata/documentation files, `situnes/acquisition.json`
+and `situnes/intersection-audit.json`. The latter records input feature-manifest
+hashes and all candidate identities. Downloads were bounded metadata reads;
+this investigation fitted no models and changed no production code.
+
+Before any new fitting, freeze its source, comparisons, group exclusions and
+stopping rules in a new protocol. Keep nonpilot Memo confirmation recordings
+out of fitting, calibration and selection. The small direct-vibe cohort and
+the #708 comparison cohort are now development evidence; repeated winners on
+them require new independent confirmation. Native emotion or musical-property
+gains justify further research, not automatic productionization.
+
+### Completed follow-ups from the November 1 research audit
+
+All five bounded studies above now have reproducible experiments-only results:
+
+- #809: [MERT layers](MERT_LAYERS_RESULTS.md). Native gains on 16/24 targets,
+  but all six mapped-vibe gates retain the incumbent specialists.
+- #810: [chroma complement](CHROMA_RESULTS.md). Focus improves on the small
+  reused activity cohort; #815 tracks independent confirmation and conditional
+  production work. Five other vibes retain. The development gain is not measured
+  against an independent production-model test set.
+- #811: [mid-level supervision](MIDLEVEL_RESULTS.md). Official 5,000-item
+  annotations acquired; 360 verified existing excerpts support a leakage-protected
+  pilot. Predicted properties do not improve the downstream models reliably;
+  true-property oracle gains motivate research rather than deployment.
+- #812: [WCMED transfer](WCMED_RESULTS.md). Original audio recovered for 58
+  sources; the repaired benchmark contains 285 distinct excerpts / 56 recordings /
+  18 related groups. Useful activation ranking, with reconstruction and ordinal
+  label limits; no new fitted model or production candidate.
+- #813: [SiTunes feasibility](SITUNES_RESULTS.md). Full 1,406 paired records
+  evaluated with participant, track and later-stage separation. Initial mood is
+  the clear predictor; context/music additions are uncertain or regress. Existing
+  audio covers just 39 paired records on 11 unverified tracks. Retain models.
+
+Nonpilot Memo remains reserved. All artifacts and source snapshots are under
+experiments/; none of these studies changes production inference.
+
+### Focus chroma confirmation follow-up (#815)
+
+[The larger protected comparison](FOCUS_CONFIRMATION_RESULTS.md) retains the
+incumbent. On the primary 450-row comparison, adding chroma changes NDCG from
+.497920 to .514290, paired interval [-.038792,.065672], while lift falls .007833
+and native Reading/Studying errors rise slightly. The 494-row and outside-pilot
+diagnostics do not recover reliable improvement. All accepted incumbent
+predictions replay; the 32 shared chroma vectors reproduce exactly.
+
+Fresh source recovery acquired HumMusQA's 320 human questions and 108-track
+metadata with verified publisher MD5s. Its one studying/working answer shares
+an artist with prior development data. Nineteen inventories identify 47
+identity/artist overlaps; the other 61 tracks have no native activity labels.
+PepMusic requires a request and combines studying with unrelated activities;
+Music in Use's public file API returns 401; the recovered brain-focus repository
+has session measurements but no stimulus audio. Original 7digital activity
+references still lack verified recording/window alignment. The independent
+confirmation gap remains explicit; there is no new deployment recommendation.

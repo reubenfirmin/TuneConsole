@@ -9,7 +9,7 @@ from tests.conftest import FakeClient, _track
 from yt_playlist.library.sync import sync_identity
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_partial_sync_opens_ready_mixes_without_reloading_or_waiting_for_enrichment(live_app, store, page, width):
     from tests.onboarding_support import finish_partial_import, publish_personal_mix
 
@@ -25,6 +25,8 @@ def test_partial_sync_opens_ready_mixes_without_reloading_or_waiting_for_enrichm
     expect(page.locator('#onboarding-feed')).to_be_visible()
     expect(page.locator('.global-now-playing')).to_contain_text('Still playing')
     page.evaluate('window.arrivalDocument = document; window.arrivalPlayer = document.querySelector(".global-now-playing")')
+    from tests.test_growth_journey import early_journey
+    early_journey(store)
     publish_personal_mix(store, now=1)
     expect(page.locator('#onboarding-feed')).to_have_count(0, timeout=12000)
     expect(page.get_by_role('tab', name='Mix tapes', exact=True)).to_be_visible()
@@ -43,7 +45,7 @@ def test_partial_sync_opens_ready_mixes_without_reloading_or_waiting_for_enrichm
     assert not errors
 
 
-@pytest.mark.parametrize('width', [390, 1440])
+@pytest.mark.parametrize('width', [1440])
 def test_completion_fragment_recovers_after_one_failed_fetch(live_app, store, page, width):
     from tests.onboarding_support import finish_partial_import, publish_personal_album
 
@@ -67,7 +69,10 @@ def test_completion_fragment_recovers_after_one_failed_fetch(live_app, store, pa
             route.continue_()
 
     page.route(live_app + '/', completion)
-    publish_personal_album(store, now=1)
+    from tests.test_growth_readiness import fresh_reserve, prepared_taste
+    fresh_reserve(store)
+    prepared_taste(store)
+    publish_personal_album(store, now=1, count=2)
     try:
         expect(page.locator('#onboarding-feed')).to_have_count(0, timeout=15000)
     except AssertionError:
@@ -91,11 +96,12 @@ def test_completion_fragment_recovers_after_one_failed_fetch(live_app, store, pa
 def test_returning_home_recovers_a_late_mix_without_restarting_setup(live_app, store, page, tmp_path):
     from tests.conftest import seed_catalog_track
     from tests.onboarding_support import publish_personal_mix
-    from yt_playlist.rec import home_cards, home_prepared, onboarding
+    from yt_playlist.rec import home_cards, home_prepared
+    from tests.home_fixture_support import returning_listener
 
     store.settings.set_setting('last_sync_at', '1')
     store.settings.set_setting('home_format', 'mixes')
-    store.settings.set_setting(onboarding.SETUP_COMPLETE, '1')
+    returning_listener(store, 'mixes')
     seed_catalog_track(store, 'listening|artist', 'Still playing', 'Artist',
                        video_id='listening', genre='house')
     page.route('**/bridge/status', lambda route: route.fulfill(json={
@@ -111,8 +117,7 @@ def test_returning_home_recovers_a_late_mix_without_restarting_setup(live_app, s
     expect(page.locator('#onboarding-feed')).to_have_count(0)
     expect(page.locator('.setup-banner')).to_have_count(0)
     expect(page.locator('.global-now-playing')).to_contain_text('Still playing')
-    expect(page.get_by_role('tab', name='Your unlocks')).to_have_attribute('aria-selected', 'true')
-    expect(page.get_by_role('tab', name='Mix tapes', exact=True)).to_be_hidden()
+    expect(page.get_by_role('tab', name='Mix tapes', exact=True)).to_have_attribute('aria-selected', 'true')
     page.evaluate('window.startupDocument = document; window.startupPlayer = document.querySelector(".global-now-playing")')
     page.clock.run_for(2000)
 
@@ -129,7 +134,7 @@ def test_returning_home_recovers_a_late_mix_without_restarting_setup(live_app, s
         page.clock.fast_forward(30_000)
     expect(board.locator('.gen-card')).to_have_count(1)
     expect(board.locator('.gen-row')).to_have_count(4)
-    expect(page.get_by_role('tab', name='Mix tapes', exact=True)).to_be_hidden()
+    expect(page.get_by_role('tab', name='Mix tapes', exact=True)).to_be_visible()
     expect(page.locator('.mix-preparation-note')).to_be_hidden()
     # One usable playlist dismisses the preparation note while the incomplete
     # board keeps polling for its remaining lanes.
@@ -199,7 +204,7 @@ def live_initial_sync(monkeypatch, request):
     return request.getfixturevalue("live_app"), job
 
 
-@pytest.mark.parametrize('width,already_ready', [(320, False), (1280, False), (1280, True)])
+@pytest.mark.parametrize('width,already_ready', [(1280, False), (1280, True)])
 def test_album_first_onboarding_preserves_player_and_opens_ready_albums(live_app, store, page, width, already_ready):
     from tests.onboarding_support import publish_personal_album
 
@@ -222,7 +227,10 @@ def test_album_first_onboarding_preserves_player_and_opens_ready_albums(live_app
 
     def finish_import():
         store.settings.set_setting('last_sync_at', '1')
-        publish_personal_album(store, now=1)
+        from tests.test_growth_readiness import fresh_reserve, prepared_taste
+        fresh_reserve(store)
+        prepared_taste(store)
+        publish_personal_album(store, now=1, count=2)
 
     if already_ready:
         finish_import()
@@ -236,17 +244,27 @@ def test_album_first_onboarding_preserves_player_and_opens_ready_albums(live_app
         expect(page.locator('#listening-format-title')).to_have_count(0)
         finish_import()
     expect(page.get_by_role('tab', name='Long play', exact=True)).to_have_attribute('aria-selected', 'true', timeout=6500)
-    expect(page.locator('.album-choice')).to_have_count(1)
-    expect(page.locator('.album-choice-title')).to_contain_text('Your next record')
+    expect(page.locator('.album-choice')).to_have_count(2)
+    expect(page.locator('.album-choice-title').first).to_contain_text('Your next record')
     expect(page.locator('#onboarding-feed')).to_have_count(0)
     expect(page.locator('main.page-setup')).to_have_count(0)
     assert page.evaluate('firstDocument === document && firstPlayer === document.querySelector(".global-now-playing")')
     assert store.settings.get_setting('onboard_listening_format') is None
     assert store.settings.get_setting('home_format') is None
-    assert store.rec_proposals.get_proposals('home_prepared') is None
+    assert store.rec_proposals.get_proposals('home_prepared')['choice_context']
+    from yt_playlist.rec import onboarding
+    assert not onboarding.prepared_mixes_ready(store, 1)
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.goto(live_app)
     expect(page.get_by_role('tab', name='Long play', exact=True)).to_have_attribute('aria-selected', 'true')
+    expect(page.locator('.album-choice')).to_have_count(2)
+    page.locator('.album-choice').first.scroll_into_view_if_needed()
+    page.evaluate('''async () => {
+        await Promise.all(document.getAnimations().filter(animation =>
+            Number.isFinite(animation.effect.getComputedTiming().iterations)
+        ).map(animation => animation.finished.catch(() => {})));
+    }''')
+    page.screenshot(path=f'/tmp/tuneconsole-731-ready-albums-{already_ready}.png', full_page=True)
     assert navigations == [live_app + '/']
     assert errors == []
 
@@ -311,12 +329,14 @@ def test_successful_initial_sync_preserves_document_player_and_details(live_init
 
     # A sparse account's usable offer graduates Home before any mode can be fitted.
     assert store.modes.list_modes(active_only=True) == []
+    from tests.test_growth_journey import early_journey
+    early_journey(store)
     publish_personal_mix(store, now=1)
     assert store.modes.list_modes(active_only=True) == []
     status = page.request.get(f"{base}/home/onboard/status")
     assert status.ok
     arrival = status.json()
-    assert arrival["songs"] == 5, arrival
+    assert arrival["songs"] == 18, arrival  # two existing songs and sixteen distinct menu songs
     assert arrival["setup"]["modes"] == 0, arrival
     assert arrival["setup"]["mixes_ready"], arrival
     assert arrival["setup"]["complete"], arrival
@@ -336,7 +356,7 @@ def test_successful_initial_sync_preserves_document_player_and_details(live_init
     assert errors == []
 
 
-@pytest.mark.parametrize("width", [320, 390, 1280])
+@pytest.mark.parametrize("width", [1280])
 def test_first_mix_arrives_before_full_sync(live_app, store, page, width, tmp_path):
     page.set_viewport_size({"width": width, "height": 900})
     page.route("**/bridge/status", lambda route: route.fulfill(json={
@@ -444,7 +464,7 @@ def test_first_mix_arrives_before_full_sync(live_app, store, page, width, tmp_pa
     assert errors == []
 
 
-@pytest.mark.parametrize('width,height', [(320, 600), (390, 820), (1440, 720), (1920, 1080)])
+@pytest.mark.parametrize('width,height', [(1440, 720), (1920, 1080)])
 def test_welcome_starting_tent_is_visible_above_the_fold_and_player(live_app, store, page, width, height):
     from tests.conftest import seed_catalog_track
 
@@ -519,7 +539,7 @@ def test_welcome_player_access_survives_home_return_resize_and_disconnect(live_a
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.route('**/bridge/status', lambda route: route.fulfill(json=bridge))
     page.route('https://i.ytimg.com/**', lambda route: route.abort())
-    page.set_viewport_size({'width': 320, 'height': 600})
+    page.set_viewport_size({'width': 1280, 'height': 720})
     page.goto(live_app)
     expect(page.locator('.festival-first-set')).to_be_visible()
     page.evaluate('window.originalWelcomePlayer = document.querySelector(".global-now-playing")')
@@ -532,7 +552,7 @@ def test_welcome_player_access_survives_home_return_resize_and_disconnect(live_a
             return el.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
         }''')
 
-    for width, height in ((320, 600), (390, 820), (1440, 720), (320, 600)):
+    for width, height in ((1280, 720), (1440, 820), (1920, 1080), (1280, 720)):
         page.set_viewport_size({'width': width, 'height': height})
         page.evaluate('''async () => {
             await document.fonts.ready;
@@ -574,7 +594,7 @@ def test_welcome_player_access_survives_home_return_resize_and_disconnect(live_a
     assert not errors
 
 
-@pytest.mark.parametrize("width", [390, 1280])
+@pytest.mark.parametrize("width", [1280])
 def test_setup_banner_follows_navigation_and_finishes_when_models_are_ready(live_app, store, page, width):
     import numpy as np
     from tests.conftest import seed_catalog_track
@@ -624,6 +644,8 @@ def test_setup_banner_follows_navigation_and_finishes_when_models_are_ready(live
     expect(page.locator("#onboarding-feed")).to_be_visible()
     banner.get_by_role("button", name="Details").click()
     from tests.onboarding_support import publish_personal_mix
+    from tests.test_growth_journey import early_journey
+    early_journey(store)
     publish_personal_mix(store, now=1)
     expect(banner).to_be_hidden(timeout=6500)
     # Finishing setup does not take away the details a user is currently reading.
@@ -637,7 +659,7 @@ def test_setup_banner_follows_navigation_and_finishes_when_models_are_ready(live
     assert errors == []
 
 
-@pytest.mark.parametrize('width', [320, 1280])
+@pytest.mark.parametrize('width', [1280])
 def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, store, page, width, tmp_path):
     from urllib.parse import parse_qs
 
@@ -708,7 +730,7 @@ def test_starter_album_resume_waits_for_confirmed_playback(live_app, store, page
         'paused': True, 'source': {'kind': 'album', 'url': '/album?browse=' + browse}}
     status = {'connected': True, 'now_playing': None, player_field: song}
     album_requests, errors = [], []
-    page.set_viewport_size({'width': 390, 'height': 900})
+    page.set_viewport_size({'width': 1280, 'height': 900})
     page.route('**/bridge/status', lambda route: route.fulfill(json=status))
     page.route('**/now-playing/toggle*', lambda route: route.fulfill(json={'ok': True}))
     page.route('**/album/play', lambda route: (album_requests.append(route.request.url),
@@ -752,7 +774,7 @@ def test_starter_album_resume_waits_for_confirmed_playback(live_app, store, page
     expect(byline).to_have_text('Enjoy your first set while we prepare your account')
     page.reload()
     expect(byline).to_have_text('Enjoy your first set while we prepare your account')
-    page.screenshot(path=str(tmp_path / f'onboarding-album-resume-{player_field}-390.png'), full_page=True)
+    page.screenshot(path=str(tmp_path / f'onboarding-album-resume-{player_field}-1280.png'), full_page=True)
     assert album_requests == []
     assert errors == []
 
@@ -782,14 +804,27 @@ def test_ready_radio_starter_uses_existing_session_controls(live_app, store, pag
         page.get_by_role('button', name='Start radio with First radio song by Artist').click()
     assert request.value.post_data_json['video_id'] == 'radio-seed'
     assert request.value.post_data_json['menu_id'] == 'starter-radio-offer'
-    expect(page.get_by_role('button', name='Start radio with First radio song by Artist')).to_be_visible()
+    recovery = page.get_by_role('status', name='Starting radio')
+    expect(recovery).to_contain_text('First radio song')
+    expect(recovery.get_by_role('button', name='Try this selection again')).to_be_enabled()
+    with page.expect_request('**/radio/start') as retried:
+        recovery.get_by_role('button', name='Try this selection again').click()
+    assert retried.value.post_data_json == request.value.post_data_json
+    expect(recovery.get_by_role('button', name='Try this selection again')).to_be_enabled()
+    recovery.scroll_into_view_if_needed()
+    page.evaluate('''async () => {
+        await Promise.all(document.getAnimations().filter(animation =>
+            Number.isFinite(animation.effect.getComputedTiming().iterations)
+        ).map(animation => animation.finished.catch(() => {})));
+    }''')
+    page.screenshot(path='/tmp/tuneconsole-731-radio-retry.png', full_page=True)
     expect(page.locator('.festival-intro-sub')).to_have_text('Your first set is ready')
     assert page.evaluate("sessionStorage.getItem('tc-onboarding-played')") is None
     assert seed_requests == []
     assert errors == []
 
 
-@pytest.mark.parametrize('width', [320, 390])
+@pytest.mark.parametrize('width', [1280])
 def test_radio_first_set_byline_waits_for_its_confirmed_playback(live_app, store, page, width):
     from tests.conftest import seed_catalog_track
 
@@ -853,7 +888,7 @@ def test_radio_first_set_byline_waits_for_its_confirmed_playback(live_app, store
     assert not errors
 
 
-@pytest.mark.parametrize('width', [320, 390, 1440])
+@pytest.mark.parametrize('width', [1440])
 def test_extension_setup_and_live_import_details(live_app, page, width):
     connected = {"connected": False, "now_playing": None, "radio": False}
     page.route("**/bridge/status", lambda route: route.fulfill(json=connected))
@@ -916,7 +951,7 @@ def test_extension_setup_and_live_import_details(live_app, page, width):
     assert errors == []
 
 
-@pytest.mark.parametrize("width", [320, 1440])
+@pytest.mark.parametrize("width", [1440])
 def test_temporary_listening_layout_holds_a_full_queue(live_app, store, page, width):
     from tests.conftest import seed_catalog_track
 

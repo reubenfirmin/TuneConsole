@@ -18,22 +18,30 @@ def _bounded(rows, label):
 
 
 def closure(conn):
+    from yt_playlist.core import group_checkpoint_retention
+    checkpoint = group_checkpoint_retention.available(conn)
     recommendations = conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
                                     "AND name='recommendation_generations'").fetchone() is not None
     prepared_roots = (' UNION SELECT group_generation_id FROM recommendation_generations '
                       'WHERE group_generation_id IS NOT NULL' if recommendations else '')
+    checkpoint_roots = (' UNION SELECT generation_id FROM group_preparation_state '
+                        'WHERE generation_id IS NOT NULL' if checkpoint else '')
     generations = {row[0] for row in _bounded(conn.execute(
         'SELECT generation_id FROM group_head UNION SELECT generation_id FROM group_evidence_generations '
         'UNION SELECT generation_id FROM group_builds UNION SELECT parent_generation_id FROM group_builds '
-        'WHERE parent_generation_id IS NOT NULL' + prepared_roots + ' LIMIT ?', (MAX_REFERENCES + 1,)), 'generation')}
+        'WHERE parent_generation_id IS NOT NULL' + prepared_roots + checkpoint_roots + ' LIMIT ?',
+        (MAX_REFERENCES + 1,)), 'generation')}
     prepared_aliases = (' UNION SELECT x.external_version FROM generation_groups x '
                        'JOIN recommendation_generations r ON r.group_generation_id=x.generation_id'
                        if recommendations else '')
+    checkpoint_aliases = (' UNION SELECT x.external_version FROM generation_groups x '
+                         'JOIN group_preparation_state s ON s.generation_id=x.generation_id' if checkpoint else '')
     aliases = {row[0] for row in _bounded(conn.execute(
         'SELECT external_version FROM group_evidence_versions UNION SELECT x.external_version '
         'FROM generation_groups x JOIN group_evidence_generations e ON e.generation_id=x.generation_id '
         'UNION SELECT x.external_version FROM generation_groups x JOIN group_builds b '
-        'ON b.parent_generation_id=x.generation_id' + prepared_aliases + ' LIMIT ?', (MAX_REFERENCES + 1,)), 'evidence')}
+        'ON b.parent_generation_id=x.generation_id' + prepared_aliases + checkpoint_aliases + ' LIMIT ?',
+        (MAX_REFERENCES + 1,)), 'evidence')}
     # Current aliases retain their first publication context, but do not cause
     # unrelated incoming historical lineage to become a new evidence root.
     current = {row[0] for row in _bounded(conn.execute('SELECT x.external_version FROM generation_groups x '

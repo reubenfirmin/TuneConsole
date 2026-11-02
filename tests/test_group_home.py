@@ -1,13 +1,16 @@
 import json
 import logging
 from copy import deepcopy
+from html.parser import HTMLParser
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient, seed_catalog_track
 from tests.group_support import publish, recordings
+from tests.home_fixture_support import returning_listener
 from tests.recommendation_support import publish_bundles
+from yt_playlist.core import mix_choices
 from yt_playlist.rec import (choice_evidence, group_home, group_serving, group_viz,
                              home_cards, home_prepared, taste_viz)
 from yt_playlist.web.app import create_app
@@ -124,6 +127,7 @@ def test_prepared_home_and_real_menu_capture_preserve_group_context(store):
     assert home_prepared._valid(payload)
     assert payload['choice_context']['group_generation'] == head['generation']
     identity = store.accounts.upsert_account('main', 'cred', None, True)
+    returning_listener(store, 'mixes', now=1200)
     fake = FakeClient()
     clock = [1300]
     app = create_app(store, lambda: {identity: fake}, now_fn=lambda: clock[0])
@@ -137,18 +141,43 @@ def test_prepared_home_and_real_menu_capture_preserve_group_context(store):
         offered = list(store.rec_ledger.evidence().records('opportunity'))
         menu = next(o for o in offered if o['format'] == 'mixes')
         options = menu['options']
-        assert all(o['group_version'] for o in options)
+        assert all(o['descriptor_id'] for o in options)
+        assert all(not {'group_version', 'recipe', 'tracks'} & o.keys() for o in options)
         ids = [o['id'] for o in options]
         choice_evidence.respond(store, menu['id'], 'visible', 1301, visible=ids)
         clock[0] = 1302
-        recipe = {**options[0]['recipe'], 'opportunity_id': menu['id'], 'option_id': ids[0]}
+        # The browser submits its operational card. Captured choices retain
+        # visible themes/genres, never hidden recipes or track memberships (#688).
+        class Cards(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.cards = []
+
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == 'div' and attrs.get('data-recipe'):
+                    self.cards.append({'recipe': json.loads(attrs['data-recipe']), 'tracks': []})
+                if tag == 'li' and attrs.get('class') == 'gen-row':
+                    self.cards[-1]['tracks'].append({key: attrs['data-' + attr] for key, attr in (
+                        ('key', 'key'), ('video_id', 'vid'), ('title', 'title'), ('artist', 'artist'),
+                        ('album', 'album'), ('thumbnail', 'thumb'))})
+
+        rendered = Cards()
+        rendered.feed(response.text)
+        card = next(card for card in rendered.cards if card['recipe']['option_id'] == ids[0])
+        recipe = card['recipe']
+        assert recipe['opportunity_id'] == menu['id'] and card['tracks']
         generated = client.post('/home/generate', data={'name': 'Group soak mix',
-            'tracks': json.dumps(options[0]['tracks']), 'recipe': json.dumps(recipe)})
+            'tracks': json.dumps(card['tracks']), 'recipe': json.dumps(recipe)})
         assert generated.status_code == 200 and 'Saved' in generated.text
         assert fake.created and fake.added
         choice_evidence.daily(store, 1303)
         state = store.rec_proposals.get_proposals('group_choice_bandit')
-        chosen = next(r for r in state['rows'] if r['version'] == options[0]['group_version'])
+        genres = {g.casefold() for g in mix_choices.expand(store.conn, options[0])['genres']}
+        matches = [g for g in head['groups'] if g.get('leaf') and not g.get('legacy')
+                   and genres & {label.casefold() for label, _weight in g['genres']}]
+        assert len(matches) == 1
+        chosen = next(r for r in state['rows'] if r['version'] == matches[0]['version'])
         assert chosen['positive'] > 0 and chosen['picked'] == 1
         assert state['excluded']['unmapped_definition'] == 0
         assert taste_viz.mix_choices(store, 1303)['picked'] == 1

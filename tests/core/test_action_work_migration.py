@@ -158,13 +158,13 @@ def test_reviewed_draft_is_frozen_before_merge_and_stale_review_cannot_write(sto
 def test_export_retains_backup_bytes_after_original_file_is_removed(store,tmp_path,monkeypatch):
     from pathlib import Path
     from tests.test_undo_recovery import RecoveryClient, _deleted
-    from yt_playlist.core import action_backup_files
+    from yt_playlist.core import action_backup_files, fao
     from yt_playlist.library.playlist_undo import undo_action
     monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path/'home'))
     client = RecoveryClient({'SOURCE':['one','one','two']})
     account,action = _deleted(store,client)
     original = store.conn.execute('SELECT filename,retained_filename FROM action_backups WHERE action_id=?',(action,)).fetchone()
-    assert Path(original[0]).read_bytes()==Path(original[1]).read_bytes()
+    assert fao.read_bytes(original[0])==fao.read_bytes(original[1])
     store.conn.execute('BEGIN')
     manifest = action_backup_files.export(store.conn,tmp_path/'export')
     store.conn.rollback()

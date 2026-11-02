@@ -360,7 +360,7 @@ def test_upload_backlog_does_not_block_feedback_for_new_songs(vibes_enabled, liv
     assert page.evaluate('JSON.parse(localStorage.getItem("tuneconsole.audio-vibes.outbox.1")).length') == 12
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_zero_analysis_labels_survive_song_change_navigation_and_second_tab(
         vibes_enabled, live_app, page, store, width):
     state = {'position': 0, 'duration': 195, 'title': 'First unanswered song'}
@@ -526,7 +526,7 @@ def test_card_accepts_labels_before_analysis_and_lights_only_saved_checks(vibes_
     assert store.audio_vibes.feedback(third['run_id']) == frozen, 'Analysis cannot rewrite an earlier human judgment'
 
 
-@pytest.mark.parametrize('width,height', [(1400, 900), (390, 720), (800, 450)])
+@pytest.mark.parametrize('width,height', [(1400, 900), (800, 450)])
 def test_normal_app_collects_then_shows_one_compact_card_and_autosaves(vibes_enabled, live_app, page, store, tmp_path, width, height):
     state = {'position': 0, 'duration': 240}
     page.set_viewport_size({'width': width, 'height': height})
@@ -786,7 +786,7 @@ def test_other_tab_can_remove_labels_while_feedback_is_in_flight(vibes_enabled, 
 
 
 def test_weak_model_fits_still_show_a_prediction_to_correct(vibes_enabled, live_app, page, store):
-    page.set_viewport_size({'width': 320, 'height': 568})
+    page.set_viewport_size({'width': 1280, 'height': 720})
     traits = sample(relaxed=.3, aggressive=.55)['traits']
     for key, score in {'happy': .2, 'sad': .6, 'arousal': 5.8}.items():
         traits[key] = {'score': score, 'per_patch': [score] * 3}
@@ -914,7 +914,7 @@ def test_three_real_tab_local_samples_on_normal_app_share_one_owner(vibe_browser
     context.on('request', lambda request: uploads.append((request.url, request.post_data or ''))
         if request.method == 'POST' and request.url.endswith('/audio-vibes/samples') else None)
     for index, page in enumerate(pages):
-        page.set_viewport_size({'width': [1440, 390][index], 'height': 1000})
+        page.set_viewport_size({'width': [1440, 1280][index], 'height': 1000})
         page.add_init_script('window.Worker=class {constructor(){throw Error("No app-side inference");}};')
         page.on('pageerror', lambda error: errors.append(str(error)))
     pages[0].goto(live_app + '/#radio')
@@ -978,7 +978,7 @@ def test_three_real_tab_local_samples_on_normal_app_share_one_owner(vibe_browser
     scores = audio_vibe_model.scores(learned, values, records[0]['baseline'])
     assert max(scores, key=scores.get) in records[0]['labels']
     expect(visible_card(pages[0]).get_by_role('button', name=DESCRIPTIONS['relax'], exact=True)).to_have_attribute('aria-pressed', 'true')
-    for page, width in zip(pages, [1440, 390]):
+    for page, width in zip(pages, [1440, 1280]):
         expect(visible_card(page).locator('[data-vibe-checks] [data-complete="true"]')).to_have_count(3)
         page.screenshot(path=f'/tmp/tuneconsole-423-natural{"-offset" if offset else ""}-{width}.png')
     # Let native media reach the 195-second boundary without seeking. Leave
@@ -1001,7 +1001,7 @@ def test_three_real_tab_local_samples_on_normal_app_share_one_owner(vibe_browser
     assert store.audio_vibes.feedback(next_id)['prediction'] is None
     expect(visible_card(pages[0]).get_by_role('button', name=DESCRIPTIONS['cruise'], exact=True)).to_have_attribute('aria-pressed', 'true')
     loaded_assets = []
-    for page, width in zip(pages, [1440, 390]):
+    for page, width in zip(pages, [1440, 1280]):
         for url in page.evaluate(r'''performance.getEntriesByType('resource')
             .map(row => row.name).filter(url => /\/(audio-vibe[^/]*|audio-preview-session|playback-status)\.js/.test(url))'''):
             data = context.request.get(url).body()

@@ -57,22 +57,23 @@ def pinned_read(method):
     return wrapped
 
 
-def publish(conn, kind, owner, value):
+def publish(conn, kind, owner, value, *, age=None):
     if kind not in KINDS:
         raise ValueError('Unsupported collection recovery owner')
     encoded = canonical({'format':FORMAT,'kind':kind,'owner':str(owner),'state':value})
     if len(encoded)>MAX_BYTES:
         raise ValueError('Collection recovery exceeds its byte budget')
     digest = hashlib.sha256(encoded).hexdigest()
-    filename = _publish_encoded(directory(conn),encoded,digest)
+    filename = _publish_encoded(directory(conn),encoded,digest,age=age)
     return filename,digest,len(encoded)
 
 
-def read(filename,digest,size,*,kind,owner):
+def read(filename,digest,size,*,kind,owner,with_age=False):
     if kind not in KINDS or type(size) is not int or not 0<size<=MAX_BYTES:
         raise ValueError('Invalid collection recovery reference')
     path = Path(filename)
     with fao.open_reader(path) as stream:
+        age = stream.info
         encoded = stream.read(size+1)
     if path.stem!=digest or len(encoded)!=size or hashlib.sha256(encoded).hexdigest()!=digest:
         raise ValueError('Collection recovery does not match its digest')
@@ -81,7 +82,7 @@ def read(filename,digest,size,*,kind,owner):
             or document['format']!=FORMAT or document['kind']!=kind or document['owner']!=str(owner)
             or canonical(document)!=encoded):
         raise ValueError('Collection recovery belongs to another workflow or format')
-    return document['state']
+    return (document['state'], age) if with_age else document['state']
 
 
 def references(conn):
@@ -123,9 +124,9 @@ def export(conn,root):
     records,chunks = [],[]
     for table,identity,kind,filename,digest,size in references(conn):
         check_cancellable_work()
-        value = read(filename,digest,size,kind=kind,owner=identity)
+        value, age = read(filename,digest,size,kind=kind,owner=identity,with_age=True)
         encoded = canonical({'format':FORMAT,'kind':kind,'owner':str(identity),'state':value})
-        copied = _publish_encoded(root,encoded,digest)
+        copied = _publish_encoded(root,encoded,digest,age=age)
         records.append({'table':table,'id':identity,'kind':kind,'digest':digest,'bytes':size,
                         'relative_filename':str(Path(copied).relative_to(root))})
         if len(records)==512:
@@ -176,9 +177,9 @@ def restore(conn,manifest):
             raise ValueError('Collection backup does not match database owners')
         files = {}
         for key,record in records.items():
-            value = read(root/record['relative_filename'],record['digest'],record['bytes'],
-                         kind=record['kind'],owner=record['id'])
-            files[key] = publish(conn,record['kind'],record['id'],value)[0]
+            value, age = read(root/record['relative_filename'],record['digest'],record['bytes'],
+                             kind=record['kind'],owner=record['id'],with_age=True)
+            files[key] = publish(conn,record['kind'],record['id'],value,age=age)[0]
         with policy_documents.coordinate_updates(conn, (table for table, _ in files)):
             for (table,identity),filename in files.items():
                 key = OWNER_KEYS.get(table,'id')
@@ -209,9 +210,7 @@ def collect_orphans(conn):
                 for path in root.glob('*/*.json'):
                     check_cancellable_work()
                     if str(path) not in owned:
-                        path.unlink(missing_ok=True)
-                        _sync_directory(path.parent)
-                        removed += 1
+                        removed += fao.delete(path, missing_ok=True)
             finally:
                 unlock()
         return removed

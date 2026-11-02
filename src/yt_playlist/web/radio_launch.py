@@ -13,6 +13,7 @@ from yt_playlist.core import radio_provenance
 from yt_playlist.library import playlist_generated
 from yt_playlist.library.playlist_metadata import versioned_title
 from yt_playlist.rec.radio_directions import RadioDirections
+from yt_playlist.rec.radio_candidates import eligible_seeds
 from yt_playlist.web.radio_persistence import PREPARATION_TIMEOUT, restore
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending, readback_durations
 from yt_playlist.web.radio_mutations import RadioMutations
@@ -50,10 +51,10 @@ class RadioLaunch:
                     radio_provenance.remember(self.store.conn,playlist)
             self.store.transient_radio_playlists.difference_update(pending)
 
-    def checkpoint_view(self, playing):
+    def checkpoint_view(self, playing, *, reader=None):
         """A saved checkpoint alone cannot establish current native playback."""
         try:
-            saved = self.persistence.load() or {}
+            saved = (self.persistence.load() if reader is None else self.persistence.view(reader)) or {}
         except (ValueError, KeyError, TypeError):
             saved = {}
         active = bool(saved.get('playlist') and playing.get('playlist_ytm_id') == saved['playlist']
@@ -85,15 +86,13 @@ class RadioLaunch:
                     "duration_s AS duration, genre, mb_year AS year, available "
                     "FROM catalog_tracks WHERE video_id=? LIMIT 1", (seed_video_id,)).fetchone()
             if row:
-                track = dict(row)
-                blocked = self.store.rec_model.disliked_identity_keys()
-                muted = {a.casefold() for a in self.store.rec_model.muted_artists()}
-                if (track["key"] not in blocked and track.get("available") != 0
-                        and (track.get("artist") or "").casefold() not in muted):
-                    seed = track
-                    candidates.retain([seed])
+                seed = dict(row)
+        if seed is not None and not seeds:
+            seed = next(iter(eligible_seeds(self.store, [seed], self.now_fn())), None)
+            if seed is not None:
+                candidates.retain([seed])
         if seed is None:
-            seed = next(iter(candidates.seed_offer(1)), None)
+            seed = next(iter(eligible_seeds(self.store, candidates.seed_offer(1), self.now_fn())), None)
         if seed is None:
             return None
         s = Session(client, candidates, identity,

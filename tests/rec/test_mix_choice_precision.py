@@ -194,7 +194,8 @@ def test_legacy_preparation_restarts_and_does_not_guess_missing_artist_genres(st
     assert not store.conn.execute("SELECT 1 FROM group_evidence_owners WHERE external_key='legacy'").fetchone()
     assert preparation.status(store.conn)['phase'] == 'ready'
     assert not preparation.step(store,110)
-    assert json.loads(ledger._path('opportunity','legacy').read_bytes()) == old
+    from yt_playlist.core import fao
+    assert json.loads(fao.read_bytes(ledger._path('opportunity','legacy'))) == old
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
@@ -232,15 +233,17 @@ def test_unpublished_sql_is_collected_and_live_learning_keeps_its_descriptor(sto
 
 
 def test_choice_backup_restores_descriptors_and_files_and_fences_retirement(store, tmp_path, monkeypatch):
-    from yt_playlist.core import choice_evidence_files, policy_documents
+    from yt_playlist.core import choice_evidence_files, fao, policy_documents
     from yt_playlist.core.store import Store
     monkeypatch.setattr(choice_evidence_files, 'PAGE_ROWS', 2)
     menu(store)
     choices.respond(store, 'menu', 'visible', 101, visible=['a','b'])
     choices.respond(store, 'menu', 'choice', 102, option_id='a')
     ledger = store.rec_ledger.evidence()
-    original = {str(path.relative_to(ledger.directory)):path.read_bytes()
+    original = {str(path.relative_to(ledger.directory)):fao.read_bytes(path)
                 for path in choice_evidence_files.references(store.conn)}
+    clocks = {str(path.relative_to(ledger.directory)):(fao.stat(path).mtime_ns, fao.stat(path).ctime_ns)
+              for path in choice_evidence_files.references(store.conn)}
     with policy_documents.retained_reader(ledger.directory):
         assert ledger.maintain(1000) == {'deferred':True}
     restored = Store(tmp_path / 'restored.db')
@@ -250,9 +253,12 @@ def test_choice_backup_restores_descriptors_and_files_and_fences_retirement(stor
         manifest = choice_evidence_files.export(store.conn, tmp_path / 'files')
         choice_evidence_files.restore(restored.conn, manifest)
         assert choices.compile_report(restored, 110)['formats'] == choices.compile_report(store,110)['formats']
-        actual = {str(path.relative_to(choice_evidence_files.directory(restored.conn))):path.read_bytes()
+        actual = {str(path.relative_to(choice_evidence_files.directory(restored.conn))):fao.read_bytes(path)
                   for path in choice_evidence_files.references(restored.conn)}
         assert actual == original
+        assert {str(path.relative_to(choice_evidence_files.directory(restored.conn))):
+                (fao.stat(path).mtime_ns, fao.stat(path).ctime_ns)
+                for path in choice_evidence_files.references(restored.conn)} == clocks
         source = next((tmp_path / 'files' / 'opportunity').glob('*/*.json'))
         source.write_bytes(b'{}')
         with pytest.raises(ValueError, match='verification'):

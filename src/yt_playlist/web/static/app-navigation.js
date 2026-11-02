@@ -105,6 +105,10 @@
       updateNavigation(page);
       renderedUrl = response.redirected ? response.url : event.destination.url;
       if (response.redirected) history.replaceState(history.state, '', renderedUrl);
+      // Dispose page scopes while their full subtree is still intact. HTMX
+      // clears descendants before Alpine's removal observer can walk them;
+      // teleported panels and page timers would otherwise survive the swap.
+      Alpine.destroyTree(main);
       await new Promise(resolve => htmx.swap(main, next.outerHTML,
         {swapStyle: 'outerHTML', settleDelay: 0},
         {afterSettleCallback: () => Alpine.nextTick(resolve)}));

@@ -224,8 +224,16 @@ def apply(conn, context):
             raise MigrationError(f'Invalid paid description evidence {surface!r}: {exc}') from exc
     for sql in statements():
         conn.execute(sql)
+    copy_rows(conn, _rows(conn))
+    conn.execute("DELETE FROM rec_proposals WHERE surface GLOB 'album_description:*' "
+                 "OR surface IN ('album_description_usage','deepseek_host') OR surface GLOB 'deepseek_credential:*'")
+
+
+def copy_rows(conn, rows, *, access_overlay=True):
+    """Copy a bounded paid-outcome batch into existing owners, without DDL."""
     root = files.directory(conn)
-    for surface, raw, built in _rows(conn):
+    for surface, raw, built in rows:
+        _original(surface, raw, built)
         value = json.loads(raw)
         if surface.startswith(RESULT_PREFIX):
             filename, digest, _size = files.publish(root, raw)
@@ -267,7 +275,12 @@ def apply(conn, context):
                 ('deepseek', 'host' if surface == 'deepseek_host' else 'credential',
                  '' if surface == 'deepseek_host' else surface[len(CREDENTIAL_PREFIX):],
                  value['status'], value.get('retry_at', 0), built, filename, digest))
-    # Preserve the older global usage record's credential/host failure as well.
+    if access_overlay:
+        copy_access_waits(conn)
+
+
+def copy_access_waits(conn):
+    """Apply global usage waits after the explicit access owners are copied."""
     for usage_id, credential, state, retry_at, built in conn.execute(
             'SELECT id,credential_key,status,retry_at,built_at FROM legacy_album_description_usage '
             "WHERE status IN ('auth','balance','rate_limit','unavailable')"):
@@ -279,8 +292,6 @@ def apply(conn, context):
             'retry_at=MAX(retry_at,excluded.retry_at),updated_at=MAX(updated_at,excluded.updated_at),'
             'legacy_usage_id=excluded.legacy_usage_id', ('deepseek', 'host' if state == 'unavailable' else 'credential',
             '' if state == 'unavailable' else credential, state, retry_at, built, usage_id))
-    conn.execute("DELETE FROM rec_proposals WHERE surface GLOB 'album_description:*' "
-                 "OR surface IN ('album_description_usage','deepseek_host') OR surface GLOB 'deepseek_credential:*'")
 
 
 def validate(conn):

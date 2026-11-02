@@ -19,12 +19,13 @@ def references(conn):
         yield from sorted((root / kind).glob('*/*.json'))
 
 
-def _read(path):
+def _read(path, *, with_age=False):
     with fao.open_reader(path) as stream:
         data = stream.read(MAX_BYTES + 1)
+        age = stream.info
     if len(data) > MAX_BYTES:
         raise ValueError('Listening evidence exceeds recovery memory budget')
-    return data
+    return (data, age) if with_age else data
 
 
 def _owner(kind, token):
@@ -67,7 +68,7 @@ def export(conn, target):
     with policy_documents.retained_reader(root), source._budget():
         for kind in ('opportunity', 'response', 'forecast', 'artifact', 'report', 'checkpoint'):
             for path in sorted((root / kind).glob('*/*.json')):
-                encoded = _read(path)
+                encoded, age = _read(path, with_age=True)
                 value = _validate(kind, path.stem, encoded)
                 if (kind == 'opportunity' and value.get('precision') == mix_choices.PRECISION
                         and (not mix_choices.available(conn) or not conn.execute(
@@ -77,7 +78,7 @@ def export(conn, target):
                 if kind == 'response' and value.get('opportunity_id') in excluded:
                     continue
                 relative = Path(kind, path.stem[:2], path.name)
-                output._publish(target / relative, encoded, kind, path.stem)
+                output._publish(target / relative, encoded, kind, path.stem, age=age)
                 entries.append([kind, path.stem, len(encoded), hashlib.sha256(encoded).hexdigest()])
                 if len(entries) == PAGE_ROWS:
                     page()
@@ -105,10 +106,10 @@ def restore(conn, manifest):
                 # Validate tokens before constructing any path from the manifest.
                 _owner(kind, token)
                 source = manifest.parent / kind / token[:2] / (token + '.json')
-                data = _read(source)
+                data, age = _read(source, with_age=True)
                 if len(data) != size or hashlib.sha256(data).hexdigest() != digest:
                     raise ValueError('Listening evidence backup failed verification')
                 _validate(kind, token, data)
-                output._publish(output.directory / kind / token[:2] / (token + '.json'), data, kind, token)
+                output._publish(output.directory / kind / token[:2] / (token + '.json'), data, kind, token, age=age)
         save(sum(fao.stat(path).logical_bytes for path in references(conn)))
         output._advance_generation()

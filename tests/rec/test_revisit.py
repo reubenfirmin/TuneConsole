@@ -45,6 +45,24 @@ def test_generated_membership_is_eligible_but_a_real_recent_generated_play_count
     assert surfaces.rediscover_tracks(store, NOW) == []
 
 
+def test_calendar_imports_count_once_per_account_day_without_recounting_exact_events(store):
+    main = store.accounts.upsert_account('Main', 'cred', None, True)
+    other = store.accounts.upsert_account('Other', 'cred', 'other', False)
+    key = song(store, main, 'calendar-and-exact', plays=2, age=60)
+    day = NOW-60*DAY
+    store.history.record_history_plays(main, day+100, [(key, 'Today')], source_timezone='UTC')
+    store.history.record_history_plays(main, day+200, [(key, 'Today')], source_timezone='UTC')
+    store.history.record_history_plays(other, day+100, [(key, 'Today')], source_timezone='UTC')
+    store.history.record_history_plays(main, day+2*DAY, [(key, 'Today')], source_timezone='UTC')
+    rows = store.rec_candidates.revisit_candidates(NOW, keys=[key])
+    assert len(rows) == 1
+    # Two exact events, one independent account/day, and one later import day.
+    assert rows[0]['plays'] == 4
+    # Calendar evidence uses the existing noon date marker plus its one-day
+    # conservative rest boundary, without claiming an exact listening time.
+    assert rows[0]['last_played'] == day+3.5*DAY
+
+
 def test_current_rating_availability_and_new_play_revalidate_prepared_song_pool(store):
     iid = store.accounts.upsert_account('Main', 'cred', None, True)
     seed(store)

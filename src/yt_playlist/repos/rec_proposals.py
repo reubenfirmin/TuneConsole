@@ -512,6 +512,21 @@ class RecProposalsRepo(Repo):
         # Large disposable collections are decoded after releasing the serving connection.
         return json_cache.decode(payload) if payload is not None else None
 
+    def proposal_fields(self, surface, fields):
+        """Read a small prepared header without restoring unrelated song profiles."""
+        payload = self._proposal_json(surface)
+        return json_cache.decode(payload, keys=set(fields)) if payload is not None else None
+
+    def fresh_candidates(self):
+        """Project the existing ranked Fresh inputs before restoring musical profiles."""
+        def select(value):
+            return {mode: {'fresh': [{name: item[name] for name in
+                    ('key', 'video_id', 'title', 'artist', 'album', 'thumbnail', 'genre', 'score') if name in item}
+                    for item in bucket.get('fresh', [])]}
+                for mode, bucket in (value or {}).items() if not mode.startswith('_')}
+        payload = self._proposal_json('mode_bundles')
+        return json_cache.decode(payload, project=select) if payload is not None else {}
+
     @snapshot_read
     def has_proposals(self, surface):
         """Check dependency presence without reading or decoding a large display pool."""

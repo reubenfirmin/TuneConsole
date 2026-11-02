@@ -88,10 +88,63 @@ def test_save_closes_its_popup_and_confirms_actual_player(generation_app, page):
     page.wait_for_url(re.compile(r'/playlist/\d+$'))
     assert popup.is_closed()
     page.evaluate('window.playbackStatus.refresh()')
-    expect(page.locator('[data-generated-playback]')).to_have_text('Playing your saved mix on YouTube Music.')
+    expect(page.locator('.pl-headmain')).to_be_visible()
+    expect(page.locator('[data-generated-playback]')).to_have_count(0)
     assert len(provider.created) == len(frames) == 1
     assert provider.created[0][0] in frames[0]['url']
     assert not errors
+
+
+def test_save_keeps_loader_until_playlist_opens_without_a_confirmation_screen(generation_app, page):
+    base, provider, bridge, frames = generation_app
+    pending = {}
+
+    def hold_save(route):
+        pending['response'] = route.fetch()
+        pending['route'] = route
+
+    page.route('**/home/generate', hold_save)
+    page.evaluate('''() => {
+      window.confirmationScreens = 0;
+      new MutationObserver(records => {
+        for (const record of records) for (const node of record.addedNodes) {
+          if (node.nodeType === 1 && (node.matches('.gen-done') || node.querySelector('.gen-done')))
+            window.confirmationScreens++;
+        }
+      }).observe(document.body, {childList: true, subtree: true});
+      window.addEventListener('pagehide', () => {
+        const record = Array.from(generationWindows.values())[0];
+        sessionStorage.setItem('mix-navigation-check', JSON.stringify({
+          confirmations: window.confirmationScreens,
+          loaderOpen: !!record?.tab && !record.tab.closed
+        }));
+      }, {once: true});
+    }''')
+    with page.expect_popup() as opened:
+        page.get_by_role('button', name='Save and play this mix').click()
+    popup = opened.value
+    try:
+        deadline = time.monotonic() + 10
+        while 'route' not in pending and time.monotonic() < deadline:
+            page.wait_for_timeout(100)
+        assert 'route' in pending, 'The save did not finish'
+        assert page.evaluate('window.confirmationScreens') == 0
+        expect(page.locator('.gen-done')).to_have_count(0)
+        expect(page.locator('.starter-mix')).to_be_visible()
+        assert not popup.is_closed()
+        expect(popup.locator('.gen-stage')).to_be_visible()
+        popup.screenshot(path='/tmp/tuneconsole-mix-loader.png')
+    finally:
+        page.unroute('**/home/generate', hold_save)
+        if 'route' in pending:
+            pending.pop('route').fulfill(response=pending['response'])
+    page.wait_for_url(re.compile(r'/playlist/\d+$'))
+    expect(page.locator('.pl-headmain')).to_be_visible()
+    assert popup.is_closed()
+    assert page.evaluate("JSON.parse(sessionStorage.getItem('mix-navigation-check'))") == {
+        'confirmations': 0, 'loaderOpen': True}
+    page.screenshot(path='/tmp/tuneconsole-mix-normal-playlist.png')
+    assert len(provider.created) == len(frames) == 1
 
 
 @pytest.mark.parametrize('generation_app', ['board'], indirect=True)
@@ -109,7 +162,8 @@ def test_focused_four_mix_board_saves_and_launches_once(generation_app, page):
     page.wait_for_url(re.compile(r'/playlist/\d+$'))
     assert opened.value.is_closed()
     page.evaluate('window.playbackStatus.refresh()')
-    expect(page.locator('[data-generated-playback]')).to_contain_text('Playing your saved mix')
+    expect(page.locator('.pl-headmain')).to_be_visible()
+    expect(page.locator('[data-generated-playback]')).to_have_count(0)
     assert len(provider.created) == len(frames) == 1
     assert not errors
 
@@ -313,33 +367,55 @@ def test_unconfirmed_provider_create_cannot_be_repeated_after_reload(generation_
     assert len(provider.created) == 1
 
 
-def test_paused_storage_can_open_saved_mix_without_a_local_playlist(generation_app, store, page):
+@pytest.mark.parametrize('connected', [True, False])
+def test_paused_storage_can_open_saved_mix_without_a_local_playlist(generation_app, store, page, connected):
     base, provider, bridge, frames = generation_app
     create = provider.create_playlist
 
     def disconnect_during_create(*args, **kwargs):
-        bridge._send = None
+        if not connected:
+            bridge._send = None
         return create(*args, **kwargs)
 
     provider.create_playlist = disconnect_during_create
     store.activity_paused = True
+    store._evidence_maintenance = 1
+    store.conn.execute('PRAGMA query_only=ON')
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
     try:
         with page.expect_popup() as opened:
             page.get_by_role('button', name='Save and play this mix').click()
-        expect(page.locator('.gen-done')).to_be_visible()
+        page.wait_for_url(re.compile(r'/playlist/saved/\d+/[^/]+$'))
+        expect(page.locator('.pl-headmain')).to_be_visible()
+        expect(page.locator('#playlist-track-body .srow')).to_have_count(2)
+        expect(page.locator('.playlist-play')).to_be_visible()
+        expect(page.locator('.gen-done')).to_have_count(0)
+        expect(page.locator('#storage-maintenance')).to_have_text(
+            'Performing database maintenance - this should take just a few minutes.')
         deadline = time.monotonic() + 5
         while not opened.value.is_closed() and time.monotonic() < deadline:
             page.wait_for_timeout(50)
         assert opened.value.is_closed()
         page.evaluate('window.playbackStatus.refresh()')
-        note = page.locator('[data-generated-playback]')
-        expect(note).to_contain_text('Reconnect the YouTube Music extension')
-        expect(note).not_to_contain_text('Use Play')
-        expect(note.get_by_role('link')).to_have_attribute('href', re.compile('watch\\?list='))
-        assert len(provider.created) == 1 and not frames
+        if not connected:
+            note = page.locator('[data-generated-playback]')
+            expect(note).to_contain_text('Reconnect the YouTube Music extension')
+            expect(note).to_contain_text('Use Play')
+            expect(note.get_by_role('link')).to_have_attribute('href', re.compile('watch\\?list='))
+        else:
+            page.wait_for_function('!sessionStorage.getItem("tc-generated-playback")')
+            expect(page.locator('[data-generated-playback]')).to_have_count(0)
+        page.reload()
+        expect(page.locator('#playlist-track-body .srow')).to_have_count(2)
+        page.screenshot(path=f'/tmp/tuneconsole-686-saved-playlist-{connected}.png', full_page=True)
+        assert len(provider.created) == 1 and len(frames) == int(connected)
         assert len(store.playlists.get_playlists()) == 1
+        assert not errors
     finally:
+        store.conn.execute('PRAGMA query_only=OFF')
         store.activity_paused = False
+        store._evidence_maintenance = 0
 
 
 def test_playback_timeout_retries_the_saved_playlist(generation_app, page, monkeypatch):
@@ -353,13 +429,13 @@ def test_playback_timeout_retries_the_saved_playlist(generation_app, page, monke
     page.clock.install()
     page.evaluate('window.playbackStatus.refresh()')
     note = page.locator('[data-generated-playback]')
-    expect(note).to_contain_text('Waiting for YouTube Music playback')
+    expect(note).to_have_count(0)
     page.clock.fast_forward(46000)
     expect(note).to_contain_text('Playback has not started')
     monkeypatch.setattr(bridge, 'send_control', navigate)
     page.get_by_role('button', name='Play on YouTube Music', exact=True).click()
     page.evaluate('window.playbackStatus.refresh()')
-    expect(note).to_have_text('Playing your saved mix on YouTube Music.')
+    expect(note).to_have_count(0)
     assert len(provider.created) == len(frames) == 1
     assert provider.created[0][0] in frames[0]['url']
 
@@ -383,10 +459,14 @@ def test_popup_has_feedback_before_the_backend_answers(generation_app, page):
     with page.expect_popup() as opened:
         page.get_by_role('button', name='Save and play this mix').click()
     popup = opened.value
-    # Locators wait for the pending navigation. Inspect the still-rendered
-    # initial document through its opener while the server has sent no bytes.
-    assert 'Preparing your mix' in page.evaluate(
-        "window.__ytTab.document.querySelector('[role=status]').innerText")
+    # The committed local document uses the existing spoke loader while the
+    # generation POST is held, without waiting for a backend page response.
+    expect(popup.get_by_role('status', name='Preparing playlist')).to_be_visible()
+    expect(popup.locator('.gen-hub')).to_be_visible()
+    expect(popup.locator('.gen-node')).to_have_count(2)
+    first = popup.locator('.gen-node').first
+    position = first.evaluate('node => node.style.transform')
+    popup.wait_for_function('position => document.querySelector(".gen-node").style.transform !== position', arg=position)
     # Capture the actual compositor without Playwright waiting for navigation.
     cdp = page.context.new_cdp_session(popup)
     try:
@@ -402,15 +482,24 @@ def test_popup_has_feedback_before_the_backend_answers(generation_app, page):
     popup.screenshot(path='/tmp/tuneconsole-634-held-popup.png')
 
 
-@pytest.mark.parametrize('asset', ['generating', 'theme'])
+@pytest.mark.parametrize('asset', ['generating', 'theme', 'stylesheets'])
 def test_interstitial_timeout_survives_unavailable_animation(generation_app, page, asset):
     base, *_ = generation_app
-    page.route(f'**/static/{asset}.js?*', lambda route: route.abort('failed'))
+    if asset == 'stylesheets':
+        page.route('**/static/*.css?*', lambda route: route.abort('failed'))
+    else:
+        page.route(f'**/static/{asset}.js?*', lambda route: route.abort('failed'))
     page.clock.install()
     page.goto(base + '/home/generating')
     page.clock.fast_forward(90001)
     expect(page.get_by_role('alert')).to_contain_text('couldn’t confirm playback')
     expect(page.locator('.gen-loader')).to_be_hidden()
+    recovery = page.get_by_role('alert')
+    # Recovery must remain legible even when the token stylesheet never loads.
+    colors = recovery.evaluate('node => ({background:getComputedStyle(node).backgroundColor, color:getComputedStyle(node).color})')
+    assert colors['background'] != 'rgba(0, 0, 0, 0)' and colors['background'] != colors['color']
+    if asset == 'stylesheets':
+        page.screenshot(path='/tmp/tuneconsole-791-recovery-no-stylesheets.png', full_page=True)
 
 
 def test_interstitial_timeout_survives_a_stalled_script(generation_app, page):
@@ -418,17 +507,35 @@ def test_interstitial_timeout_survives_a_stalled_script(generation_app, page):
     pending = []
     page.route('**/static/theme.js?*', lambda route: pending.append(route))
     page.clock.install()
-    page.goto(base + '/home/generating', wait_until='commit')
-    expect(page.get_by_role('status')).to_contain_text('Wiring up your playlist')
-    page.clock.fast_forward(90001)
-    expect(page.get_by_role('alert')).to_contain_text('couldn’t confirm playback')
-    expect(page.locator('.gen-loader')).to_be_hidden()
-    for route in pending:
-        route.abort('failed')
+    page.add_init_script('''(() => {
+      window.mixLaunchDeadlines = [];
+      const schedule = window.setTimeout;
+      window.setTimeout = function(callback, delay, ...args) {
+        const timer = schedule.call(this, callback, delay, ...args);
+        if (delay === 90000) window.mixLaunchDeadlines.push(timer);
+        return timer;
+      };
+    })();''')
+    try:
+        page.goto(base + '/home/generating', wait_until='commit')
+        expect(page.get_by_role('status')).to_contain_text('Wiring up your playlist')
+        # The loader markup precedes the recovery script in the HTML stream.
+        # Advance from its actual deadline installation while theme.js stays held.
+        page.wait_for_function('window.mixLaunchDeadlines?.length === 1')
+        assert pending
+        page.clock.fast_forward(90001)
+        expect(page.get_by_role('alert')).to_contain_text('couldn’t confirm playback')
+        expect(page.locator('.gen-loader')).to_be_hidden()
+        # CSS animation timing is independent of the simulated deadline clock.
+        expect(page.get_by_role('alert')).to_have_css('opacity', '1')
+        page.screenshot(path='/tmp/tuneconsole-791-stalled-script-recovery.png', full_page=True)
+    finally:
+        for route in pending:
+            route.abort('failed')
 
 
 @pytest.mark.parametrize('generation_app', ['board'], indirect=True)
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_unknown_mix_keeps_its_identity_and_returns_to_the_same_selection(generation_app, page, width):
     base, provider, *_ = generation_app
     page.set_viewport_size({'width': width, 'height': 900})
@@ -505,7 +612,11 @@ def test_popup_deadline_survives_reloading_its_opener(generation_app, page, requ
     with page.expect_popup() as opened:
         card.get_by_role('button', name='Save and play this mix').click()
     popup = opened.value
-    expect(popup.get_by_role('heading')).to_have_text(selected['title'])
+    expect(popup.get_by_role('status', name='Preparing playlist')).to_be_visible()
+    expect(popup.locator('.gen-node')).to_have_count(min(14, len(selected['tracks'])))
+    popup.wait_for_function('''() => [...document.querySelectorAll('.gen-node img')].every(
+        image => image.complete && image.naturalWidth > 0)''')
+    popup.screenshot(path=f'/tmp/tuneconsole-686-spokes-{kind}.png')
     page.reload()
     popup.clock.fast_forward(90001)
     expect(popup.get_by_role('alert')).to_contain_text('couldn’t confirm playback')

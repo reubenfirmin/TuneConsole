@@ -9,12 +9,14 @@ import math
 import numpy as np
 
 from yt_playlist.rec import embed
+from tests.conftest import seed_catalog_track
 
 
 def _put(store, vecs):
     """vecs = {identity_key: (x, y)}; stored L2-normalised as float32, like the real model."""
     rows = []
     for k, xy in vecs.items():
+        seed_catalog_track(store, k, k, 'Artist')
         v = np.asarray(xy, dtype=np.float32)
         v /= np.linalg.norm(v) + 1e-9
         rows.append((k, v.tobytes()))

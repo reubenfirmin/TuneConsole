@@ -5,8 +5,9 @@ import shutil
 
 import pytest
 
-from yt_playlist.core import catalog
+from yt_playlist.core import catalog, metadata_runtime
 from yt_playlist.core.activity import WorkBudgetExceeded
+from yt_playlist.core.preparation import metadata_runtime as runtime_preparation
 from yt_playlist.core.store import Store
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import musical_preparation, musical_profiles as profiles
@@ -14,10 +15,10 @@ from yt_playlist.rec.progressive import Budget, Preparation
 from yt_playlist.repos.musical_profiles import MusicalProfilesRepo
 
 
-def observe(store, tid, value, *, entity='shared', scope='artist', field='tags', run='one', title=None):
+def observe(store, tid, value, *, entity='shared', scope='artist', field='tags', run='one', title=None, now=10):
     store.enrichment_state.record_metadata_observations(tid, 'fixture', [MetadataObservation(
         field, value, scope, entity, 'reported' if field == 'tags' else 'prediction',
-        match_evidence={'method': 'title_artist_match', 'input_title': title})], run_id=run, now=10)
+        match_evidence={'method': 'title_artist_match', 'input_title': title})], run_id=run, now=now)
 
 
 def drain(store, batch=32):
@@ -67,6 +68,7 @@ def test_source_slice_tracks_only_its_source_and_referenced_metadata(store, monk
         'JOIN native_metadata_observations o ON o.id=s.observation_id WHERE s.source_key=?', (key,)).fetchall()
     expected.update(('native_metadata_observations', 'key:' + str(row[0])) for row in references)
     expected.update(('metadata_deliveries', 'key:' + str(row[1])) for row in references)
+    expected.add(('metadata_runtime_state', 'group:format'))
     # Pinning records a scalar serial; only publication seeks consumed inputs.
     assert captures == [expected]
 
@@ -139,6 +141,87 @@ def test_file_backed_delivery_relocation_preserves_last_good_and_retries(tmp_pat
         assert get(store)['intensity']['value'] < .5
     finally:
         store.conn.close()
+
+
+@pytest.mark.parametrize('cutover_at', ['before-pin', 'during-calculation'])
+def test_file_backed_format_cutover_preserves_last_good_and_retries(file_backed_store, tmp_path, monkeypatch, cutover_at):
+    store = file_backed_store
+    tid = store.tracks.upsert_track('v', 'Song', 'Artist', '', 200)
+    observe(store, tid, [{'name': 'Metal'}])
+    drain(store)
+    assert get(store)['intensity']['value'] > .5
+
+    observe(store, tid, [{'name': 'Ambient'}], run='partial')
+    partial = runtime_preparation.step(store.conn, tmp_path / 'partial.json', batch_size=1)
+    assert not partial['complete'] and not metadata_runtime.active(store.conn)
+    original_profile = profiles.source_profile
+
+    def collect_files(source):
+        result = original_profile(source)
+        with store.conn:
+            store.conn.execute('UPDATE metadata_runtime_state SET gc_cursor=gc_cursor+1 WHERE id=1')
+        return result
+
+    # Incomplete preparation and unrelated collection progress must not block
+    # normal profile publication in the installed format.
+    with monkeypatch.context() as patch:
+        patch.setattr(profiles, 'source_profile', collect_files)
+        assert musical_preparation.source_step(store, 1001)
+    drain(store)
+    previous = get(store)
+    assert previous['intensity']['value'] < .5
+
+    observe(store, tid, [{'name': 'Techno'}], run='cutover')
+    key = store.musical_profiles.pending()
+    previous_source = tuple(store.conn.execute(
+        'SELECT * FROM rec_musical_source_profiles WHERE source_key=?', (key,)).fetchone())
+    progress = tmp_path / 'cutover.json'
+    for _ in range(100):
+        if runtime_preparation.step(store.conn, progress, batch_size=1)['complete']:
+            break
+    else:
+        pytest.fail('Metadata preparation did not complete')
+    assert not metadata_runtime.active(store.conn)
+    original_dependencies = MusicalProfilesRepo.source_dependencies
+
+    def select_after_dependencies(repo, key):
+        result = original_dependencies(repo, key)
+        runtime_preparation.activate(store.conn, progress)
+        return result
+
+    def select_during_calculation(source):
+        result = original_profile(source)
+        runtime_preparation.activate(store.conn, progress)
+        return result
+
+    with monkeypatch.context() as patch:
+        if cutover_at == 'before-pin':
+            patch.setattr(MusicalProfilesRepo, 'source_dependencies', select_after_dependencies)
+        else:
+            patch.setattr(profiles, 'source_profile', select_during_calculation)
+        assert not musical_preparation.source_step(store, 1002)
+    assert metadata_runtime.active(store.conn)
+    assert get(store) == previous
+    assert tuple(store.conn.execute(
+        'SELECT * FROM rec_musical_source_profiles WHERE source_key=?', (key,)).fetchone()) == previous_source
+    assert store.musical_profiles.pending() == key
+
+    # The retry must read the selected format after a real process-style reopen.
+    path = store._db_path
+    store.conn.close()
+    reopened = Store(path)
+    try:
+        reopened.init_schema()
+        assert metadata_runtime.active(reopened.conn)
+        assert get(reopened) == previous
+        drain(reopened)
+        assert get(reopened)['intensity']['value'] > .5
+        observe(reopened, tid, [{'name': 'Ambient'}], run='after-cutover', now=11)
+        drain(reopened)
+        assert get(reopened)['intensity']['value'] < .5
+        assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchone()
+    finally:
+        reopened.conn.close()
 
 
 def test_identical_artist_tags_from_new_recording_retain_history_without_restarting_fanout(store):

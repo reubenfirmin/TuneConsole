@@ -9,11 +9,72 @@ import os
 from pathlib import Path
 import statistics
 import time
+import uuid
 
 import pytest
 
 BASELINE = Path(__file__).parent / ".github/test-durations.json"
 SHARD_COUNTS = (1, 2, 4)
+DIAGNOSTIC_BYTES = 64 * 1024
+
+
+def _diagnostic(value):
+    raw = str(value).encode('utf-8', errors='replace')
+    result = raw.decode('utf-8', errors='replace')
+    width = DIAGNOSTIC_BYTES // 2
+    while len(json.dumps(result, ensure_ascii=False).encode()) > DIAGNOSTIC_BYTES:
+        result = (raw[:width] + b'\n[diagnostic truncated]\n' + raw[-width:]).decode('utf-8', errors='replace')
+        width //= 2
+    return result
+
+
+def _replay(report, event):
+    kind = event['event']
+    node = event.get('nodeid')
+    if kind == 'start':
+        report['executions'].append(node)
+        report['active'] = {'nodeid': node, 'phase': 'starting'}
+    elif kind == 'phase':
+        report['active'] = {'nodeid': node, 'phase': event['phase']}
+    elif kind == 'outcome':
+        phases = report['tests'].setdefault(node, {})
+        if event['phase'] in phases:
+            report['repeated_phases'].append([node, event['phase']])
+        phases[event['phase']] = event['result']
+    elif kind == 'end':
+        report['active'] = None
+    elif kind == 'finish':
+        report.update(exitstatus=event['exitstatus'], elapsed_seconds=event['elapsed_seconds'])
+    else:
+        raise ValueError('Unknown shard journal event')
+
+
+def load_report(path):
+    """Recover complete journal records even when pytest never reached sessionfinish."""
+    path = Path(path)
+    report = json.loads(path.read_text())
+    if 'journal_id' not in report:
+        return report  # Previously completed artifacts remain readable.
+    report.update(tests={}, executions=[], repeated_phases=[], active=None)
+    report.pop('exitstatus', None)
+    report.pop('elapsed_seconds', None)
+    journal = path.with_suffix('.events.jsonl')
+    with journal.open('rb') as stream:
+        sequence = 0
+        while raw := stream.readline(4 * DIAGNOSTIC_BYTES + 1):
+            if len(raw) > 4 * DIAGNOSTIC_BYTES:
+                raise ValueError('Oversized shard journal record')
+            if not raw.endswith(b'\n'):
+                # A killed writer may leave only its final append incomplete.
+                report['journal_incomplete'] = True
+                report.pop('exitstatus', None)
+                break
+            event = json.loads(raw)
+            if event.get('journal_id') != report['journal_id'] or event.get('sequence') != sequence:
+                raise ValueError('Shard journal source or sequence differs')
+            _replay(report, event)
+            sequence += 1
+    return report
 
 
 def partition(nodeids, durations, count=2):
@@ -78,10 +139,15 @@ class Shard:
     def __init__(self, config, index, total, path, suite, durations):
         self.config, self.path, self.durations = config, path, durations
         self.started = time.monotonic()
+        self.sequence = 0
+        self.journal = path.with_suffix('.events.jsonl')
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.journal.write_bytes(b'')
         self.report = {"schema": 2, "suite": suite, "index": index, "total": total,
                        "revision": os.environ.get("GITHUB_SHA", "local"),
                        "started_at": datetime.now(timezone.utc).isoformat(), "tests": {},
-                       "executions": [], "repeated_phases": []}
+                       "executions": [], "repeated_phases": [], 'journal_id': uuid.uuid4().hex,
+                       'active': None}
 
     @pytest.hookimpl(hookwrapper=True, tryfirst=True)
     def pytest_collection_modifyitems(self, config, items):
@@ -100,21 +166,53 @@ class Shard:
         self.write()
 
     def pytest_runtest_logstart(self, nodeid, location):
-        self.report["executions"].append(nodeid)
+        self.event('start', nodeid=nodeid)
+
+    @pytest.hookimpl(hookwrapper=True, tryfirst=True)
+    def pytest_runtest_setup(self, item):
+        self.event('phase', nodeid=item.nodeid, phase='setup')
+        yield
+
+    @pytest.hookimpl(hookwrapper=True, tryfirst=True)
+    def pytest_runtest_call(self, item):
+        self.event('phase', nodeid=item.nodeid, phase='call')
+        yield
+
+    @pytest.hookimpl(hookwrapper=True, tryfirst=True)
+    def pytest_runtest_teardown(self, item):
+        self.event('phase', nodeid=item.nodeid, phase='teardown')
+        yield
 
     def pytest_runtest_logreport(self, report):
-        phases = self.report["tests"].setdefault(report.nodeid, {})
-        if report.when in phases:
-            self.report["repeated_phases"].append([report.nodeid, report.when])
-        phases[report.when] = {"seconds": report.duration, "outcome": report.outcome}
+        result = {"seconds": report.duration, "outcome": report.outcome}
+        if report.failed:
+            result['diagnostic'] = _diagnostic(report.longreprtext)
+            result['captured'] = _diagnostic('\n'.join(f'{name}\n{text}' for name, text in report.sections))
+        self.event('outcome', nodeid=report.nodeid, phase=report.when, result=result)
+
+    def pytest_runtest_logfinish(self, nodeid, location):
+        self.event('end', nodeid=nodeid)
 
     def pytest_sessionfinish(self, session, exitstatus):
-        self.report.update(exitstatus=int(exitstatus), elapsed_seconds=time.monotonic() - self.started)
+        self.event('finish', exitstatus=int(exitstatus), elapsed_seconds=time.monotonic() - self.started)
         self.write()
+
+    def event(self, kind, **values):
+        event = {'event': kind, 'journal_id': self.report['journal_id'], 'sequence': self.sequence, **values}
+        # One bounded append per transition, never a rewrite of accumulated history.
+        # Close flushes Python buffers; fsync keeps observed receipts durable too.
+        with self.journal.open('ab') as stream:
+            stream.write((json.dumps(event, ensure_ascii=False) + '\n').encode())
+            stream.flush()
+            os.fsync(stream.fileno())
+        self.sequence += 1
+        _replay(self.report, event)
 
     def write(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.report, indent=2) + "\n")
+        temporary = self.path.with_suffix('.json.tmp')
+        temporary.write_text(json.dumps(self.report, indent=2) + "\n")
+        temporary.replace(self.path)
 
 
 def verify(reports, suite, total=2):
@@ -131,6 +229,8 @@ def verify(reports, suite, total=2):
             raise ValueError(f"{suite}: shard normal collections, file plans or source revisions differ")
         if report.get("exitstatus") != 0:
             raise ValueError(f"{suite}: shard {report['index']} did not pass")
+        if report.get('active') or report.get('journal_incomplete'):
+            raise ValueError(f"{suite}: shard {report['index']} has incomplete journal work")
         planned = [nodeid for nodeid in original if report["file_owners"][nodeid.split("::", 1)[0]] == report["index"]]
         if report["selected"] != planned or set(report["tests"]) != set(planned):
             raise ValueError(f"{suite}: missing or unexpected executed cases on shard {report['index']}")
@@ -170,7 +270,7 @@ if __name__ == "__main__":
     parser.add_argument("suite", choices=("unit", "browser"))
     parser.add_argument("--total", type=int, choices=SHARD_COUNTS, default=4)
     args = parser.parse_args()
-    reports = [json.loads(path.read_text()) for path in args.directory.rglob("shard.json")]
+    reports = [load_report(path) for path in args.directory.rglob("shard.json")]
     result = verify([report for report in reports if report["suite"] == args.suite], args.suite, args.total)
     print(json.dumps(result, indent=2))
     output = args.directory / f"{args.suite}-timings.json"

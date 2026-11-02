@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.test_undo_recovery import RecoveryClient
+from yt_playlist.core import fao
 from yt_playlist.core.store import Store
 from yt_playlist.library import executor, playlist_backups, playlist_deletion, playlist_undo, playlist_generated
 from yt_playlist.web.app import create_app
@@ -174,8 +175,8 @@ def test_backup_and_intent_are_committed_before_transport_and_survive_lost_reply
             step = reader.conn.execute("SELECT phase,outcome,backup_status,claim_token FROM action_steps "
                                        "WHERE action_id=? AND operation='delete_playlist'",(action.id,)).fetchone()
             assert tuple(step[:3])==('uncertain','unknown','verified') and step['claim_token']
-            backup = json.loads(Path(entry["backup"]).read_text())
-            assert backup["provider_playlist_id"] == playlist_id
+            backup = json.loads(fao.read_bytes(entry["backup"]))
+            assert backup["ytm_playlist_id"] == playlist_id
             assert [t["video_id"] for t in backup["tracks"]] == ([] if operation == "empty" else ["a", "b"])
         finally:
             reader.conn.close()

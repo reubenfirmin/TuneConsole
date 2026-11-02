@@ -17,7 +17,7 @@ def _fold_album(store, bid="BID", n=4):
                                  "year": "2001", "type": "Album", "thumbnail": None}])
 
 
-def test_album_waterfall_fills_genres(store, monkeypatch):
+def test_album_waterfall_fills_genres(store, monkeypatch, canonical_genre_matcher):
     _fold_album(store)
     pending = store.tracks.album_tracks_to_enrich("BID")
     assert len(pending) == 4
@@ -28,7 +28,7 @@ def test_album_waterfall_fills_genres(store, monkeypatch):
                             lambda ev: None)
 
     detail = store.charts.album_tracks_detail("BID")
-    assert all(t["genre"] == "rock" and t["year"] == "2001" for t in detail)
+    assert all(t["genre"] == "Rock" and t["year"] == "2001" for t in detail)
     assert store.tracks.album_tracks_to_enrich("BID") == []          # nothing left to enrich
 
 
@@ -69,7 +69,8 @@ def test_album_track_genre_edit(store):
                    base_url="http://127.0.0.1")
     r = c.post("/album/BID/track-genre", data={"video_id": "v0", "genre": "jazz"})
     assert r.status_code == 200 and "jazz" in r.text                 # re-rendered row carries it
-    assert any(t["genre"] == "jazz" for t in store.charts.album_tracks_detail("BID") if t["video_id"] == "v0")
+    edited = [t for t in store.charts.album_tracks_detail("BID") if t["video_id"] == "v0"]
+    assert len(edited) == 1 and edited[0]['genre'] == 'Jazz'
 
 
 def test_album_folds_in_on_demand_when_saved(store):

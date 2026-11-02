@@ -10,18 +10,20 @@ FORMAT = 'action-backup-export-1'
 MAX_BYTES = 64 * 1024 * 1024
 
 
-def verified(filename,digest=None,size=None):
+def verified(filename,digest=None,size=None,*,with_age=False):
     with fao.open_reader(filename) as stream:
         encoded = stream.read(MAX_BYTES+1)
+        age = stream.info
     actual = hashlib.sha256(encoded).hexdigest()
     if not encoded or len(encoded)>MAX_BYTES or (digest is not None and actual!=digest) or (size is not None and len(encoded)!=size):
         raise ValueError('Action backup bytes do not match their committed reference')
-    return encoded,actual,len(encoded)
+    result = encoded,actual,len(encoded)
+    return (result,age) if with_age else result
 
 
 def retain(conn,filename):
-    encoded,digest,size = verified(filename)
-    return _publish_encoded(collection_recovery.directory(conn),encoded,digest),digest,size
+    (encoded,digest,size),age = verified(filename,with_age=True)
+    return _publish_encoded(collection_recovery.directory(conn),encoded,digest,age=age),digest,size
 
 
 def inventory(conn):
@@ -37,8 +39,8 @@ def export(conn,root):
     records = []
     for row in inventory(conn):
         if row['availability']=='verified':
-            encoded,digest,_ = verified(row['retained_filename'],row['digest'],row['bytes'])
-            _publish_encoded(root,encoded,digest)
+            (encoded,digest,_),age = verified(row['retained_filename'],row['digest'],row['bytes'],with_age=True)
+            _publish_encoded(root,encoded,digest,age=age)
         records.append({key:value for key,value in row.items() if key!='retained_filename'})
     encoded = canonical({'format':FORMAT,'records':records})
     if len(encoded)>collection_recovery.MAX_BYTES:
@@ -63,8 +65,8 @@ def restore(conn,manifest):
         for row in actual:
             if row['availability']=='verified':
                 source = path.parent.parent/row['digest'][:2]/(row['digest']+'.json')
-                raw,_,_ = verified(source,row['digest'],row['bytes'])
-                filename = _publish_encoded(collection_recovery.directory(conn),raw,row['digest'])
+                (raw,_,_),age = verified(source,row['digest'],row['bytes'],with_age=True)
+                filename = _publish_encoded(collection_recovery.directory(conn),raw,row['digest'],age=age)
                 conn.execute('UPDATE action_backups SET retained_filename=? WHERE action_id=? AND position=?',
                              (filename,row['action_id'],row['position']))
                 conn.execute('UPDATE action_steps SET backup_filename=? WHERE action_id=? AND backup_status=\'verified\' '

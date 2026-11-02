@@ -23,7 +23,7 @@ def _seed(store):
 def test_failed_publication_rolls_back_all_artifacts_even_after_later_commit(store):
     _seed(store)
     before = store.rec_model.content_generation()
-    store.conn.execute("CREATE TRIGGER reject_content BEFORE INSERT ON recording_embeddings "
+    store.conn.execute("CREATE TRIGGER reject_content BEFORE INSERT ON recording_embedding_files "
                        "WHEN NEW.space='content_discovery' "
                        "BEGIN SELECT RAISE(ABORT,'injected write failure'); END")
     with pytest.raises(sqlite3.IntegrityError, match="injected write failure"):
@@ -57,13 +57,13 @@ def test_discovery_encoder_retries_against_competing_library_generation(store, m
     encode = content_model.encode_discovered
     switched = False
 
-    def competing_encode(rows, model):
+    def competing_encode(rows, model, *, conn=None):
         nonlocal switched
         if not switched:
             switched = True
             store.tracks.set_track_genre(tid, "Folk")
             model_support.build_content_model(store)
-        return encode(rows, model)
+        return encode(rows, model, conn=conn)
 
     monkeypatch.setattr(content_model, "encode_discovered", competing_encode)
     assert vectors.build_discovered_content_vectors(store) == 0
@@ -89,7 +89,7 @@ def test_reader_sees_old_then_new_complete_generation_during_publication(tmp_pat
         return 0
 
     writer.conn.create_function("pause_publication", 0, pause)
-    writer.conn.execute("CREATE TRIGGER pause_content BEFORE INSERT ON recording_embeddings "
+    writer.conn.execute("CREATE TRIGGER pause_content BEFORE INSERT ON recording_embedding_files "
                         "WHEN NEW.space='content_library' "
                         "BEGIN SELECT pause_publication(); END")
     replacement_model = {"cat": {"fam:folk-country": 0}, "ncat": 1, "cont": []}

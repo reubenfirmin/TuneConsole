@@ -16,7 +16,7 @@ def test_completed_audio_sample_retries_after_maintenance_and_page_reload(live_a
     page.on('response', lambda response: attempts.append(response.status)
         if response.url.endswith('/audio-vibes/samples') else None)
     page.goto(live_app + '/playlists')
-    expect(page.locator('#storage-maintenance')).to_have_text('Library updates are paused.')
+    expect(page.locator('#storage-maintenance')).to_have_text('Updating library storage; browsing and playback remain available.')
     page.wait_for_function('document.documentElement.dataset.storageCompacting === "true"')
     page.wait_for_function('window.performance.getEntriesByType("resource").some('
                           'r => r.name.endsWith("/audio-vibes/samples"))')
@@ -24,7 +24,7 @@ def test_completed_audio_sample_retries_after_maintenance_and_page_reload(live_a
     assert page.evaluate('(key) => JSON.parse(localStorage.getItem(key))', outbox) == [payload]
     assert not store.conn.execute('SELECT 1 FROM sample_attributes').fetchone()
     page.reload()
-    expect(page.locator('#storage-maintenance')).to_have_text('Library updates are paused.')
+    expect(page.locator('#storage-maintenance')).to_have_text('Updating library storage; browsing and playback remain available.')
     page.wait_for_function('document.documentElement.dataset.storageCompacting === "true"')
     assert page.evaluate('(key) => JSON.parse(localStorage.getItem(key))', outbox) == [payload]
     store._evidence_recovery_pending = False

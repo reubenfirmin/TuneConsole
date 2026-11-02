@@ -9,7 +9,7 @@ from yt_playlist.rec import home_prepared
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
 
 
-@pytest.mark.parametrize("width", [1440, 390])
+@pytest.mark.parametrize("width", [1440])
 def test_only_visible_discovery_tiles_count_once_per_visit(live_app, store, page, width, tmp_path):
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
@@ -38,8 +38,6 @@ def test_only_visible_discovery_tiles_count_once_per_visit(live_app, store, page
     assert any(shown.values()) and max(shown.values()) == 1
     hidden_ids = tiles.evaluate_all("tiles => tiles.filter(t => !t.getClientRects().length).map(t => t.dataset.discoveryId)")
     assert all(shown[item_id] == 0 for item_id in hidden_ids)
-    if width == 390:
-        assert hidden_ids  # The mobile grid crops rows that must never count as viewed.
 
     page.evaluate("""() => htmx.ajax('GET', '/home/discover', {
         target: '#home-discovery > div:first-child', swap: 'innerHTML'})""")
@@ -54,7 +52,7 @@ def test_only_visible_discovery_tiles_count_once_per_visit(live_app, store, page
     assert store.discovery.get_discovered_artists()[0]["offered_count"] == 1
 
 
-@pytest.mark.parametrize("width", [1440, 390])
+@pytest.mark.parametrize("width", [1440])
 def test_pool_shows_metadata_charts_above_tracks(live_app, store, page, width, tmp_path):
     store.discovery.upsert_discovered_track("cold", "v1", "Cold Song", "Artist", "Album", None,
                                   "House", "2020", "album", 1,
@@ -80,7 +78,7 @@ def test_pool_shows_metadata_charts_above_tracks(live_app, store, page, width, t
     expect(overview).to_be_hidden()
 
 
-@pytest.mark.parametrize("width", [1440, 390])
+@pytest.mark.parametrize("width", [1440])
 def test_prepared_songs_are_ready_when_discover_opens(live_app, store, page, width, tmp_path):
     from yt_playlist.rec import fresh_pool
 

@@ -55,7 +55,8 @@ packages = ["src/yt_playlist"]
 addopts = "-q -m 'not browser'"
 testpaths = ["tests"]
 pythonpath = ["."]
-# Test databases can be several gigabytes; keep reports explicitly, not fixtures.
-tmp_path_retention_count = 0
-tmp_path_retention_policy = "none"
+# A nonzero count enables pytest's active-directory lock across concurrent runs.
+# conftest removes each completed session's workspace on both pass and failure.
+tmp_path_retention_count = 1
+tmp_path_retention_policy = "all"
 markers = ["browser: live-browser tests via Playwright (run with -m browser)"]

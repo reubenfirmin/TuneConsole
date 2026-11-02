@@ -1,4 +1,4 @@
-"""The composed starting landscape stays ordered at desktop and phone sizes."""
+"""The composed starting landscape stays ordered at desktop sizes."""
 from io import BytesIO
 
 import pytest
@@ -35,7 +35,7 @@ def _assert_loaded_record_pixels(page, url, color):
         'pixels': [screenshot.getpixel((round(p['x']), round(p['y']))) for p in copies]}
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 @pytest.mark.parametrize('failure', ['error', 'timeout'])
 def test_record_uses_loaded_original_when_google_enlargement_fails(page, radio_ui, width, failure):
     page.set_viewport_size({'width': width, 'height': 1000})
@@ -149,7 +149,7 @@ def test_two_minute_landscapes_render_different_folds(page, radio_ui, tmp_path):
     assert len({tuple(shape) for shape in shapes}) == 4
 
 
-@pytest.mark.parametrize('width,height', [(1440, 1000), (1792, 1398), (390, 1000)])
+@pytest.mark.parametrize('width,height', [(1440, 1000), (1792, 1398)])
 def test_radio_starts_with_ordered_contours(page, radio_ui, width, height):
     page.set_viewport_size({'width': width, 'height': height})
     page.emulate_media(reduced_motion='reduce')

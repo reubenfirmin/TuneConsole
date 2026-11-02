@@ -13,6 +13,7 @@ def test_ranking_contribution_fades_by_source_half_life(store, space, source):
     now = 1000 * DAY
     iid = store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("v", "Song", "Artist", None, 200)
+    store.tracks.upsert_track("other", "Other", "Artist", None, 200)
     key = "song|artist"
     keys, vectors = [key, "other|artist"], np.eye(2, dtype=np.float32)
     store.rec_model.replace_rec_content_vectors([(k, v.tobytes()) for k, v in zip(keys, vectors)])

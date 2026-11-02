@@ -190,7 +190,10 @@ def _read(encoded, keys, *, max_bytes=None):
     if isinstance(value, dict) and value.get(MARKER) == LEGACY_FORMAT:
         return bounded_json.loads(expand(value.get('json')), keys=keys), None
     if isinstance(value, dict) and value.get(MARKER) == FORMAT:
-        body = bounded_json.loads(expand(value.get('json')), keys=keys)
+        # These fields live only in the group section of v2. A group-only
+        # reader need not inflate every independent mode and Vibe copy.
+        group_only = 'groups' in value and keys is not None and keys <= {'all', '_meta'}
+        body = {} if group_only else bounded_json.loads(expand(value.get('json')), keys=keys)
         if 'groups' in value and (keys is None or keys & {'all', '_meta'}):
             groups = bounded_json.loads(expand(value['groups']), keys=keys)
             if not isinstance(body, dict) or not isinstance(groups, dict):

@@ -2,9 +2,7 @@
 import pytest
 from playwright.sync_api import expect
 
-from tests.home_fixture_support import publish_menu
-from tests.test_home_other_genres import seed_genres
-from tests.test_mode_cards_route import prepare_home
+from tests.home_fixture_support import browser_store as store, publish_menu, returning_listener
 
 
 def test_regeneration_sends_the_held_recipe_after_each_animated_swap(live_app, store, page):
@@ -12,16 +10,20 @@ def test_regeneration_sends_the_held_recipe_after_each_animated_swap(live_app, s
     from urllib.parse import parse_qs
     from yt_playlist.rec import choice_evidence
 
-    seed_genres(store)
+    # Publish four usable cards through their normal owner. This consumer test
+    # exercises the modeled template's board refresh; preparation is separate.
+    publish_menu(store, 1, modeled=True)
+    returning_listener(store, 'mixes', now=1)
     store.settings.set_setting('last_sync_at', '1')
     store.settings.set_setting('onboard_dismissed', '1')
-    prepare_home(store, 1)
     page.route('https://i.ytimg.com/**', lambda route: route.abort())
     page.goto(live_app + '/')
     card = page.locator('#gen-wheelhouse')
     expect(card).to_be_visible()
     card.locator('.gen-poster').click()
     body = card.locator('.gen-card-body')
+    expect(card.get_by_role('button', name='Regenerate this mix', exact=True)).to_have_attribute(
+        'hx-post', '/home/refresh-cards')
     closed = []
     for index in range(2):
         held = json.loads(body.get_attribute('data-recipe'))['opportunity_id']
@@ -35,16 +37,22 @@ def test_regeneration_sends_the_held_recipe_after_each_animated_swap(live_app, s
         incoming = page.evaluate("""text => new DOMParser().parseFromString(text, 'text/html')
             .getElementById('gen-body-wheelhouse').dataset.recipe""", response.text())
         expect(body).to_have_attribute('data-recipe', incoming)
+        # The recipe is installed before the incoming rows finish animating.
+        # Complete each real swap before exercising the next held recipe.
+        body.locator('.gen-focus .gen-row').evaluate_all('''rows => Promise.all(
+            rows.flatMap(row => row.getAnimations()).map(animation => animation.finished))''')
         assert json.loads(incoming)['opportunity_id'] != held
         closed.append(held)
         responses = [row for row in store.rec_ledger.evidence().records('response') if row['kind'] == 'close']
         assert {row['opportunity_id'] for row in responses} == set(closed)
         assert all(row['opportunity_id'] != other for row in responses)
+    card.screenshot(path='/tmp/tuneconsole-held-recipe-after-swaps.png')
 
 
 @pytest.mark.parametrize("failure", ["network", "http", "unprocessable", "missing", "invalid", "empty"])
-def test_mix_regeneration_recovers_from_failure(live_app, store, page, failure, unlocked_home_controls):
+def test_mix_regeneration_recovers_from_failure(live_app, store, page, failure):
     publish_menu(store, 1)
+    returning_listener(store, 'mixes', now=1)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
     page.route("https://i.ytimg.com/**", lambda route: route.abort())

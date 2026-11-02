@@ -18,7 +18,7 @@ from yt_playlist.core.work_diagnostics import maintenance_job
 from yt_playlist.rec import (album_choices, choice_evidence, discover, fresh_pool, home_cards, home_themes, home_vibe,
                              mode_eval, mode_surfaces, rec_params, recipes, surfaces, taste_analysis,
                              transient, mix_tuning)
-from yt_playlist.rec import group_learning, group_serving, musical_character
+from yt_playlist.rec import group_learning, group_serving, musical_character, stored_home
 from yt_playlist.rec.eligibility import home_exclusions
 
 SURFACE = "home_prepared"
@@ -206,7 +206,7 @@ def prepare_revisit(store, now):
 def _prepare(store, now):
     started = time.monotonic()
     mix_tuning.expire(store, now)
-    with store.read_snapshot() as snapshot:
+    with store.read_snapshot() as snapshot, stored_home.preparation_inputs() as metadata_inputs:
         reader = snapshot.store
         target = "home_tuned" if mix_tuning.remaining(reader, now) > 0 else SURFACE
         previous = reader.rec_proposals.get_proposals(target)
@@ -272,6 +272,7 @@ def _prepare(store, now):
         # recent evidence for every card multiplied a small read into seconds of
         # repeated metadata queries during ordinary catch-up.
         selection_data['preparation'] = {'leans': fingerprint['transient'], 'bundles': bundles,
+            'metadata_inputs': metadata_inputs,
             'framing': framing,
             'group_preview': preview,
             'dists': (fingerprint['breadth']['families'], dict(fingerprint['eras'])),

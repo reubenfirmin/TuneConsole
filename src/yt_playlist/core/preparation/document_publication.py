@@ -77,7 +77,7 @@ class DocumentPublication:
 
     def validate(self, conn):
         from ..migrations.current import _tokens
-        from ..migrations.v103_entity_names import transform
+        from ..entity_names import predecessor_definition as transform
         renamed = conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='accounts'").fetchone()
         for name, sql in self.definitions():
             expected = transform(sql) if renamed else sql

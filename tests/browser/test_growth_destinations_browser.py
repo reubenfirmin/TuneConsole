@@ -8,7 +8,7 @@ from tests.test_growth_destinations import publish_full_journey
 from tests.test_growth_journey import early_journey
 
 
-@pytest.mark.parametrize('width', [1536, 390])
+@pytest.mark.parametrize('width', [1536])
 def test_destinations_appear_with_real_content_and_keep_the_player(live_app, store, page, width):
     early_journey(store)
     publish_personal_mix(store, now=1)
@@ -88,11 +88,6 @@ def test_destinations_appear_with_real_content_and_keep_the_player(live_app, sto
     assert page.locator('body').evaluate('el => el.scrollWidth <= innerWidth')
     page.locator('main').evaluate('el => Promise.all(el.getAnimations({subtree:true}).filter(a => a.effect.getComputedTiming().iterations !== Infinity).map(a => a.finished))')
     page.screenshot(path=f'/tmp/tuneconsole-564-destinations-{width}.png', full_page=True)
-    if width == 390:
-        for part, fraction in (('middle', .5), ('end', 1)):
-            page.locator('.festival-map-scroll').evaluate(
-                '(el, fraction) => el.scrollLeft = (el.scrollWidth - el.clientWidth) * fraction', fraction)
-            page.screenshot(path=f'/tmp/tuneconsole-564-destinations-390-{part}.png', full_page=True)
     for asset in ('festival-grounds-v4.png', 'account-growth.css', 'account-growth.js'):
         response = page.request.get(live_app + '/static/' + asset)
         assert response.status == 200

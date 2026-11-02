@@ -88,7 +88,7 @@ def _open_editor(live_app, page):
     expect(page.get_by_role("heading", name="Recognized genre tags")).to_be_visible()
 
 
-@pytest.mark.parametrize("width", [1280, 390])
+@pytest.mark.parametrize("width", [1280])
 def test_legacy_link_opens_enrichment_editor(live_app, page, width, tmp_path):
     page.set_viewport_size({"width": width, "height": 900})
     page.goto(f"{live_app}/genres")

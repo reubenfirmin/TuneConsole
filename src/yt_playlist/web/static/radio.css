@@ -23,22 +23,6 @@ body:has(.home-dashboard.is-radio) > :not(main) { flex-shrink: 0; }
   --queue-color: var(--accent);
 }
 .radio-home > :is(.radio-launch, .radio-seeds, .radio-session) { grid-area: 1 / 1; min-width: 0; min-height: 0; }
-.radio-home.has-launch-recovery { grid-template-rows: auto minmax(0, 1fr); }
-.radio-home.has-launch-recovery > :is(.radio-launch, .radio-seeds, .radio-session) { grid-row: 2; }
-.radio-launch-recovery { grid-area: 1 / 1; display: flex; gap: 1rem; padding: 1rem; margin-bottom: 1rem;
-  border-block: 1px solid var(--border-2); background: var(--surface); color: var(--text); }
-.radio-launch-recovery > img { width: 5rem; height: 5rem; object-fit: cover; border-radius: 8px; flex-shrink: 0; }
-.radio-recovery-copy { min-width: 0; }
-.radio-recovery-copy h2 { margin: .2rem 0; font-size: 1.1rem; overflow-wrap: anywhere; }
-.radio-recovery-copy p { margin: .35rem 0; font-size: .9rem; }
-.radio-recovery-copy .radio-recovery-label { font-size: .75rem; color: var(--accent); }
-.radio-recovery-artist { color: var(--dim); }
-.radio-recovery-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .8rem; }
-@media (max-width: 500px) {
-  .radio-launch-recovery { padding: .8rem; gap: .8rem; }
-  .radio-launch-recovery > img { width: 3.5rem; height: 3.5rem; }
-  .radio-recovery-actions .btn { width: 100%; white-space: normal; text-align: center; }
-}
 .radio-session.is-preparing { visibility: hidden; pointer-events: none; }
 .radio-track-scroll thead .radio-options-cell { z-index: 3; padding-block: 0; }
 .radio-menu { position: relative; margin-inline-start: auto; z-index: 6; }
@@ -79,6 +63,7 @@ body:has(.home-dashboard.is-radio) > :not(main) { flex-shrink: 0; }
 .radio-launch.gen-stage { position: relative; inset: auto; height: 100%; min-height: 0; border: 1px solid var(--border); border-radius: 12px; animation: radio-arrive .35s ease both; }
 .radio-launch .gen-copy { max-width: none; left: 2rem; right: 2rem; bottom: 2rem; }
 .radio-launch .gen-sub { max-width: none; overflow-wrap: anywhere; }
+.radio-launch-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .8rem; }
 @keyframes radio-arrive { from { opacity: 0; transform: translateY(.4rem); } to { opacity: 1; transform: translateY(0); } }
 .radio-session { position: relative; display: grid; grid-template-rows: minmax(0, var(--radio-history-height, 40%)) var(--radio-junction-height) minmax(0, 1fr); height: var(--radio-session-height); }
 .radio-playlist { position: relative; isolation: isolate; display: flex; min-width: 0; min-height: 0; }

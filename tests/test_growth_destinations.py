@@ -157,3 +157,33 @@ def test_available_destinations_have_a_continuous_path_even_when_preparation_fin
             assert current['ready'], (stop['id'], current['id'])
     if albums and not radio:
         assert stops['albums']['parent'] == 'foundation'
+
+
+@pytest.mark.parametrize('format', [None, 'mixes', 'albums', 'radio', 'vibes', 'tv'])
+def test_retained_access_matches_the_existing_journey_without_claiming_ready_output(store, format):
+    from tests.home_fixture_support import returning_listener
+
+    if format == 'tv':
+        store.settings.set_setting('tv_draw', '1')
+    elif format:
+        returning_listener(store, format)
+    state = account_growth.view(store, 1000)
+    for area in ('directions', 'album-choices', 'radio', 'tv', 'discover', 'vibes', 'recent', 'rediscover'):
+        assert account_growth.retained_access(store, area) == account_growth.has_access(state, area)
+    assert not any(state['ready_areas'].values())
+    assert not state['vibes_ready']
+
+
+def test_earned_mix_guard_does_not_assemble_later_vibe_readiness(store, monkeypatch):
+    from fastapi.testclient import TestClient
+    from tests.home_fixture_support import publish_menu, returning_listener
+    from yt_playlist.web.app import create_app
+
+    publish_menu(store, now=1000)
+    returning_listener(store, 'mixes', now=1000)
+    monkeypatch.setattr(account_growth, 'view', lambda *args, **kwargs:
+                        pytest.fail('An earned Mix fragment guard assembled the whole journey'))
+    with TestClient(create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False),
+                    base_url='http://127.0.0.1') as client:
+        response = client.get('/home/cards')
+    assert response.status_code == 200 and 'gen-wheelhouse' in response.text

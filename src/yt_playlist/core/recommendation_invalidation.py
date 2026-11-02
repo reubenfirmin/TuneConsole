@@ -79,6 +79,9 @@ def artist_reconciled(conn):
     rebuild and clear the artist fingerprint so even unchanged inputs repopulate emptied caches.
     """
     conn.execute('DELETE FROM artist_embeddings')
+    from . import embedding_files
+    if embedding_files.available(conn):
+        conn.execute('DELETE FROM artist_embedding_files')
     retained = (*SERVING_SURFACES, 'listening_choices', 'tv_pool')
     conn.execute(f'DELETE FROM rec_proposals WHERE surface NOT IN ({",".join("?" for _ in retained)})', retained)
     clear_display(conn, retain_serving=True)

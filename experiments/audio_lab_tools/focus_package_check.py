@@ -7,7 +7,9 @@ import sys
 from tempfile import TemporaryDirectory
 import zipfile
 
-from yt_playlist.rec import audio_vibe_focus as focus
+from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release
+from yt_playlist.rec import audio_vibe_relax as relax, audio_vibe_uplift as uplift
+from yt_playlist.rec import audio_vibe_energize as energize, audio_vibe_focus as focus
 from .external_experiment import digest, save, stamp
 from .focus_experiment import inside
 from .focus_export import captures
@@ -23,7 +25,7 @@ def check(directory, wheel):
 
 def check_installed(directory, wheel, installed):
     root = Path(focus.__file__).resolve().parents[1]
-    names = ['rec/audio_vibe_model.py', 'rec/audio_vibe_external.py', 'rec/audio_vibe_preview.py',
+    names = ['rec/audio_vibe_runtime.py', 'rec/audio_vibe_model.py', 'rec/audio_vibe_external.py', 'rec/audio_vibe_preview.py',
              'rec/vibe_preparation.py', 'rec/musical_character.py', 'repos/vibe_predictions.py',
              'core/audio_vibe_contract.py', 'rec/data/emotify-vibes.json']
     for name in ('cruise', 'release', 'relax', 'uplift', 'energize', 'focus'):
@@ -40,7 +42,11 @@ def check_installed(directory, wheel, installed):
              for count in sorted({1, min(3, len(samples)), len(samples)})]
     input_file = directory / 'captures.json'
     save(input_file, cases)
-    expected = [focus.score(focus.load(focus.DEFAULT_PATH), [s['embedding']['values'] for s in case])['score'] for case in cases]
+    modules = {'cruise': cruise, 'release': release, 'relax': relax, 'uplift': uplift,
+               'energize': energize, 'concentrate': focus}
+    expected = [{vibe: {**module.score(module.load(module.DEFAULT_PATH),
+                    [s['embedding']['values'] for s in case]), 'mode': 'active'}
+                 for vibe, module in modules.items()} for case in cases]
     program = '''import json, os, socket, sys
 sys.path.insert(0, sys.argv[1])
 os.environ['YT_PLAYLIST_HOME'] = sys.argv[3]
@@ -58,24 +64,27 @@ def forbidden(*args, **kwargs):
 socket.socket.connect = forbidden
 with open(sys.argv[2]) as stream:
     cases = json.load(stream)
-scores = []
+predictions = []
 for rows in cases:
     result = p.predict(rows, require_complete=False)
     assert set(result['individual_models']) == {'cruise', 'release', 'relax', 'uplift', 'energize', 'concentrate'}
-    scores.append(result['suitability']['concentrate'])
+    for vibe, candidate in result['individual_models'].items():
+        assert result['suitability'][vibe] == candidate['score']
+    predictions.append(result['individual_models'])
 assert f.__file__.startswith(sys.argv[1])
+assert not hasattr(c, 'route') and not hasattr(c, 'route_samples')
 assert not any(k == 'experiments' or k.startswith('experiments.') for k in sys.modules)
-print(json.dumps({'module': f.__file__, 'sha256': result['individual_models']['concentrate']['sha256'], 'scores': scores}))
+print(json.dumps({'module': f.__file__, 'sha256': result['individual_models']['concentrate']['sha256'], 'predictions': predictions}))
 '''
     result = subprocess.run([sys.executable, '-I', '-c', program, str(installed), str(input_file),
                              str(directory / 'app-home')], cwd=installed, capture_output=True, text=True, check=True)
     observed = json.loads(result.stdout)
-    errors = [abs(actual - wanted) for actual, wanted in zip(observed.pop('scores'), expected, strict=True)]
-    if max(errors) > 1e-12:
+    if observed.pop('predictions') != expected:
         raise ValueError('Installed inference differs')
     report = {'created_at': stamp(), 'wheel': wheel.name, 'wheel_sha256': digest(wheel),
         'installed_runtime': observed, 'checked_files': {name: digest(root / name) for name in names},
-        'input_sha256': digest(input_file), 'cases': len(expected), 'maximum_error': max(errors),
+        'input_sha256': digest(input_file), 'cases': len(expected), 'specialists': list(modules),
+        'maximum_error': 0., 'exact_native_and_provenance_equality': True,
         'default_modes': True, 'network_blocked': True, 'complete': True}
     save(directory / 'report.json', report)
     print(json.dumps(report), flush=True)

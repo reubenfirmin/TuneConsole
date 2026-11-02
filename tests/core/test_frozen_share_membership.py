@@ -7,6 +7,7 @@ from yt_playlist.core import albums, album_tracklists, genre_identity
 from yt_playlist.core.migrations import current, migrate, registry, Migration, MigrationError
 from yt_playlist.core.migrations import v105_frozen_share_membership as membership
 from yt_playlist.core.store import Store
+from tests.historical_support import upgrade_fixture
 
 
 def installed(path):
@@ -56,7 +57,7 @@ def test_installed_shares_keep_exact_membership_across_upgrade_alias_and_restart
     store = installed(path)
     aid,snapshot,empty = capture(store.conn,legacy=legacy)
     before = list(map(tuple,store.conn.execute('SELECT * FROM album_share_items ORDER BY snapshot_id,position')))
-    store.init_schema()
+    upgrade_fixture(store)
     assert list(map(tuple,store.conn.execute('SELECT * FROM album_share_items ORDER BY snapshot_id,position')))==before
     assert_frozen(store.conn,snapshot)
     with store.conn:
@@ -99,7 +100,7 @@ def test_interrupted_guard_install_rolls_back_then_restarts(tmp_path):
     with pytest.raises(MigrationError,match='interrupted share guard'):
         migrate(store.conn,registry=(*registry.MIGRATIONS[:104],Migration(105,'frozen_share_membership',interrupted)))
     assert list(store.conn.iterdump())==before
-    store.init_schema()
+    upgrade_fixture(store)
     assert_frozen(store.conn,snapshot)
     store.conn.close()
 
@@ -112,6 +113,6 @@ def test_preexisting_appended_share_stops_without_changing_original_rows(tmp_pat
                            'FROM album_share_items WHERE snapshot_id=? AND position=0',(snapshot,))
     before = list(store.conn.iterdump())
     with pytest.raises(MigrationError,match='changed membership; original rows retained'):
-        migrate(store.conn)
+        migrate(store.conn, registry=registry.MIGRATIONS)
     assert list(store.conn.iterdump())==before
     store.conn.close()

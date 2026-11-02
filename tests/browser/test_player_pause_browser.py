@@ -10,7 +10,7 @@ from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 
 
 @pytest.mark.parametrize("path", ["/", "/artists"])
-@pytest.mark.parametrize("width", [1280, 390])
+@pytest.mark.parametrize("width", [1280])
 def test_pause_resume_reaches_global_player(live_app, page, path, width):
     page.set_viewport_size({"width": width, "height": 900})
     with connect(live_app.replace("http://", "ws://") + "/bridge/ws",

@@ -29,6 +29,10 @@ def save(conn, recipe_id, state, now, *, expected_revision=None, conditional=Fal
         else:
             raise ValueError('A draft requires a nonempty revision')
     recovery = dict(state)
+    candidates = {row['video_id']: row for row in state.get('pool', [])
+                  if isinstance(row, dict) and row.get('video_id')}
+    candidates.update({row['video_id']: row for row in state.get('picked', [])
+                       if isinstance(row, dict) and row.get('video_id')})
     selections = []
     for selection, values in (('picked',state.get('picks',[])),('excluded',state.get('banned',[]))):
         for position, video in enumerate(values):
@@ -36,9 +40,11 @@ def save(conn, recipe_id, state, now, *, expected_revision=None, conditional=Fal
                 raise ValueError('A draft selection requires an exact upload ID')
             row = conn.execute('SELECT id,recording_id FROM catalog_entries WHERE video_id=? ORDER BY id LIMIT 1',(video,)).fetchone()
             if row is None:
-                # The selected upload is exact evidence. Admit it through the
-                # normal catalog boundary; do not infer a recording from title.
-                entry = catalog.upsert(conn,video,'','',preferred_key='@unresolved-video:'+video)
+                # Retain known display labels without inferring a recording
+                # from them or selecting blank metadata ahead of provider reads.
+                candidate = candidates.get(video, {})
+                entry = catalog.admit_captured_video(conn, video,
+                    title=candidate.get('title') or '', artist=candidate.get('artist') or '', captured_at=now)
                 row = conn.execute('SELECT id,recording_id FROM catalog_entries WHERE id=?',(entry,)).fetchone()
             selections.append((selection,position,row[1],row[0],video))
     recovery.pop('picks',None)

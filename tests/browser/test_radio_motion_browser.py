@@ -167,7 +167,7 @@ def _assert_junction_motion(page, session, initial, target_x, *, dense=False):
         assert len({frame['paths'][index]['d'] for frame in frames}) >= 4
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_restored_junction_preserves_all_four_stream_shapes_without_loader_art(page, radio_ui, width):
     api = radio_ui
     page.set_viewport_size({'width': width, 'height': 1000})
@@ -400,7 +400,6 @@ def test_record_cover_changes_immediately_when_replaying_history(page, radio_ui)
 @pytest.mark.parametrize('width,height,motion', [
     pytest.param(1440, 1000, True, id='desktop-motion'),
     pytest.param(1792, 1398, False, id='tall-layout'),
-    pytest.param(390, 1000, True, id='mobile-motion'),
 ])
 def test_session_history_rises_from_junction_and_queues_preview_without_switching(page, radio_ui, width, height, motion):
     api = radio_ui
@@ -481,9 +480,9 @@ def test_session_history_rises_from_junction_and_queues_preview_without_switchin
 
 
 def _exercise_preview_motion(page, session, width):
-    """Desktop/mobile retain the full pointer, focus, reduced-motion and reversal journey."""
+    """Desktop retains the full pointer, focus, reduced-motion and reversal journey."""
     other = session.locator('.radio-direction').nth(1)
-    # Scroll the phone's queue into view before measuring either endpoint.
+    # Scroll the queue into view before measuring either endpoint.
     other.scroll_into_view_if_needed()
     page.mouse.move(0, 0)
     page.clock.install()

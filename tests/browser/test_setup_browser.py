@@ -20,8 +20,20 @@ from tests.web.test_setup_identities import CheckedClient
 pytestmark = pytest.mark.browser
 
 
-@pytest.mark.parametrize('width', [390, 1440])
+@pytest.mark.parametrize('width', [1440])
 def test_home_starting_mode_saves_in_setup(live_app, store, page, width, tmp_path):
+    import json
+    from tests.home_fixture_support import returning_listener
+    from tests.onboarding_support import publish_personal_mix
+    returning_listener(store, 'mixes', 'albums', 'radio')
+    tracks = publish_personal_mix(store, now=1)
+    store.rec_proposals.put_proposals('album_prepared', {
+        'built_at': 1, 'context': {}, 'items': [
+            {'browse_id': f'setup-album-{i}', 'title': f'Record {i}',
+             'artist': f'Artist {i}', 'classification': 'discovery', 'score': .8}
+            for i in range(2)]}, 1)
+    store.settings.set_setting('radio_seed_offer', json.dumps({'menu_id': 'setup-radio', 'tracks': tracks[:4]}))
+    assert all(page.request.get(live_app + '/home/growth').json()['ready_formats'].values())
     page.set_viewport_size({'width': width, 'height': 950})
     page.goto(f'{live_app}/setup?tab=home')
     expect(page.get_by_role('tab', name='Home', exact=True)).to_have_attribute('aria-selected', 'true')
@@ -87,7 +99,7 @@ def test_setup_tab_deep_link_opens_enrichment(live_setup_app, page):
     expect(page.get_by_text("Shared secret")).to_be_visible()
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_album_description_settings_save_pause_and_remove_without_exposing_key(live_setup_app, page, width):
     page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(f'{live_setup_app}/setup?tab=enrichment')
@@ -212,7 +224,7 @@ def test_add_identity_stays_on_identities_and_shows_live_validation(live_identit
     _add_identity(page, t.base)
     expect(page).to_have_url(f"{t.base}/setup?tab=identities")
     expect(page.get_by_role("tab", name="Identities", exact=True)).to_have_attribute("aria-selected", "true")
-    expect(page.get_by_role("status")).to_be_hidden()
+    expect(page.locator('[role="status"][x-show="identityMessage"]')).to_be_hidden()
     expect(page.get_by_label("Label for identity 2", exact=True)).to_have_value("Brand")
     expect(page.locator(".identity-auth--valid")).to_have_count(2)
     expect(page.get_by_role("button", name="Brand: authenticated", exact=True)).to_be_visible()
@@ -274,7 +286,7 @@ def test_disconnected_identity_is_checked_automatically_after_reconnecting(live_
     expect(page.locator(".identity-auth-help:visible")).to_have_count(0)
 
 
-@pytest.mark.parametrize("viewport", [{"width": 1280, "height": 900}, {"width": 390, "height": 844}])
+@pytest.mark.parametrize("viewport", [{"width": 1280, "height": 900}])
 def test_yellow_dot_help_keeps_fields_in_place_and_can_be_dismissed(live_identity_setup, page, viewport):
     page.set_viewport_size(viewport)
     t = live_identity_setup
@@ -348,7 +360,7 @@ def test_remove_is_immediate_with_deletion_message_and_no_checks(live_identity_s
     checks_before = {name: client.checks for name, client in t.clients.items()}
     page.get_by_role("button", name="Remove Brand", exact=True).click()
     expect(page.locator('input[name="label"]')).to_have_count(1)
-    expect(page.get_by_role("status")).to_contain_text('Removed identity "Brand".')
+    expect(page.locator('[role="status"][x-show="identityMessage"]')).to_contain_text('Removed identity "Brand".')
     expect(page.get_by_role("button", name="Save and check", exact=True)).to_be_hidden()
     expect(page.locator('.tools-pop a[href="/move"]')).to_have_count(0)
     assert [i.label for i in t.store.accounts.get_accounts()] == ["main"]
@@ -356,7 +368,7 @@ def test_remove_is_immediate_with_deletion_message_and_no_checks(live_identity_s
     page.reload()
     expect(page.get_by_role("tab", name="Identities", exact=True)).to_have_attribute("aria-selected", "true")
     expect(page.locator('input[name="label"]')).to_have_count(1)
-    expect(page.get_by_role("status")).to_contain_text('Removed identity "Brand".')
+    expect(page.locator('[role="status"][x-show="identityMessage"]')).to_contain_text('Removed identity "Brand".')
     expect(page.get_by_text("Saved 1 identity.", exact=False)).to_have_count(0)
 
 

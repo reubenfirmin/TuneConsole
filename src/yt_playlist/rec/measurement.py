@@ -303,12 +303,14 @@ def stamp_pool(store, items, now, ranker="candidate-pool"):
         return items
 
 
-def maintain_storage(store, now):
+def maintain_storage(store, now, *, progress=False):
     """Collect unused prepared policies even when no recommendations are served.
 
     Read the large prepared/session JSON off the serving connection. Publication
     checks those roots for changes, and rechecks impression references at delete.
     """
+    from yt_playlist.core.preparation import policy_history
+    history = policy_history.maintain(store,now)
     store.rec_ledger.maintain_impressions(now)
     with store.read_snapshot() as snapshot:
         versions, cursor = policy_storage.retention_candidates(snapshot.store.conn, now)
@@ -317,6 +319,9 @@ def maintain_storage(store, now):
     if published and (stats['policies_deleted'] or stats['bodies_deleted']):
         log.info('Recommendation policy retention: policies_deleted=%d bodies_deleted=%d more=%s',
                  stats['policies_deleted'], stats['bodies_deleted'], cursor is not None)
+    if progress:
+        return {**stats, 'published': published,
+                'pending': bool(history) or not published or cursor is not None or stats.get('bodies_deleted', 0) == policy_storage.SCAN_LIMIT}
     return published
 
 

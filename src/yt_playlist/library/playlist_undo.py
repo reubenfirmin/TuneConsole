@@ -5,6 +5,8 @@ from collections import Counter
 from pathlib import Path
 from uuid import uuid4
 
+from yt_playlist.core import fao
+
 from yt_playlist.library.action_claim import claim_action, claim_deletion_target
 from yt_playlist.library.sync import refresh_playlist
 from yt_playlist.library.playlist_mutation import mutation_status, restore_playlist_sequence
@@ -62,7 +64,7 @@ def _verify_restored_sources(clients, steps):
     for step in steps:
         if step["kind"] != "backup":
             continue
-        payload = json.loads(Path(step["backup"]).read_text(encoding="utf-8"))
+        payload = json.loads(fao.read_bytes(step["backup"]))
         client = _client(clients, payload.get("identity_id"))
         detail = _existing(client, step["created_id"])
         required = Counter(t["video_id"] for t in payload.get("tracks", []))
@@ -128,7 +130,7 @@ def _find_created(client, marker):
 
 
 def _restore_backup(store, clients, step, now, save):
-    payload = json.loads(Path(step["backup"]).read_text(encoding="utf-8"))
+    payload = json.loads(fao.read_bytes(step["backup"]))
     if payload.get('snapshot_version', 1) not in (1, 2):
         raise ValueError('Unsupported playlist backup version. Review it before recovering manually.')
     identity = payload.get("identity_id")

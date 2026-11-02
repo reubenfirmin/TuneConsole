@@ -216,6 +216,9 @@ def associate_item(conn, video_id, recording_id, *, source, evidence, now, same_
     # These coordinates describe their original owners' accepted inputs. An
     # upload correction cannot transfer or reuse either affected derived row.
     conn.execute('DELETE FROM recording_embeddings WHERE recording_id IN (?,?)', (previous, recording_id))
+    from . import embedding_files
+    if embedding_files.available(conn):
+        conn.execute('DELETE FROM recording_embedding_files WHERE recording_id IN (?,?)', (previous, recording_id))
     conn.execute('DELETE FROM prepared_recording_inputs WHERE recording_id IN (?,?)', (previous, recording_id))
     payload = json.dumps(evidence,sort_keys=True)
     previous_key = conn.execute('SELECT identity_key FROM recordings WHERE id=?', (previous,)).fetchone()[0]
@@ -284,6 +287,25 @@ def add_alias(conn, alias, recording_id, source):
     # Existing embeddings/proposals use the previous key space. Rebuild, retaining rollback artifacts.
     if renamed:
         invalidate_derived(conn)
+
+
+def admit_captured_video(conn, video_id, *, title='', artist='', captured_at=0.):
+    """Admit an exact upload from recovery without reinterpreting past evidence.
+
+    A saved draft or session proves an upload ID. It supplies no provider
+    delivery or authority to resolve an earlier unknown listening subject.
+    """
+    if not isinstance(video_id,str) or not video_id.strip():
+        raise ValueError('A captured upload requires its exact video ID')
+    row = conn.execute('SELECT id FROM catalog_entries WHERE video_id=? ORDER BY id LIMIT 1',(video_id,)).fetchone()
+    if row:
+        return row[0]
+    recording = conn.execute('INSERT INTO recordings(identity_key,title,artist,provisional,created_at) '
+        'VALUES (?,?,?,1,?)',('@unresolved-video:'+video_id,title,artist,captured_at)).lastrowid
+    conn.execute('INSERT INTO youtube_items(video_id,recording_id,title,artist) VALUES (?,?,?,?)',
+                 (video_id,recording,title,artist))
+    return conn.execute('INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,?)',
+                         (recording,video_id)).lastrowid
 
 
 def upsert(conn, video_id, title, artist, album=None, duration_s=None, available=None,

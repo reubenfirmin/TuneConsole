@@ -217,11 +217,13 @@ def _issue_record(store, record, context, *, reuse=False):
         key=lambda i: (-scores[i], i))] if scored else None
     record = {**record, 'context': hashlib.sha256(canonical(context)).hexdigest(),
               'prediction': prediction, 'prediction_status': 'issued' if scored else 'unscored'}
-    if record['format'] == 'mixes' and mix_choices.available(store.conn):
-        # Publication acknowledges SQL descriptor custody before the event file.
-        # A failed event write leaves a conservative projection for this ID.
-        with store._lock, store.conn:
-            record = mix_choices.publish_menu(store.conn, record, record['context'])
+    if record['format'] == 'mixes':
+        with store._lock:
+            if mix_choices.available(store.conn):
+                # Publication acknowledges SQL descriptor custody before the event file.
+                # A failed event write leaves a conservative projection for this ID.
+                with store.conn:
+                    record = mix_choices.publish_menu(store.conn, record, record['context'])
     ledger.put("opportunity", identity, record, artifact=context)
     return identity
 
@@ -326,9 +328,13 @@ def album_playback_context(store, msg, now, *, account_id=None):
     from yt_playlist.rec import rec_params
     try:
         from yt_playlist.core import album_playback_context as playback_context
-        pending = playback_context.load(store.conn)
+        # Playback events overlap TV refills and other serving writes. Pin this
+        # read on its own connection; the context loader owns a read transaction.
+        with store.read_view() as reader:
+            pending = playback_context.load(reader.conn)
+            attribution_hours = rec_params.get_param(reader, 'choice_attribution_h')
         if (not pending or not 0 <= now - pending['at'] <=
-                rec_params.get_param(store, 'choice_attribution_h') * 3600):
+                attribution_hours * 3600):
             return None
         if (pending.get('account_id') is not None and account_id is not None
                 and pending['account_id'] != account_id):

@@ -1,12 +1,13 @@
 """A failed merge Undo must retain the keeper's usable copy until sources are restored."""
 import json
-from pathlib import Path
 
 import pytest
 
 from tests.conftest import _track
 from tests.test_undo_recovery import RecoveryClient, _journal
+from yt_playlist.core import fao
 from yt_playlist.library import executor, playlist_undo, playlist_backups
+from yt_playlist.library.action_claim import claim_action
 from yt_playlist.util.action_kinds import APPLY_MERGE
 
 
@@ -36,18 +37,22 @@ def test_merge_source_failures_preserve_keeper_and_resume_safely(store, merged, 
         steps = playlist_undo._steps(undo, aid)
         steps.sort(key=lambda step: step["kind"] != "keeper")
         undo["recovery"] = {"version": 1, "steps": steps}
-        store.actions.update_action(aid, "undo_failed", 2, json.dumps(undo))
+        with claim_action(store, aid):
+            action = store.actions.claim_undo(aid, 2)
+            store.actions.save_undo_progress(aid, undo, 2, failed=True,
+                                             claim_token=action.execution_token)
     clients = {iid: client}
+    backup = json.loads(store.actions.get_action(aid).undo_json)["backups"][0]
     with monkeypatch.context() as patch:
         if failure == "backup_read":
-            read = Path.read_text
+            read = fao.read_bytes
 
             def unreadable(path, *args, **kwargs):
-                if str(path) == undo["backups"][0]:
+                if str(path) == backup:
                     raise OSError("Backup unavailable")
                 return read(path, *args, **kwargs)
 
-            patch.setattr(Path, "read_text", unreadable)
+            patch.setattr(fao, "read_bytes", unreadable)
         elif failure == "account":
             clients = {}
         elif failure == "create":
@@ -60,6 +65,8 @@ def test_merge_source_failures_preserve_keeper_and_resume_safely(store, merged, 
     assert not client.removed
     journal = _journal(store, aid)
     assert journal["version"] == 2 and journal["steps"][0]["kind"] == "backup"
+    if failure == "backup_read":
+        assert journal["error"] == "Backup unavailable"
     source = journal["steps"][0]
     marker, created_id = source["marker"], source.get("created_id")
     playlist_undo.undo_action(store, aid, {iid: client}, 4)

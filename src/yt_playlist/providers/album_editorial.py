@@ -8,13 +8,15 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
+from yt_playlist.core import fao
+
 from yt_playlist.providers.discogs import _artist_key
 from yt_playlist.util.matching import recording_title
 
 
 @lru_cache(maxsize=1)
 def _entries():
-    return json.loads((Path(__file__).parent.parent / 'data' / 'album_editorial.json').read_text())['entries']
+    return json.loads(fao.read_bytes(Path(__file__).parent.parent / 'data' / 'album_editorial.json'))['entries']
 
 
 def lookup(album):

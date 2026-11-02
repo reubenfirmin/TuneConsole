@@ -2,8 +2,8 @@
 <div class="gen-loader"{% if loader_radio|default(false) %}
      x-data="launchLoaderView(8)"
      x-effect="update({active: visible && launching, thumbs: launchTracks.map(song => song.thumbnail).filter(Boolean),
-       statuses: restoring ? ['Returning to your radio', 'Connecting to YouTube Music'] : [busyAction === 'start' ? 'Finding your frequency' : 'Connecting to YouTube Music', 'Tuning your radio'],
-       detail: !restoring && launchSong?.title ? 'Starting with ' + launchSong.title + (launchSong.artist ? ' · ' + launchSong.artist : '') : ''})"{% elif loader_tv|default(false) %}
+       statuses: launchPhase ? [recoveryTitle] : restoring ? ['Returning to your radio', 'Connecting to YouTube Music'] : [busyAction === 'start' ? 'Finding your frequency' : 'Connecting to YouTube Music', 'Tuning your radio'],
+       detail: launchPhase ? [recoveryArtist, recoveryMessage].filter(Boolean).join(' · ') : !restoring && launchSong?.title ? 'Starting with ' + launchSong.title + (launchSong.artist ? ' · ' + launchSong.artist : '') : ''})"{% elif loader_tv|default(false) %}
      x-data="launchLoaderView()"
      x-effect="update({active: visible && generating, thumbs: [], statuses: ['Generating TV session']})"{% endif %}>
   <div class="cluster-stars" aria-hidden="true"></div>
@@ -24,5 +24,12 @@
   <div class="gen-copy">
     <h2 class="gen-status"><span class="gen-dot" aria-hidden="true"></span><span data-loader-status>{{ loader_status|default('Tuning your radio') }}</span><span class="gen-cursor" aria-hidden="true"></span></h2>
     <p class="gen-sub" data-loader-detail>{{ loader_detail|default('') }}</p>
+    {% if loader_radio|default(false) %}
+    <div class="radio-launch-actions" x-show="launchPhase && !busy" x-cloak>
+      <button class="btn btn-primary" type="button" x-show="!launchUncertain" @click="start(recoverySong, recoveryFromPlaylist)">Try this selection again</button>
+      <button class="btn" type="button" x-show="launchUncertain" @click="refresh().catch(() => {})">Check playback</button>
+      <a class="btn" :href="recoveryUrl" :target="recoveryFromPlaylist ? '_self' : '_blank'" rel="noopener" x-text="recoveryFromPlaylist ? 'Back to this playlist' : 'Play this song on YouTube Music'"></a>
+    </div>
+    {% endif %}
   </div>
 </div>

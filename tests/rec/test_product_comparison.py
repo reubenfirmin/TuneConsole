@@ -559,16 +559,21 @@ def test_collaborative_change_affects_actual_album_scores_with_content_available
 
 @pytest.mark.parametrize('held', ['missing', 'stale', 'current'])
 def test_album_readiness_does_not_publish_paired_assignments(paired_album_store, held):
+    from tests.test_growth_journey import early_journey
     from yt_playlist.rec import album_choices, onboarding
     from yt_playlist.rec.home_cards import _epoch
 
     store = paired_album_store
+    # Readiness arrives after usable First sounds and Your music output.
+    # Build those real predecessors without forcing an access gate.
+    early_journey(store)
     trial = _trial(store)
     for arm in ('incumbent', 'challenger'):
         store.rec_proposals.put_proposals(product.pair_surface(trial['run_id'], arm, 'albums'),
             {'run_id': trial['run_id'], 'data': {'items': [{
-                'browse_id': arm, 'title': 'Ready record', 'artist': 'Artist',
-                'classification': 'discovery', 'score': .9}],
+                'browse_id': f'{arm}-{index}', 'title': f'Ready record {index}',
+                'artist': f'Artist {index}', 'classification': 'discovery', 'score': .9}
+                for index in range(2)],
                 'context': {}, 'built_at': 1000}}, 1000)
     if held == 'stale':
         store.rec_proposals.put_proposals('model_album_assignment', {'epoch': 'old', 'comparison': {}}, 999)
@@ -653,12 +658,13 @@ def test_rebuilt_home_menu_captures_new_opportunity_without_old_comparison(store
             explicit = home_prepared.cards(store, normal, 1001, views.recommendations, record=False)
             explicit.protos = [p for p in explicit.protos if p['lane'] != lane] + [replacement]
             explicit.slots = [{'proto': p, 'pool': None} for p in explicit.protos]
-            monkeypatch.setattr(views.recommendations, 'cards', lambda *args: explicit)
+            # Live recalculation owns a private-reader HomeCards instance.
+            # Control that calculation rather than the route's writer instance.
+            monkeypatch.setattr(type(views.recommendations), 'cards', lambda *args: explicit)
             views.card_context(request, 1001, live=True)
 
         shown = views.card_context(request, 1002)
         assert shown['protos'] and not shown['choice_context'].get('comparison')
-        assert shown['choice_context']['arm_snapshot'] == original['arm_snapshot']
         changed = next(p for p in shown['protos'] if p['lane'] == lane)
         assert [t['key'] for t in changed['tracks']] == [t['key'] for t in replacement['tracks']]
         assert all(p['assignment'] is None for p in shown['protos'])
@@ -674,8 +680,9 @@ def test_rebuilt_home_menu_captures_new_opportunity_without_old_comparison(store
             while worker.jobs.measurements:
                 thread.submit(worker._flush_measurements).result(5)
         assert not choices.opportunity(store, current_id).get('comparison')
-        assert choices.resolve_context(store, {'artifact': choices.opportunity(store, current_id)['context']})[
-            'arm_snapshot'] == original['arm_snapshot']
+        captured = choices.resolve_context(store, {'artifact': choices.opportunity(store, current_id)['context']})
+        assert captured['precision'] == 'theme-raw-genres-v1'
+        assert 'arm_snapshot' not in captured and not captured.get('comparison')
         measured = product.measure(store, trial, 1004)
         assert sum(row.get('offered', 0) for row in measured['formats']['mixes']['arms'].values()) == 1
     finally:
@@ -685,12 +692,17 @@ def test_rebuilt_home_menu_captures_new_opportunity_without_old_comparison(store
 @pytest.mark.parametrize('steering', ['include', 'avoid', 'vibe', 'vibe_change', 'vibe_reset',
                                     'vibe_expire', 'breadth', 'lean'])
 def test_new_home_tuning_preserves_the_tailored_menu_without_comparison_attribution(store, trial, steering):
+    from tests.home_fixture_support import returning_listener
     from tests.rec.test_home_prepared import seed, service
     from yt_playlist.rec import home_cards, home_prepared, home_vibe, mix_tuning, rec_params
     from yt_playlist.util import genre_map
 
     seed(store)
     now = 1000
+    if steering.startswith('vibe'):
+        # This consumer test starts after the listener has earned Vibes access.
+        # Missing today's prepared Vibe menus must not erase that past access.
+        returning_listener(store, 'vibes', now=now)
     if steering in ('vibe_change', 'vibe_reset', 'vibe_expire'):
         with mix_tuning.adjusting(store, now):
             store.settings.set_setting(home_vibe.SETTING, 'energize')

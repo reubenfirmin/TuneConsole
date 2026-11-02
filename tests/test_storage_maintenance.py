@@ -127,7 +127,7 @@ def test_ui_and_extension_playback_during_actual_vacuum(current_vacuum_store, mo
             assert status['active'] and status['message'] == MESSAGE and not status['recording']
             home = client.get('/')
             assert home.status_code == 200
-            assert 'Library updates are paused.' in home.text
+            assert 'Updating library storage; browsing and playback remain available.' in home.text
             assert '/static/storage-maintenance.css' in home.text
             assert "authBanner([])" in home.text
             for url in ('/playlists', '/cleanup', '/album?browse=MPREalbum',
@@ -326,7 +326,7 @@ const assert = require('node:assert/strict'), fs = require('node:fs'), vm = requ
 let banner = null, textWrites = 0;
 const document = {readyState:'complete', documentElement:{dataset:{}}, getElementById: () => banner};
 const events=[];
-let refresh, fail=false, state={active:true,auth_labels:[],banner_message:'Library updates are paused.'};
+let refresh, fail=false, state={active:true,auth_labels:[],banner_message:'Updating library storage; browsing and playback remain available.'};
 vm.runInNewContext(fs.readFileSync('src/yt_playlist/web/static/storage-maintenance.js','utf8'), {
   document, window:{setInterval: callback => {refresh=callback;},dispatchEvent:event=>events.push(event)},
   CustomEvent:class {constructor(type,options){this.type=type;this.detail=options.detail;}},
@@ -348,11 +348,12 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
     auth_labels:['Main'],message:'Detailed diagnostic text.',banner_message:'Free disk space to finish.'}; await refresh();
   assert.equal(document.documentElement.dataset.storageCompacting,'false');
   assert.equal(banner.hidden,false); assert.equal(banner.textContent,state.banner_message);
+  assert.equal(banner.title,undefined,'API diagnostics must not become a warning tooltip');
   assert.equal(banner.attributes.role,'alert'); assert.equal(banner.attributes['aria-live'],'assertive');
   assert.equal(events.at(-1).detail.labels[0],'Main');
   fail=true; await refresh(); assert.equal(document.documentElement.dataset.storageCompacting,'false');
   assert.equal(banner.textContent,state.banner_message); assert.equal(banner.hidden,false);
-  fail=false; state={active:true,auth_labels:[],banner_message:'Library updates are paused.'}; await refresh();
+  fail=false; state={active:true,auth_labels:[],banner_message:'Updating library storage; browsing and playback remain available.'}; await refresh();
   assert.equal(document.documentElement.dataset.storageCompacting,'true');
   assert.equal(banner.attributes.role,'status'); assert.equal(banner.attributes['aria-live'],'polite');
   state={active:false,phase:'done',recording:true,warning:false,auth_labels:[]}; await refresh();

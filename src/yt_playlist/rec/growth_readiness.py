@@ -6,8 +6,7 @@ ranking remain with the feature owners; reading a gate never schedules work.
 import math
 
 from yt_playlist.rec import (album_choices, album_tuning, choice_evidence, fresh_pool, home_cards,
-                             home_prepared, home_vibe, mix_tuning, musical_character, vibe_pools,
-                             vibe_preparation)
+                             home_prepared, mix_tuning, musical_character, vibe_preparation)
 
 # Enough ranked discoveries to fill one ordinary four-card row. Selection still
 # uses Fresh's existing diversity/exclusion rules, including for pool-only users.
@@ -26,7 +25,9 @@ def foundation(store, now):
         taste = bool(store.modes.list_modes(active_only=True))
         for surface, field in ((home_prepared.SURFACE, 'choice_context'),
                                (album_choices.SURFACE, 'context')):
-            payload = store.rec_proposals.get_proposals(surface) or {}
+            if taste:
+                break
+            payload = store.rec_proposals.proposal_fields(surface, (field,)) or {}
             try:
                 context = choice_evidence.resolve_context(store, payload.get(field) or {})
             except ValueError:
@@ -37,7 +38,9 @@ def foundation(store, now):
                 continue
             saved = (context.get('layers') or {}).get('saved') or {}
             taste = taste or any((value or {}).get('titles') for value in saved.values())
-        tracks = fresh_pool.pick(store, now, size=POOL_TRACKS, minimum=1)
+        bundles = (None if getattr(store, '_recommendation_files', False)
+                   else store.rec_proposals.fresh_candidates())
+        tracks = fresh_pool.pick(store, now, size=POOL_TRACKS, minimum=1, bundles=bundles)
         ranked = {track['key'] for track in tracks
                   if type(track.get('score')) in (int, float) and math.isfinite(track['score'])}
         return bool(taste and len(ranked) >= POOL_TRACKS)
@@ -77,17 +80,9 @@ def _supported(track, preset):
 
 def vibes(store, now):
     """Every displayed preset needs four useful, evidenced cards, not just Relax."""
+    from yt_playlist.rec import vibe_readiness
     genres = store.rec_proposals.get_proposals('home_genre_request') or {}
     requested = genres if mix_tuning.genre_active(store, genres) else {}
-    signatures = set()
-    for preset in home_vibe.PRESETS:
-        cards = vibe_pools.assemble(store, now, preset, home_cards._epoch(store, 'cards'),
-            include_genres=requested.get('include_genres', ()),
-            avoid_genres=requested.get('avoid_genres', ()))
-        if len(cards) < 4 or any(sum(_supported(track, preset) for track in card['tracks']) < 4
-                                for card in cards):
-            return False
-        signatures.add(tuple(tuple(track['key'] for track in card['tracks']) for card in cards))
-    # Neutral/tied evidence that produces the same menu for every button does
-    # not yet deliver the change the newly exposed controls promise.
-    return len(signatures) > 1
+    return vibe_readiness.ready(store, now, home_cards._epoch(store, 'cards'),
+        include_genres=requested.get('include_genres', ()),
+        avoid_genres=requested.get('avoid_genres', ()))

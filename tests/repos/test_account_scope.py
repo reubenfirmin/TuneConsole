@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.historical_support import upgrade_fixture
 
 from yt_playlist.core.accounts import client_for
 from yt_playlist.core.migrations import Migration,MigrationError,migrate
@@ -24,7 +25,7 @@ def installed_v23(tmp_path):
 def test_installed_account_scope_preserves_unknown_ownership_and_curation(installed_v23,installed_version):
     store = installed_v23
     migrate(store.conn,registry=registry.MIGRATIONS[:installed_version])
-    store.init_schema()
+    upgrade_fixture(store)
     assert store.playlists.get_playlist(1).playlist_scope_id=='@account:1:LM'
     assert store.playlists.get_playlist(2).playlist_scope_id=='@account:2:LM'
     assert store.playlists.get_playlist(4).playlist_scope_id==store.playlists.get_playlist(5).playlist_scope_id=='shared'
@@ -68,7 +69,7 @@ def test_account_scope_repair_preserves_existing_account_override(installed_v23)
     migrate(store.conn,registry=registry.MIGRATIONS[:29])
     with store.conn:
         store.conn.execute("INSERT INTO playlist_group VALUES ('@account:1:LM','Already changed')")
-    store.init_schema()
+    upgrade_fixture(store)
     assert store.playlists.get_playlist_groups()=={
         '@account:1:LM':'Already changed','@account:2:LM':'Old likes','shared':'Keep'}
 
@@ -82,7 +83,7 @@ def test_repair_does_not_restore_albums_already_resolved_by_every_original_accou
         store.conn.execute('INSERT INTO identity_state_archive VALUES (?,?,?,?)',
                            ('album_legacy:saved_albums','removed','{"browse_id":"removed"}','original album'))
         store.conn.executemany('INSERT INTO album_library_snapshots VALUES (?,1)', [(1,),(2,)])
-    store.init_schema()
+    upgrade_fixture(store)
     assert store.collection.saved_album_ids()==set()
 
 
@@ -96,12 +97,12 @@ def test_account_scope_repair_failure_keeps_installed_v29_unchanged(installed_v2
         raise RuntimeError('interrupt preservation repair')
     monkeypatch.setattr(registry,'MIGRATIONS',(*current[:29],Migration(30,current[29].name,fail)))
     with pytest.raises(MigrationError,match='interrupt preservation repair'):
-        migrate(store.conn)
+        migrate(store.conn, registry=registry.MIGRATIONS)
     assert list(store.conn.iterdump())==before
     assert not (tmp_path / 'backups').exists()
     assert store.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
     monkeypatch.setattr(registry,'MIGRATIONS',current)
-    store.init_schema()
+    upgrade_fixture(store)
     assert store.playlists.get_playlist_groups()['@account:2:LM']=='Old likes'
 
 
@@ -114,10 +115,10 @@ def test_scope_upgrade_failure_rolls_back_without_backups(installed_v23,tmp_path
         raise RuntimeError('interrupt account migration')
     monkeypatch.setattr(registry,'MIGRATIONS',(*current[:23],Migration(24,current[23].name,fail)))
     with pytest.raises(MigrationError,match='interrupt account migration'):
-        migrate(store.conn)
+        migrate(store.conn, registry=registry.MIGRATIONS)
     assert list(store.conn.iterdump())==before
     monkeypatch.setattr(registry,'MIGRATIONS',current)
-    store.init_schema()
+    upgrade_fixture(store)
     assert not (tmp_path / 'backups').exists()
     assert store.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
 

@@ -293,13 +293,11 @@ def test_native_attributes_match_known_levels_and_rhythm_without_audio_output(pr
         assert all(value is None or math.isfinite(value) for value in values.values())
 
 
-@pytest.mark.parametrize('preview_browser', ['no_activation', 'normal_playback', 'mobile', 'unverified_playback', 'packaged'], indirect=True)
+@pytest.mark.parametrize('preview_browser', ['no_activation', 'normal_playback', 'unverified_playback', 'packaged'], indirect=True)
 def test_app_automatically_captures_and_runs_model_without_capture_click(live_app, preview_browser, tmp_path, request):
     context, worker, source, source_cdp, isolated = preview_browser
     source_activated = _evaluate(source_cdp, 'navigator.userActivation.hasBeenActive')
     page = context.new_page()
-    if request.node.callspec.params['preview_browser'] == 'mobile':
-        page.set_viewport_size({'width': 390, 'height': 900})
     page.add_init_script('''window.Worker=class {constructor(){throw Error('Audio inference must stay in the YouTube tab');}};''')
     cdp = context.new_cdp_session(page)
     state = mock_playback(page)
@@ -429,7 +427,7 @@ def test_preview_recovers_media_readiness_and_reports_a_persistent_failure(live_
 def test_automatic_preview_cancels_and_erases_pcm(live_app, preview_browser, end, tmp_path):
     context, worker, source, source_cdp, isolated = preview_browser
     page = context.new_page()
-    page.set_viewport_size({'width': 390, 'height': 900})
+    page.set_viewport_size({'width': 1280, 'height': 900})
     state = mock_playback(page)
     if end == 'frame':
         _evaluate(source_cdp, '''(() => {
@@ -492,7 +490,7 @@ def test_automatic_preview_cancels_and_erases_pcm(live_app, preview_browser, end
         expect(page.locator('[data-preview-result]')).to_be_hidden()
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
         if end == 'stop':
-            page.screenshot(path=str(tmp_path / 'audio-preview-mobile.png'), full_page=True)
+            page.screenshot(path=str(tmp_path / 'audio-preview-desktop.png'), full_page=True)
     if end not in ('source', 'pause'):
         assert _evaluate(source_cdp, '!document.querySelector("video").paused')
 

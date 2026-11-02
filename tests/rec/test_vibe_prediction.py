@@ -162,7 +162,8 @@ def test_broad_genres_cannot_seed_genre_predictions(store, genre):
     assert not store.conn.execute('SELECT 1 FROM recording_vibes WHERE subgenre_key IS NOT NULL').fetchone()
 
 
-def test_provider_classifiers_seed_predictions_without_captured_audio_or_prepared_state(store):
+def test_provider_classifiers_seed_predictions_without_captured_audio_or_prepared_state(file_backed_store):
+    store = file_backed_store
     tid, own = track(store, 'provider')
     _tid, target = track(store, 'target')
     store.enrichment_state.record_metadata_observations(tid, 'acousticbrainz', [
@@ -204,12 +205,12 @@ def test_prediction_queue_survives_restart_and_failure_rolls_back_all_derived_st
     _tid, target = track(store, 'two')
     capture(store, 'one')
     from yt_playlist.repos.vibe_predictions import VibePredictionsRepo
-    original = VibePredictionsRepo.publish
+    original = VibePredictionsRepo.publish_prepared
     def fail(repo, *args):
         original(repo, *args)
         raise RuntimeError('interrupted prediction publication')
     with monkeypatch.context() as patch:
-        patch.setattr(VibePredictionsRepo, 'publish', fail)
+        patch.setattr(VibePredictionsRepo, 'publish_prepared', fail)
         with pytest.raises(RuntimeError, match='interrupted prediction'):
             Preparation(store).capture(1000)
     assert not store.conn.execute('SELECT 1 FROM recording_vibes').fetchone()
@@ -243,7 +244,8 @@ def test_model_version_change_recomputes_all_evidence_in_pages(store, monkeypatc
                               ('%changed-model',)).fetchone()[0] == 2
 
 
-def test_artist_tags_never_become_recording_measurements_or_propagation_seeds(store):
+def test_artist_tags_never_become_recording_measurements_or_propagation_seeds(file_backed_store):
+    store = file_backed_store
     tid, own = track(store, 'one')
     _tid, target = track(store, 'two')
     store.enrichment_state.record_metadata_observations(tid, 'lastfm', [
@@ -298,7 +300,8 @@ def test_played_catalog_recording_can_teach_library_before_it_is_saved(store):
     assert not store.musical_profiles.by_keys(['outside|shared artist'])
 
 
-def test_provider_backlog_cannot_starve_vibe_bootstrap_or_dependency_fanout(store):
+def test_provider_backlog_cannot_starve_vibe_bootstrap_or_dependency_fanout(file_backed_store):
+    store = file_backed_store
     for index in range(10):
         tid, _key = track(store, f'song{index}')
         store.enrichment_state.record_metadata_observations(tid, 'acousticbrainz', [

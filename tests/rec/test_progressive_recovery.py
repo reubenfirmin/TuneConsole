@@ -121,7 +121,7 @@ def test_audit_does_not_overwrite_a_newer_arrival(store, monkeypatch):
     assert len(store.prepared_content.pending(10)) == 6
 
 
-def test_repair_captures_only_its_five_table_counters_after_unrelated_key_churn(store, monkeypatch):
+def test_repair_captures_only_its_four_owner_counters_after_unrelated_key_churn(store, monkeypatch):
     catalog(store, 6)
     with store.conn:
         store.conn.execute('DELETE FROM rec_content_pending')
@@ -139,8 +139,85 @@ def test_repair_captures_only_its_five_table_counters_after_unrelated_key_churn(
     preparation = progressive.Preparation(store)
     assert preparation.repair(1000)
     assert len(store.prepared_content.pending(10)) == 6
-    assert captured[0] == progressive.REPAIR_INPUTS
-    assert all(scope <= progressive.REPAIR_INPUTS for scope in captured)
+    expected = frozenset((table, '') for table in (
+        'recordings', 'recording_redirects', 'prepared_recording_inputs', 'rec_content_pending'))
+    assert progressive.REPAIR_INPUTS == expected
+    assert captured and all(scope == expected for scope in captured)
+
+
+@pytest.mark.parametrize('owner,invalidates', [
+    ('recordings', True), ('recording_redirects', True),
+    ('prepared_recording_inputs', True), ('rec_content_pending', True),
+    ('settings', False), ('unresolved_preparation_inputs', False),
+    ('recording_embeddings', False), ('recording_embedding_files', False),
+])
+def test_repair_fences_each_read_owner_and_ignores_independent_owners(store, monkeypatch, owner, invalidates):
+    from yt_playlist.core import prepared_inputs
+    from yt_playlist.core.preparation import embeddings as embedding_preparation
+
+    catalog(store, 6)
+    subjects = list(store.conn.execute('SELECT id,identity_key FROM recordings ORDER BY id'))
+    vector = np.array([1, 0], dtype=np.float32).tobytes()
+    if owner == 'recording_embedding_files':
+        with store.conn:
+            store.conn.execute('INSERT INTO recording_embeddings VALUES (?,?,?,?,?,?)',
+                (subjects[0][0], 'collaborative', 'basis', 2, vector, 1))
+    with store.conn:
+        store.conn.execute('DELETE FROM rec_content_pending')
+    missing, enqueue = PreparedContentRepo.missing_unqueued, PreparedContentRepo.enqueue_missing
+    mutations, publications, queue_after_mutation = [], [], []
+
+    def change_after_read(repo, limit=32):
+        keys = missing(repo, limit)
+        if limit == 1:
+            return keys  # The preliminary due check does not publish work.
+        if owner == 'recording_embedding_files':
+            assert embedding_preparation.prepare(store, limit=1) == 1
+        else:
+            with store.conn:
+                if owner == 'recordings':
+                    store.conn.execute('UPDATE recordings SET bpm=bpm+1 WHERE id=?', (subjects[0][0],))
+                elif owner == 'recording_redirects':
+                    store.conn.execute('INSERT INTO recording_redirects VALUES (?,?,?,?)',
+                        (subjects[0][0], subjects[1][0], 'test', '{}'))
+                elif owner == 'prepared_recording_inputs':
+                    prepared_inputs.upsert(store.conn, subjects[0][1],
+                        {'library': None, 'discovered': None}, '0'*64, 1000, 1)
+                elif owner == 'rec_content_pending':
+                    store.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?)', (subjects[0][1],))
+                elif owner == 'settings':
+                    store.conn.execute("INSERT INTO settings VALUES ('unrelated-during-repair','changed')")
+                elif owner == 'unresolved_preparation_inputs':
+                    prepared_inputs.upsert(store.conn, 'absent|artist',
+                        {'library': None, 'discovered': None}, '0'*64, 1000, 1)
+                else:
+                    store.conn.execute('INSERT INTO recording_embeddings VALUES (?,?,?,?,?,?)',
+                        (subjects[0][0], 'collaborative', 'basis', 2, vector, 1))
+        mutations.append(owner)
+        queue_after_mutation[:] = store.prepared_content.pending(10)
+        return keys
+
+    def publish(repo, keys):
+        publications.append(list(keys))
+        return enqueue(repo, keys)
+
+    preparation = progressive.Preparation(store)
+    with monkeypatch.context() as patch:
+        patch.setattr(PreparedContentRepo, 'missing_unqueued', change_after_read)
+        patch.setattr(PreparedContentRepo, 'enqueue_missing', publish)
+        assert preparation.repair(1000) is not invalidates
+    assert mutations == [owner]
+    if invalidates:
+        assert publications == []
+        assert store.prepared_content.pending(10) == queue_after_mutation
+        expected = missing(store.prepared_content, 10)
+        assert preparation.repair(1001)
+        assert {key for key, _revision in store.prepared_content.pending(10)} == (
+            set(expected) | {key for key, _revision in queue_after_mutation})
+    else:
+        assert publications == [[key for _subject, key in subjects]]
+        assert len(store.prepared_content.pending(10)) == 6
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def test_memory_deferral_survives_restart_and_recovers_without_new_activity(tmp_path):
@@ -238,7 +315,7 @@ def test_repeated_time_budget_failure_is_visible_and_retried(store, monkeypatch)
     catalog(store, 12)
     p = progressive.Preparation(store)
     drain(p)
-    def too_slow(_inputs):
+    def too_slow(_inputs, *, genre_axes=None):
         raise WorkBudgetExceeded()
     with monkeypatch.context() as patch:
         patch.setattr(content_model, 'build_library_content', too_slow)

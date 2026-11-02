@@ -39,7 +39,7 @@ def test_browsing_playback_feedback_and_resumed_writes_across_replacement(librar
         assert client.post('/storage-maintenance/compact').status_code==202
         assert held.wait(20)
         status = client.get('/storage-maintenance/status').json()
-        assert status['active'] and status['banner_message']=='Library updates are paused.'
+        assert status['active'] and status['banner_message']=='Updating library storage; browsing and playback remain available.'
         for path in ('/','/playlists','/track/known','/radio/status','/storage-maintenance/status'):
             assert client.get(path).status_code==200,path
         playlist_url = 'https://music.youtube.com/playlist?list=LM'

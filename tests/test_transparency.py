@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from yt_playlist.rec import actions
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.home_fixture_support import returning_listener
 
 
 def _client(store):
@@ -40,7 +41,7 @@ def test_alert_dismiss_persists(store):
 
 def test_transparency_note_when_muted(store):
     _, c = _client(store)
+    returning_listener(store, 'mixes', now=1)
     store.settings.set_setting("last_sync_at", "1.0")        # synced -> the gated muted-artist note renders
-    store.settings.set_setting("onboard_dismissed", "1")     # graduated user: testing the normal feed, not onboarding
     store.rec_model.record_feedback("for_you", "artist:Coldplay", "mute", now=1.0)
     assert "muted artist" in c.get("/").text and "Taste Model" in c.get("/").text

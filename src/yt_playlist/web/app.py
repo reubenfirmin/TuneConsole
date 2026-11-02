@@ -13,7 +13,8 @@ from urllib.parse import urlsplit
 from markupsafe import Markup, escape
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, Response
-from fastapi.staticfiles import StaticFiles
+from yt_playlist.web.fao_static import ManagedStaticFiles
+from yt_playlist.core import fao
 from fastapi.templating import Jinja2Templates
 
 from yt_playlist.web.icons import arrow_icon
@@ -263,8 +264,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
                         if bridge.connected:
                             store.settings.set_setting('bridge_paired', '1')
                             ctx.clear_all_auth_expired()
-                        # Load saved genres before HTTP admission. Updating the
-                        # packaged catalog is separate local configuration work.
+                        # Refresh local genre configuration after storage preparation.
                         genre_lib.configure(store)
                         ctx.radio.prepare()
                         ctx.rec_worker.start_ticker()
@@ -307,7 +307,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
 
     app = FastAPI(lifespan=lifespan)
     app.add_middleware(RequestPriorityMiddleware, priority=store.priority)
-    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    app.mount("/static", ManagedStaticFiles(directory=str(static_dir)), name="static")
     allowed = set(allowed_hosts)
     # Cache-bust the front-end by a CONTENT hash across ALL top-level static JS/CSS so browsers always
     # fetch the current build after an edit (otherwise a stale cached file silently diverges). Content
@@ -323,16 +323,18 @@ def create_app(store, client_provider, *, now_fn=time.time,
             try:
                 files = sorted((p for p in [*static_dir.glob("*.js"), *static_dir.glob("*.css"),
                                             static_dir / "favicon.svg"] if p.exists()), key=lambda p: p.name)
-                key = tuple((p.name, int(p.stat().st_mtime), p.stat().st_size) for p in files)
+                key = tuple((p.name, fao.stat(p).identity) for p in files)
                 if key != self._key:
                     h = hashlib.md5()
                     for p in files:
-                        h.update(p.read_bytes())
+                        h.update(fao.read_bytes(p))
                     self._val, self._key = h.hexdigest()[:12], key
                 return self._val
             except (OSError, ValueError):
                 return "0"
     templates.env.globals["asset_v"] = _AssetVersion()
+    from yt_playlist.web.theme import mix_launch_tokens
+    templates.env.globals["mix_launch_tokens"] = mix_launch_tokens
     from yt_playlist.core.features import listening_charts_enabled
     templates.env.globals['listening_charts_enabled'] = listening_charts_enabled()
     templates.env.globals["arrow_icon"] = arrow_icon
@@ -364,7 +366,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
                 '/radio/start', '/radio/stop', '/radio/select', '/radio/tune', '/radio/seen',
                 '/home/tv/takeover', '/heartbeat', '/goodbye') or (
                 request.url.path.startswith('/home/tv/playlist/') and request.url.path.endswith('/event'))
-            if ctx is not None and not playback_request:
+            if ctx is not None and not playback_request and request.url.path != '/storage-maintenance/rebuild':
                 maintenance = ctx.storage_maintenance.status()
                 if maintenance['active']:
                     return PlainTextResponse(maintenance['message'], status_code=503)
@@ -399,6 +401,8 @@ def create_app(store, client_provider, *, now_fn=time.time,
 
     @app.exception_handler(WorkBudgetExceeded)
     async def busy_publication(request, error):
+        logging.getLogger(__name__).warning('Request budget exceeded for %s %s',
+            request.method, request.url.path, exc_info=error)
         return PlainTextResponse(str(error), status_code=503, headers={'Retry-After': '5'})
 
     from yt_playlist.providers import genres as genre_lib
@@ -417,16 +421,27 @@ def create_app(store, client_provider, *, now_fn=time.time,
             reload_config()
         ctx.radio.retain_provenance()
     ctx.storage_maintenance = StorageMaintenance(store, on_resume=resume_storage)
-    templates.env.globals['storage_maintenance_status'] = ctx.storage_maintenance.status
+    def maintenance_notice():
+        status = ctx.storage_maintenance.status()
+        if not status['banner_message'] and (not ctx.storage_maintenance.ready.is_set()
+                or ctx.rec_worker.preparing or ctx.enrich_worker.busy):
+            status['banner_message'] = 'Preparing library data. Features will appear as they are ready.'
+        return status
+    templates.env.globals['storage_maintenance_status'] = maintenance_notice
 
     @app.get('/storage-maintenance/status')
     def storage_maintenance_status():
-        status = ctx.storage_maintenance.status()
+        status = maintenance_notice()
         return {**status, 'auth_labels': [] if status['active'] else list(ctx.auth_expired.values())}
 
     @app.post('/storage-maintenance/compact', status_code=202)
     def compact_storage():
         ctx.storage_maintenance.start_compaction()
+        return ctx.storage_maintenance.status()
+
+    @app.post('/storage-maintenance/rebuild', status_code=202)
+    def rebuild_storage(resume: bool = False):
+        ctx.storage_maintenance.start_rebuild(resume=resume)
         return ctx.storage_maintenance.status()
     app.include_router(build_bridge_route(ctx))
     from yt_playlist.rec.rec_worker import RecWorker

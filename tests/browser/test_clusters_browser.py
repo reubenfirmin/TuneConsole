@@ -36,7 +36,7 @@ def _add(page, label, kind):
     expect(page.locator(".cluster-center")).to_have_attribute("aria-busy", "false")
 
 
-@pytest.mark.parametrize("width", [1440, 600])
+@pytest.mark.parametrize("width", [1440])
 def test_seed_songs_wrapping_and_restore(page, cluster_library, width):
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))

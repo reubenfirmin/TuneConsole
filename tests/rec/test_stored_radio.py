@@ -1,6 +1,8 @@
 """Complete typed Radio membership with bounded live hydration and reader roots."""
 from dataclasses import replace
 import json
+import sqlite3
+from contextlib import nullcontext
 
 import numpy as np
 import pytest
@@ -17,6 +19,56 @@ from yt_playlist.rec.stored_radio import PreparedRadio
 from yt_playlist.repos import recommendation_publication as publication
 from yt_playlist.repos.rec_proposals import RecProposalsRepo
 from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
+
+
+@pytest.mark.parametrize('blocked_by', ['sql_writer', 'cancelled_work'])
+def test_database_close_releases_radio_readers_when_retirement_cannot_commit(file_backed_store, blocked_by):
+    from tests.recommendation_support import publish_bundles
+    from yt_playlist.core import db_handles, group_documents
+    from yt_playlist.core.activity import WorkClosing, cancellable_work
+    from yt_playlist.core.store import Store
+    from yt_playlist.rec import group_roots
+
+    store = file_backed_store
+    publish_bundles(store, {'all': {}}, now=1000)
+    readers = [PreparedRadio(store, 1001) for _ in range(2)]
+    directory = group_documents.root_for_database(store._db_path, store._evidence_key) / '.pending'
+    assert all(reader._lifetime.alive for reader in readers)
+    assert len(list(directory.glob('*.lock'))) == 2
+    other = sqlite3.connect(store._db_path, timeout=0)
+    cancelled = [False]
+    try:
+        if blocked_by == 'sql_writer':
+            other.execute('BEGIN IMMEDIATE')
+            scope = nullcontext()
+            outcome = nullcontext()
+        else:
+            scope = cancellable_work(lambda: cancelled[0])
+            outcome = pytest.raises(WorkClosing)
+        with outcome:
+            with scope:
+                cancelled[0] = blocked_by == 'cancelled_work'
+                store.conn.close()
+                assert store.conn._handle_closed and store.conn._handle_lease is None
+                assert not store.conn._before_close_callbacks
+        assert len(list(directory.glob('*.lock'))) == 2
+    finally:
+        other.rollback()
+        other.close()
+        for reader in readers:
+            reader.close()
+        store.conn.close()
+    with db_handles.lease(store._db_path, exclusive=True, timeout=0):
+        pass
+    reopened = Store.open_current(store._db_path)
+    try:
+        assert reopened.conn.execute(
+            "SELECT count(*) FROM group_evidence_owners WHERE kind='pending'").fetchone()[0] == 2
+        group_roots.reap_pending(reopened)
+        assert not reopened.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
+        assert not list(directory.glob('*.lock'))
+    finally:
+        reopened.conn.close()
 
 
 @pytest.fixture

@@ -157,7 +157,7 @@ def test_home_reads_keep_owned_changes_and_finish_before_a_busy_writer(tmp_path,
                 store.modes.log_pick(101, 7, 100)
                 store.conn.execute('INSERT INTO playlist_membership_refs(id) VALUES (102)')
                 read = lambda: store.modes.pick_counts(50, before=200)
-                change = ('INSERT INTO rec_mode_picks(playlist_id,mode_id,created_at) '
+                change = ('INSERT INTO rec_mode_picks(membership_ref_id,mode_id,created_at) '
                           'VALUES (102,7,101)', ())
             committed, uncommitted = {7: 1}, {7: 2}
         elif operation in ('disliked_identity_keys', 'disliked_key_page'):
@@ -221,7 +221,7 @@ def test_home_reads_keep_owned_changes_and_finish_before_a_busy_writer(tmp_path,
 
             def read():
                 row = store.playlists.get_playlist(playlist)
-                return row.title, row.identity_id, row.ytm_playlist_id
+                return row.title, row.account_id, row.provider_playlist_id
 
             change = ("UPDATE playlists SET title='Uncommitted' WHERE id=?", (playlist,))
             committed = ('Committed', identity, 'P')

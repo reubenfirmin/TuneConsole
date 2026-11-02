@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -42,17 +43,22 @@ def probe_suite(tmp_path):
     temproot = tmp_path / "temp"
     temproot.mkdir()
 
-    def run(*args, fail=False):
-        return subprocess.run(
+    def run(*args, fail=False, start=False, role='probe'):
+        arguments = dict(
+            cwd=checkout,
+            env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTEST_ADDOPTS": "",
+                 "PYTEST_DEBUG_TEMPROOT": str(temproot), "FAIL_PROBE": "1" if fail else "",
+                 "SESSION_ROLE": role},
+        )
+        command = (
             [sys.executable, "-c", _BOOTSTRAP, str(_ROOT),
              "-c", str(_ROOT / "pyproject.toml"), "--confcutdir", str(checkout),
              "-o", f"cache_dir={checkout / 'cache'}",
-             "test_probe.py", *args],
-            cwd=checkout,
-            env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTEST_ADDOPTS": "",
-                 "PYTEST_DEBUG_TEMPROOT": str(temproot), "FAIL_PROBE": "1" if fail else ""},
-            capture_output=True, text=True, timeout=30,
+             "test_probe.py", *args]
         )
+        if start:
+            return subprocess.Popen(command, **arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return subprocess.run(command, **arguments, capture_output=True, text=True, timeout=30)
 
     return checkout, run
 
@@ -73,6 +79,74 @@ def test_temporary_databases_are_removed_after_passing_and_failing_runs(probe_su
     assert all(not Path(path).parent.exists() for path in created)
     if explicit:
         assert not basetemp.exists()
+
+
+def test_passing_run_accepts_pytest_removing_its_workspace_first(probe_suite):
+    checkout, run = probe_suite
+    result = run('-o', 'tmp_path_retention_policy=failed')
+    assert result.returncode == 0, result.stdout + result.stderr
+    created = json.loads((checkout / 'created.json').read_text())
+    assert all(not Path(path).parent.exists() for path in created)
+
+
+@pytest.mark.parametrize('explicit', [False, True])
+@pytest.mark.parametrize('fail', [False, True])
+def test_concurrent_focused_sessions_preserve_live_sqlite_and_clean_their_own_workspaces(probe_suite, explicit, fail):
+    checkout, run = probe_suite
+    (checkout / 'test_probe.py').write_text(
+        "import json, os, sqlite3, time\n"
+        "from contextlib import closing\nfrom pathlib import Path\n"
+        "def test_probe(tmp_path, tmp_path_factory):\n"
+        "    role = os.environ['SESSION_ROLE']\n"
+        "    database = tmp_path / 'live.db'\n"
+        "    shared = tmp_path_factory.mktemp('shared')\n"
+        "    (shared / 'fixture.db').write_bytes(b'disposable')\n"
+        "    with closing(sqlite3.connect(database)) as conn:\n"
+        "        conn.execute('CREATE TABLE probe (value TEXT)')\n"
+        "        conn.execute(\"INSERT INTO probe VALUES ('before')\")\n"
+        "        conn.commit()\n"
+        "        report = Path(role + '-ready.json')\n"
+        "        report.with_suffix('.tmp').write_text(json.dumps([str(tmp_path), str(shared)]))\n"
+        "        report.with_suffix('.tmp').replace(report)\n"
+        "        if role == 'A':\n"
+        "            deadline = time.monotonic() + 60\n"
+        "            while not Path('resume-A').exists():\n"
+        "                assert time.monotonic() < deadline, 'other session did not finish'\n"
+        "                time.sleep(.02)\n"
+        "            assert database.is_file(), 'other session deleted the live database'\n"
+        "            assert list(conn.execute('SELECT value FROM probe')) == [('before',)]\n"
+        "            conn.execute(\"INSERT INTO probe VALUES ('after')\")\n"
+        "            conn.commit()\n"
+        "            with closing(sqlite3.connect(database)) as reopened:\n"
+        "                assert list(reopened.execute('SELECT value FROM probe')) == [('before',), ('after',)]\n"
+        "            Path('A-resumed').touch()\n"
+        "    assert not os.environ.get('FAIL_PROBE')\n",
+        encoding='utf-8',
+    )
+    args_a = ['--basetemp', str(checkout / 'temp-A')] if explicit else []
+    args_b = ['--basetemp', str(checkout / 'temp-B')] if explicit else []
+    first = run(*args_a, start=True, role='A', fail=fail)
+    try:
+        deadline = time.monotonic() + 20
+        while not (checkout / 'A-ready.json').exists():
+            assert first.poll() is None, first.communicate()
+            assert time.monotonic() < deadline, 'first session did not create its database'
+            time.sleep(.02)
+        active = json.loads((checkout / 'A-ready.json').read_text())
+        second = run(*args_b, role='B', fail=fail)
+        assert second.returncode == (1 if fail else 0), second.stdout + second.stderr
+        assert all(Path(path).is_dir() for path in active)
+        finished = json.loads((checkout / 'B-ready.json').read_text())
+        assert all(not Path(path).parent.exists() for path in finished)
+        (checkout / 'resume-A').touch()
+        output, error = first.communicate(timeout=20)
+        assert first.returncode == (1 if fail else 0), output + error
+        assert (checkout / 'A-resumed').is_file()
+        assert all(not Path(path).parent.exists() for path in active)
+    finally:
+        if first.poll() is None:
+            first.terminate()
+            first.communicate(timeout=10)
 
 
 @pytest.mark.parametrize("args", [("--collect-only",), ("-k", "missing")])

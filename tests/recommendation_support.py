@@ -45,6 +45,14 @@ def publish_bundles(store, bundle, now=1000, *, fresh=(), vibes=False):
         prepared = {key: value if key.startswith('_') else {
             lane: policies.stamp(items, lane) for lane, items in value.items()}
             for key, value in bundle.items()}
+        if '_vibes' in prepared:
+            selected = deepcopy(prepared['_vibes'])
+            selected['pools'] = {preset: {lane: policies.stamp(items, 'vibe:' + preset)
+                for lane, items in lanes.items()} for preset, lanes in selected.get('pools', {}).items()}
+            selected['genres'] = {preset: {lane: {genre: policies.stamp(items, 'vibe:' + preset)
+                for genre, items in groups.items()} for lane, groups in lanes.items()}
+                for preset, lanes in selected.get('genres', {}).items()}
+            prepared['_vibes'] = selected
         generation = mode_surfaces._publish_typed_bundles(store, snapshot, prepared,
             policies.stamp(list(fresh), 'fresh'), policies, {}, now)
     assert generation is not None

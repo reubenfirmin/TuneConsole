@@ -1,13 +1,11 @@
 """Frozen source-native fixed consensus for independent Uplift suitability."""
 from functools import lru_cache
-import hashlib
-import json
 from pathlib import Path
 from statistics import mean
 
-from yt_playlist.core import audio_embedding
+from yt_playlist.core import audio_embedding, fao
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
-from yt_playlist.rec import audio_vibe_cruise as bounded
+from yt_playlist.rec import audio_vibe_runtime as bounded
 
 FORMAT = 'audio-vibe-uplift-1'
 VERSION = 'uplift-routing-1'
@@ -27,21 +25,15 @@ TRAINING_AGGREGATION = 'mean_embedding_per_annotated_recording'
 
 
 def configured_path():
-    return bounded._configured(ENVIRONMENT_KEY, str(DEFAULT_PATH)) or None
+    return bounded.configured(ENVIRONMENT_KEY, str(DEFAULT_PATH)) or None
 
 
 def mode():
-    return 'active' if bounded._configured(MODE_KEY, 'active') == 'active' else 'off'
+    return 'active' if bounded.configured(MODE_KEY, 'active') == 'active' else 'off'
 
 
 def identity():
-    selected_mode, path = mode(), configured_path()
-    if selected_mode == 'active' and path:
-        try:
-            return '/'.join((VERSION, selected_mode, load(path)['sha256']))
-        except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
-            pass
-    return '/'.join((VERSION, selected_mode, 'shared'))
+    return bounded.identity(VERSION, mode(), configured_path(), load)
 
 
 def validate(artifact):
@@ -53,7 +45,7 @@ def validate(artifact):
             or artifact.get('training_aggregation') != TRAINING_AGGREGATION
             or artifact.get('score_semantics') != 'independent_uncalibrated_suitability'
             or artifact.get('weights') != WEIGHTS
-            or any(not bounded._hash(artifact.get(key)) for key in
+            or any(not bounded.valid_hash(artifact.get(key)) for key in
                    ('embedding_signature', 'source_model_sha256', 'source_plan_sha256'))
             or not isinstance(artifact.get('experts'), dict) or set(artifact['experts']) != set(TARGETS)):
         raise ValueError('Incompatible Uplift model')
@@ -62,29 +54,19 @@ def validate(artifact):
         if (not isinstance(expert, dict) or expert.get('target_names') != targets
                 or type(expert.get('training_rows')) is not int or expert['training_rows'] <= 0):
             raise ValueError('Invalid Uplift source identity')
-        bounded._stage(expert.get('model'), audio_embedding.DIMENSIONS, len(targets), allow_rff=False)
+        bounded.validate_stage(expert.get('model'), audio_embedding.DIMENSIONS, len(targets), allow_rff=False)
     return artifact
 
 
 @lru_cache(maxsize=2)
 def _load(path, mtime, size):
-    if not 0 < size <= MAX_BYTES:
-        raise ValueError('Uplift artifact exceeds size bound')
-    with Path(path).open('rb') as stream:
-        raw = stream.read(MAX_BYTES + 1)
-    if len(raw) != size:
-        raise ValueError('Uplift artifact changed during read')
-    try:
-        header = validate(json.loads(raw))
-    except RecursionError as error:
-        raise ValueError('Invalid Uplift artifact nesting') from error
-    return {'header': header, 'sha256': hashlib.sha256(raw).hexdigest()}
+    return bounded.read_artifact(path, size, MAX_BYTES, lambda artifact: {'header': validate(artifact)})
 
 
 def load(path):
     path = Path(path).resolve()
-    stat = path.stat()
-    return _load(str(path), stat.st_mtime_ns, stat.st_size)
+    info = fao.stat(path)
+    return _load(str(path), info.identity, info.logical_bytes)
 
 
 def score(model, values):
@@ -92,7 +74,7 @@ def score(model, values):
     native, scores = {}, {}
     for source, targets in TARGETS.items():
         expert = model['header']['experts'][source]
-        predicted = [bounded._predict(expert['model'], row) for row in values]
+        predicted = [bounded.predict(expert['model'], row) for row in values]
         attributes = dict(zip(targets, (mean(column) for column in zip(*predicted, strict=True)), strict=True))
         native[source] = attributes
         # Soundtracks averages valence/happiness; all other sources have one target.
@@ -105,18 +87,5 @@ def score(model, values):
 
 def apply(samples, prediction):
     path = configured_path()
-    if mode() != 'active' or not path:
-        return prediction
-    try:
-        model = load(path)
-        if {audio_embedding.signature(sample) for sample in samples} != {model['header']['embedding_signature']}:
-            return prediction
-        candidate = score(model, [sample['embedding']['values'] for sample in samples])
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
-        return prediction
-    suitability = {row['vibe']: row['score'] for row in prediction['ranking']}
-    suitability.update(prediction.get('suitability', {}))
-    suitability['uplift'] = candidate['score']
-    return {**prediction, 'suitability': suitability,
-            'individual_models': {**prediction.get('individual_models', {}),
-                                  'uplift': {**candidate, 'mode': 'active'}}}
+    return bounded.apply(samples, prediction, selected_mode=mode(), path=path,
+                         loader=load, scorer=score, vibe='uplift')

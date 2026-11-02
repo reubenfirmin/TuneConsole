@@ -271,12 +271,14 @@ def test_account_data_requires_selection_preview_and_confirmation_before_writes(
     # Setup keeps the completed report visible without opening the mature dashboard.
     assert 'id="onboarding-feed"' in dashboard.text
     assert 'class="dash-nav"' not in dashboard.text
+    from tests.home_fixture_support import returning_listener
     from tests.onboarding_support import publish_personal_mix
     web.post('/home/onboard/format', data={'format': 'mixes'})
     publish_personal_mix(store, now=1000)
+    returning_listener(store, 'mixes', now=1000)
     dashboard = web.get("/")
     assert "Spotify import complete" in dashboard.text
-    assert "panel: location.hash.slice(1) || 'notices'" in dashboard.text
+    assert "panel: homePanel(location.hash.slice(1)) || 'notices'" in dashboard.text
 
     report = web.get("/import/spotify-library/report")
     assert report.status_code == 200

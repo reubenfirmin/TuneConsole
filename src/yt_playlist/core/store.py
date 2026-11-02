@@ -9,7 +9,7 @@ from yt_playlist.core.db_reads import MAX_READERS, read_view
 from yt_playlist.core.db_snapshot import read_snapshot
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.db_diagnostics import DiagnosticConnection
-from yt_playlist.core import evidence_ledger
+from yt_playlist.core import evidence_ledger, file_owners
 from yt_playlist.core.work_diagnostics import MaintenanceDiagnostics
 from yt_playlist.core.priority import RequestPriority, ServingLock
 from yt_playlist.core import collection_recovery, group_documents, metadata_delivery_files, metadata_runtime_files, policy_documents, recommendation_outputs, served_facts
@@ -79,7 +79,7 @@ class Store:
         if str(db_path) != ':memory:':
             from yt_playlist.core.db_rebuild.install import recover
             recover(Path(db_path).resolve())
-        self.conn = sqlite3.connect(str(db_path), check_same_thread=False, factory=DiagnosticConnection)
+        self.conn = sqlite3.connect(str(db_path), uri=True, check_same_thread=False, factory=DiagnosticConnection)
         self._db_path = None if str(db_path) == ":memory:" else Path(db_path).resolve()
         self._evidence_key = uuid.uuid4().hex
         from yt_playlist.core.playback_inbox import Inbox
@@ -89,6 +89,10 @@ class Store:
             import shutil
             runtime_root = metadata_runtime_files.root_for_database(None, self._evidence_key)
             self.conn._close_callbacks.append(lambda: shutil.rmtree(runtime_root, ignore_errors=True))
+            from . import fao
+            for domain in file_owners.owners():
+                root = fao.root_for_database(None, self._evidence_key, domain)
+                self.conn._close_callbacks.append(lambda root=root: shutil.rmtree(root, ignore_errors=True))
         self._configure_connection()
         self.priority = RequestPriority()
         self._lock = ServingLock(self.priority)
@@ -114,6 +118,7 @@ class Store:
         """Read-only background view, optionally restricted to declared revision keys."""
         root = policy_documents.root_for_database(self._db_path, self._evidence_key)
         with ExitStack() as retained:
+            retained.enter_context(file_owners.readers(self._db_path, self._evidence_key))
             retained.enter_context(policy_documents.retained_reader(root))
             retained.enter_context(policy_documents.retained_reader(
                 evidence_ledger.root_for_database(self._db_path, self._evidence_key)))
@@ -150,6 +155,7 @@ class Store:
             return
         root = policy_documents.root_for_database(self._db_path, self._evidence_key)
         with ExitStack() as retained:
+            retained.enter_context(file_owners.readers(self._db_path, self._evidence_key))
             retained.enter_context(policy_documents.retained_reader(root))
             retained.enter_context(policy_documents.retained_reader(
                 evidence_ledger.root_for_database(self._db_path, self._evidence_key)))
@@ -297,6 +303,30 @@ class Store:
         self.taste_groups = (CompactTasteGroupsRepo if self._compact_group_files else TasteGroupsRepo)(self)
         self.trends = TrendsRepo(self)
         self.road_trip = RoadTripRepo(self)
+
+    @classmethod
+    def open_current(cls, db_path):
+        """Open an already constructed current database for domain preparation.
+
+        Importers must finish and validate its schema first. This boundary runs
+        neither migrations nor startup history repair on the private candidate.
+        """
+        from .migrations import current, regular
+        store = cls(db_path)
+        try:
+            current.validate(store.conn)
+            regular.validate(store.conn)
+            store._schema_compatibility = False
+            store._rebuild_source_version = None
+            store._schema_recovery_pending = False
+            store._bind_repositories()
+            if store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() != 'wal':
+                raise RuntimeError('Domain preparation requires WAL readers')
+            store._snapshot_revisions = Revisions(store.conn)
+            return store
+        except BaseException:
+            store.conn.close()
+            raise
 
     @_synchronized
     def init_schema(self, *, defer_metadata=False):

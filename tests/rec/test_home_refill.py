@@ -6,13 +6,22 @@ from fastapi.testclient import TestClient
 import pytest
 
 from tests.rec.test_home_prepared import prepared, seed, service
-from tests.home_fixture_support import publish_menu
+from tests.home_fixture_support import publish_menu, returning_listener
+from tests.recommendation_support import publish_bundles
 from tests.test_group_home import library as group_library
 from yt_playlist.core.activity import WorkBudgetExceeded
-from yt_playlist.rec import choice_evidence, home_cards, home_prepared, home_vibe, mix_tuning, transient
+from yt_playlist.rec import choice_evidence, home_cards, home_prepared, home_vibe, mix_tuning, mode_surfaces, transient
 from yt_playlist.web.app import create_app
 
 
+@pytest.fixture
+def returning_vibe_listener(store):
+    # These refresh cases concern someone already using Vibes. Current menu
+    # readiness may change while their earned access remains available (#649).
+    returning_listener(store, 'vibes', now=999)
+
+
+@pytest.mark.usefixtures('returning_vibe_listener')
 @pytest.mark.parametrize('change', ['vibe', 'genre', 'both', 'learning'])
 def test_preferences_keep_prepared_mixes_and_explain_pending_update(store, prepared, monkeypatch, change):
     if change in ('genre', 'both'):
@@ -45,6 +54,7 @@ def test_preferences_keep_prepared_mixes_and_explain_pending_update(store, prepa
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
 
 
+@pytest.mark.usefixtures('returning_vibe_listener')
 def test_tuned_set_survives_learning_refresh_but_expiry_prefers_baseline(store, prepared):
     with mix_tuning.adjusting_vibe(store, 1001):
         store.settings.set_setting(home_vibe.SETTING, 'energize')
@@ -60,6 +70,7 @@ def test_tuned_set_survives_learning_refresh_but_expiry_prefers_baseline(store, 
     assert home_prepared.load(store, 1001 + mix_tuning.TTL_S)['tuning'] == prepared['tuning']
 
 
+@pytest.mark.usefixtures('returning_vibe_listener')
 def test_updated_set_replaces_fallback_in_same_window_and_clears_notice(store, prepared):
     with mix_tuning.adjusting_vibe(store, 1001):
         store.settings.set_setting(home_vibe.SETTING, 'energize')
@@ -84,6 +95,7 @@ def test_updated_set_replaces_fallback_in_same_window_and_clears_notice(store, p
         assert 'hx-get="/home/cards?prepare_attempt=' not in response.text
 
 
+@pytest.mark.usefixtures('returning_vibe_listener')
 def test_stale_mixes_still_apply_new_dislikes(store, prepared):
     first = home_prepared.cards(store, prepared, 1000, service(store), record=False)
     key = first.protos[0]['tracks'][0]['key']
@@ -259,38 +271,46 @@ def test_retry_reuses_completed_card_work_without_publishing_partial_set(store, 
     assert not store.modes.impression_counts()
 
 
-def test_adaptive_pool_decode_survives_deferred_setup_and_invalidates_on_replacement(store, monkeypatch):
+def test_typed_adaptive_pools_survive_deferred_setup_and_follow_replacement(store, monkeypatch):
     from yt_playlist.repos.rec_proposals import RecProposalsRepo
     group_library(store)
-    real_read = RecProposalsRepo.group_pools_json
-    reads = []
+    real_read = mode_surfaces.bundle_metadata
+    framings = []
 
-    def counted(repo):
-        value = real_read(repo)
-        reads.append(value)
+    def counted(reader, **kwargs):
+        value = real_read(reader, **kwargs)
+        framings.append(value)
         return value
+
+    def retired(*args, **kwargs):
+        pytest.fail('Typed adaptive preparation must not decode retired pool documents')
 
     def defer(*args, **kwargs):
         raise WorkBudgetExceeded('Completed pool capture must survive later setup deferral')
 
-    monkeypatch.setattr(RecProposalsRepo, 'group_pools_json', counted)
+    monkeypatch.setattr(RecProposalsRepo, 'group_pools_json', retired)
+    monkeypatch.setattr(mode_surfaces, 'bundle_metadata', counted)
     with monkeypatch.context() as patch:
         patch.setattr(home_prepared, 'tuning_key', defer)
         assert home_prepared.prepare(store, 1200) is None
         assert home_prepared.prepare(store, 1201) is None
-    assert len(reads) == 1
+    assert len(framings) == 2 and framings[0] == framings[1]
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) is None
     payload = home_prepared.prepare(store, 1202)
     assert payload and payload['menus'][0]['protos']
-    assert len(reads) == 1
-    bundles = store.rec_proposals.get_proposals('mode_bundles')
-    bundles['_meta']['pool_replacement'] = True
-    store.rec_proposals.put_proposals('mode_bundles', bundles, 1203)
+    assert len(framings) >= 3 and all(value == framings[0] for value in framings)
+    before = len(framings)
+    bundles = deepcopy(store._fixture_bundle_payload)
+    bundles['_meta']['comfort_pool'] -= 1
+    publish_bundles(store, bundles, now=1203)
     with monkeypatch.context() as patch:
         patch.setattr(home_prepared, 'tuning_key', defer)
         assert home_prepared.prepare(store, 1204) is None
-    assert len(reads) == 2 and reads[0] != reads[1]
+    assert len(framings) == before + 1 and framings[-1] != framings[0]
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == payload
+    replacement = home_prepared.prepare(store, 1205)
+    assert replacement and replacement['menus'][0]['protos']
+    assert replacement['generation'] != payload['generation']
 
 
 def test_context_and_mix_preparation_share_signals_across_retries_and_expire(store, monkeypatch):

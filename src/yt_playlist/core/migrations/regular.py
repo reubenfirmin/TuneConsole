@@ -198,6 +198,86 @@ def _validate_vibe_provenance(conn):
     vibe_provenance.validate(conn)
 
 
+def _install_vibe_file_guards(conn, context):
+    from .. import vibe_provenance
+    vibe_provenance.install_guards(conn, context)
+
+
+def _validate_vibe_file_guards(conn):
+    from .. import vibe_provenance
+    vibe_provenance.validate_guards(conn)
+
+
+def _install_vibe_allocation(conn, context):
+    from .. import vibe_provenance
+    vibe_provenance.install_allocation(conn, context)
+
+
+def _validate_vibe_allocation(conn):
+    from .. import vibe_provenance
+    vibe_provenance.validate_allocation(conn)
+
+
+def _install_profile_files(conn, context):
+    from .. import profile_files
+    profile_files.install(conn, context)
+
+
+def _validate_profile_files(conn):
+    from .. import profile_files
+    profile_files.validate(conn)
+
+
+def _install_embedding_files(conn, context):
+    from .. import embedding_files
+    embedding_files.install(conn, context)
+
+
+def _validate_embedding_files(conn):
+    from .. import embedding_files
+    embedding_files.validate(conn)
+
+
+def _install_legacy_journals(conn, context):
+    from .. import legacy_journals
+    legacy_journals.install(conn, context)
+
+
+def _validate_legacy_journals(conn):
+    from .. import legacy_journals
+    legacy_journals.validate(conn)
+
+
+def _install_provenance_lifecycle(conn, context):
+    from .. import vibe_provenance
+    vibe_provenance.install_lifecycle(conn, context)
+
+
+def _validate_provenance_lifecycle(conn):
+    from .. import vibe_provenance
+    vibe_provenance.validate_lifecycle(conn)
+
+
+def _install_policy_history(conn, context):
+    from .. import policy_history
+    policy_history.install(conn, context)
+
+
+def _validate_policy_history(conn):
+    from .. import policy_history
+    policy_history.validate(conn)
+
+
+def _install_vibe_versions(conn, context):
+    from .. import vibe_versions
+    vibe_versions.install(conn, context)
+
+
+def _validate_vibe_versions(conn):
+    from .. import vibe_versions
+    vibe_versions.validate(conn)
+
+
 def after_owner_upgrade(conn):
     """Keep adopted bounded guards when an explicit upgrade creates an owner."""
     if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='schema_changes'").fetchone():
@@ -205,6 +285,48 @@ def after_owner_upgrade(conn):
     if conn.execute("SELECT 1 FROM schema_changes WHERE version=7 AND name='bounded_installed_genre_repair'").fetchone():
         from ..preparation import installed_genre_contract
         installed_genre_contract.install_guards(conn)
+    if conn.execute("SELECT 1 FROM schema_changes WHERE version=16 AND name='file_owned_vibe_guards'").fetchone():
+        from .. import vibe_provenance
+        vibe_provenance.install_guards(conn)
+    if conn.execute("SELECT 1 FROM schema_changes WHERE name='continuing_historical_policy_attribution'").fetchone():
+        from .. import policy_history
+        policy_history.install_capture(conn)
+    if conn.execute("SELECT 1 FROM schema_changes WHERE name='continuing_installed_embedding_order'").fetchone():
+        from .. import embedding_files
+        embedding_files.install_legacy_order_guards(conn)
+    if conn.execute("SELECT 1 FROM schema_changes WHERE name='grouping_checkpoint_retention'").fetchone():
+        from .. import group_checkpoint_retention
+        group_checkpoint_retention.install(conn)
+
+
+def _install_policy_history_capture(conn, context):
+    from .. import policy_history
+    policy_history.install_capture(conn,context)
+
+
+def _validate_policy_history_capture(conn):
+    from .. import policy_history
+    policy_history.validate_capture(conn)
+
+
+def _install_embedding_order(conn, context):
+    from .. import embedding_files
+    embedding_files.install_legacy_order(conn,context)
+
+
+def _validate_embedding_order(conn):
+    from .. import embedding_files
+    embedding_files.validate_legacy_order(conn)
+
+
+def _install_group_checkpoint_retention(conn, context):
+    from .. import group_checkpoint_retention
+    group_checkpoint_retention.install(conn, context)
+
+
+def _validate_group_checkpoint_retention(conn):
+    from .. import group_checkpoint_retention
+    group_checkpoint_retention.validate(conn)
 
 
 CHANGES = (
@@ -223,6 +345,17 @@ CHANGES = (
     Change(13, 'retired_taste_mode_payloads', _install_mode_retention, _validate_mode_retention),
     Change(14, 'native_metadata_delivery_freshness', _install_native_metadata_heads, _validate_native_metadata_heads),
     Change(15, 'file_owned_prediction_provenance', _install_vibe_provenance, _validate_vibe_provenance),
+    Change(16, 'file_owned_vibe_guards', _install_vibe_file_guards, _validate_vibe_file_guards),
+    Change(17, 'monotonic_vibe_calculation_ids', _install_vibe_allocation, _validate_vibe_allocation),
+    Change(18, 'file_owned_musical_profiles', _install_profile_files, _validate_profile_files),
+    Change(19, 'file_owned_embeddings', _install_embedding_files, _validate_embedding_files),
+    Change(20, 'file_owned_legacy_journals', _install_legacy_journals, _validate_legacy_journals),
+    Change(21, 'protected_file_provenance_inputs', _install_provenance_lifecycle, _validate_provenance_lifecycle),
+    Change(22, 'compact_historical_policy_identities', _install_policy_history, _validate_policy_history),
+    Change(23, 'vibe_version_identities', _install_vibe_versions, _validate_vibe_versions),
+    Change(24, 'continuing_historical_policy_attribution', _install_policy_history_capture, _validate_policy_history_capture),
+    Change(25, 'continuing_installed_embedding_order', _install_embedding_order, _validate_embedding_order),
+    Change(26, 'grouping_checkpoint_retention', _install_group_checkpoint_retention, _validate_group_checkpoint_retention),
 )
 
 

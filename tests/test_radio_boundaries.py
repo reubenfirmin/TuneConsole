@@ -1,12 +1,12 @@
 """Lifecycle and restart boundaries across the independent radio collaborators."""
 import ast
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from tests.radio_session_support import poc, play
+from yt_playlist.core import radio_storage
 from yt_playlist.web.radio_persistence import migrate
 from yt_playlist.web.radio_edits import AppendOperation
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending, RadioPlaylistIO
@@ -68,12 +68,13 @@ def test_restart_checks_an_uncertain_write_before_sending_another(poc, version, 
     with pytest.raises(RuntimeError, match="Read response lost"):
         c.advance(c.session)
     assert c.session.phase == phase
-    saved = json.loads(c.ctx.store.settings.get_setting("radio_current_session"))
+    saved = c.persistence.load()
     assert saved["phase"] == phase
     saved["version"] = version
     if version == 1:
         saved.pop("phase")
-    c.ctx.store.settings.set_setting("radio_current_session", json.dumps(saved))
+    with c.ctx.store.conn:
+        radio_storage.save(c.ctx.store.conn, saved, expected=c.persistence.revision)
     remote.after_add = lambda: None
     restored = PlaylistRadio(c.ctx)
     restored.join()
@@ -112,11 +113,12 @@ def test_restart_does_not_adopt_a_session_the_user_stopped(poc, version):
     c.start()
     play(c, "v1")
     c.stop()
-    saved = json.loads(c.ctx.store.settings.get_setting("radio_current_session"))
+    saved = c.persistence.load()
     saved["version"] = version
     if version == 1:
         saved.pop("phase")
-    c.ctx.store.settings.set_setting("radio_current_session", json.dumps(saved))
+    with c.ctx.store.conn:
+        radio_storage.save(c.ctx.store.conn, saved, expected=c.persistence.revision)
     before = (list(remote.adds), list(remote.removes), list(frames), len(workers))
     restored = PlaylistRadio(c.ctx)
     assert not restored.bootstrap()["state"]["active"]

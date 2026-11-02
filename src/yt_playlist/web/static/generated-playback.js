@@ -15,6 +15,14 @@
     const player = status?.now_playing || {};
     const playing = player.playlist_ytm_id === pending.playlist && !player.paused;
     const expired = Date.now() - pending.at >= 45000;
+    if (playing) {
+      note?.remove();
+      note = null;
+      try { sessionStorage.removeItem('tc-generated-playback'); } catch (_) {}
+      pending = null;
+      return;
+    }
+    if (!expired && status?.connected !== false) return;
     if (!note || !note.isConnected) {
       const owner = document.querySelector('.pl-headmain, [data-generated-playlist]');
       if (!owner) return;
@@ -22,11 +30,7 @@
       note.className = 'section-note'; note.dataset.generatedPlayback = '';
       note.setAttribute('role', 'status'); owner.append(note);
     }
-    if (playing) {
-      note.textContent = 'Playing your saved mix on YouTube Music.';
-      try { sessionStorage.removeItem('tc-generated-playback'); } catch (_) {}
-      pending = null;
-    } else if (expired || status?.connected === false) {
+    if (expired || status?.connected === false) {
       note.replaceChildren(document.createTextNode('Your mix is saved. ' +
         (status?.connected === false ? 'Reconnect the YouTube Music extension. ' : 'Playback has not started. ') +
         (note.closest('.pl-headmain') ? 'Use Play to retry this saved playlist, or ' : 'You can ')));
@@ -34,7 +38,7 @@
       link.textContent = 'open it on YouTube Music';
       link.href = 'https://music.youtube.com/watch?list=' + encodeURIComponent(pending.playlist);
       link.target = '_blank'; link.rel = 'noopener'; note.append(link);
-    } else note.textContent = 'Your mix is saved. Waiting for YouTube Music playback…';
+    }
   }
   load();
   window.addEventListener('generated-playback-pending', () => { load(); update(); });

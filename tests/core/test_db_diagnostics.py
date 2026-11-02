@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from yt_playlist.core import db_diagnostics as diagnostics
+from yt_playlist.core import lock_diagnostics
 from yt_playlist.core import priority
 from yt_playlist.core.activity import WorkClosing, cancellable_work
 from yt_playlist.core.work_diagnostics import work_span
@@ -20,6 +21,7 @@ from yt_playlist.repos.base import Repo, synchronized
 def clock(monkeypatch, caplog):
     value = [0.]
     monkeypatch.setattr(diagnostics, "monotonic", lambda: value[0])
+    monkeypatch.setattr(lock_diagnostics, "monotonic", lambda: value[0])
     caplog.set_level(logging.WARNING, logger="yt_playlist.database")
     return value
 
@@ -296,7 +298,7 @@ def test_checkpoint_failure_retains_outcome_and_restores_timing_context(store, c
     assert f"outcome={'cancelled' if error is WorkClosing else 'failed'}" in caplog.text
     assert 'operation=ProbeRepo.query phase=enrichment' in caplog.text
     assert 'private failure detail' not in caplog.text
-    assert diagnostics._lock_timing.get() is None
+    assert lock_diagnostics._lock_timing.get() is None
     assert store.priority._foreground == 0
     assert ProbeRepo(store).query('SELECT 1')[0][0] == 1
 

@@ -52,9 +52,9 @@ def test_card_view_counter_ticks_and_reads(store):
 
 def test_proposals_roundtrip_and_missing(store):
     dao = store.rec_proposals
-    assert dao.get_proposals("discover") is None
-    dao.put_proposals("discover", [{"artist": "X", "title": "LP"}], now=1.0)
-    assert dao.get_proposals("discover") == [{"artist": "X", "title": "LP"}]
+    assert dao.get_proposals("home_discovery") is None
+    dao.put_proposals("home_discovery", [{"artist": "X", "title": "LP"}], now=1.0)
+    assert dao.get_proposals("home_discovery") == [{"artist": "X", "title": "LP"}]
 
 
 def test_tracks_total_replaces_raw_sql(store):

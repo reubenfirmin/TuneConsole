@@ -118,8 +118,11 @@ def test_recovery_cleanup_uses_actual_typed_owners_and_preserves_retained_semant
     assert policy_recovery._missing_references(store.conn) == missing
 
 
-def test_retired_policy_sharing_job_does_not_pause_recording_or_compact_new_schema(recommendations, monkeypatch):
-    store = recommendations
+def test_retired_policy_sharing_job_does_not_pause_recording_or_compact_new_schema(file_backed_store, monkeypatch):
+    # A fully admitted current database has completed regular DDL. The typed
+    # recommendation fixture deliberately owns only a partial historical schema.
+    store = file_backed_store
+    assert policy_storage.typed(store.conn)
     store.settings.set_setting(policy_upgrade.KEY, json.dumps({'phase': 'sharing', 'cursor': 'old'}))
     def forbidden(*args, **kwargs):
         pytest.fail('Typed policies invoked the retired SQLite sharing job')

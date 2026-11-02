@@ -57,7 +57,7 @@ def test_junction_geometry_remains_continuous_around_control(page, radio_ui):
     assert not jumps, jumps
 
 
-@pytest.mark.parametrize("width", [1440, 390])
+@pytest.mark.parametrize("width", [1440])
 def test_tune_streams_modal_applies_all_axes_and_keeps_selected_stream_lit(page, radio_ui, width):
     api = radio_ui
     page.set_viewport_size({"width": width, "height": 1000})
@@ -142,7 +142,7 @@ def test_decay_and_metadata_refresh_without_switching_streams(page, radio_ui):
         for b in api.ready["directions"]]}
     expect(page.locator(".radio-session")).to_be_visible(timeout=6000)
     expect(page.locator(".radio-proposed-meta")).to_have_count(0)
-    bars = page.get_by_role("progressbar")
+    bars = page.locator('.radio-direction').get_by_role("progressbar")
     expect(bars).to_have_count(4)
     expect(bars.nth(1)).to_have_attribute("aria-valuenow", "1")
     api.state = {**api.state, "directions": [

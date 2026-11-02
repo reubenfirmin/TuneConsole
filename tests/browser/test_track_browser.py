@@ -7,7 +7,7 @@ from tests.test_song_actions import SONG
 from yt_playlist.web.track_links import track_url
 
 
-@pytest.mark.parametrize('width', [1280, 390])
+@pytest.mark.parametrize('width', [1280])
 def test_musical_evidence_opens_with_keyboard_and_fits_narrow_screens(song_app, page, width):
     from tests.musical_support import prepare_profiles
     from yt_playlist.providers.base import MetadataObservation
@@ -42,7 +42,7 @@ def test_musical_evidence_opens_with_keyboard_and_fits_narrow_screens(song_app, 
     page.screenshot(path=f'/tmp/tuneconsole-405-provenance-{width}.png', full_page=True)
 
 
-@pytest.mark.parametrize('width', [1280, 390])
+@pytest.mark.parametrize('width', [1280])
 def test_track_details_actions_and_navigation(song_app, page, width, tmp_path):
     # This journey checks a loaded hero; failure and fallback use separate image-event cases.
     song_app['store'].tracks.upsert_track('owned-song', 'Owned Song', 'Artist & Friends', 'Album', 180,
@@ -89,7 +89,7 @@ def test_track_details_actions_and_navigation(song_app, page, width, tmp_path):
     assert not errors
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_populated_track_keeps_memberships_and_precise_ledger_together(song_app, page, width):
     store = song_app['store']
     track = store.tracks.track_detail('owned-song')

@@ -106,6 +106,7 @@ def test_load_reconciles_stale_database_identities_with_saved_config(store, monk
     rt = Runtime(store, tmp_path / "config.toml", tmp_path)
     rt.apply_setup([{"label": "main", "credential_ref": "browser.json", "is_master": True}])
     # Reproduce a removal saved by an older version: config is correct, DB still has the old row.
+    store.conn.execute("UPDATE accounts SET is_master=0")
     removed = store.accounts.upsert_account("brand", "browser.json", "UC9", True)
     rt.load()
 

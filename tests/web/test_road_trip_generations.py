@@ -125,6 +125,7 @@ def test_overlapping_edits_invalidate_queued_workers_and_current_failure_settles
 
 
 def test_repository_rejects_old_revision_and_deleted_draft(store):
+    store.accounts.upsert_account('main', 'cred', None, True)
     rid = _recipe(store)
     store.road_trip.save_road_trip_draft(rid, {'revision': 'new', 'value': 'new'}, 100)
     assert not store.road_trip.replace_road_trip_draft(
@@ -142,6 +143,7 @@ def test_remote_save_completion_does_not_replace_newer_or_deleted_draft(store, m
     from yt_playlist.core.activity import Activity
     from yt_playlist.web.road_trip_drafts import RoadTripDrafts
 
+    store.accounts.upsert_account('main', 'cred', None, True)
     _stub_pools(monkeypatch, store)
     rid = _recipe(store)
     workers = []

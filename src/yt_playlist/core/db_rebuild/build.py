@@ -1,14 +1,14 @@
 """Construct and verify database candidates without deleting from their source.
 
 construct() runs the schema owner's direct conversions with atomic bookmarks.
-build() retains the existing installed-format compaction contract until the
-normalized destination and its source mappings are integrated. Neither installs
-a database or advances source migration history.
+build() copies retained values into fresh pages after preparation. Neither
+installs a database or advances source migration history.
 """
-from contextlib import closing
+from contextlib import closing, ExitStack, nullcontext
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import time
@@ -33,6 +33,8 @@ class Batch:
 class Stage:
     name: str
     copy: Callable
+    repositories: bool = False
+    batch_size: int = 128
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,8 @@ class Destination:
 
     initialize(target) creates the destination once. Each stage's
     copy(source, target, cursor, limit) returns a Batch without committing.
+    Repository stages receive a normal Store after the schema is complete;
+    their repository commits join the same outer bookmark transaction.
     verify(source, target) establishes the domain preservation requirements.
     Source admission and domain mappings remain explicit at the caller.
     """
@@ -48,6 +52,10 @@ class Destination:
     initialize: Callable
     stages: tuple[Stage, ...]
     verify: Callable
+    compact: bool = False
+    runtime_stages: int | None = None
+    verify_runtime: Callable | None = None
+    verify_analytics: Callable | None = None
 
 
 CHECKPOINT = '_database_rebuild_checkpoint'
@@ -65,7 +73,7 @@ def _source_identity(path):
             with candidate.open('rb') as stream:
                 # A read-only WAL connection may create an empty sidecar. That
                 # contains no committed source data and is not a source change.
-                if candidate != path and candidate.stat().st_size == 0:
+                if candidate != path and candidate.stat().st_size <= 32:
                     continue
                 result[candidate.name] = hashlib.file_digest(stream, 'sha256').hexdigest()
         except FileNotFoundError:
@@ -87,19 +95,21 @@ def _checkpoint(conn, value=None):
 def _owned_transaction(conn):
     """Domain callbacks must not publish a batch outside its bookmark commit."""
     def authorize(action, *_):
-        return sqlite3.SQLITE_DENY if action in (sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_SAVEPOINT) else sqlite3.SQLITE_OK
+        # The outer BEGIN is owned here. Domain writers may use savepoints for
+        # local error recovery; releasing one cannot commit this outer batch.
+        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_TRANSACTION else sqlite3.SQLITE_OK
     conn.set_authorizer(authorize)
 
 
-def construct(source, output, destination, *, batch_size=128, progress=lambda phase, detail: None,
-              cancelled=lambda: False):
+def construct(source, output, destination, *, batch_size=8192, progress=lambda phase, detail: None,
+              cancelled=lambda: False, runtime_only=False):
     """Build or resume a fresh-schema candidate with atomic batch checkpoints.
 
     Only the destination is written. A failed batch rolls back with its cursor;
     completed batches remain resumable while the exact source and destination
     contract are unchanged. A candidate is publishable only after this function
     returns: final validation precedes removal of its private checkpoint table.
-    The job's immutable verified recovery copy is the stable restart source;
+    The job's write-fenced original is the stable restart source;
     checkpointing an active serving WAL conservatively invalidates its identity.
     """
     if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
@@ -107,7 +117,8 @@ def construct(source, output, destination, *, batch_size=128, progress=lambda ph
     names = [stage.name for stage in destination.stages]
     if (not isinstance(destination.version, str) or not destination.version
             or any(not isinstance(name, str) or not name for name in names)
-            or len(set(names)) != len(names)):
+            or len(set(names)) != len(names)
+            or any(type(stage.batch_size) is not int or stage.batch_size < 1 for stage in destination.stages)):
         raise ValueError('Rebuild needs a versioned destination and unique named stages')
     source, output = Path(source).resolve(strict=True), Path(output).absolute()
     if output.is_symlink() or output.resolve() == source:
@@ -119,6 +130,8 @@ def construct(source, output, destination, *, batch_size=128, progress=lambda ph
         reader.execute('BEGIN')
         reader.execute('SELECT name FROM main.sqlite_schema LIMIT 1').fetchone()
         identity = _source_identity(source)
+        from . import files
+        files.borrow(source, output)
         if not output.exists():
             used = (reader.execute('PRAGMA page_count').fetchone()[0]
                     - reader.execute('PRAGMA freelist_count').fetchone()[0])
@@ -147,22 +160,38 @@ def construct(source, output, destination, *, batch_size=128, progress=lambda ph
             except BaseException:
                 output.unlink(missing_ok=True)
                 raise
-        with closing(sqlite3.connect(output)) as target:
+        with ExitStack() as resources:
+            target = resources.enter_context(closing(sqlite3.connect(output.as_uri(), uri=True)))
+            prepared = None
             _configure(target, cancelled)
             target.execute('PRAGMA synchronous=FULL')
+            # Direct SQL copies read the same immutable recovery source. The
+            # read-only URI also prevents a converter from changing that input.
+            target.execute('ATTACH DATABASE ? AS rebuild_source', (source.as_uri()+'?mode=ro',))
             try:
                 pending = _checkpoint(target)
                 if (pending.get('format') != 1 or pending.get('source') != identity
                         or pending.get('destination') != destination.version or pending.get('stages') != names):
                     raise ValueError('Rebuild source or destination contract changed; discard the stale candidate')
-                while pending['stage'] < len(destination.stages):
+                end = (destination.runtime_stages if runtime_only and destination.runtime_stages is not None
+                       else len(destination.stages))
+                while pending['stage'] < end:
                     if cancelled():
                         raise InterruptedError('Database rebuild interrupted')
                     stage = destination.stages[pending['stage']]
+                    if stage.repositories and prepared is None:
+                        from ..store import Store
+                        prepared = Store.open_current(output)
+                        target.close()
+                        target = prepared.conn
+                        resources.callback(target.close)
+                        _configure(target, cancelled)
                     target.execute('BEGIN IMMEDIATE')
                     _owned_transaction(target)
                     try:
-                        batch = stage.copy(reader, target, pending['cursor'], batch_size)
+                        with target.atomic(join=True) if prepared else nullcontext():
+                            batch = stage.copy(reader, prepared if stage.repositories else target,
+                                               pending['cursor'], min(batch_size, stage.batch_size))
                     finally:
                         target.set_authorizer(None)
                     if (not isinstance(batch, Batch) or not isinstance(batch.rows, int)
@@ -181,16 +210,21 @@ def construct(source, output, destination, *, batch_size=128, progress=lambda ph
                 if cancelled():
                     raise InterruptedError('Database rebuild interrupted')
                 progress('verify', {'destination': destination.version})
-                target.execute('PRAGMA query_only=ON')
-                target.execute('BEGIN')
-                _owned_transaction(target)
-                try:
-                    destination.verify(reader, target)
-                    _verify(target)
-                finally:
-                    target.set_authorizer(None)
-                    target.rollback()
-                    target.execute('PRAGMA query_only=OFF')
+                # Independent read-only handles admit attached SQL comparisons
+                # even after repository stages have used a normal Store writer.
+                with closing(sqlite3.connect(output.as_uri()+'?mode=ro',uri=True)) as verified:
+                    _configure(verified,cancelled)
+                    verified.execute('ATTACH DATABASE ? AS rebuild_source', (source.as_uri()+'?mode=ro',))
+                    verified.execute('PRAGMA query_only=ON')
+                    verified.execute('BEGIN')
+                    _owned_transaction(verified)
+                    try:
+                        verify = destination.verify_runtime if runtime_only else destination.verify
+                        (verify or destination.verify)(reader, verified)
+                        _verify(verified)
+                    finally:
+                        verified.set_authorizer(None)
+                        verified.rollback()
                 # Inspect data_version outside the pinned snapshot as well as
                 # the persistent fingerprint. A commit between pinning that
                 # snapshot and hashing could otherwise make both hashes agree
@@ -199,9 +233,6 @@ def construct(source, output, destination, *, batch_size=128, progress=lambda ph
                 if (reader.execute('PRAGMA data_version').fetchone()[0] != observed_version
                         or _source_identity(source) != identity):
                     raise ValueError('Source changed during database rebuild')
-                target.execute('BEGIN IMMEDIATE')
-                target.execute('DROP TABLE '+CHECKPOINT)
-                target.commit()
                 report = dict(source=str(source), output=str(output), destination=destination.version,
                               rows=pending['rows'], sql_bytes=output.stat().st_size,
                               seconds=time.monotonic()-started)
@@ -209,7 +240,89 @@ def construct(source, output, destination, *, batch_size=128, progress=lambda ph
                 target.set_authorizer(None)
                 target.rollback()
                 raise
+        if runtime_only and destination.runtime_stages is not None:
+            report['analytics_pending'] = True
+        elif destination.compact:
+            # Keep the verified construction and its bookmark until the final
+            # retained copy is complete. Interruption restarts only this pass;
+            # the domain conversions do not run again. Relative file roots
+            # remain at output, so replacing SQLite preserves their custody.
+            compacted = output.with_name(output.name+'.compacted')
+            if compacted.is_symlink():
+                raise ValueError('Compacted rebuild output must be an owned file')
+            compacted.unlink(missing_ok=True)
+            report['compaction'] = build(output, compacted, now=source.stat().st_mtime,
+                                         progress=progress, cancelled=cancelled)
+            if cancelled():
+                raise InterruptedError('Database rebuild interrupted')
+            if (reader.execute('PRAGMA data_version').fetchone()[0] != observed_version
+                    or _source_identity(source) != identity):
+                raise ValueError('Source changed during database rebuild')
+            with closing(sqlite3.connect(compacted)) as target:
+                target.execute('DROP TABLE '+CHECKPOINT)
+                target.commit()
+            with compacted.open('rb') as stream:
+                os.fsync(stream.fileno())
+            os.replace(compacted, output)
+        else:
+            with closing(sqlite3.connect(output)) as target:
+                target.execute('DROP TABLE '+CHECKPOINT)
+                target.commit()
+        report['sql_bytes'] = output.stat().st_size
+        report['seconds'] = time.monotonic()-started
     return report
+
+
+def finish_analytics(source, store, destination, *, progress=lambda phase, detail: None,
+                     cancelled=lambda: False):
+    """Continue the same SQL bookmark after runtime admission has resumed.
+
+    The worker remains stopped. A separate normal Store owns bounded write
+    transactions, so browsing and application writes keep their own connection.
+    The caller verifies custody of the retained original before entering here.
+    """
+    source = Path(source).resolve(strict=True)
+    with closing(sqlite3.connect(source.as_uri()+'?mode=ro', uri=True)) as reader:
+        reader.row_factory = sqlite3.Row
+        _configure(reader, cancelled)
+        reader.execute('BEGIN')
+        target = store.conn
+        _configure(target, cancelled)
+        target.execute('ATTACH DATABASE ? AS rebuild_source', (source.as_uri()+'?mode=ro',))
+        pending = _checkpoint(target)
+        if (pending['destination'] != destination.version
+                or pending['stages'] != [stage.name for stage in destination.stages]
+                or pending['stage'] < destination.runtime_stages):
+            raise ValueError('Installed analytics checkpoint belongs to another rebuild')
+        while pending['stage'] < len(destination.stages):
+            if cancelled():
+                raise InterruptedError('Analytics copy interrupted')
+            stage = destination.stages[pending['stage']]
+            # Admission waits before BEGIN; no cooperative pause may retain
+            # SQLite's writer while a foreground request is waiting for it.
+            with store._lock, target:
+                target.execute('BEGIN IMMEDIATE')
+                _owned_transaction(target)
+                try:
+                    with target.atomic(join=True):
+                        batch = stage.copy(reader, store if stage.repositories else target,
+                                           pending['cursor'], min(128, stage.batch_size))
+                finally:
+                    target.set_authorizer(None)
+                if (not isinstance(batch, Batch) or type(batch.rows) is not int or batch.rows < 0
+                        or type(batch.done) is not bool
+                        or not batch.done and batch.cursor == pending['cursor']):
+                    raise ValueError('Analytics stage did not advance: '+stage.name)
+                pending['rows'][stage.name] = pending['rows'].get(stage.name, 0)+batch.rows
+                pending['cursor'] = None if batch.done else batch.cursor
+                pending['stage'] += int(batch.done)
+                _checkpoint(target, pending)
+            progress('analytics', {'stage': stage.name, 'rows': pending['rows'][stage.name]})
+        if destination.verify_analytics is not None:
+            with target:
+                target.execute('BEGIN')
+                destination.verify_analytics(reader, target)
+    return pending['rows']
 
 
 def quote(name):
@@ -301,7 +414,8 @@ def plan(conn, *, now):
     return predicates
 
 
-def _equal_rows(conn, name, predicate):
+def _equal_rows(conn, name, predicate, expressions=None):
+    expressions = expressions or {}
     fields, keys = _fields(conn, name)
     expected = conn.execute('SELECT count(*) FROM main.' + quote(name) + ' s WHERE ' + predicate).fetchone()[0]
     actual = conn.execute('SELECT count(*) FROM compacted.' + quote(name)).fetchone()[0]
@@ -315,7 +429,7 @@ def _equal_rows(conn, name, predicate):
     # changed NOCASE text and equates INTEGER 1 with REAL 1.0.
     comparison = ' AND '.join('d.' + quote(key) + ' IS s.' + quote(key) for key in keys)
     for field in dict.fromkeys([*keys, *fields, *generated]):
-        left, right = 'd.' + quote(field), 's.' + quote(field)
+        left, right = 'd.' + quote(field), expressions.get(field, 's.' + quote(field))
         comparison += f' AND typeof({left})=typeof({right}) AND {left} COLLATE BINARY IS {right} COLLATE BINARY'
     missing = conn.execute('SELECT 1 FROM main.' + quote(name) + ' s WHERE (' + predicate
         + ') AND NOT EXISTS(SELECT 1 FROM compacted.' + quote(name) + ' d WHERE ' + comparison + ') LIMIT 1').fetchone()
@@ -390,15 +504,26 @@ def build(source, output, *, now=None, progress=lambda phase, detail: None, canc
                 copier.execute('ATTACH DATABASE ? AS compacted',(output.as_uri(),))
                 copier.execute('BEGIN')
                 predicates = plan(copier, now=time.time() if now is None else now)
+                from .. import metadata_retention, served_facts
+                retired, expressions = metadata_retention.plan(copier)
+                predicates.update(retired)
+                if served_facts.active(copier):
+                    if copier.execute('SELECT 1 FROM rec_served_impressions i WHERE NOT EXISTS('
+                        'SELECT 1 FROM served_facts f WHERE f.impression_id=i.id) LIMIT 1').fetchone():
+                        raise ValueError('Cannot compact incomplete served facts')
+                    copier.create_function('compact_served_provenance', 1, served_facts.compact_provenance,
+                                           deterministic=True)
+                    expressions['rec_served_impressions'] = {'provenance': 'compact_served_provenance(s.provenance)'}
                 report['phases']['schema_and_plan_seconds'] = time.monotonic() - phase
                 phase = time.monotonic()
                 for name in tables:
                     fields, _ = _fields(copier, name)
                     columns = ','.join(map(quote, fields))
                     predicate = predicates.get(name, '1')
+                    selected = ','.join(expressions.get(name, {}).get(field, 's.'+quote(field)) for field in fields)
                     began = time.monotonic()
                     count = copier.execute('INSERT INTO compacted.' + quote(name) + '(' + columns + ') SELECT '
-                        + columns + ' FROM main.' + quote(name) + ' s WHERE ' + predicate).rowcount
+                        + selected + ' FROM main.' + quote(name) + ' s WHERE ' + predicate).rowcount
                     report['tables'][name] = {'rows': count, 'copy_seconds': time.monotonic() - began}
                     progress('copy', {'table': name, 'rows': count})
                 if copier.execute("SELECT 1 FROM main.sqlite_schema WHERE name='sqlite_sequence'").fetchone():
@@ -412,7 +537,10 @@ def build(source, output, *, now=None, progress=lambda phase, detail: None, canc
                 phase = time.monotonic()
                 copier.execute('BEGIN')
                 for name in tables:
-                    _equal_rows(copier,name,predicates.get(name,'1'))
+                    if name in expressions:
+                        _equal_rows(copier,name,predicates.get(name,'1'),expressions[name])
+                    else:
+                        _equal_rows(copier,name,predicates.get(name,'1'))
                     progress('verify',{'table':name})
                 if copier.execute("SELECT 1 FROM main.sqlite_schema WHERE name='sqlite_sequence'").fetchone():
                     if copier.execute('SELECT * FROM main.sqlite_sequence ORDER BY name').fetchall() != \

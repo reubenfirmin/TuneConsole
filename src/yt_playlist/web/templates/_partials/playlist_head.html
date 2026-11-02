@@ -1,7 +1,7 @@
 {# Editable playlist title. The page includes this inside the head; /playlist/{id}/rename returns it
    standalone and htmx swaps it into #pl-title with the new title. The click-to-edit toggle stays
    Alpine (pure client state); Enter/blur posts via htmx. Escape reverts the draft and closes. #}
-<div id="pl-title" class="{{ 'pl-structured-title' if generated_heading else '' }}" data-title="{{ pl.title }}" x-data="titleEditor({{ pl.id }})">
+<div id="pl-title" class="{{ 'pl-structured-title' if generated_heading else '' }}" data-title="{{ pl.title }}" x-data="titleEditor({{ pl.id|tojson }})"{% if pl.id is none %} inert{% endif %}>
   {% if generated_heading %}
   <div class="pl-generated-meta" x-show="!editing">
     <span class="pl-type-badge">{{ generated_heading.kind }}</span>

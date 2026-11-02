@@ -5,8 +5,8 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.historical_captures import retained_capture
-from yt_playlist.core import listening
-from yt_playlist.core.migrations import v026_listening_observations
+from yt_playlist.core import catalog, listening
+from yt_playlist.core.migrations import v026_listening_observations, v103_entity_names
 from yt_playlist.rec import taste_analysis
 
 
@@ -94,6 +94,7 @@ def test_indexed_evidence_matches_original_projection(store, generated, independ
     retained_capture(store.conn, 1, ts, ['legacy', 'legacy'])
     retained_capture(store.conn, 1, ts + 86400, [])
     original = v026_listening_observations.PROJECTIONS[2]
+    original = v103_entity_names.transform(original)
     original = original[original.index(' AS') + 3:]
     expected = Counter(map(tuple, store.conn.execute(original)))
     actual = Counter(map(tuple, store.conn.execute('SELECT * FROM eligible_listening_evidence')))
@@ -114,8 +115,9 @@ def test_shared_facets_keep_independent_song_genre_and_song_year_deduplication(s
     store.tracks.set_track_genre(a, 'Techno')
     # Entry choices preserve deliberately different upload facets.
     with store.conn:
-        store.conn.executemany("INSERT INTO entry_field_choices(entry_id,field,value_json,source) VALUES (?,?,?,'user')",
-                               [(b, 'genre', '"Ambient"'), (a, 'mb_year', '"1990"'), (b, 'mb_year', '"2000"')])
+        catalog.choose_field(store.conn, b, 'genre', 'Ambient')
+        catalog.choose_field(store.conn, a, 'mb_year', '1990')
+        catalog.choose_field(store.conn, b, 'mb_year', '2000')
     store.history.import_listening_events(iid, [(key, 'a', 1792497600), (key, 'a', 1792497600 + 86400)])
     plays = store.rec_query.play_counts()
     facets = store.rec_query.play_weighted_facets(plays)

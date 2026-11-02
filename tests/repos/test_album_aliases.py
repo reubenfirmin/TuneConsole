@@ -273,7 +273,11 @@ def test_populated_upgrade_rolls_back_then_restarts_without_changing_source_ids(
     installed = Store(path)
     migrate(installed.conn, registry=registry.MIGRATIONS[:61])
     with installed.conn:
-        albums.save(installed.conn, {'browse': OLD, 'title': 'Album', 'artist': 'Artist'})
+        album = installed.conn.execute(
+            "INSERT INTO albums(title,artist,metadata_rank) VALUES ('Album','Artist',2)").lastrowid
+        installed.conn.execute("INSERT INTO album_provider_ids VALUES ('youtube',?,?)", (OLD, album))
+        installed.conn.execute("INSERT INTO album_library_memberships(album_id,identity_id,source) "
+                               "VALUES (?,NULL,'youtube')", (album,))
         installed.conn.execute('INSERT INTO album_share_snapshots VALUES (?,?,?)', (OLD, 'Frozen', '["source"]'))
     before = list(installed.conn.iterdump())
     alias_migration = registry.MIGRATIONS[61]
@@ -285,9 +289,10 @@ def test_populated_upgrade_rolls_back_then_restarts_without_changing_source_ids(
     with monkeypatch.context() as patch:
         patch.setattr(registry, 'MIGRATIONS', (*registry.MIGRATIONS[:61], Migration(alias_migration.version, alias_migration.name, fail)))
         with pytest.raises(MigrationError, match='interrupted alias upgrade'):
-            migrate(installed.conn)
+            migrate(installed.conn, registry=registry.MIGRATIONS)
     assert list(installed.conn.iterdump()) == before
-    installed.init_schema()
+    from tests.historical_support import upgrade_fixture
+    upgrade_fixture(installed)
     assert installed.collection.saved_album_ids() == {OLD}
     assert installed.conn.execute('SELECT is_primary FROM album_provider_ids').fetchone()[0] == 1
     assert installed.conn.execute('SELECT raw_source_ref FROM album_share_items').fetchone()[0] == 'source'

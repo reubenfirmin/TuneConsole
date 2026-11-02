@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from tests.historical_captures import legacy_capture
+from tests.historical_support import upgrade_fixture
 from yt_playlist.core import catalog, repair
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
 from yt_playlist.core.migrations import current
@@ -54,23 +55,23 @@ def test_populated_conversion_preserves_originals_precision_receipts_and_project
     capture.validate(store.conn)
     # Later migrations may replace these views while retaining the evidence.
     # Validate each schema against its own contract, then compare the data below.
-    store.init_schema()
+    upgrade_fixture(store)
     current.validate(store.conn)
     assert list(map(tuple, store.conn.execute(
-        'SELECT identity_id,raw_identity_key,identity_key,recording_id,source,last_observed_at,'
+        'SELECT account_id,raw_identity_key,identity_key,recording_id,source,last_observed_at,'
         "capture_id,capture_item_id FROM listening_observation_subjects WHERE precision='legacy_unknown' "
         'ORDER BY capture_item_id'))) == originals
     assert list(map(tuple, store.conn.execute('SELECT * FROM listening_capture_receipts ORDER BY id'))) == receipts
-    assert list(map(tuple, store.conn.execute('SELECT * FROM listening_days ORDER BY identity_id,identity_key'))) == days
+    assert list(map(tuple, store.conn.execute('SELECT * FROM listening_days ORDER BY account_id,identity_key'))) == days
     converted = store.conn.execute('SELECT * FROM listening_observation_subjects WHERE id=1').fetchone()
-    assert {k:converted[k] for k in observations[0]} == observations[0]
+    assert {k:converted['account_id' if k == 'identity_id' else k] for k in observations[0]} == observations[0]
     assert list(map(tuple, store.conn.execute(
         "SELECT DISTINCT precision,timezone FROM listening_observations WHERE capture_id IS NOT NULL"))) == [
             ('legacy_unknown', None)]
     assert {r[0] for r in store.conn.execute(
         "SELECT precision FROM listening_activity WHERE identity_key='unknown'")} == {'legacy_unknown'}
     assert not list(store.conn.execute('SELECT 1 FROM play_events'))
-    assert tuple(store.conn.execute('SELECT timezone,confirmed FROM listening_calendars WHERE identity_id=1').fetchone()) == (
+    assert tuple(store.conn.execute('SELECT timezone,confirmed FROM listening_calendars WHERE account_id=1').fetchone()) == (
         'America/Costa_Rica', 1)
     for name in capture.RETIRED:
         assert store.conn.execute('SELECT 1 FROM sqlite_master WHERE name=?', (name,)).fetchone() is None
@@ -117,7 +118,7 @@ def test_first_confirmed_calendar_preserves_unknown_capture_dates_and_precision(
     with store.conn:
         store.conn.execute("UPDATE listening_calendars SET timezone='UTC',confirmed=0 WHERE identity_id=1")
     migrate(store.conn, registry=_registry())
-    store.init_schema()
+    upgrade_fixture(store)
     before = list(map(tuple, store.conn.execute(
         "SELECT * FROM listening_observations WHERE precision='legacy_unknown' ORDER BY id")))
     with store.conn:
@@ -130,28 +131,28 @@ def test_first_confirmed_calendar_preserves_unknown_capture_dates_and_precision(
 def test_converted_capture_removal_and_reset_preserve_other_accounts_and_exact_plays():
     store = _predecessor()
     legacy_capture(store.conn, 2, 1792540801, ['ytm'], source='ytm_history')
-    store.init_schema()
+    upgrade_fixture(store)
     other_rows = list(map(tuple, store.conn.execute(
-        'SELECT * FROM listening_observations WHERE identity_id=2 ORDER BY id')))
+        'SELECT * FROM listening_observations WHERE account_id=2 ORDER BY id')))
     other_receipts = list(map(tuple, store.conn.execute(
-        'SELECT * FROM listening_capture_receipts WHERE identity_id=2 ORDER BY id')))
+        'SELECT * FROM listening_capture_receipts WHERE account_id=2 ORDER BY id')))
     store.history.import_listening_events(1, [('real', None, 1792540800), ('real', None, 1792544400)])
     events = list(map(tuple, store.conn.execute('SELECT * FROM play_events ORDER BY id')))
     store.history.remove_listening_source('ytm_history', 1)
     assert not store.conn.execute(
-        "SELECT 1 FROM listening_observations WHERE identity_id=1 AND source='ytm_history'").fetchone()
+        "SELECT 1 FROM listening_observations WHERE account_id=1 AND source='ytm_history'").fetchone()
     assert store.history.listening_day_counts(1) == {'day': 1, 'real': 1, 'unknown': 1}
     assert store.history.event_play_counts(1) == {'real': 2}
     assert list(map(tuple, store.conn.execute(
-        'SELECT * FROM listening_observations WHERE identity_id=2 ORDER BY id'))) == other_rows
+        'SELECT * FROM listening_observations WHERE account_id=2 ORDER BY id'))) == other_rows
     store.trends.refresh_first_play()
     store.history.reset_play_history(1)
-    assert not store.conn.execute('SELECT 1 FROM listening_observations WHERE identity_id=1').fetchone()
-    assert not store.conn.execute('SELECT 1 FROM listening_capture_receipts WHERE identity_id=1').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM listening_observations WHERE account_id=1').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM listening_capture_receipts WHERE account_id=1').fetchone()
     assert list(map(tuple, store.conn.execute(
-        'SELECT * FROM listening_observations WHERE identity_id=2 ORDER BY id'))) == other_rows
+        'SELECT * FROM listening_observations WHERE account_id=2 ORDER BY id'))) == other_rows
     assert list(map(tuple, store.conn.execute(
-        'SELECT * FROM listening_capture_receipts WHERE identity_id=2 ORDER BY id'))) == other_receipts
+        'SELECT * FROM listening_capture_receipts WHERE account_id=2 ORDER BY id'))) == other_receipts
     assert not store.trends.first_play_map('track')
     store.trends.refresh_first_play()
     assert store.settings.get_setting('trend_first_play_source') == 'canonical_listening'
@@ -183,7 +184,7 @@ def test_converted_capture_reassociation_retains_raw_evidence_and_rolls_back(mon
     first, target = entries
     old_key, new_key = 'old|artist', 'correct|artist'
     receipt_id = legacy_capture(store.conn, 1, 1792540800, [old_key], source='unknown')
-    store.init_schema()
+    upgrade_fixture(store)
     original = dict(store.conn.execute(
         'SELECT * FROM listening_observations WHERE capture_id=?', (receipt_id,)).fetchone())
     before = list(store.conn.iterdump())
@@ -212,7 +213,7 @@ def test_converted_capture_reassociation_retains_raw_evidence_and_rolls_back(mon
 
 def test_interrupted_reset_rolls_back_observations_and_retains_receipts():
     store = _predecessor()
-    store.init_schema()
+    upgrade_fixture(store)
     store.trends.refresh_first_play()
     with store.conn:
         store.conn.execute("CREATE TRIGGER interrupt_reset BEFORE DELETE ON listening_capture_receipts "
@@ -227,10 +228,10 @@ def test_interrupted_reset_rolls_back_observations_and_retains_receipts():
 def test_migrated_repair_backup_restores_complete_capture_evidence(tmp_path):
     store = _predecessor()
     day = 1792540800 // 86400
-    store.init_schema()
+    upgrade_fixture(store)
     with store.conn:
         store.conn.execute(
-            'INSERT INTO takeout_imports(identity_id,fingerprint,imported_at,unparsed_dates,'
+            'INSERT INTO takeout_imports(account_id,fingerprint,imported_at,unparsed_dates,'
             'account_verified,complete,coverage_start,coverage_end) VALUES (1,?,1,0,1,1,?,?)',
             ('verified coverage', day * 86400, (day + 1) * 86400))
     original = list(map(tuple, store.conn.execute('SELECT * FROM listening_observations ORDER BY id')))
@@ -254,10 +255,10 @@ def test_migrated_repair_backup_restores_complete_capture_evidence(tmp_path):
     current.validate(store.conn)
 
 
-@pytest.mark.parametrize('assignment', ['identity_id=2', 'first_observed_at=0', "day='2026-10-01'"])
+@pytest.mark.parametrize('assignment', [pytest.param('account_id=2', id='identity_id=2'), 'first_observed_at=0', "day='2026-10-01'"])
 def test_current_validation_rejects_capture_receipt_disagreement(assignment):
     store = _predecessor()
-    store.init_schema()
+    upgrade_fixture(store)
     with store.conn:
         store.conn.execute('UPDATE listening_observations SET ' + assignment + ' WHERE capture_item_id=1')
     with pytest.raises(MigrationError, match='capture receipt'):

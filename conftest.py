@@ -38,13 +38,19 @@ def pytest_sessionfinish(session):
     try:
         return (yield)
     finally:
-        # Pytest's retention settings do not clean an explicit --basetemp.
-        # Wait until teardown and report writers finish, and only remove a
-        # directory the temp factory actually used (collection may not use it).
+        # Keep pytest's active-directory protection during the session, then
+        # remove only this factory's workspace, including failures and explicit
+        # --basetemp. Wait until teardown and report writers finish; collection
+        # may never have used the factory or created the requested directory.
         factory = getattr(session.config, "_tmp_path_factory", None)
-        if session.config.getoption("basetemp", default=None) and factory is not None:
+        if factory is not None:
             if factory._basetemp is not None:
-                shutil.rmtree(factory._basetemp)
+                try:
+                    shutil.rmtree(factory._basetemp)
+                except FileNotFoundError:
+                    # Pytest may already have cleaned this completed session
+                    # when its retention policy was explicitly overridden.
+                    pass
 
 
 def pytest_addoption(parser):

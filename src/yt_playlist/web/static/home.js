@@ -1,3 +1,10 @@
+function loadHomeArea(element) {
+  // Alpine can initialize a swapped Home before HTMX settles its descendants.
+  // Register the fragment listener before sending the area's first open event.
+  htmx.process(element);
+  htmx.trigger(element, 'home-area-open');
+}
+
 function onboardingArrival(artistsRequired = false) {
   return {
     songs: 0, playlists: 0, albums: 0, covers: [], outcome: null, statusError: '',

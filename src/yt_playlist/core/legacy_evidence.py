@@ -1,12 +1,14 @@
 """Retained originals belong to their catalog, artist, album or workflow owner.
 
 Payloads are exact historical text, including non-JSON signatures. Queryable
-ambiguity guards have a separate typed relation; archive age never permits GC.
+ambiguity guards have a separate typed relation. Cold journals own explicit
+bounded diagnostic retention and durable user/paid/scope recovery exceptions.
 """
 import hashlib
 from . import fao
 import json
 from contextlib import closing
+from itertools import islice
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -56,6 +58,8 @@ def _subjects(conn, domain, kind, key, payload):
         if column in result:
             continue
         table, field = owner[:-1].split('(')
+        if table == 'playlist_scopes' and not any(row[1]=='ref' for row in conn.execute('PRAGMA table_info(playlist_scopes)')):
+            field = 'id'
         value = body.get(column) if isinstance(body, dict) else None
         if column == 'artist_id' and kind == 'ambiguous_album_artist':
             value = key
@@ -67,6 +71,9 @@ def _subjects(conn, domain, kind, key, payload):
 
 
 def available(conn):
+    from . import legacy_journals
+    if legacy_journals.available(conn):
+        return True
     return conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='legacy_catalog_evidence'").fetchone() is not None
 
 
@@ -125,12 +132,12 @@ def _encode(domain, payload, *, kind='original'):
     return encoded
 
 
-def _publish(root, domain, encoded):
+def _publish(root, domain, encoded, *, age=None):
     pending, size = [], len(_header(domain))
 
     def seal():
         packed = _header(domain) + b''.join(pending)
-        filename = policy_documents._publish_encoded(root, packed, hashlib.sha256(packed).hexdigest())
+        filename = policy_documents._publish_encoded(root, packed, hashlib.sha256(packed).hexdigest(), age=age)
         offset = len(_header(domain))
         for record in pending:
             yield filename, hashlib.sha256(record).hexdigest(), len(record), offset
@@ -149,7 +156,7 @@ def _publish(root, domain, encoded):
         yield from seal()
 
 
-def _read(domain, filename, digest, size, offset, *, kind='original'):
+def _read(domain, filename, digest, size, offset, *, kind='original', with_age=False):
     import json
     if (not _digest(digest) or type(size) is not int or not 0 < size <= MAX_BYTES
             or type(offset) is not int or offset < 0):
@@ -158,6 +165,7 @@ def _read(domain, filename, digest, size, offset, *, kind='original'):
     if not _digest(path.stem):
         raise ValueError('Invalid retained evidence filename')
     with fao.open_reader(path) as stream:
+        age = stream.info
         if offset:
             header = _header(domain)
             if offset < len(header) or stream.read(len(header)) != header:
@@ -172,15 +180,55 @@ def _read(domain, filename, digest, size, offset, *, kind='original'):
             or value['format'] != FORMAT or value['owner'] != domain or value['kind'] != kind
             or canonical(value) != encoded):
         raise ValueError('Unsupported retained evidence format')
-    return encoded, value['value']
+    result = encoded, value['value']
+    return (result, age) if with_age else result
 
 
 def retain_many(conn, domain, rows):
     """Publish a bounded batch before its owning SQL rows; caller owns rollback."""
     if not conn.in_transaction:
         raise RuntimeError('Retaining legacy evidence needs an outer transaction')
+    from . import legacy_journals
+    if legacy_journals.available(conn):
+        pending = []
+        table = DOMAINS[domain]
+        installed = conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?',(table,)).fetchone()
+        for row in rows:
+            existing = conn.execute(f'SELECT filename,content_digest,byte_size,file_offset FROM {table} '
+                'WHERE kind=? AND source_id=?',row[:2]).fetchone() if installed else None
+            if existing:
+                _read(domain,*existing)
+                continue
+            pending.append(row)
+            if len(pending) == 128:
+                legacy_journals.retain_many(conn,domain,pending)
+                pending.clear()
+        if pending:
+            legacy_journals.retain_many(conn,domain,pending)
+        return
+    stage_many(conn, domain, rows)
+
+
+def stage_many(conn, domain, rows):
+    """Capture exact receipts for later bounded journal publication.
+
+    Bulk importers can retain a complete batch before choosing archive order.
+    Readers already support these receipts alongside a published journal;
+    prepare_batch transfers them atomically after the import has finished.
+    """
+    if not conn.in_transaction:
+        raise RuntimeError('Retaining legacy evidence needs an outer transaction')
+    from . import legacy_journals
+    rows = list(islice(rows, 513))
+    if len(rows) > 512:
+        raise ValueError('Invalid retained evidence batch')
+    archived = {}
+    if legacy_journals.available(conn) and legacy_journals.head(conn, domain) is not None:
+        from . import file_map
+        archived = file_map.get_many(legacy_journals.directory(conn) / domain,
+            legacy_journals.head(conn, domain), [legacy_journals.key(row[0], row[1]) for row in rows])
     table = DOMAINS[domain]
-    pending, used = [], 0
+    pending, used, selected = [], 0, set()
     for kind, source_id, payload, reason in rows:
         if (len(pending) == 512 or not all(isinstance(v, str) for v in (kind, source_id, payload, reason))
                 or not kind or not reason):
@@ -189,6 +237,10 @@ def retain_many(conn, domain, rows):
         used += len(encoded)
         if used > 32 * 1024 * 1024:
             raise ValueError('Retained evidence batch exceeds its memory budget')
+        if legacy_journals.key(kind, source_id) in archived:
+            continue
+        if (kind, source_id) in selected:
+            continue
         existing = conn.execute(f'SELECT filename,content_digest,byte_size,file_offset FROM {table} '
                                 'WHERE kind=? AND source_id=?', (kind, source_id)).fetchone()
         if existing:
@@ -197,6 +249,7 @@ def retain_many(conn, domain, rows):
             _read(domain, *existing)
             continue
         pending.append((kind, source_id, reason, encoded, _subjects(conn, domain, kind, source_id, payload)))
+        selected.add((kind, source_id))
     references = _publish(directory(conn) / domain, domain, (row[3] for row in pending))
     for (kind, source_id, reason, _, subjects), reference in zip(pending, references):
         columns = ''.join(',' + column for column in subjects)
@@ -215,6 +268,13 @@ def retain(conn, kind, source_id, payload, reason, *, domain=None):
 
 
 def original(conn, domain, kind, source_id):
+    from . import legacy_journals
+    if legacy_journals.available(conn):
+        saved = legacy_journals.read(conn,domain,kind,source_id)
+        if saved is not None:
+            return saved.get('payload')
+        if not conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?',(DOMAINS[domain],)).fetchone():
+            return None
     with policy_documents.retained_reader(directory(conn)):
         row = conn.execute(f'SELECT filename,content_digest,byte_size,file_offset FROM {DOMAINS[domain]} '
                            'WHERE kind=? AND source_id=?', (kind, source_id)).fetchone()
@@ -229,8 +289,10 @@ def mark_artist_ambiguity(conn, artist_id):
 
 def _owners(conn):
     for domain, table in DOMAINS.items():
+        if not conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?',(table,)).fetchone():
+            continue
         for row in conn.execute(f'SELECT kind,source_id,content_digest,byte_size,file_offset,filename FROM {table} '
-                                'ORDER BY kind,source_id'):
+                                'ORDER BY filename,file_offset,kind,source_id'):
             yield domain, tuple(row)
 
 
@@ -264,8 +326,11 @@ def export(conn, target):
 
     def publish_batch():
         domain = batch[0][0]
-        records = (_read(owner, row[5], row[2], row[3], row[4])[0] for owner, row in batch)
-        for (_, row), reference in zip(batch, _publish(target / domain, domain, records)):
+        records = ((value[0], age) for owner, row in batch
+                   for value, age in [_read(owner, row[5], row[2], row[3], row[4], with_age=True)])
+        def publish(root, values, *, age):
+            return _publish(root, domain, values, age=age)
+        for (_, row), reference in zip(batch, policy_documents.repack(target / domain, records, publish)):
             filename, digest, size, offset = reference
             entries.append([domain, row[0], row[1], digest, size, offset,
                             str(Path(filename).relative_to(target))])
@@ -300,6 +365,7 @@ def restore(conn, manifest):
         staged.execute('CREATE TABLE owners(domain TEXT,kind TEXT,source_id TEXT,digest TEXT,size INTEGER,'
                        'offset INTEGER,filename TEXT,target TEXT,target_offset INTEGER,'
                        'PRIMARY KEY(domain,kind,source_id)) WITHOUT ROWID')
+        staged.execute('CREATE INDEX owners_source ON owners(domain,filename,offset,kind,source_id)')
         for digest in document['chunks']:
             entries = _read_document(root / digest[:2] / (digest + '.json'), 'backup-chunk')
             if not isinstance(entries, list) or not 1 <= len(entries) <= 512:
@@ -332,16 +398,22 @@ def restore(conn, manifest):
                 after = None
                 while True:
                     batch = staged.execute('SELECT kind,source_id,digest,size,offset,filename FROM owners WHERE domain=?'
-                        + (' AND (kind,source_id)>(?,?)' if after is not None else '')
-                        + ' ORDER BY kind,source_id LIMIT 128', (domain, *after) if after is not None else (domain,)).fetchall()
+                        + (' AND (filename,offset,kind,source_id)>(?,?,?,?)' if after is not None else '')
+                        + ' ORDER BY filename,offset,kind,source_id LIMIT 128',
+                        (domain, *after) if after is not None else (domain,)).fetchall()
                     if not batch:
                         break
-                    records = (_read(domain, row[5], row[2], row[3], row[4])[0] for row in batch)
-                    for row, reference in zip(batch, _publish(directory(conn) / domain, domain, records)):
+                    records = ((value[0], age) for row in batch
+                               for value, age in [_read(domain, row[5], row[2], row[3], row[4], with_age=True)])
+                    def publish(root, values, *, age):
+                        return _publish(root, domain, values, age=age)
+                    for row, reference in zip(batch, policy_documents.repack(directory(conn) / domain, records, publish)):
                         staged.execute('UPDATE owners SET target=?,target_offset=? WHERE domain=? AND kind=? AND source_id=?',
                                        (reference[0], reference[3], domain, row[0], row[1]))
-                    after = batch[-1][:2]
+                    after = batch[-1][5], batch[-1][4], *batch[-1][:2]
             for domain, table in DOMAINS.items():
+                if not conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?',(table,)).fetchone():
+                    continue
                 for kind, source_id, filename, offset in staged.execute('SELECT kind,source_id,target,target_offset '
                                                                        'FROM owners WHERE domain=?', (domain,)):
                     conn.execute(f'UPDATE {table} SET filename=?,file_offset=? WHERE kind=? AND source_id=?',
@@ -368,12 +440,11 @@ def collect_orphans(conn):
             try:
                 removed = 0
                 for domain, table in DOMAINS.items():
+                    present = conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?',(table,)).fetchone()
                     for path in (root / domain).glob('*/*.json'):
                         check_cancellable_work()
-                        if not conn.execute(f'SELECT 1 FROM {table} WHERE filename=? LIMIT 1', (str(path),)).fetchone():
-                            path.unlink()
-                            policy_documents._sync_directory(path.parent)
-                            removed += 1
+                        if not present or not conn.execute(f'SELECT 1 FROM {table} WHERE filename=? LIMIT 1', (str(path),)).fetchone():
+                            removed += fao.delete(path, missing_ok=True)
                 conn.commit()
                 return removed
             finally:

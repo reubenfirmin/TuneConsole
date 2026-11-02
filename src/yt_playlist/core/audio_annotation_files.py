@@ -22,7 +22,7 @@ def directory(conn, memory_key=None):
     return Path(tempfile.gettempdir()) / 'tuneconsole-annotations' / memory_key
 
 
-def publish(root, document):
+def publish(root, document, *, age=None):
     """Publish before inserting its database reference, under the writer reservation."""
     if not isinstance(document, dict) or document.get('format') != FILE_FORMAT:
         raise ValueError('Unsupported annotation document format')
@@ -31,13 +31,14 @@ def publish(root, document):
         raise ValueError('Annotation document exceeds the input byte budget')
     digest = hashlib.sha256(encoded).hexdigest()
     path = Path(root) / digest[:2] / (digest + '.json')
-    fao.write_bytes(path, encoded, immutable=True, max_bytes=MAX_BYTES)
+    fao.write_bytes(path, encoded, immutable=True, max_bytes=MAX_BYTES, age=age)
     return str(path)
 
 
-def read(filename, *, expected=None):
+def read(filename, *, expected=None, with_age=False):
     path = Path(filename)
     with fao.open_reader(path) as stream:
+        age = stream.info
         encoded = stream.read(MAX_BYTES + 1)
     if len(encoded) > MAX_BYTES:
         raise ValueError('Annotation document exceeds the input byte budget')
@@ -47,7 +48,7 @@ def read(filename, *, expected=None):
     if (not isinstance(document, dict) or document.get('format') != FILE_FORMAT
             or any(document.get(key) != value for key, value in (expected or {}).items())):
         raise ValueError('Annotation file does not match its judgment identity')
-    return document
+    return (document, age) if with_age else document
 
 
 def export(conn, root):
@@ -63,7 +64,8 @@ def export(conn, root):
     files = []
     for annotation_id, filename in conn.execute(
             'SELECT id,model_output_filename FROM audio_annotations ORDER BY id'):
-        target = publish(root, read(filename))
+        value, age = read(filename, with_age=True)
+        target = publish(root, value, age=age)
         files.append({'annotation_id': annotation_id, 'digest': Path(target).stem,
                       'relative_filename': str(Path(target).relative_to(root))})
     return publish(root, {'format': FILE_FORMAT, 'type': 'backup-manifest', 'files': files})
@@ -89,7 +91,8 @@ def restore(conn, manifest, *, memory_key=None):
             digest = entry['digest']
             if relative != Path(digest[:2]) / (digest + '.json') or Path(expected[entry['annotation_id']]).stem != digest:
                 raise ValueError('Annotation backup identity mismatch')
-            targets.append((publish(directory(conn, memory_key), read(root / relative)), entry['annotation_id']))
+            value, age = read(root / relative, with_age=True)
+            targets.append((publish(directory(conn, memory_key), value, age=age), entry['annotation_id']))
         conn.executemany('UPDATE audio_annotations SET model_output_filename=? WHERE id=?', targets)
         conn.commit()
     except BaseException:
@@ -110,9 +113,7 @@ def collect_orphans(conn, *, memory_key=None):
         if root.exists():
             for path in (*root.glob('*/*.json'), *root.glob('*/.pending-*')):
                 if path.resolve() not in retained:
-                    path.unlink()
-                    _sync_directory(path.parent)
-                    removed += 1
+                    removed += fao.delete(path, missing_ok=True)
         conn.commit()
     except BaseException:
         conn.rollback()

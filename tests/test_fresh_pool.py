@@ -4,10 +4,16 @@ import time
 from types import SimpleNamespace
 
 from tests.test_home_other_genres import seed_genres
-from tests.test_mode_cards_route import _client
+from tests.test_mode_cards_route import _client as current_client
+from tests.home_fixture_support import returning_listener
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 from yt_playlist.rec import embedding_vectors as embed, fresh_pool, mode_surfaces, road_trip_candidates, surfaces
 from yt_playlist.util.matching import identity_key
+
+
+def _client(store, now=1000.0):
+    returning_listener(store, 'mixes', now=now)
+    return current_client(store, now)
 
 
 def test_fresh_card_waits_for_metadata_then_renders_discoveries(store):
@@ -65,7 +71,8 @@ def test_populate_searches_each_selected_genre_and_keeps_only_new_matching_songs
     assert fresh_pool.populate(ctx, genres, on_progress=messages.append) == 3
     assert requested == ["drum & bass", "house", "pop"]
     rows = store.discovery.get_discovered_tracks()
-    assert {r["genre"] for r in rows} == {"house", "drum & bass", "pop"}
+    from yt_playlist.util import genre_map
+    assert {genre_map.family(r['genre'], conn=store.conn) for r in rows} == {'house', 'dnb', 'pop'}
     assert all(r["source_browse_id"].startswith("genre:") for r in rows)
     assert encoded == [store] and messages
     # A repeat does not erase metadata already enriched on a discovered song.
@@ -104,13 +111,9 @@ def test_selected_fresh_mix_balances_all_three_genres_and_requires_missing_famil
 
 
 def _without_fresh(store):
-    seed_genres(store)
-    bundles = store.rec_proposals.get_proposals("mode_bundles")
-    for bucket in bundles.values():
-        if isinstance(bucket, dict):
-            bucket.pop("fresh", None)
-    store.rec_proposals.put_proposals("mode_bundles", bundles, 1)
-    publish_bundles(store, bundles, 1)
+    # These workflows need selected Jazz/Techno offers and an empty Fresh slot.
+    # Publish that state once, without seeding hundreds of unrelated subjects.
+    seed_genres(store, genres=['Jazz','Techno'], tracks_per_lane=8, fresh=False)
 
 
 def _job_id(response):
@@ -209,10 +212,12 @@ def test_fresh_slot_starts_once_rejoins_on_refresh_and_becomes_a_scoped_mix(stor
                 "", None, track.genre, None, None, 1000)
     finally:
         release.set()
-    deadline = time.monotonic() + 10
+    # This waits for the worker's real typed publication, not a page request.
+    # Polling stays responsive while the background preparation is unfinished.
+    deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         ready = client.get(f"/home/fresh-pool/{job_id}")
-        if 'class="fresh-pool-art"' not in ready.text:
+        if 'hx-trigger="every 2s"' not in ready.text:
             break
         time.sleep(.01)
     assert 'data-title="New ' in ready.text

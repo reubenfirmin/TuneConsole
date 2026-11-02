@@ -13,14 +13,14 @@ def test_set_and_get_lean():
     s.rec_model.set_lean("genre:Techno", 1.4, 1000.0)
     assert s.rec_model.get_lean("genre:Techno") == 1.4
     assert s.rec_model.get_lean("genre:House") == 1.0          # default neutral
-    assert s.rec_model.get_leans() == {"genre:Techno": 1.4}
+    assert s.rec_model.get_leans() == {"genre:techno": 1.4}
 
 
 def test_lean_rows_and_graduated_day():
     s = _store()
     s.rec_model.set_lean("genre:Techno", 1.4, 1000.0)
     s.rec_model.set_lean_graduated_day("genre:Techno", "2026-06-25")
-    row = {r["axis"]: r for r in s.rec_model.lean_rows()}["genre:Techno"]
+    row = {r["axis"]: r for r in s.rec_model.lean_rows()}["genre:techno"]
     assert row["value"] == 1.4
     assert row["updated_at"] == 1000.0
     assert row["last_graduated_day"] == "2026-06-25"

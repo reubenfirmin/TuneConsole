@@ -8,6 +8,7 @@ import sqlite3
 import pytest
 
 from yt_playlist.core import album_memberships as membership
+from yt_playlist.core import entity_names
 from yt_playlist.core import playlist_scope_state as scopes
 from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations import v077_scope_account_state as migration
@@ -40,6 +41,31 @@ def state(store, account):
     return store.conn.execute('SELECT * FROM account_album_state WHERE account_id=?', (account,)).fetchone()
 
 
+def historical_playlist(store, owner, remote, title):
+    """Capture v69 membership through genuine predecessor columns and triggers."""
+    scoped = remote in ('LM', 'SE')
+    scope = f'@account:{owner}:{remote}' if scoped else remote
+    with store.conn:
+        store.conn.execute('INSERT OR IGNORE INTO playlist_scopes VALUES (?,?,?,?)',
+                           (scope, remote, owner if scoped else None, 'account' if scoped else 'shared'))
+        membership_id = store.conn.execute('INSERT INTO playlist_membership_refs(scope_ref,identity_id) '
+                                           'VALUES (?,?)', (scope, owner)).lastrowid
+        store.conn.execute('INSERT INTO playlists(id,identity_id,ytm_playlist_id,title,track_count,'
+            'content_hash,first_seen,last_seen,last_changed,scope_ref) VALUES (?,?,?,?,0,\'\',1,1,1,?)',
+            (membership_id, owner, remote, title, scope))
+    return membership_id
+
+
+def current_reads(store):
+    """Use explicit read projections only after the frozen migration is checked.
+
+    Physical v69/v77 owners and applied history remain unchanged. Private
+    readers install the same projections when repository consumers open them.
+    """
+    store._schema_compatibility = True
+    entity_names.predecessor_reads(store.conn)
+
+
 def test_scope_defaults_explicit_presence_and_unknown_ignore_time(predecessor):
     store = predecessor
     with store.conn:
@@ -69,12 +95,13 @@ def test_scope_defaults_explicit_presence_and_unknown_ignore_time(predecessor):
 
 def test_membership_lifetimes_scope_kinds_and_old_ids_are_not_collapsed(predecessor):
     store = predecessor
-    old = store.playlists.upsert_playlist(1, 'shared', 'First', 0, '', 1)
-    store.playlists.remove_playlist(old)
-    current = store.playlists.upsert_playlist(1, 'shared', 'Returned', 0, '', 2)
-    store.playlists.upsert_playlist(3, 'shared', 'Other account', 0, '', 2)
-    store.playlists.upsert_playlist(1, 'LM', 'Liked one', 0, '', 2)
-    store.playlists.upsert_playlist(3, 'LM', 'Liked three', 0, '', 2)
+    old = historical_playlist(store, 1, 'shared', 'First')
+    with store.conn:
+        store.conn.execute('DELETE FROM playlists WHERE id=?', (old,))
+    current = historical_playlist(store, 1, 'shared', 'Returned')
+    historical_playlist(store, 3, 'shared', 'Other account')
+    historical_playlist(store, 1, 'LM', 'Liked one')
+    historical_playlist(store, 3, 'LM', 'Liked three')
     with store.conn:
         store.conn.execute('INSERT INTO playlist_membership_refs(scope_ref,identity_id) VALUES (NULL,NULL)')
         store.conn.execute('INSERT INTO playlist_membership_refs(scope_ref,identity_id) VALUES (NULL,NULL)')
@@ -158,6 +185,7 @@ def test_snapshot_is_one_checkpoint_write_and_rolls_back_with_membership(predece
 def test_legacy_batch_resets_original_cohort_without_adding_later_accounts(predecessor):
     store = predecessor
     apply(store)
+    current_reads(store)
     with store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
         membership.start_legacy_cohort(store.conn)
@@ -187,6 +215,7 @@ def test_empty_original_cohort_does_not_resolve_unknown_membership_vacuously(pre
 def test_release_merge_keeps_known_and_unattributed_sets_and_earliest_known_time(predecessor):
     store = predecessor
     apply(store)
+    current_reads(store)
     with store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
         membership.save(store.conn, 2, 1, saved_at=20)
@@ -243,7 +272,7 @@ def test_external_reference_to_discarded_surrogate_is_diagnosed(predecessor):
 def test_curation_replay_is_stable_and_scope_resolution_remains_account_specific(predecessor):
     store = predecessor
     for account in (1, 3):
-        store.playlists.upsert_playlist(account, 'LM', 'Liked', 0, '', 1)
+        historical_playlist(store, account, 'LM', 'Liked')
     apply(store)
     first, second = '@account:1:LM', '@account:3:LM'
     assert scopes.available(store.conn)
@@ -301,18 +330,19 @@ def album(browse):
 def test_collection_workflow_keeps_frozen_cohort_and_rejects_stale_snapshots(predecessor):
     store = predecessor
     apply(store)
+    current_reads(store)
     store.collection.add_saved_album(album('unattributed'))
     before = store.collection.saved_album_revision(1)
-    store.collection.add_saved_album(album('owned'), identity_id=1)
+    store.collection.add_saved_album(album('owned'), account_id=1)
     assert store.collection.replace_saved_album_snapshots({1: []}, expected_revisions={1: before}, now=10) == set()
     assert store.collection.saved_album_ids() == {'unattributed', 'owned'}
     assert store.collection.replace_saved_album_snapshots({1: [album('owned')], 2: [], 3: []}, now=11) == {1, 3}
     assert store.collection.saved_album_ids() == {'unattributed', 'owned'}
     owners = store.collection.saved_album_owners()
-    assert owners['unattributed'] == [{'identity_id': None, 'label': None, 'active': False}]
-    assert owners['owned'] == [{'identity_id': 1, 'label': 'Main', 'active': True}]
-    assert [row['browse'] for row in store.collection.get_saved_albums(identity_id=1)] == ['owned']
-    assert store.collection.get_saved_albums(identity_id=3) == []
+    assert owners['unattributed'] == [{'account_id': None, 'label': None, 'active': False}]
+    assert owners['owned'] == [{'account_id': 1, 'label': 'Main', 'active': True}]
+    assert [row['browse'] for row in store.collection.get_saved_albums(account_id=1)] == ['owned']
+    assert store.collection.get_saved_albums(account_id=3) == []
     with store.conn:
         store.conn.execute('UPDATE identities SET active=1 WHERE id=2')
     assert store.collection.replace_saved_album_snapshots({2: []}, now=12) == {2}
@@ -323,7 +353,8 @@ def test_collection_workflow_keeps_frozen_cohort_and_rejects_stale_snapshots(pre
 def test_failed_collection_publication_cannot_advance_checkpoint_or_erase_membership(predecessor):
     store = predecessor
     apply(store)
-    store.collection.add_saved_album(album('owned'), identity_id=1)
+    current_reads(store)
+    store.collection.add_saved_album(album('owned'), account_id=1)
     revision = store.collection.saved_album_revision(1)
     with pytest.raises(KeyError):
         store.collection.replace_saved_album_snapshots({1: [{'title': 'No provider ID'}]},
@@ -341,7 +372,8 @@ def test_failed_collection_publication_cannot_advance_checkpoint_or_erase_member
 def test_saved_membership_projections_share_the_consolidated_owner(predecessor):
     store = predecessor
     apply(store)
-    store.collection.add_saved_album(album('one'), identity_id=1)
+    current_reads(store)
+    store.collection.add_saved_album(album('one'), account_id=1)
     store.collection.add_saved_album(album('two'))
     ids = store.collection.canonical_album_ids(['one', 'two'])
     assert store.rec_query.owned_albums() == set(ids.values())
@@ -351,10 +383,10 @@ def test_saved_membership_projections_share_the_consolidated_owner(predecessor):
     assert store.discovery.interested_artists()[0]['score'] == 6
     result = store.search.omni_search('Collected Artist')
     assert any(section['kind'] == 'albums_by' and len(section['rows']) == 2 for section in result['sections'])
-    store.collection.remove_saved_album('one', identity_id=1)
+    store.collection.remove_saved_album('one', account_id=1)
     assert store.collection.saved_album_ids() == {'two'}
     # Replacing the unattributed set never erases a known owner's membership.
-    store.collection.add_saved_album(album('one'), identity_id=1)
+    store.collection.add_saved_album(album('one'), account_id=1)
     store.collection.replace_saved_albums([album('replacement')])
     assert store.collection.saved_album_ids() == {'one', 'replacement'}
 
@@ -362,27 +394,28 @@ def test_saved_membership_projections_share_the_consolidated_owner(predecessor):
 def test_public_scope_mutations_resolve_once_and_survive_membership_recreation(predecessor):
     store = predecessor
     for account in (1, 3):
-        store.playlists.upsert_playlist(account, 'LM', 'Liked', 0, '', 1)
+        historical_playlist(store, account, 'LM', 'Liked')
     apply(store)
-    store.playlists.set_playlist_provenance('LM', identity_id=1, origin='tuneconsole', adopted=False,
+    current_reads(store)
+    store.playlists.set_playlist_provenance('LM', account_id=1, origin='tuneconsole', adopted=False,
                                            description='Recorded provenance')
-    store.playlists.set_playlist_group('LM', ' Group ', identity_id=1)
-    store.playlists.hide_playlist('LM', identity_id=1)
+    store.playlists.set_playlist_group('LM', ' Group ', account_id=1)
+    store.playlists.hide_playlist('LM', account_id=1)
     store.overlaps.ignore_overlap_playlist('@account:1:LM', 10)
     store.overlaps.ignore_overlap_playlist('@account:1:LM', 20)
-    assert store.playlists.playlist_provenance('LM', identity_id=3)['origin'] == 'ordinary'
+    assert store.playlists.playlist_provenance('LM', account_id=3)['origin'] == 'ordinary'
     assert store.playlists.get_playlist_groups() == {'@account:1:LM': 'Group'}
     assert store.playlists.get_hidden_playlists() == {'@account:1:LM'}
     assert store.overlaps.get_overlap_ignored() == {'@account:1:LM'}
-    assert store.conn.execute("SELECT overlap_ignored_at FROM playlist_scopes WHERE ref='@account:1:LM'").fetchone()[0] == 10
+    assert store.conn.execute("SELECT overlap_ignored_at FROM main.playlist_scopes WHERE ref='@account:1:LM'").fetchone()[0] == 10
     prior = store.playlists.upsert_playlist(1, 'LM', 'Liked', 0, '', 2)
     store.playlists.remove_playlist(prior)
     current = store.playlists.upsert_playlist(1, 'LM', 'Liked again', 0, '', 3)
     assert current != prior
-    assert store.playlists.playlist_provenance('LM', identity_id=1)['description'] == 'Recorded provenance'
+    assert store.playlists.playlist_provenance('LM', account_id=1)['description'] == 'Recorded provenance'
     assert store.playlists.get_hidden_playlists() == {'@account:1:LM'}
-    store.playlists.unhide_playlist('LM', identity_id=1)
-    store.playlists.set_playlist_group('LM', '', identity_id=1)
+    store.playlists.unhide_playlist('LM', account_id=1)
+    store.playlists.set_playlist_group('LM', '', account_id=1)
     store.overlaps.unignore_overlap_playlist('@account:1:LM')
     assert not store.playlists.get_hidden_playlists()
     assert not store.playlists.get_playlist_groups()
@@ -394,13 +427,16 @@ def test_listening_format_classification_survives_scope_provenance_consolidation
     store = predecessor
     store.tracks.upsert_track('format-video', 'Format song', 'Artist', None, None)
     key = store.tracks.identity_key_for_video('format-video')
-    store.playlists.upsert_playlist(1, 'generated-list', 'Mix', 1, '', 10)
+    historical_playlist(store, 1, 'generated-list', 'Mix')
+    current_reads(store)
     store.playlists.set_playlist_provenance('generated-list', origin='tuneconsole', adopted=True)
     store.history.record_play_event(1, key, 'format-video', 10, playlist_ytm_id='generated-list')
     with store.read_view() as reader:
         before = listening_analytics.calculate(reader, 20)
     assert before['subjects'][key]['formats'] == ['mixes']
+    entity_names.clear_predecessor_reads(store.conn)
     apply(store)
+    current_reads(store)
     with store.read_view() as reader:
         after = listening_analytics.calculate(reader, 20)
     assert after == before
@@ -408,6 +444,7 @@ def test_listening_format_classification_survives_scope_provenance_consolidation
     # it verifies the reader after reopening, not registered-tail acceptance.
     reopened = Store(store._db_path)
     try:
+        reopened._schema_compatibility = True
         reopened._bind_repositories()
         with reopened.read_view() as reader:
             assert listening_analytics.calculate(reader, 20) == before

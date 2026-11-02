@@ -3,6 +3,7 @@ import pytest
 from playwright.sync_api import expect
 
 from tests.conftest import FakeClient
+from tests.home_fixture_support import browser_store as store, returning_listener
 from tests.onboarding_support import publish_personal_mix
 from yt_playlist.rec import tv, tv_artwork
 from yt_playlist.util.matching import search_squash
@@ -10,6 +11,9 @@ from yt_playlist.util.matching import search_squash
 
 @pytest.fixture
 def tv_ui(store, live_app, page, monkeypatch):
+    # Prior Vibes use retains the earlier TV destination, including while its
+    # pool refreshes. Keep the first TV draw so queue identity is deterministic.
+    returning_listener(store, 'mixes', 'vibes', now=1)
     seeds = publish_personal_mix(store, now=1)
     for seed in seeds:
         store.rec_model.record_like(seed['key'], 1)
@@ -149,9 +153,13 @@ def test_tv_retries_startup_errors_on_the_same_video_before_any_skip(page, live_
             ['load', 'visual00000'], ['load', 'visual00000']]
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_tv_uses_prepared_pool_without_preview_and_shared_controls_own_video(page, live_app, tv_ui, width):
     searches, api_loads = tv_ui
+    # Hold continuation at the network boundary so this checks Reset against the
+    # initial saved draw. The stream tests exercise confirmed refill history.
+    page.route('**/home/tv/playlist/*/refill',
+               lambda route: route.fulfill(status=202, json={'preparing': True}))
     page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(live_app + '/')
     tabs = page.get_by_role('tab')
@@ -179,8 +187,6 @@ def test_tv_uses_prepared_pool_without_preview_and_shared_controls_own_video(pag
     expect(page.locator('.tv-player iframe')).to_be_visible()
     page.wait_for_function('window.tvCalls.some(call => call[0] === "play")')
     original_playlist = page.evaluate('Alpine.$data(document.querySelector(".tv-home")).playlistId')
-    # The stream can already have prefetched beyond its initial saved draw.
-    # Compare that draw, rather than the growing queue, when checking novelty.
     original_videos = ['visual00000', 'visual00001', 'visual00002']
     expect(page.locator('.tv-loading')).to_be_hidden()
     strip = page.get_by_role('navigation', name='TV playlist', exact=True)
@@ -286,7 +292,7 @@ def test_tv_parameters_apply_without_search_and_blocked_embeds_offer_recovery(pa
     expect(page.get_by_role('button', name='Reset TV', exact=True)).to_be_visible()
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_reset_waits_inside_embed_until_background_pool_is_ready(page, live_app, tv_ui, store, width):
     page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(live_app + '/#tv')

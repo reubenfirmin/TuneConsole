@@ -10,7 +10,7 @@ import tempfile
 from . import policy_documents
 from .evidence_ledger import canonical, _sync_directory
 
-RETAIN_SECONDS = 90 * 86400
+RETAIN_SECONDS = 30 * 86400
 MAX_BYTES = 8 * 1024 * 1024
 FIELDS = ('policy_kind', 'ranker', 'video_id', 'artist', 'genre', 'ownership', 'last_played',
           'has_last_played', 'has_coverage', 'genre_covered', 'year_covered', 'audio_covered',
@@ -163,6 +163,10 @@ def diagnostic(conn, row):
         raise ValueError('Unexpectedly missing served diagnostic: ' + str(row['id'])) from None
     if len(encoded) > MAX_BYTES:
         raise ValueError('Served diagnostic exceeds its byte budget')
+    return _verified_diagnostic(encoded, row)
+
+
+def _verified_diagnostic(encoded, row):
     document = json.loads(encoded)
     body = document.get('body') if isinstance(document, dict) else None
     if (not isinstance(body, dict) or body.get('format') != 1
@@ -199,6 +203,13 @@ def prepare_batch(conn, limit=128):
     return len(rows)
 
 
+def compact_provenance(encoded):
+    """Keep the policy relationship while facts and diagnostics own the trace."""
+    trace = json.loads(encoded)
+    thin = {'pool_policy': trace['pool_policy']} if 'pool_policy' in trace else {}
+    return json.dumps(thin, separators=(',', ':'))
+
+
 def insert(conn, rows):
     if not conn.in_transaction:
         conn.execute('BEGIN IMMEDIATE')
@@ -210,8 +221,7 @@ def insert(conn, rows):
         identity = max(identity, conn.execute('SELECT COALESCE(max(id),0)+1 FROM rec_served_impressions').fetchone()[0])
         trace = json.loads(row[8])
         # Old policy-reference triggers still own these relationships until #626.
-        thin = {'pool_policy': trace['pool_policy']} if 'pool_policy' in trace else {}
-        compact = (*row[:8], json.dumps(thin, separators=(',', ':')), row[9])
+        compact = (*row[:8], compact_provenance(row[8]), row[9])
         conn.execute('INSERT INTO rec_served_impressions(id,request_id,surface,lane,mode_id,identity_key,rank,'
                      'score,model_version,provenance,served_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)', (identity, *compact))
         publish(conn, identity, row[9], trace)
@@ -228,9 +238,10 @@ def expire(conn, now, limit=256):
     # Commit intentional expiry before unlinking. A crash can leave extra files,
     # but never a published diagnostic whose file maintenance has removed.
     conn.executemany('UPDATE served_facts SET diagnostic_expired=1 WHERE impression_id=?', [(i,) for i in identities])
+    conn.executemany('INSERT OR IGNORE INTO served_diagnostic_retirements VALUES (?)', [(i,) for i in identities])
     conn.commit()
     for identity in identities:
-        (directory(conn) / relative(identity)).unlink(missing_ok=True)
+        fao.delete(directory(conn) / relative(identity), missing_ok=True)
     return len(identities)
 
 
@@ -239,10 +250,61 @@ def collect_retired(conn, limit=256):
     rows = conn.execute('SELECT impression_id FROM served_diagnostic_retirements ORDER BY impression_id LIMIT ?',
                         (limit,)).fetchall()
     for identity, in rows:
-        if not conn.execute('SELECT 1 FROM served_facts WHERE impression_id=?', (identity,)).fetchone():
-            (directory(conn) / relative(identity)).unlink(missing_ok=True)
+        current = conn.execute('SELECT diagnostic_expired FROM served_facts WHERE impression_id=?', (identity,)).fetchone()
+        if current is None or current[0]:
+            path = directory(conn) / relative(identity)
+            if path.exists() and not fao.delete(path, missing_ok=True):
+                continue
         conn.execute('DELETE FROM served_diagnostic_retirements WHERE impression_id=?', (identity,))
     return len(rows)
+
+
+def collect_orphans(conn, now, limit=256):
+    """Bound directory visits as well as deletions; restart repeats one shard.
+
+    Caller owns the domain's exclusive reader fence and SQLite writer reservation,
+    so neither a pinned reader nor an uncommitted publisher can lose its file.
+    """
+    if not conn.in_transaction:
+        raise RuntimeError('Orphan collection requires the diagnostic writer reservation')
+    root = directory(conn)
+    progress = root / '.orphan-collection.json'
+    current = getattr(conn, '_served_orphan_gc', None)
+    shard = (json.loads(fao.read_bytes(progress))['shard'] if progress.exists() else 0) if current is None else current[0]
+    removed = 0
+    for _ in range(limit):
+        if current is None:
+            directory_path = root / str(shard).zfill(2)
+            try:
+                iterator = os.scandir(directory_path)
+            except FileNotFoundError:
+                iterator = iter(())
+            current = shard, iterator
+            conn._served_orphan_gc = current
+            if hasattr(iterator, 'close'):
+                conn._close_callbacks.append(iterator.close)
+        try:
+            entry = next(current[1])
+        except StopIteration:
+            if hasattr(current[1], 'close'):
+                current[1].close()
+                conn._close_callbacks.remove(current[1].close)
+            shard = (shard + 1) % 100
+            current = conn._served_orphan_gc = None
+            continue
+        if not entry.is_file(follow_symlinks=False) or not entry.name.endswith('.json') or not entry.name[:-5].isdecimal():
+            continue
+        identity = int(entry.name[:-5])
+        if identity < 1 or root / relative(identity) != Path(entry.path):
+            continue
+        if conn.execute('SELECT 1 FROM rec_served_impressions WHERE id=?', (identity,)).fetchone():
+            continue
+        info = fao.stat(entry.path)
+        if info.ctime_ns / 1e9 <= now - RETAIN_SECONDS:
+            removed += fao.delete(entry.path, expected=info.identity, missing_ok=True)
+    # Persist once per bounded pass. A crash may rescan a shard, never skip it.
+    fao.write_bytes(progress, canonical({'shard': shard}))
+    return removed
 
 
 def references(conn):
@@ -276,19 +338,23 @@ def restore(conn, manifest):
     if not isinstance(value, dict) or set(value) != {'format', 'entries'} or value['format'] != 'served-diagnostics-1':
         raise ValueError('Unsupported served diagnostics backup')
     expected = {row['id']: row for row in references(conn)}
-    seen = set()
-    for identity, size, digest in value['entries']:
-        if identity not in expected or identity in seen:
-            raise ValueError('Served diagnostics backup differs from SQL ownership')
-        seen.add(identity)
-        source = manifest.parent / relative(identity)
-        with fao.open_reader(source) as stream:
-            encoded = stream.read(MAX_BYTES + 1)
-        if len(encoded) > MAX_BYTES or len(encoded) != size or hashlib.sha256(encoded).hexdigest() != digest:
-            raise ValueError('Served diagnostic backup failed verification')
-        target = directory(conn) / relative(identity)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        fao.copy(source, target, max_bytes=MAX_BYTES)
-        diagnostic(conn, expected[identity])
-    if seen != expected.keys():
-        raise ValueError('Served diagnostics backup is incomplete')
+    # Stage a verified copy of every member first. A bad later member (or an
+    # incomplete manifest) must not replace any previously usable live trace.
+    with tempfile.TemporaryDirectory(prefix='tuneconsole-served-restore-') as staging:
+        staged = Path(staging)
+        seen = set()
+        for identity, size, digest in value['entries']:
+            if identity not in expected or identity in seen:
+                raise ValueError('Served diagnostics backup differs from SQL ownership')
+            seen.add(identity)
+            source = manifest.parent / relative(identity)
+            prepared = staged / relative(identity)
+            fao.copy(source, prepared, max_bytes=MAX_BYTES)
+            encoded = fao.read_bytes(prepared, max_bytes=MAX_BYTES)
+            if len(encoded) != size or hashlib.sha256(encoded).hexdigest() != digest:
+                raise ValueError('Served diagnostic backup failed verification')
+            _verified_diagnostic(encoded, expected[identity])
+        if seen != expected.keys():
+            raise ValueError('Served diagnostics backup is incomplete')
+        for identity in seen:
+            fao.copy(staged / relative(identity), directory(conn) / relative(identity), max_bytes=MAX_BYTES)

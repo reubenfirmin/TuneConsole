@@ -107,6 +107,9 @@
 /* Setup embeds Radio outside the dashboard's viewport-height layout. */
 .onboarding-radio .radio-seeds { grid-template-rows: none; grid-auto-rows: minmax(8rem, auto); }
 .onboarding-radio .radio-seed { aspect-ratio: 1; }
+.onboarding-radio .radio-launch { height: auto; }
+.onboarding-radio .radio-launch .gen-loader { position: relative; padding-top: 16rem; }
+.onboarding-radio .radio-launch .gen-copy { position: relative; inset: auto; padding: 2rem; }
 @media (max-width: 38rem) {
   .starter-album { grid-template-columns: minmax(0, 1fr); }
   .starter-album-art { width: min(100%, 16rem); }

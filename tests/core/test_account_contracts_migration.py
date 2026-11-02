@@ -43,11 +43,24 @@ def accounts(store):
     return list(map(tuple, store.conn.execute('SELECT * FROM identities ORDER BY id')))
 
 
+def historical_playlist(store, owner, remote, title):
+    """Seed genuine v69 columns; its triggers retain membership and revisions."""
+    scoped = remote in ('LM', 'SE')
+    scope = f'@account:{owner}:{remote}' if scoped else remote
+    with store.conn:
+        store.conn.execute('INSERT OR IGNORE INTO playlist_scopes VALUES (?,?,?,?)',
+                           (scope, remote, owner if scoped else None, 'account' if scoped else 'shared'))
+        return store.conn.execute('INSERT INTO playlists(identity_id,ytm_playlist_id,title,track_count,'
+            'content_hash,first_seen,last_seen,last_changed,scope_ref) VALUES (?,?,?,0,\'\',1,1,1,?)',
+            (owner, remote, title, scope)).lastrowid
+
+
 def test_account_values_child_history_and_installed_sql_survive_replacement(predecessor):
     store = predecessor
-    current = store.playlists.upsert_playlist(1, 'shared', 'Retained', 0, '', 1)
-    retired = store.playlists.upsert_playlist(2, 'shared', 'Former', 0, '', 1)
-    store.playlists.remove_playlist(retired)
+    current = historical_playlist(store, 1, 'shared', 'Retained')
+    retired = historical_playlist(store, 2, 'shared', 'Former')
+    with store.conn:
+        store.conn.execute('DELETE FROM playlists WHERE id=?', (retired,))
     with store.conn:
         store.conn.execute('CREATE TABLE installed_account_receipts(account_id INTEGER REFERENCES identities(id), value TEXT)')
         store.conn.execute("INSERT INTO installed_account_receipts VALUES (2,'original')")
@@ -131,9 +144,9 @@ def test_reconciliation_swaps_labels_master_and_retains_retired_ids(predecessor)
 
 def test_scope_owner_agreement_keeps_shared_and_unknown_historical_subjects(predecessor):
     store = predecessor
-    store.playlists.upsert_playlist(1, 'LM', 'Liked', 0, '', 1)
-    store.playlists.upsert_playlist(1, 'shared', 'Shared one', 0, '', 1)
-    store.playlists.upsert_playlist(2, 'shared', 'Shared two', 0, '', 1)
+    historical_playlist(store, 1, 'LM', 'Liked')
+    historical_playlist(store, 1, 'shared', 'Shared one')
+    historical_playlist(store, 2, 'shared', 'Shared two')
     apply(store)
     with store.conn:
         store.conn.execute('INSERT INTO playlist_membership_refs(scope_ref,identity_id) VALUES (NULL,NULL)')

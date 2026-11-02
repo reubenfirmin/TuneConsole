@@ -15,10 +15,16 @@ Publication writes and syncs the document before committing its fact row. SQL
 records whether that document was deliberately expired. Unexpected absence and
 corruption are errors, not expiry. IDs used by compact writes are monotonic.
 
-Diagnostics are retained for **90 days**, matching the existing reporting window.
+Diagnostics are retained for **30 days** under the shared FAO policy (#689).
+Typed reporting facts retain their existing independent reporting window.
 The provider-alternative seven-day policy does not apply here. Expiry and existing
 impression/response pruning run in bounded idle maintenance batches too. A reader
 holds the file lifetime fence across its SQL snapshot and trace read.
+Abandoned publications without SQL receipts use a bounded filesystem scan with
+a durable shard cursor and a 30-day file-creation grace. The collector holds both
+the exclusive reader fence and a writer reservation before checking ownership.
+Restore stages and verifies every envelope against SQL facts and the complete
+manifest before replacing any live diagnostic.
 
 Installation is additive and bounded. Explicit preparation captures existing
 immutable provenance in restartable batches; concurrent legacy writes remain

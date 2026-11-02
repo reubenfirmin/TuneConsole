@@ -7,7 +7,7 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import installed
-from yt_playlist.core import action_backup_files, collection_recovery, policy_documents, recommendation_outputs as files
+from yt_playlist.core import action_backup_files, collection_recovery, fao, policy_documents, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import action_ledger as preparation
 from yt_playlist.core.store import Store
@@ -75,7 +75,7 @@ def test_exact_documents_unknown_outcomes_order_links_and_backups(installed):
     assert steps[1]['creation_marker'] == 'captured-marker' and steps[1]['observed_status'] == 'unknown'
     backups = rows(store.conn, action, 'backups', 'position')
     assert len(backups) == 1 and backups[0]['backup_status'] == 'verified'
-    assert Path(backups[0]['retained_filename']).read_bytes() == path.read_bytes()
+    assert fao.read_bytes(backups[0]['retained_filename']) == fao.read_bytes(path)
     assert [row['video_id_snapshot'] for row in rows(store.conn, placed, 'placement_items', 'position')] == ['one'] * 3
     assert preparation.head(store.conn, draft)['draft_signature'] == 'SOURCE|COPY'
     assert preparation.head(store.conn, linked)['undo_of_action_id'] == action

@@ -34,7 +34,7 @@ def test_populated_contexts_do_not_read_behavior_evidence(monkeypatch, store, so
         store.tracks.upsert_track('v', 'A', 'X', 'Saved', 100, album_browse_id='record')
     else:
         store.rec_proposals.put_proposals('choice_interests', {'contexts': [{
-            'format': 'mixes', 'option_id': 'mix', 'keys': ['a|x'], 'at': 100,
+            'format': 'albums', 'option_id': 'record', 'keys': ['a|x'], 'at': 100,
             'days': 1, 'episodes': 1, 'episode_support': 1}]}, 100)
     monkeypatch.setattr(store.rec_query, 'play_counts', lambda: pytest.fail('Populated taste loaded listening fallback'))
     pt = scoring.playlist_taste(store, now=110)

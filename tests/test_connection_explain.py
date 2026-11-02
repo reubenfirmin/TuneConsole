@@ -102,7 +102,8 @@ def test_child_excluded_from_its_own_path(store):
 def _put(store, vecs):
     from tests.conftest import seed_catalog_track
     for key in vecs:
-        seed_catalog_track(store,key,key,'Artist')
+        if store.conn.execute('SELECT 1 FROM recording_aliases WHERE alias=?', (key,)).fetchone() is None:
+            seed_catalog_track(store,key,key,'Artist')
     rows = []
     for k, xy in vecs.items():
         v = np.asarray(xy, dtype=np.float32)

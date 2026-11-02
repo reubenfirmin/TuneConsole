@@ -6,6 +6,7 @@ import numpy as np
 
 from yt_playlist.rec import embedding_vectors as embed, rec_params, scoring, transient
 from tests import model_support
+from tests.conftest import seed_catalog_track
 
 
 class _FakeDao:
@@ -26,6 +27,9 @@ def _store_with_content(tmp_path, monkeypatch, content, audio):
     from yt_playlist.core.store import Store
     s = Store(str(tmp_path / "t.db"))
     s.init_schema()
+    for key in set(content) | set(audio):
+        title, artist = key.split('|', 1)
+        seed_catalog_track(s, key, title, artist)
     for method in ("library_keys", "track_content", "track_audio_features"):
         monkeypatch.setattr(s.rec_query, method, getattr(_FakeDao(content, audio), method))
     model_support.build_content_model(s)       # persist audio-aware content vectors

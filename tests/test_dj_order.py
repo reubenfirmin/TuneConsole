@@ -72,11 +72,11 @@ def test_dj_order_works_on_foryou_items():
 @pytest.mark.parametrize("size", [128, 512, 2048])
 def test_dj_order_resolves_features_linearly_and_reuses_distances(monkeypatch, size):
     tracks = [_t(str(i % 8), "techno" if i % 2 else "folk", i) for i in range(size)]
-    calls = {"artist": 0, "genre": 0, "family": 0, "distance": 0}
+    calls = {"artist": 0, "genre": 0, "family_field": 0, "family": 0, "distance": 0}
     read, family, distance = ordering._field, genre_map.family, genre_map.family_distance
 
     def field(item, name):
-        calls[name] += 1
+        calls['family_field' if name == 'family' else name] += 1
         return read(item, name)
 
     def resolve(genre):

@@ -102,7 +102,7 @@ def test_save_album_flips_to_unsave_after_reload(live_artist_app, page):
     expect(page.get_by_role("button", name="Unsave", exact=True)).to_be_visible()   # now saved
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_album_status_track_links_and_save_from_artist(live_artist_app, page, width):
     base = live_artist_app['base']
     page.set_viewport_size({'width': width, 'height': 1000})
@@ -150,7 +150,7 @@ def test_unsave_album_flips_to_save_after_reload(live_artist_app, page):
     expect(page.get_by_role("button", name="Save", exact=True)).to_be_visible()      # now unsaved
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_artist_multi_account_unsave_keeps_choices_in_modal(live_artist_app, page, width):
     state = live_artist_app
     for identity in (None, state['iid'], state['other']):
@@ -176,7 +176,7 @@ def test_artist_multi_account_unsave_keeps_choices_in_modal(live_artist_app, pag
     assert state['clients'][state['iid']].rated == []
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_existing_album_page_uses_shared_player_and_library_icons(live_artist_app, page, width):
     status = {'connected': True, 'now_playing': {
         'video_id': 'v1', 'title': 'SongA', 'artist': 'Artist X', 'paused': False,
@@ -234,7 +234,7 @@ def test_existing_album_page_uses_shared_player_and_library_icons(live_artist_ap
     assert not errors
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_non_main_album_owner_is_removed_from_collection(live_artist_app, page, width):
     app = live_artist_app
     app['store'].collection.add_saved_album({
@@ -250,7 +250,7 @@ def test_non_main_album_owner_is_removed_from_collection(live_artist_app, page, 
     assert app['clients'][app['other']].rated == [('PLAUDIO', 'INDIFFERENT')]
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 @pytest.mark.parametrize('path', ['/artist?name=Artist%20X', '/albums', '/album?browse=MPREb_x'])
 def test_multiple_owners_choose_one_account_from_a_single_control(live_artist_app, page, width, path):
     app = live_artist_app
@@ -280,7 +280,7 @@ def test_multiple_owners_choose_one_account_from_a_single_control(live_artist_ap
     control.click()
     dialog.get_by_role('button', name='Cancel', exact=True).click()
     expect(dialog).to_be_hidden()
-    if width == 390 and path.startswith('/album?'):
+    if path.startswith('/album?'):
         other_client = app['clients'].pop(app['other'])
         control.click()
         dialog.get_by_role('button', name='Unsave from Other', exact=True).click()

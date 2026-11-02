@@ -9,12 +9,11 @@ import json
 import os
 from pathlib import Path
 import sqlite3
-import tempfile
 import time
 
 from .. import db_handles, policy_documents, policy_recovery
 from ..evidence_ledger import _sync_directory
-from . import build
+from . import build, files
 
 
 def digest(path):
@@ -29,21 +28,12 @@ def sync(path):
 
 
 def save(database, value):
+    from contextvars import Context
+    from .. import fao
     destination = db_handles.state_path(database)
-    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix='.'+destination.name, delete=False) as stream:
-        pending = Path(stream.name)
-        try:
-            stream.write((json.dumps(value, sort_keys=True, allow_nan=False)+'\n').encode())
-            stream.flush()
-            os.fsync(stream.fileno())
-        except BaseException:
-            pending.unlink(missing_ok=True)
-            raise
-    try:
-        os.replace(pending, destination)
-        _sync_directory(destination.parent)
-    finally:
-        pending.unlink(missing_ok=True)
+    # Cancellation may stop construction, but recovery custody must finish
+    # recording which database is authoritative before write admission resumes.
+    Context().run(fao.write_bytes,destination,(json.dumps(value, sort_keys=True, allow_nan=False)+'\n').encode())
 
 
 def reopen(store, *, internal=False):
@@ -70,6 +60,8 @@ def _open_store(store, internal):
         if not store._rebuild_source_version:
             store.conn.execute('PRAGMA journal_mode=WAL')
         store._bind_repositories()
+        from ...rec.choice_evidence import STORAGE_PENDING
+        store._evidence_recovery_pending = store.settings.get_setting(STORAGE_PENDING) == '1'
         store._snapshot_revisions = Revisions(store.conn)
         store._read_memo = ReadMemo()
         if store._rebuild_source_version:
@@ -86,9 +78,12 @@ def _rollback(database, state):
     original = Path(state['original'])
     if state['phase'] == 'complete':
         raise ValueError('Write admission already resumed; automatic rollback is no longer safe')
+    if original.exists() and digest(original) != state.get('original_sha256'):
+        raise ValueError('Recoverable original does not match verified cutover state')
+    state['phase'] = 'rollback'
+    save(database, state)
+    files.rollback(state)
     if original.exists():
-        if digest(original) != state.get('original_sha256'):
-            raise ValueError('Recoverable original does not match verified cutover state')
         if database.exists():
             with closing(sqlite3.connect(database, timeout=.1)) as rejected:
                 checkpoint = rejected.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
@@ -101,7 +96,7 @@ def _rollback(database, state):
             os.replace(database, Path(state['destination'])/'rejected.db')
         os.replace(original, database)
         sync(database)
-    elif not database.exists() or state['phase'] in {'original_moved', 'installed', 'reopening', 'rollback'}:
+    elif not database.exists():
         raise ValueError('Compaction recovery cannot find its original database')
     elif state.get('original_sha256') and digest(database) != state['original_sha256']:
         raise ValueError('Compaction recovery cannot verify the original database')
@@ -144,6 +139,7 @@ def replace(store, state, guard, *, progress):
                 state['phase'] = 'original_moved'
                 save(database, state)
                 progress('original_moved')
+                files.install(state, progress=progress)
                 os.replace(Path(state['sibling']), database)
                 sync(database)
                 state['phase'] = 'installed'
@@ -198,8 +194,11 @@ def recover(database):
             if digest(database) != pending['candidate_sha256']:
                 raise ValueError('Interrupted installed database failed its durable digest')
             with closing(sqlite3.connect(database.as_uri()+'?mode=ro', uri=True)) as conn:
+                conn.row_factory = sqlite3.Row
                 policy_recovery._verify(conn)
                 build._format(conn)
+                if not pending.get('analytics_pending'):
+                    files.verify(conn)
             pending.update(phase='complete', recovered=True)
             save(database, pending)
         elif pending['phase'] in {'closing', 'original_moved', 'reopening', 'rollback'}:

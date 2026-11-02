@@ -34,7 +34,7 @@ def test_closed_file_install_preserves_format_and_continuing_writes(installed,tm
     assert report['phase']=='complete'
     assert report['copy']['installed_version']==version
     assert Path(report['original']).exists()
-    assert Path(report['backup']).exists()
+    assert 'backup' not in report
     assert report['physical_reclaimed_bytes']==0
     assert 'original_moved' in observations
     assert not store.activity_paused
@@ -225,7 +225,7 @@ def test_installed_preparation_reuses_fenced_file_custody(installed,kind,monkeyp
                 assert policy_documents._try_file_lock(lock,exclusive=True) is None
             observed.append(phase)
     report = copy_compaction.run(store,progress=progress)
-    assert report['source_files']['files']>0
+    assert 'backup' not in report
     assert {'copy','staging','original_moved'}<=set(observed)
     assert read(store)==expected
     assert selected(store.conn)==selection
@@ -274,7 +274,7 @@ def test_different_mount_scratch_keeps_installed_custody_on_destination(installe
         report = copy_compaction.run(store,scratch=scratch)
         assert report['phase']=='complete'
         assert not report['capacity']['same_filesystem']
-        assert Path(report['backup']).is_relative_to(scratch)
+        assert Path(report['work']).is_relative_to(scratch)
         assert Path(report['destination']).stat().st_dev==store._db_path.stat().st_dev
         assert Path(report['work']).stat().st_dev!=store._db_path.stat().st_dev
         assert store.settings.get_setting('cross mount')=='retained'
@@ -283,7 +283,7 @@ def test_different_mount_scratch_keeps_installed_custody_on_destination(installe
     # Only scratch is disposable: the existing installed file trees stay live.
     assert producer.exists()
     assert read(store)==expected
-    assert copy_compaction._owned_files(store.conn)['files']>0
+    assert any(producer.rglob('*.json'))
 
 
 @pytest.mark.parametrize('installed',[79],indirect=True)

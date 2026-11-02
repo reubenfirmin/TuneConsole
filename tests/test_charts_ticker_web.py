@@ -61,7 +61,7 @@ def test_charts_ticker_tabs_render(store):
     assert 'class="modal chart-key-popup"' in body
     assert 'class="key-window"' in body
     # category labels from each dimension show up in their tables
-    assert "techno" in body          # genre
+    assert "Techno" in body          # canonical display label
     assert "1990" in body            # year decade bucket
     assert "Album A" in body         # album
     assert "Mix" in body             # playlist

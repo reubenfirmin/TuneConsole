@@ -170,6 +170,24 @@ def test_remembered_preference_alone_does_not_restore_earned_access(store):
     assert not any(account_growth.has_access(state, area)
                    for area in (*state['ready_areas'], 'vibes'))
     assert not account_growth.radio_access(store, 1000, radio={})
+    assert home_vibe.current(store, 1000) == ''
+
+
+def test_saved_vibe_with_confirmed_use_does_not_reassemble_growth_menus(store, monkeypatch):
+    from tests.home_fixture_support import returning_listener
+
+    returning_listener(store, 'vibes', now=1)
+    store.settings.set_setting(home_vibe.SETTING, 'relax')
+
+    def no_menu_rebuild(*_args, **_kwargs):
+        raise AssertionError('Earned Vibe access must not depend on current prepared menus')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(account_growth.growth_readiness, 'vibes', no_menu_rebuild)
+        patch.setattr(account_growth, 'view', no_menu_rebuild)
+        assert home_vibe.current(store, 1000) == 'relax'
+    store.rec_proposals.put_proposals('listening_choices', {'home_format': {}}, 1001)
+    assert home_vibe.current(store, 1002) == ''
 
 
 def test_previously_used_mix_remains_home_and_fragment_destination_without_ready_output(store):

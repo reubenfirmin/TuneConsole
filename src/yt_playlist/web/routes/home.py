@@ -29,16 +29,15 @@ def build(ctx) -> APIRouter:
 
     @router.get("/")
     def home_page(request: Request):
-        if store.activity_paused and store._db_path is not None:
-            # Compose the complete maintenance response from one committed view.
-            # Rendering should not construct a private connection for each small
-            # setting, eligibility lookup or prepared-card read.
-            with store.read_view() as reader:
-                return render_home(request, reader, HomeViews(ctx, store=reader))
-        return render_home(request, store, views)
-
-    def render_home(request, store, views):
         now = now_fn()
+        if store._db_path is not None and (store.activity_paused or ctx.storage_maintenance.phase == 'schema'):
+            # Bounded schema DDL leaves installed owners writable. Compose its
+            # response on one committed view without foreground impression writes.
+            with store.read_view() as reader:
+                return render_home(request, reader, HomeViews(ctx, store=reader), now)
+        return render_home(request, store, views, now)
+
+    def render_home(request, store, views, now):
         artists_required = artist_start.required(store)
         dao = store.rec_ledger
         for card in (() if store.activity_paused or getattr(store, '_read_only', False) else ROTATING_CARDS):
@@ -63,7 +62,7 @@ def build(ctx) -> APIRouter:
         spotify_library_job = current_spotify_import_job(ctx)
         if spotify_library_job and spotify_library_job.get("dismissed"):
             spotify_library_job = None
-        radio_bootstrap = ctx.radio.bootstrap()
+        radio_bootstrap = ctx.radio.bootstrap(reader=store)
         launch_id = request.query_params.get("radio_playlist")
         if launch_id is not None:
             source = store.playlists.get_playlist(int(launch_id)) if launch_id.isdecimal() and len(launch_id) < 16 else None
@@ -72,7 +71,7 @@ def build(ctx) -> APIRouter:
                     "tracks": [track for track in store.charts.playlist_tracks_detail(source.id)
                                if track.get("video_id") and track.get("available") != 0][:8]}
         radio_state = radio_bootstrap["state"]
-        radio_tracks = ctx.radio.history_tracks(radio_state) if radio_state.get('active') else []
+        radio_tracks = ctx.radio.history_tracks(radio_state, reader=store) if radio_state.get('active') else []
         collections = home_prepared.collections(store, views.prepared(now, request), now)
         views.queue_artist_images(collections, now)
         albums_ready = onboarding.prepared_albums_ready(store, now)

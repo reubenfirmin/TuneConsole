@@ -15,8 +15,8 @@ from yt_playlist.rec import home_cards as home
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
 
 
-def seed_genres(store):
-    genres = ["Jazz", "Techno", "Trance", "Indie Rock", "Ambient", "Classical"]
+def seed_genres(store, *, genres=None, tracks_per_lane=20, fresh=True):
+    genres = genres or ["Jazz", "Techno", "Trance", "Indie Rock", "Ambient", "Classical"]
     store.modes.replace_modes([
         {"mode_id": mid, "label": genre, "families": [[genre_map.family(genre), 80]],
          "centroid": np.eye(len(genres), dtype=np.float32)[mid], "size": 80, "rep_keys": []}
@@ -25,9 +25,11 @@ def seed_genres(store):
     for mid, genre in enumerate(genres):
         bundles[str(mid)] = {}
         for lane in mode_surfaces.CARD_SURFACES:
+            if lane == 'fresh' and not fresh:
+                continue
             items = [{"key": f"{lane}-{mid}-{i}|artist{i}", "video_id": "v", "title": f"Song {mid} {i}",
                       "artist": f"Artist {i}", "album": "", "thumbnail": None, "genre": genre,
-                      "plays": 0, "reason": "", "lane": lane} for i in range(20)]
+                      "plays": 0, "reason": "", "lane": lane} for i in range(tracks_per_lane)]
             bundles[str(mid)][lane] = items
             bundles["all"].setdefault(lane, []).extend(items)
     seed_bundle_subjects(store, bundles)

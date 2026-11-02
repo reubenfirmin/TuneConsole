@@ -33,6 +33,7 @@ def build(ctx, views):
                 "avoid_genres": sorted({axis[0] for axis in store.genres.feature_axes(genres).values()}),
                 **({'held_by_vibe': True} if store.settings.get_setting(home_vibe.SETTING) else {}),
             }, now)
+        ctx.rec_worker.trigger_candidate_refresh()
         return views.cards_safe(request, now)
 
     @router.post("/home/mix-genres")
@@ -49,6 +50,7 @@ def build(ctx, views):
                 "epoch": _epoch(store, "cards"), "include_genres": sorted(set(genres)),
                 **({'held_by_vibe': True} if store.settings.get_setting(home_vibe.SETTING) else {}),
             }, now)
+        ctx.rec_worker.trigger_candidate_refresh()
         return views.cards_safe(request, now)
 
     @router.post("/home/vibe", dependencies=[Depends(guard(ctx, 'vibes'))])

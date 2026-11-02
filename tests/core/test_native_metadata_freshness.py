@@ -82,6 +82,21 @@ def test_partial_deliveries_keep_other_fields_and_exact_run_result(runtime_store
     assert inputs(store)['mood_party']['provenance']['model_version'] == 'classifier-1'
 
 
+def test_new_model_provenance_is_a_real_input_change(runtime_store):
+    store = runtime_store
+    track, _ = entry(store)
+    record(store, track, [observation()], 'first', 10)
+    revision = store.conn.execute('SELECT revision FROM rec_musical_sources').fetchone()[0]
+    with store.conn:
+        store.conn.execute('DELETE FROM rec_musical_pending')
+    record(store, track, [observation(model_version='classifier-2')], 'new-model', 30)
+    dependencies, references = store.musical_profiles.source_dependencies(source())
+    values, pending, _ = store.musical_profiles.source_input(source(), observation_ids=references)
+    assert values['observations']['mood_party']['value'] == .8
+    assert values['observations']['mood_party']['provenance']['model_version'] == 'classifier-2'
+    assert pending[0] == revision+1
+
+
 def test_same_run_shared_source_can_link_another_recording(runtime_store):
     store = runtime_store
     first, _ = entry(store, 'first')

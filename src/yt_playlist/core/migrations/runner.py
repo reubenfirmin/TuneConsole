@@ -235,6 +235,11 @@ def validate_version(conn, version, *, foreign_keys=True, data=True):
             vibe_replacements = frozenset({'audio_vibe_feedback'}) if version >= 67 else frozenset()
             if version >= 79:
                 vibe_replacements |= {f'vibe_artists_{event}' for event in ('insert', 'update', 'delete')}
+            if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='schema_changes'").fetchone() and conn.execute(
+                    "SELECT 1 FROM schema_changes WHERE version=16 AND name='file_owned_vibe_guards'").fetchone():
+                from .. import vibe_provenance
+                vibe_provenance.validate_guards(conn)
+                vibe_replacements |= {name for name, _sql in vibe_provenance.guards()}
             v061_recording_vibes.validate(conn, replaced=vibe_replacements)
         if version >= 62:
             v062_album_aliases.validate(conn, replaced=frozenset({'saved_albums'}) if version >= 77 else frozenset(),
@@ -278,7 +283,13 @@ def validate_version(conn, version, *, foreign_keys=True, data=True):
             from . import v069_prepared_recording_inputs
             v069_prepared_recording_inputs.validate(conn)
         if version >= 70:
-            v070_policy_documents.validate(conn)
+            policy_replacements = frozenset()
+            if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='schema_changes'").fetchone() and conn.execute(
+                    "SELECT 1 FROM schema_changes WHERE name='continuing_historical_policy_attribution'").fetchone():
+                from .. import policy_history
+                policy_history.validate_capture(conn)
+                policy_replacements = {name for name, _sql in policy_history.capture_guards()}
+            v070_policy_documents.validate(conn, replaced=policy_replacements)
         if version >= 71:
             from . import v071_album_descriptions
             v071_album_descriptions.validate(conn)

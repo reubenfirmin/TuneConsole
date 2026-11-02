@@ -1,6 +1,20 @@
 from yt_playlist.providers import deepseek
 from yt_playlist.rec import album_descriptions
 from tests.web_support import _client
+from tests.rec.test_album_descriptions import own_album
+
+
+def paid_copy(store, album, text='Saved prose.', *, status='ready'):
+    """Complete an admitted request through its actual album and usage owners."""
+    own_album(store, album)
+    owner = store.album_descriptions
+    reservation = owner.claim(owner.album_id(album), deepseek.description_policy(), 'fixture-credential', 100, 1)
+    assert reservation['status'] == 'reserved'
+    assert owner.authorize(reservation['request_id'], reservation['token'], 'fixture-credential', 100, 1)
+    record = {'status': status, 'model': deepseek.MODEL, 'retry_at': 999999 if status == 'auth' else 0}
+    if status == 'ready':
+        record['description'] = text
+    assert owner.finish(reservation['request_id'], reservation['token'], record, 1)
 
 
 def test_settings_key_entry_is_visible_but_saved_key_is_never_echoed(store, monkeypatch):
@@ -46,13 +60,13 @@ def test_invalid_form_does_not_partially_save_or_echo_submitted_secret(store):
 def test_remove_key_pauses_generation_and_preserves_paid_description(store):
     client = _client(store, lambda: {})
     store.settings.set_setting('deepseek_api_key', 'sk-SECRET-0123456789')
-    store.rec_proposals.put_proposals('album_description:' + album_descriptions.identity({'artist': 'A', 'title': 'B'}),
-        {'description': 'Saved prose.', 'model': deepseek.MODEL}, 1)
+    album = {'browse_id': 'paid-record', 'artist': 'A', 'title': 'B'}
+    paid_copy(store, album)
     response = client.post('/settings/deepseek', data={'action': 'disconnect'})
     assert 'saved key removed' in response.text
     assert not store.settings.get_setting('deepseek_api_key')
     assert not album_descriptions.settings(store, 1)['enabled']
-    assert album_descriptions.read(store, {'artist': 'A', 'title': 'B'})['text'] == 'Saved prose.'
+    assert album_descriptions.read(store, album)['text'] == 'Saved prose.'
 
 
 def test_settings_save_wakes_missing_notes_without_resetting_counts_or_success(store):
@@ -60,8 +74,9 @@ def test_settings_save_wakes_missing_notes_without_resetting_counts_or_success(s
     store.rec_proposals.publish_album_note('missing', {'retry_at': 999999, 'editorial_version': 6}, 1)
     store.rec_proposals.publish_album_note('ready', {'retry_at': 999999, 'editorial_version': 6,
         'description': {'kind': 'generated', 'text': 'Saved prose.'}}, 1)
-    store.rec_proposals.put_proposals('album_description_usage', {'day': 0, 'requests': 20,
-        'status': 'auth', 'retry_at': 999999}, 1)
+    for n in range(20):
+        paid_copy(store, {'browse_id': f'paid-{n}', 'artist': 'A', 'title': f'Album {n}'},
+                  status='auth' if n == 19 else 'ready')
     client.post('/settings/deepseek', data={'key': 'sk-FIXED-0123456789', 'enabled': 'on', 'daily_limit': '20'})
     notes = store.rec_proposals.get_proposals('album_notes')
     assert notes['missing']['retry_at'] == 0 and notes['ready']['retry_at'] == 999999
@@ -71,11 +86,12 @@ def test_settings_save_wakes_missing_notes_without_resetting_counts_or_success(s
 def test_home_renders_saved_generated_copy_without_provider_label_or_paid_request(store, monkeypatch):
     from yt_playlist.providers import release_notes
     client = _client(store, lambda: {})
+    store.rec_proposals.put_proposals('listening_choices', {
+        'home_format': {'episodes': {'albums': 1}}}, 1)
     album = {'browse_id': 'record', 'artist': 'Artist', 'title': 'Album', 'score': .9}
     store.rec_proposals.put_proposals('album_prepared', {'items': [album], 'context': {}, 'built_at': 1}, 1)
-    store.rec_proposals.put_proposals('album_description:' + album_descriptions.identity(album), {
-        'description': 'A saved album description with <script>unsafe markup</script>.',
-        'model': deepseek.MODEL, 'status': 'ready'}, 1)
+    paid_copy(store, album, 'A saved album description with <script>unsafe markup</script>.')
+    before = store.album_descriptions.requests_today(1)
     def forbidden(*args):
         raise AssertionError('Rendering must not call providers')
     monkeypatch.setattr(deepseek, 'describe', forbidden)
@@ -85,4 +101,4 @@ def test_home_renders_saved_generated_copy_without_provider_label_or_paid_reques
     assert 'AI description · DeepSeek Flash' not in response.text
     assert '&lt;script&gt;unsafe markup&lt;/script&gt;' in response.text
     assert '<script>unsafe markup</script>' not in response.text
-    assert not store.rec_proposals.get_proposals('album_description_usage')
+    assert store.album_descriptions.requests_today(1) == before == 1

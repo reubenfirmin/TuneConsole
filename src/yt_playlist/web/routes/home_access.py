@@ -15,7 +15,9 @@ def state(ctx, request=None):
 
 def guard(ctx, area, *, radio=None):
     def require(request: Request):
-        if area == 'radio' and not hasattr(request.state, 'account_growth'):
+        if not hasattr(request.state, 'account_growth') and account_growth.retained_access(ctx.store, area):
+            allowed = True
+        elif area == 'radio' and not hasattr(request.state, 'account_growth'):
             allowed = account_growth.radio_access(ctx.store, ctx.now_fn(),
                 radio=ctx.radio.bootstrap() if radio is None else radio)
         else:

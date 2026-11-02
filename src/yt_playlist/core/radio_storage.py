@@ -124,7 +124,9 @@ def save(conn,state,*,expected,legacy=False,now=None):
                              (video,)).fetchone()
         if entry is None:
             key = '@unresolved-video:'+video
-            entry_id = catalog.upsert(conn,video,track.get('title',''),track.get('artist',''),preferred_key=key)
+            entry_id = (catalog.admit_captured_video(conn,video,title=track.get('title',''),
+                artist=track.get('artist',''),captured_at=now if now is not None else 0.) if legacy else
+                catalog.upsert(conn,video,track.get('title',''),track.get('artist',''),preferred_key=key))
             entry = conn.execute('SELECT id,recording_id FROM catalog_entries WHERE id=?',(entry_id,)).fetchone()
         conn.execute('INSERT INTO radio_queue_items VALUES (?,?,?,?,?,?)',(owner,position,entry[1],entry[0],video,status))
     conn.execute('INSERT INTO radio_session_head VALUES (1,?) ON CONFLICT(singleton) DO UPDATE SET session_id=excluded.session_id',

@@ -8,6 +8,7 @@ from yt_playlist.rec import embedding_vectors as embed, radio_catalog, radio_tun
 from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, RadioCandidates
 from yt_playlist.rec.radio_directions import DEPTH, RadioDirections
 from yt_playlist.rec.radio_genres import genre
+from yt_playlist.core import catalog
 
 
 def catalog_track(store, video, label="Downtempo", *, artist=None, duration=200, available=None):
@@ -123,8 +124,7 @@ def test_themed_catalog_respects_exclusions_and_current_metadata(store, seed):
     catalog_track(store, "same-family", label="Synthwave")
     # The underlying recording is Downtempo, but the current upload override wins.
     with store.conn:
-        store.conn.execute("INSERT INTO entry_field_choices VALUES (?,?,?,?)",
-                           (rejected["override"][1], "genre", json.dumps("Indie Rock"), "test"))
+        catalog.choose_field(store.conn, rejected["override"][1], 'genre', 'Indie Rock', 'test', now=1)
     # Another upload of an already heard recording is not another eligible song.
     heard, tid = rejected["duplicate"]
     store.tracks.upsert_track("duplicate-upload", heard["title"], heard["artist"], "", 200)
@@ -134,8 +134,7 @@ def test_themed_catalog_respects_exclusions_and_current_metadata(store, seed):
     assert store.tracks.identity_key_for_video("duplicate-upload") == heard["key"]
     good, good_id = catalog_track(store, "corrected", label="Indie Rock")
     with store.conn:
-        store.conn.execute("INSERT INTO entry_field_choices VALUES (?,?,?,?)",
-                           (good_id, "genre", json.dumps("Downtempo"), "test"))
+        catalog.choose_field(store.conn, good_id, 'genre', 'Downtempo', 'test', now=1)
     c = candidates(store)
     # Feedback can arrive after construction, before these tracks enter a menu.
     store.rec_model.record_dislike(rejected["disliked"][0]["key"], 200_000, 1)
@@ -153,7 +152,7 @@ def test_themed_catalog_respects_exclusions_and_current_metadata(store, seed):
 def test_themed_catalog_keeps_library_and_discovery_distinct(store, seed, comfort):
     owned, _ = catalog_track(store, "owned")
     store.discovery.upsert_discovered_track("fresh-key", "fresh-video", "Fresh", "New Artist", "", "",
-                                           "Downtempo", 2001, "artist:new", 1)
+                                           "Downtempo", "2001", "artist:new", 1)
     pick = candidates(store, comfort=comfort).next_track([seed])
     assert pick["video_id"] == (owned["video_id"] if comfort else "fresh-video")
     assert bool(pick["_radio_fresh"]) == (comfort == 0)

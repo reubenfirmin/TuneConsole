@@ -503,37 +503,45 @@ def _lineage_orphans(repo):
 
 def cleanup(repo, *, before=None, generation=None):
     """Fence an expired worker, then remove one bounded unpublished prefix."""
-    with publication._write(repo) as conn:
-        row = conn.execute('SELECT g.id FROM group_builds b JOIN group_generations g ON g.id=b.generation_id '
-            'WHERE b.expires_at<? AND NOT EXISTS(SELECT 1 FROM group_publications p WHERE p.generation_id=g.id) '
-            + ('AND g.external_key=? ' if generation is not None else '') + 'ORDER BY b.expires_at LIMIT 1',
-            (time.time() if before is None else before,) + ((generation,) if generation is not None else ())).fetchone()
-        if row is not None:
-            generation_id = row[0]
-            conn.execute('UPDATE group_builds SET owner=?,ready=0,expires_at=0 WHERE generation_id=?',
-                         (publication._CLEANUP_OWNER, generation_id))
-            for table, key in (('group_graph', ('generation_id', 'left_recording_id', 'right_recording_id')),
-                               ('unresolved_group_graph', ('generation_id', 'left_key', 'right_key')),
-                               ('group_assignments', ('generation_id', 'recording_id')),
-                               ('unresolved_group_assignments', ('generation_id', 'raw_key')),
-                               ('group_unknown', ('generation_id', 'recording_id')),
-                               ('unresolved_group_unknown', ('generation_id', 'raw_key')),
-                               ('group_generation_lineage', ('generation_id', 'source_alias', 'target_alias'))):
-                if _delete(conn, table, key, 'generation_id=?', (generation_id,)):
-                    return True
-            if _lineage_orphans(repo):
+    with publication._write(repo):
+        return cleanup_batch(repo, before=before, generation=generation)
+
+
+def cleanup_batch(repo, *, before=None, generation=None):
+    """The same bounded cleanup under an existing writer and bookmark."""
+    conn = repo.conn
+    if not conn.in_transaction:
+        raise RuntimeError('Group cleanup requires an outer writer transaction')
+    row = conn.execute('SELECT g.id FROM group_builds b JOIN group_generations g ON g.id=b.generation_id '
+        'WHERE b.expires_at<? AND NOT EXISTS(SELECT 1 FROM group_publications p WHERE p.generation_id=g.id) '
+        + ('AND g.external_key=? ' if generation is not None else '') + 'ORDER BY b.expires_at LIMIT 1',
+        (time.time() if before is None else before,) + ((generation,) if generation is not None else ())).fetchone()
+    if row is not None:
+        generation_id = row[0]
+        conn.execute('UPDATE group_builds SET owner=?,ready=0,expires_at=0 WHERE generation_id=?',
+                     (publication._CLEANUP_OWNER, generation_id))
+        for table, key in (('group_graph', ('generation_id', 'left_recording_id', 'right_recording_id')),
+                           ('unresolved_group_graph', ('generation_id', 'left_key', 'right_key')),
+                           ('group_assignments', ('generation_id', 'recording_id')),
+                           ('unresolved_group_assignments', ('generation_id', 'raw_key')),
+                           ('group_unknown', ('generation_id', 'recording_id')),
+                           ('unresolved_group_unknown', ('generation_id', 'raw_key')),
+                           ('group_generation_lineage', ('generation_id', 'source_alias', 'target_alias'))):
+            if _delete(conn, table, key, 'generation_id=?', (generation_id,)):
                 return True
-            if _delete(conn, 'generation_groups', ('generation_id', 'group_id'), 'generation_id=?', (generation_id,)):
-                return True
-            if _delete(conn, 'group_version_aliases', ('external_version',), 'first_generation_id=? AND NOT EXISTS('
-                    'SELECT 1 FROM generation_groups x WHERE x.external_version=group_version_aliases.external_version)',
-                    (generation_id,)):
-                return True
-            if _delete(conn, 'group_build_versions', ('generation_id', 'position'), 'generation_id=?', (generation_id,)):
-                return True
-            if _orphans(conn):
-                return True
-            conn.execute('DELETE FROM group_builds WHERE generation_id=?', (generation_id,))
-            conn.execute('DELETE FROM group_generations WHERE id=?', (generation_id,))
+        if _lineage_orphans(repo):
             return True
-        return _orphans(conn)
+        if _delete(conn, 'generation_groups', ('generation_id', 'group_id'), 'generation_id=?', (generation_id,)):
+            return True
+        if _delete(conn, 'group_version_aliases', ('external_version',), 'first_generation_id=? AND NOT EXISTS('
+                'SELECT 1 FROM generation_groups x WHERE x.external_version=group_version_aliases.external_version)',
+                (generation_id,)):
+            return True
+        if _delete(conn, 'group_build_versions', ('generation_id', 'position'), 'generation_id=?', (generation_id,)):
+            return True
+        if _orphans(conn):
+            return True
+        conn.execute('DELETE FROM group_builds WHERE generation_id=?', (generation_id,))
+        conn.execute('DELETE FROM group_generations WHERE id=?', (generation_id,))
+        return True
+    return _orphans(conn)

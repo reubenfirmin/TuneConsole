@@ -245,8 +245,9 @@ def test_oversized_prepared_key_fails_before_map_writer_and_valid_original_is_re
             owner.step(store.conn)
     finally:
         store.conn.set_trace_callback(None)
-    # Installation validates under a short reservation; the map never reserves.
-    assert sql.count('BEGIN IMMEDIATE') == 1
+    # Completed installation validates without a writer reservation. Invalid
+    # preparation must also fail before map publication can reserve a writer.
+    assert sql.count('BEGIN IMMEDIATE') == 0
     assert not store.conn.execute('SELECT 1 FROM '+owner.table('stages')).fetchone()
     assert preparation.read_original(store.conn, owner.name, good) == original
     regular.migrate(store.conn)

@@ -5,7 +5,7 @@ contain no mutable index and never establish provider delivery identity.
 """
 from contextlib import closing
 import hashlib
-from itertools import chain
+from itertools import chain, groupby
 import json
 from pathlib import Path
 import sqlite3
@@ -47,13 +47,13 @@ def _digest(value):
     return isinstance(value, str) and len(value) == 64 and not set(value) - set('0123456789abcdef')
 
 
-def publish_encoded(root, records):
+def publish_encoded(root, records, *, age=None):
     """Yield (filename, record digest, byte size, offset), retaining one pack."""
     pending, size = [], len(PACK_HEADER)
 
     def seal():
         packed = PACK_HEADER + b''.join(pending)
-        filename = policy_documents._publish_encoded(root, packed, hashlib.sha256(packed).hexdigest())
+        filename = policy_documents._publish_encoded(root, packed, hashlib.sha256(packed).hexdigest(), age=age)
         offset = len(PACK_HEADER)
         for record in pending:
             yield filename, hashlib.sha256(record).hexdigest(), len(record), offset
@@ -72,19 +72,15 @@ def publish_encoded(root, records):
         yield from seal()
 
 
-def _read(filename, digest, byte_size, offset, *, kind='response'):
+def _range(path, digest, byte_size, offset):
     if (not _digest(digest) or type(byte_size) is not int or not 0 < byte_size <= MAX_BYTES
             or type(offset) is not int or offset < 0):
         raise ValueError('Invalid metadata delivery file range')
-    path = Path(filename)
     if not _digest(path.stem):
         raise ValueError('Invalid metadata delivery filename')
-    with fao.open_reader(path) as stream:
-        if offset:
-            if offset < len(PACK_HEADER) or stream.read(len(PACK_HEADER)) != PACK_HEADER:
-                raise ValueError('Invalid metadata delivery pack')
-            stream.seek(offset)
-        encoded = stream.read(byte_size + (not offset))
+
+
+def _decoded(path, digest, byte_size, offset, encoded, kind):
     if (len(encoded) != byte_size or hashlib.sha256(encoded).hexdigest() != digest
             or not offset and path.stem != digest):
         raise ValueError('Metadata delivery file does not match its owned content')
@@ -94,6 +90,40 @@ def _read(filename, digest, byte_size, offset, *, kind='response'):
             or canonical(document) != encoded):
         raise ValueError('Unsupported or noncanonical metadata delivery document')
     return encoded
+
+
+def _read(filename, digest, byte_size, offset, *, kind='response', with_age=False):
+    path = Path(filename)
+    _range(path, digest, byte_size, offset)
+    with fao.open_reader(path) as stream:
+        age = stream.info
+        if offset:
+            if offset < len(PACK_HEADER) or stream.read(len(PACK_HEADER)) != PACK_HEADER:
+                raise ValueError('Invalid metadata delivery pack')
+            stream.seek(offset)
+        encoded = stream.read(byte_size + (not offset))
+    _decoded(path, digest, byte_size, offset, encoded, kind)
+    return (encoded, age) if with_age else encoded
+
+
+def _read_records(references):
+    """Validate ordered ranges with one pinned reader and one record in memory."""
+    for filename, records in groupby(references, key=lambda reference: reference[0]):
+        path = Path(filename)
+        with fao.open_reader(path) as stream:
+            header = None
+            for reference in records:
+                _, digest, size, offset = reference
+                _range(path, digest, size, offset)
+                if offset:
+                    if header is None:
+                        stream.seek(0)
+                        header = stream.read(len(PACK_HEADER))
+                    if offset < len(PACK_HEADER) or header != PACK_HEADER:
+                        raise ValueError('Invalid metadata delivery pack')
+                stream.seek(offset)
+                encoded = stream.read(size + (not offset))
+                yield reference, _decoded(path, digest, size, offset, encoded, 'response')
 
 
 def read(filename, digest, byte_size, offset):
@@ -124,7 +154,7 @@ def export(conn, root):
 
 def _contents(conn):
     return conn.execute('SELECT DISTINCT raw_filename,raw_digest,raw_byte_size,raw_offset '
-                        'FROM metadata_deliveries WHERE raw_filename IS NOT NULL')
+                        'FROM metadata_deliveries WHERE raw_filename IS NOT NULL ORDER BY raw_filename,raw_offset')
 
 
 def _export(conn, root, *, directory, references, contents):
@@ -136,9 +166,8 @@ def _export(conn, root, *, directory, references, contents):
         staged.execute('PRAGMA cache_size=-1024')
         staged.execute('CREATE TABLE contents(digest TEXT PRIMARY KEY,filename TEXT,size INTEGER,offset INTEGER,'
                        'target TEXT,target_offset INTEGER) WITHOUT ROWID')
-        for filename, digest, size, offset in contents(conn):
+        for (filename, digest, size, offset), encoded in _read_records(contents(conn)):
             check_cancellable_work()
-            encoded = _read(filename, digest, size, offset)
             old = staged.execute('SELECT filename,size,offset FROM contents WHERE digest=?', (digest,)).fetchone()
             if old:
                 if _read(old[0], digest, old[1], old[2]) != encoded:
@@ -146,7 +175,16 @@ def _export(conn, root, *, directory, references, contents):
             else:
                 staged.execute('INSERT INTO contents(digest,filename,size,offset) VALUES (?,?,?,?)',
                                (digest, filename, size, offset))
-        _copy_contents(staged, root)
+        # Backups retain existing bounded packs and their original offsets.
+        # Repacking belongs to restoration/conversion, not recovery custody.
+        staged.execute('CREATE INDEX contents_source ON contents(filename,offset)')
+        for filename, in staged.execute('SELECT DISTINCT filename FROM contents ORDER BY filename'):
+            source = Path(filename)
+            relative = Path(source.stem[:2], source.stem + '.json')
+            copied = root / relative
+            fao.copy(source, copied, digest=source.stem)
+            staged.execute('UPDATE contents SET target=?,target_offset=offset WHERE filename=?',
+                           (str(relative), filename))
         entries, chunks = [], []
 
         def chunk():
@@ -160,7 +198,7 @@ def _export(conn, root, *, directory, references, contents):
             filename, offset = staged.execute('SELECT target,target_offset FROM contents WHERE digest=? AND size=?',
                                                (digest, size)).fetchone()
             entries.append({'id': identity, 'digest': digest, 'byte_size': size, 'offset': offset,
-                            'relative_filename': str(Path(filename).relative_to(root))})
+                            'relative_filename': filename})
             if len(entries) == CHUNK_ROWS:
                 chunk()
         if entries:
@@ -170,20 +208,22 @@ def _export(conn, root, *, directory, references, contents):
 
 def _copy_contents(staged, root):
     """Publish each distinct response once, using a disk-backed range map."""
+    staged.execute('CREATE INDEX IF NOT EXISTS contents_source ON contents(filename,offset,digest)')
     after = None
     while True:
         batch = staged.execute('SELECT digest,filename,size,offset FROM contents'
-            + (' WHERE digest>?' if after is not None else '') + ' ORDER BY digest LIMIT 128',
-            (after,) if after is not None else ()).fetchall()
+            + (' WHERE (filename,offset,digest)>(?,?,?)' if after is not None else '')
+            + ' ORDER BY filename,offset,digest LIMIT 128',
+            after if after is not None else ()).fetchall()
         if not batch:
             return
-        records = (_read(filename, digest, size, offset) for digest, filename, size, offset in batch)
-        for row, target in zip(batch, publish_encoded(root, records)):
+        records = (_read(filename, digest, size, offset, with_age=True) for digest, filename, size, offset in batch)
+        for row, target in zip(batch, policy_documents.repack(root, records, publish_encoded)):
             filename, digest, size, offset = target
             if (digest, size) != (row[0], row[2]):
                 raise ValueError('Metadata copy changed captured content')
             staged.execute('UPDATE contents SET target=?,target_offset=? WHERE digest=?', (filename, offset, digest))
-        after = batch[-1][0]
+        after = batch[-1][1], batch[-1][3], batch[-1][0]
 
 
 def _source(root, entry):
@@ -291,9 +331,7 @@ def collect_orphans(conn):
                     check_cancellable_work()
                     if not conn.execute('SELECT 1 FROM metadata_deliveries WHERE raw_filename=? LIMIT 1',
                                         (str(path),)).fetchone():
-                        path.unlink(missing_ok=True)
-                        _sync_directory(path.parent)
-                        removed += 1
+                        removed += fao.delete(path, missing_ok=True)
                 return removed
             finally:
                 unlock()

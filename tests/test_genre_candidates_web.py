@@ -51,7 +51,7 @@ def test_provider_agreement_is_one_genre_choice(store):
     store.enrichment_state.log_enrichment(tid, "later", "lastfm", "genre", "Electronic", now=2.0)
     provenance = store.enrichment_reports.genre_provenance(tid)
     electronic = next(o for o in provenance["options"] if o["value"] == "Electronic")
-    assert electronic["providers"] == ["musicbrainz", "lastfm"]
+    assert electronic["providers"] == ["track_enrichment", "musicbrainz", "lastfm"]
     html = client.get(f"/track/{tid}/genre-candidates").text
     assert html.count('value="Electronic"') == 1
 

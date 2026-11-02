@@ -64,17 +64,15 @@ class StorageMaintenance:
 
     def start_compaction(self, *, scratch=None):
         """Explicit retained-copy operation, independent of schema preparation."""
-        self._start_copy(destination=None, resume=False, scratch=scratch)
+        self._start_copy(destination=None, rebuild=False, resume=False, scratch=scratch)
 
-    def start_rebuild(self, destination, *, resume=False, scratch=None):
+    def start_rebuild(self, destination=None, *, resume=False, scratch=None):
         """Run a schema owner's direct destination through the shared worker."""
-        if destination is None:
-            raise ValueError('A rebuild requires a destination contract')
         if resume and scratch is not None:
             raise ValueError('Resume reuses the recorded scratch directory')
-        self._start_copy(destination=destination, resume=resume, scratch=scratch)
+        self._start_copy(destination=destination, rebuild=True, resume=resume, scratch=scratch)
 
-    def _start_copy(self, *, destination, resume, scratch):
+    def _start_copy(self, *, destination, rebuild, resume, scratch):
         with self.store._lock:
             if self.active or self._thread is not None and self._thread.is_alive():
                 raise StorageCompacting()
@@ -84,11 +82,11 @@ class StorageMaintenance:
             self.detail = {}
             self.error = ''
             self.report = None
-            self._rebuilding = destination is not None
+            self._rebuilding = rebuild
             self.message = ''
             self.ready.clear()
             self._thread = threading.Thread(target=self._run_copy,
-                kwargs={'destination':destination, 'resume':resume, 'scratch':scratch},
+                kwargs={'destination':destination, 'rebuild':rebuild, 'resume':resume, 'scratch':scratch},
                 name='database-rebuild' if self._rebuilding else 'copy-compaction', daemon=True)
             try:
                 self._thread.start()
@@ -98,14 +96,36 @@ class StorageMaintenance:
                 self._thread = None
                 raise
 
-    def _run_copy(self, *, destination, resume, scratch):
+    def _run_copy(self, *, destination, rebuild, resume, scratch):
         from . import playback_feedback
-        from .db_rebuild import job
+        from .db_rebuild import build, job
         from .activity import cancellable_work
         try:
             with cancellable_work(self._stop.is_set):
-                self.report = job.run(self.store,destination=destination,resume=resume,scratch=scratch,
-                    progress=self._progress,cancelled=self._stop.is_set)
+                if resume is None:
+                    from . import db_handles
+                    from .db_rebuild.destination import signature
+                    from pathlib import Path
+                    previous = db_handles.state(self.store._db_path) or {}
+                    resume = bool(previous.get('phase') == 'failed' and previous.get('failed_phase') == 'building'
+                        and previous.get('operation') == 'rebuild' and previous.get('source_identity')
+                        and previous.get('destination_version') == signature()
+                        and (Path(previous['work'])/'copy.db').is_file()
+                        and previous['source_identity'] == build._source_identity(self.store._db_path))
+                from . import db_handles
+                previous = db_handles.state(self.store._db_path) or {}
+                if previous.get('phase') == 'complete' and previous.get('analytics_pending'):
+                    self.report = previous
+                else:
+                    self.report = job.run(self.store,destination=destination,rebuild=rebuild,resume=resume,scratch=scratch,
+                        progress=self._progress,cancelled=self._stop.is_set)
+                if self.report.get('analytics_pending'):
+                    # Runtime cutover has completed. Requests may read/write,
+                    # while ready continues holding the workers at startup.
+                    self.active = False
+                    self.on_resume()
+                    playback_feedback.try_drain(self.store)
+                    self.report = job.finish_analytics(self.store,progress=self._progress,cancelled=self._stop.is_set)
             self.phase = 'done'
         except Exception as error:
             self.phase = 'deferred'
@@ -125,7 +145,8 @@ class StorageMaintenance:
                     playback_feedback.try_drain(self.store)
             except Exception:
                 log.warning('Playback feedback or provenance awaits retry after database copy',exc_info=True)
-            if not getattr(self.store, '_rebuild_source_version', None):
+            pending = db_handles.state(self.store._db_path) or {}
+            if not self.store.activity_paused and not pending.get('analytics_pending'):
                 self.ready.set()
 
     def status(self):
@@ -161,7 +182,7 @@ class StorageMaintenance:
             banner_message = ('Library recovery is needed.' if phase=='recovery_required' else
                               'Library updates need attention.' if retrying else
                               'Catching up on your listening.' if not self.active and not evidence else
-                              'Library updates are paused.')
+                              'Performing database maintenance - this should take just a few minutes.')
         elif warning:
             banner_message = ('Library update needs a retry.' if phase == 'schema_retry' else
                               'Free disk space to finish.' if self.message in {LOW_SPACE_MESSAGE,COPY_LOW_SPACE_MESSAGE} else
@@ -176,9 +197,15 @@ class StorageMaintenance:
         if self.store._db_path is None or self._thread is not None:
             return
         with self.store._lock:
-            if getattr(self.store, '_rebuild_source_version', None) == 64:
-                self.phase = 'rebuild_required'
-                self.ready.clear()
+            from . import db_handles
+            pending = db_handles.state(self.store._db_path) or {}
+            if pending.get('phase') == 'complete' and pending.get('analytics_pending'):
+                self._start_copy(destination=None,rebuild=True,resume=False,scratch=None)
+                return
+            if self.store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] in (64,93):
+                # Admission is constant-size. The worker selects and validates
+                # the full source/target contract after fencing source writes.
+                self._start_copy(destination=None,rebuild=True,resume=None,scratch=None)
                 return
             from .migrations import regular
             if regular.validate(self.store.conn) < len(regular.CHANGES):

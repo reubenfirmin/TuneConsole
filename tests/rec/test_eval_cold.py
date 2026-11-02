@@ -12,7 +12,7 @@ def test_metadata_free_discovery_is_neither_eligible_nor_rankable(store):
 
 
 @pytest.mark.parametrize("genre,year,audio", [("Techno", None, {}), (None, "2000", {}),
-                                              (None, None, {"bpm": 0}),
+                                              (None, None, {"bpm": 120}),
                                               (None, None, {"music_key": "C"})])
 def test_metadata_without_model_is_eligible_but_not_rankable(store, genre, year, audio):
     store.discovery.upsert_discovered_track("a|x", "v", "a", "x", "", None, genre, year, "album", 0)

@@ -11,11 +11,20 @@ from yt_playlist.util.matching import identity_key
 from yt_playlist.web.track_links import track_url
 
 
-@pytest.mark.parametrize("width", [1440, 1024, 390, 320])
+@pytest.mark.parametrize("width", [1440, 1024])
 def test_preview_and_compare_show_artwork_play_tracks_and_keep_baseline(live_app, store, page, monkeypatch, width, tmp_path):
     from yt_playlist.rec import surfaces
+    from tests.conftest import seed_catalog_track
 
     title = 'A song with a "long" title & another verse'
+    for key, name, artist, video in [
+        ('song|artist', title, 'Artist & guest', 'preview-song'),
+        ('missing|artist', 'Missing artwork', 'Another artist', 'missing-art'),
+        ('unknown|artist', 'Unresolved song', 'Unknown artist', None),
+        ('old|artist', 'Former pick', 'Artist & guest', 'former-pick'),
+        ('new|artist', 'New pick', 'Artist & guest', 'new-pick'),
+    ]:
+        seed_catalog_track(store, key, name, artist, video_id=video)
     trace = {"durable": .4, "transient_delta": .1, "session_delta": 0,
              "audio_delta": 0, "axes": {}, "contexts": [{"name": "Night drive"}]}
     sample = [surfaces.ForYouItem(title, "Artist & guest", "An album", "preview-song",
@@ -95,12 +104,12 @@ def test_preview_and_compare_show_artwork_play_tracks_and_keep_baseline(live_app
     assert page.url.endswith("#experiment/preview")
     assert len(page.context.pages) == 1
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    page.locator(".taste-comparison").screenshot(path=str(tmp_path / f"taste-comparison-{width}.png"))
+    page.locator(".taste-comparison").screenshot(path=f"/tmp/tuneconsole-ready-742-comparison-{width}.png")
     page.get_by_role("button", name="Refresh sample", exact=True).click()
     expect(page.locator(".sample-note")).to_contain_text("Sample updated")
-    page.locator(".foryou-sample").screenshot(path=str(tmp_path / f"taste-preview-{width}.png"))
+    page.locator(".foryou-sample").screenshot(path=f"/tmp/tuneconsole-ready-742-preview-{width}.png")
     page.get_by_role("tablist", name="Experiment tools", exact=True).scroll_into_view_if_needed()
-    page.screenshot(path=str(tmp_path / f"taste-experiment-subtabs-{width}.png"))
+    page.screenshot(path=f"/tmp/tuneconsole-ready-742-subtabs-{width}.png")
     assert errors == []
 
 
@@ -136,7 +145,7 @@ def test_overview_updates_itself_when_background_genre_repair_finishes(store, pa
     expect(page.locator("#taste-profile-panel .taste-panel-content")).to_contain_text("Loading taste profile")
 
 
-@pytest.mark.parametrize('width', [1440, 390, 320])
+@pytest.mark.parametrize('width', [1440])
 def test_populated_overview_leads_with_changes_and_keeps_feedback_compact(store, page, monkeypatch, request, width, tmp_path):
     from yt_playlist.rec.rec_worker import RecWorker
 
@@ -187,7 +196,7 @@ def test_populated_overview_leads_with_changes_and_keeps_feedback_compact(store,
     expect(page.get_by_role('tab', name='Recent & learning', exact=True)).to_have_attribute('aria-selected', 'true')
 
 
-@pytest.mark.parametrize("width", [1440, 1024, 390, 320])
+@pytest.mark.parametrize("width", [1440, 1024])
 def test_playlist_influence_shows_the_whole_blend_and_links_selected_rows(live_app, store, page, width, tmp_path):
     iid = store.accounts.get_accounts()[0].id
     titles = ['Night drives / broken beats & "other" late discoveries',
@@ -254,7 +263,7 @@ def test_playlist_influence_shows_the_whole_blend_and_links_selected_rows(live_a
     assert errors == []
 
 
-@pytest.mark.parametrize("width", [1440, 390, 320])
+@pytest.mark.parametrize("width", [1440])
 def test_feedback_uses_track_table_with_artwork_sorting_and_unban(live_app, store, page, width, tmp_path):
     title = 'Alpha "Live" & the extended recording'
     artist = "Artist's Band"

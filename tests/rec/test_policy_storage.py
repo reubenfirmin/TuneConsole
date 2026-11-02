@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.conftest import seed_catalog_track
-from yt_playlist.core import db_space, policy_config
+from yt_playlist.core import db_space, policy_config, radio_storage
 from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, measurement, mode_surfaces, scorecard
 from yt_playlist.repos import policy_storage
@@ -46,6 +46,24 @@ def test_pool_variants_share_large_body_and_preserve_exact_configuration(store, 
     assert size < 512000  # Includes canonical file wrappers, versus about 48 MB unshared.
     assert store.rec_ledger.policy_configuration(items[-1]['pool_policy']) == {
         **body, 'ranker': 'vibe:lane:family-1007'}
+
+
+def test_idle_collection_reports_bounded_progress_and_matches_rebuild_closure(store, monkeypatch):
+    for index in range(5):
+        store.rec_ledger.record_serving_policy('unused-'+str(index), {'value':index}, 1)
+    store.rec_ledger.record_serving_policy('live', {'value':'live'}, 9999)
+    closure = policy_storage.retained_closure(store.conn,10000)
+    assert closure['recommendation_policies'] == {'live'}
+    monkeypatch.setattr(policy_storage,'SCAN_LIMIT',2)
+    progress = []
+    for _ in range(4):
+        result = measurement.maintain_storage(store,10000,progress=True)
+        progress.append(result)
+        if not result['pending']:
+            break
+    assert [row['policies_deleted'] for row in progress] == [2,2,1]
+    assert store.rec_ledger.policy_configuration('live') == {'value':'live'}
+    assert {row[0] for row in store.conn.execute('SELECT version FROM recommendation_policies')} == closure['recommendation_policies']
 
 
 def check_preparation_retention(store, monkeypatch, *, generations, variants, evidence_bytes,
@@ -96,10 +114,15 @@ def test_unused_retention_protects_both_impression_paths_proposals_sessions_and_
         store.rec_ledger.record_serving_policy(version, {'policy': version}, at)
     store.rec_ledger.record_served_impressions('kept', 'home', [{'key': 'song', 'rank': 1,
         'model_version': 'model', 'provenance': {'pool_policy': 42}}], 10000)
-    store.rec_proposals.put_proposals('some-prepared-surface', {'items': [{'pool_policy': 'prepared'}]}, 1)
-    store.settings.set_setting('radio_session', json.dumps({'nested': {'pool_policy': 'session'}}))
+    store.rec_proposals.put_proposals('home_choice', {'tracks': [{'pool_policy': 'prepared'}]}, 1)
+    account = store.accounts.upsert_account('Retention', 'retention.json', None, True)
+    with store.conn:
+        radio_storage.save(store.conn, {'episode_id': 'retained-radio', 'identity': account,
+            'phase': 'appending', 'tracks': [{'video_id': 'retained-video', 'pool_policy': 'session'}]},
+            expected=None, now=1)
     assert measurement.maintain_storage(store, 10000)
-    assert {row[0] for row in store.conn.execute('SELECT model_version FROM rec_serving_policies')} == {
+    assert {row[0] for row in store.conn.execute('SELECT version FROM recommendation_policies UNION '
+        "SELECT version FROM recommendation_policy_history WHERE state='archived'")} == {
         'model', '42', 'prepared', 'session', 'new'}
     store.rec_ledger._prune_policy_batch(10000)
     assert store.rec_ledger.policy_configuration('prepared') == {'policy': 'prepared'}
@@ -113,7 +136,7 @@ def test_prepared_reference_change_defers_cleanup(tmp_path, monkeypatch):
     original = policy_storage.protected_references
     def raced(conn):
         result = original(conn)
-        store.rec_proposals.put_proposals('new-pool', {'pool_policy': 'old-policy'}, 10000)
+        store.rec_proposals.put_proposals('home_choice', {'context': {'pool_policy': 'old-policy'}}, 10000)
         return result
     monkeypatch.setattr(policy_storage, 'protected_references', raced)
     try:
@@ -132,7 +155,7 @@ def test_queued_offer_restores_collected_pool_with_its_impression(tmp_path):
     try:
         assert measurement.maintain_storage(store, 10000)
         assert store.rec_ledger.policy_configuration(version) is None
-        assert store.conn.execute('SELECT count(*) FROM rec_policy_bases').fetchone()[0] == 0
+        assert store.conn.execute('SELECT count(*) FROM recommendation_policy_bodies').fetchone()[0] == 0
         offer.run()
         impression = store.conn.execute('SELECT id FROM rec_served_impressions').fetchone()[0]
         assert scorecard.served_recommendation(store, impression)['pool_configuration'] == {
@@ -146,23 +169,23 @@ def test_queued_offer_restores_collected_pool_with_its_impression(tmp_path):
 @pytest.mark.parametrize('budget', ['MAX_UNUSED_BYTES', 'MAX_UNUSED_VARIANTS'])
 def test_budget_rejection_preserves_last_good_projection_and_policies(store, monkeypatch, budget):
     rows, base = _publish(store)
-    store.rec_proposals.put_proposals('mode_bundles', {'last-good': True}, 1)
+    store.rec_proposals.put_proposals('home_choice', {'last-good': True}, 1)
     monkeypatch.setattr(policy_storage, budget, 1)
     with pytest.raises(policy_storage.PolicyStorageFull), store.conn:
         new_rows = [policy_config.variant_record(base[0], {'ranker': 'new'}, 2)]
         store.rec_ledger.publish_prepared_policies(new_rows, [base])
-        store.rec_proposals.publish_prepared_home('{"last-good":false}', 2, surface='mode_bundles')
-    assert store.rec_proposals.get_proposals('mode_bundles') == {'last-good': True}
-    assert store.conn.execute('SELECT count(*) FROM rec_serving_policies').fetchone()[0] == len(rows)
+        store.rec_proposals.publish_prepared_home('{"last-good":false}', 2, surface='home_choice')
+    assert store.rec_proposals.get_proposals('home_choice') == {'last-good': True}
+    assert store.conn.execute('SELECT count(*) FROM recommendation_policies').fetchone()[0] == len(rows)
 
 
 def test_failed_policy_publication_rolls_back_bodies_variants_and_links(store):
     row, base = policy_config.pack({'ranker': 'valid', 'exact': True}, 1)
     bad = policy_config.variant_record('missing-body', {'ranker': 'invalid'}, 1)
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(ValueError, match='Missing shared recommendation policy body'):
         store.rec_ledger.record_prepared_policies([row, bad], [base])
     assert not store.conn.in_transaction
-    for table in ('rec_serving_policies', 'rec_policy_bases', 'rec_policy_variants'):
+    for table in ('recommendation_policies', 'recommendation_policy_bodies', 'recommendation_impression_policies'):
         assert store.conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == 0
 
 
@@ -170,6 +193,12 @@ def test_sqlite_full_rolls_back_new_policy_and_keeps_personal_data(tmp_path):
     store = Store(tmp_path / 'state.db')
     store.init_schema()
     store.settings.set_setting('personal', 'keep')
+    # Policy bodies live in files now. Force a genuine SQLITE_FULL during the
+    # associated SQL owner insert, independent of the body's compression ratio.
+    with store.conn:
+        store.conn.execute('CREATE TABLE controlled_policy_growth(payload BLOB)')
+        store.conn.execute('CREATE TRIGGER controlled_policy_full BEFORE INSERT ON recommendation_policies '
+            'BEGIN INSERT INTO controlled_policy_growth VALUES (zeroblob(1000000)); END')
     pages = store.conn.execute('PRAGMA page_count').fetchone()[0]
     store.conn.execute(f'PRAGMA max_page_count={pages}')
     row, base = policy_config.pack({'ranker': 'large', 'evidence': 'x' * 1000000}, 1)
@@ -178,7 +207,9 @@ def test_sqlite_full_rolls_back_new_policy_and_keeps_personal_data(tmp_path):
             store.rec_ledger.record_prepared_policies([row], [base])
         assert not store.conn.in_transaction
         assert store.settings.get_setting('personal') == 'keep'
-        assert store.conn.execute('SELECT count(*) FROM rec_policy_bases').fetchone()[0] == 0
+        assert store.conn.execute('SELECT count(*) FROM recommendation_policy_bodies').fetchone()[0] == 0
+        assert store.conn.execute('SELECT count(*) FROM recommendation_policies').fetchone()[0] == 0
+        assert store.conn.execute('SELECT count(*) FROM controlled_policy_growth').fetchone()[0] == 0
         assert store.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
     finally:
         store.conn.close()
@@ -197,18 +228,21 @@ def test_low_headroom_allows_existing_startup_and_core_writes_but_defers_prepara
         with pytest.raises(db_space.LowDiskSpace, match='10.0 MiB available'):
             _publish(store)
         assert store.settings.get_setting('personal') == 'saved'
-        assert store.conn.execute('SELECT count(*) FROM rec_serving_policies').fetchone()[0] == 0
+        assert store.conn.execute('SELECT count(*) FROM recommendation_policies').fetchone()[0] == 0
     finally:
         store.conn.close()
 
 
 def test_republishing_existing_variants_at_exact_budget_is_idempotent(store, monkeypatch):
     rows, base = _publish(store)
-    size = base[2] + sum(len(row[1].encode()) for row in rows)
+    size = store.conn.execute('SELECT sum(byte_size) FROM recommendation_policy_bodies').fetchone()[0]
+    size += store.conn.execute('SELECT sum(byte_size) FROM recommendation_policies').fetchone()[0]
     monkeypatch.setattr(policy_storage, 'MAX_UNUSED_BYTES', size)
     monkeypatch.setattr(policy_storage, 'MAX_UNUSED_VARIANTS', len(rows))
     store.rec_ledger.record_prepared_policies(rows, [base])
-    assert store.conn.execute('SELECT count(*) FROM rec_serving_policies').fetchone()[0] == len(rows)
+    assert store.conn.execute('SELECT count(*) FROM recommendation_policies').fetchone()[0] == len(rows)
+    assert store.conn.execute('SELECT sum(byte_size) FROM recommendation_policy_bodies').fetchone()[0] + \
+        store.conn.execute('SELECT sum(byte_size) FROM recommendation_policies').fetchone()[0] == size
 
 
 def test_quota_accounting_tracks_inserted_and_expired_impression_references(store):
@@ -216,29 +250,28 @@ def test_quota_accounting_tracks_inserted_and_expired_impression_references(stor
     first, second = (row[0] for row in rows)
     store.rec_ledger.record_served_impressions('one', 'home', [{'key': 'song', 'rank': 1,
         'model_version': first, 'provenance': {'pool_policy': second}}], 1)
-    assert [row[0] for row in store.conn.execute('SELECT served FROM rec_policy_variants')] == [1, 1]
-    assert store.conn.execute('SELECT served FROM rec_policy_bases').fetchone()[0] == 1
+    assert [row[0] for row in store.conn.execute('SELECT served FROM recommendation_policies')] == [1, 1]
+    assert store.conn.execute('SELECT served FROM recommendation_policy_bodies').fetchone()[0] == 1
     store.rec_ledger.record_served_impressions('two', 'home', [{'key': 'song', 'rank': 1,
         'model_version': first}], 100)
     store.rec_ledger._prune_impression_batch(50)
-    assert {row[0]: row[1] for row in store.conn.execute('SELECT model_version,served FROM rec_policy_variants')} == {
+    assert {row[0]: row[1] for row in store.conn.execute('SELECT version,served FROM recommendation_policies')} == {
         first: 1, second: 0}
-    assert store.conn.execute('SELECT served FROM rec_policy_bases').fetchone()[0] == 1
+    assert store.conn.execute('SELECT served FROM recommendation_policy_bodies').fetchone()[0] == 1
     store.rec_ledger._prune_impression_batch(101)
-    assert [row[0] for row in store.conn.execute('SELECT served FROM rec_policy_variants')] == [0, 0]
-    assert store.conn.execute('SELECT served FROM rec_policy_bases').fetchone()[0] == 0
+    assert [row[0] for row in store.conn.execute('SELECT served FROM recommendation_policies')] == [0, 0]
+    assert store.conn.execute('SELECT served FROM recommendation_policy_bodies').fetchone()[0] == 0
 
 
 def test_quota_queries_use_partial_indexes_and_do_not_traverse_served_history(store):
     rows, base = _publish(store)
     # The publication queries must enter through the bounded unserved indexes.
     plans = [row[3] for row in store.conn.execute('EXPLAIN QUERY PLAN '
-        'SELECT count(*),sum(length(p.configuration)) FROM rec_policy_variants v '
-        'JOIN rec_serving_policies p USING(model_version) WHERE v.served=0')]
-    assert any('ix_rec_policy_unused_variants' in line for line in plans), plans
+        'SELECT count(*),sum(byte_size) FROM recommendation_policies WHERE served=0')]
+    assert any('ix_recommendation_policies_unused' in line for line in plans), plans
     plans = [row[3] for row in store.conn.execute('EXPLAIN QUERY PLAN '
-        'SELECT sum(byte_size) FROM rec_policy_bases WHERE served=0')]
-    assert any('ix_rec_policy_unused_bases' in line for line in plans), plans
+        'SELECT sum(byte_size) FROM recommendation_policy_bodies WHERE served=0')]
+    assert any('ix_recommendation_policy_bodies_unused' in line for line in plans), plans
 
 
 def test_legacy_cleanup_limits_payload_work_and_resumes_from_cursor(legacy_policy_store, monkeypatch):

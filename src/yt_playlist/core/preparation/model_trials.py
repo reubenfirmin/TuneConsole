@@ -10,7 +10,7 @@ import json
 import math
 
 from .. import model_comparison_state as state
-from ..migrations import v095_recommendation_state as frozen
+from ..migrations import current as schema
 from ..migrations.runner import MigrationError
 from .ordered_rows import OrderedJob
 from .rows import Job, main as run
@@ -38,7 +38,7 @@ def definitions(surface):
         built_at REAL CHECK(built_at IS NULL OR abs(built_at)<=1.7976931348623157e308),
         PRIMARY KEY(source,digest)) WITHOUT ROWID'''
     native = state.OWNERS[surface][0]
-    sql, = (sql for sql in frozen.model_control_statements() if sql.startswith('CREATE TABLE ' + native + ' ('))
+    sql, = (sql for sql in schema.statements(version=95) if sql.startswith('CREATE TABLE ' + native + ' ('))
     # Preserve the finite historical checks, replacing only its singleton key
     # and eager run FK. Source-run edits must remain usable while preparation
     # is incomplete; their journal reconciles the explicit run resolution.

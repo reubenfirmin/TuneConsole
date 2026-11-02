@@ -192,3 +192,43 @@ def test_selected_album_playback_is_context_evidence_not_organic_track_learning(
     # A later independent direct choice has its own organic evidence.
     assert live_plays.handle_play_event(_ctx(s), _msg(), 5000)
     assert [row['identity_key'] for row in layers._plays(s, 0)] == ['song|artist']
+
+
+def test_album_attribution_reads_committed_context_during_another_write(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from yt_playlist.core import album_playback_context
+    from yt_playlist.rec import choice_evidence
+
+    store = Store(tmp_path / 'playback.db')
+    writing, release = Event(), Event()
+    try:
+        store.init_schema()
+        account = store.accounts.upsert_account('main', 'bridge', None, True)
+        pending = {'opportunity_id': 'chosen', 'browse': 'album', 'playlist': 'OLAK-album',
+                   'videos': ['v1'], 'at': 991, 'account_id': account}
+        with store._lock, store.conn:
+            album_playback_context.put(store.conn, pending)
+
+        def write_next_queue():
+            with store._lock, store.conn:
+                album_playback_context.put(store.conn, {**pending, 'playlist': 'OLAK-next'})
+                writing.set()
+                assert release.wait(10)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            writer = executor.submit(write_next_queue)
+            try:
+                assert writing.wait(5)
+                # A refill or playback writer may be mid-transaction. Attribution
+                # must see the committed queue without touching that transaction.
+                actual = choice_evidence.album_playback_context(
+                    store, _msg(playlist='OLAK-album'), 1000, account_id=account)
+                assert actual == pending
+            finally:
+                release.set()
+            writer.result(timeout=5)
+        assert album_playback_context.load(store.conn)['playlist'] == 'OLAK-next'
+    finally:
+        release.set()
+        store.conn.close()

@@ -22,7 +22,10 @@ class _FakeSettings:
 
 
 class _FakeStore:
+    activity_paused = False
+
     def __init__(self):
+        self._lock = threading.RLock()
         self.settings = _FakeSettings()
 
 
@@ -43,11 +46,17 @@ def test_status_attributes_saved_radio_before_controller_reattaches(store, start
     bridge.now_playing = {"title": "Playing song", "artist": "Artist", "video_id": "v1",
                           "playlist_ytm_id": "PLRADIO", "paused": False}
     bridge.now_playing_seen_at = time.monotonic()
-    store.settings.set_setting("radio_current_session", json.dumps({
+    from yt_playlist.core import radio_storage
+    iid = store.accounts.upsert_account('main', 'credential', None, True)
+    store.tracks.upsert_track('v1', 'Playing song', 'Artist', None, 200)
+    state = {
+        "episode_id": "saved-radio", "identity": iid,
         "version": version, "phase": "preparing" if starting else "playing",
         "playlist": "PLRADIO", "title": "Radio Session", "tracks": [{"video_id": "v1"}],
         "initial_tracks": [{"video_id": "v1"}] if starting else [],
-    }))
+    }
+    with store.conn:
+        radio_storage.save(store.conn, state, expected=None)
     ctx = SimpleNamespace(bridge=bridge, store=store)
     ctx.radio = PlaylistRadio(ctx)
     assert ctx.radio.session is None and not ctx.radio.active

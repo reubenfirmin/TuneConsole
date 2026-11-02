@@ -3,10 +3,12 @@ from fastapi.testclient import TestClient
 from yt_playlist.rec import surfaces
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.home_fixture_support import returning_listener
 from tests.test_mode_cards_route import _seed_bundles, prepare_home
 
 
 def _client(store, iid):
+    returning_listener(store, 'mixes', now=1000)
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0),
                       base_url="http://127.0.0.1")
 

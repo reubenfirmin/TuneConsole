@@ -68,12 +68,7 @@ def _components(node):
 
 
 def _sync_directory(path):
-    if hasattr(os, 'O_DIRECTORY'):
-        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+    fao._sync(path)
 
 
 def _mkdir(path):
@@ -185,7 +180,7 @@ class EvidenceLedger:
                 if kind == 'artifact':
                     # Reusing an old immutable manifest starts a fresh preparation
                     # lease for its graph before a proposal/menu can reference it.
-                    os.utime(path, None)
+                    fao.touch(path)
                 return False
             artifact_data = canonical(artifact) if artifact is not None else None
             artifact_path = (self._path("artifact", hashlib.sha256(artifact_data).hexdigest())
@@ -207,10 +202,10 @@ class EvidenceLedger:
                      + (artifact_size if artifact_path is not None and artifact_path.exists() else 0))
                 raise
 
-    def _publish(self, path, encoded, kind, identity):
+    def _publish(self, path, encoded, kind, identity, *, age=None):
         existing = fao.exists(path)
         try:
-            fao.write_bytes(path, encoded, immutable=True)
+            fao.write_bytes(path, encoded, immutable=True, age=age)
         except fao.CorruptFile as exc:
             raise EvidenceConflict(f"Conflicting {kind} evidence: {identity}") from exc
         return not existing
@@ -238,10 +233,9 @@ class EvidenceLedger:
 
     def maintain(self, *args, **kwargs):
         """Do not retire files belonging to an analytics reader or backup."""
-        from . import policy_documents
         _mkdir(self.directory)
         with (self.directory / '.readers.lock').open('a+b') as stream:
-            unlock = policy_documents._try_file_lock(stream, exclusive=True)
+            unlock = fao._try_file_lock(stream, exclusive=True)
             if unlock is None:
                 return {'deferred': True}
             try:
@@ -291,10 +285,10 @@ class EvidenceLedger:
             # Cache edges, not decoded model arrays. Shared components are read once.
             pinned = set(protected_artifacts)
             for path in artifacts:
-                if path.stat().st_mtime >= orphan_before:
+                if fao.stat(path).mtime_ns/1e9 >= orphan_before:
                     pinned.update(_components(json.loads(fao.read_bytes(path))))
             references = Counter(closure(pinned))
-            references.update(path for path in artifacts if path.stat().st_mtime >= orphan_before)
+            references.update(path for path in artifacts if fao.stat(path).mtime_ns/1e9 >= orphan_before)
             # A caller acknowledges compact, correction-capable inputs only after
             # successful learning publication. Raw contexts then become optional
             # diagnostics, even while their opportunities belong to an active trial.
@@ -412,8 +406,7 @@ class EvidenceLedger:
                 removed.difference_update(pending_paths)
                 if retired:
                     self._advance_generation()
-                for path in removed:
-                    path.unlink(missing_ok=True)
+                removed = {path for path in removed if fao.delete(path, missing_ok=True)}
                 if retire_references is not None:
                     retire_references(sorted(retired), sorted(identity for path, identity in retired_checkpoints.items()
                         if path in removed and isinstance(identity, str)))

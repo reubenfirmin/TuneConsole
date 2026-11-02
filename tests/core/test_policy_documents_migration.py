@@ -8,6 +8,7 @@ import sys
 import pytest
 
 from yt_playlist.core import policy_documents as files
+from yt_playlist.core import fao
 from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations.runner import Context, MigrationError
 from yt_playlist.core.migrations import v070_policy_documents as migration
@@ -123,12 +124,12 @@ def test_interrupted_publication_rolls_back_owners_and_can_restart(predecessor, 
     before = list(conn.iterdump())
     publish = files._publish_encoded
     calls = 0
-    def interrupted(*args):
+    def interrupted(*args, **kwargs):
         nonlocal calls
         calls += 1
         if calls == 2:
             raise OSError('controlled interruption')
-        return publish(*args)
+        return publish(*args, **kwargs)
     monkeypatch.setattr(files, '_publish_encoded', interrupted)
     with pytest.raises(OSError, match='controlled interruption'), conn:
         conn.execute('BEGIN IMMEDIATE')
@@ -216,13 +217,33 @@ def test_pack_records_are_individually_bounded_and_verified(tmp_path):
             files.read(filename, digest, offset=wrong_offset, size=wrong_size)
     with pytest.raises(ValueError, match='digest'):
         files.read(filename, records[1][1], offset=offset, size=size)
-    with Path(filename).open('r+b') as stream:
-        stream.seek(offset)
-        stream.write(b'!')
+    encoded = bytearray(fao.read_bytes(filename))
+    encoded[offset] = ord('!')
+    fao.write_bytes(filename, bytes(encoded))
     with pytest.raises(ValueError, match='digest'):
         files.read(filename, digest, offset=offset, size=size)
     second_file, second_digest, second_size, second_offset = records[1]
     assert files.read(second_file, second_digest, offset=second_offset, size=second_size) == expected[1]
+
+
+def test_bulk_reader_pins_each_pack_once_and_verifies_each_record(tmp_path,monkeypatch):
+    from contextlib import contextmanager
+    expected = [{'original':i,'configuration':'x'*1000} for i in range(128)]
+    references = list(files.publish_many(tmp_path,expected))
+    assert len({row[0] for row in references})==1
+    opened,original = [],fao.open_reader
+    @contextmanager
+    def counted(path,**kwargs):
+        opened.append(path)
+        with original(path,**kwargs) as stream:
+            yield stream
+    monkeypatch.setattr(fao,'open_reader',counted)
+    values = list(files.read_many((filename,digest,offset,size) for filename,digest,size,offset in references))
+    assert values==expected
+    assert len(opened)==1
+    filename,digest,size,offset = references[1]
+    with pytest.raises(ValueError,match='digest'):
+        list(files.read_many([(filename,references[0][1],offset,size)]))
 
 
 def test_individual_large_policy_has_its_own_pack_without_splitting_the_record(tmp_path):
@@ -264,12 +285,12 @@ def test_interrupted_restore_never_publishes_partial_database_ranges(predecessor
         path.unlink()
     publish = files._publish_encoded
     calls = 0
-    def interrupted(*args):
+    def interrupted(*args, **kwargs):
         nonlocal calls
         calls += 1
         if calls == 2:
             raise OSError('controlled restore interruption')
-        return publish(*args)
+        return publish(*args, **kwargs)
     monkeypatch.setattr(files, 'PACK_BYTES', 100)
     monkeypatch.setattr(files, '_publish_encoded', interrupted)
     with pytest.raises(OSError, match='controlled restore interruption'):

@@ -257,7 +257,7 @@ def test_failed_playlist_logs_context_preserves_tracks_and_reports_partial_sync(
 
 
 def test_first_sync_prioritizes_small_seed_without_certifying_partial_reads(store, monkeypatch):
-    import json
+    from yt_playlist.core import sync_state
     from yt_playlist.util.retry import with_retry
     from yt_playlist.library.sync_outcomes import sync_due
 
@@ -305,5 +305,5 @@ def test_first_sync_prioritizes_small_seed_without_certifying_partial_reads(stor
     client.reads.clear()
     sync_all(store, {iid: client}, now=1300, automatic=True)
     assert client.reads == ["LM", "BAD", "BAD", "BAD"]
-    state = json.loads(store.settings.get_setting("library_sync_state"))
+    state = sync_state.state(store)
     assert state["accounts"][str(iid)]["resources"]["playlists"]["items"]["SMALL"]["last_success_at"] == 1000

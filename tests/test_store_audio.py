@@ -1,5 +1,6 @@
 import sqlite3
 from yt_playlist.core.store import Store
+from tests.historical_support import upgrade_fixture
 
 
 def test_fresh_schema_has_audio_columns():
@@ -22,7 +23,7 @@ def test_migration_adds_audio_columns_to_old_db(tmp_path):
     raw.commit()
     raw.close()
     s = Store(str(db))
-    s.init_schema()
+    upgrade_fixture(s)
     cols = {r["name"] for r in s.conn.execute("PRAGMA table_info(tracks)")}
     assert {"bpm", "energy", "danceability", "mb_recording_id",
             "music_key", "music_scale", "mood_happy", "mood_sad", "mood_relaxed",

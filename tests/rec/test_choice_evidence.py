@@ -18,6 +18,28 @@ def offer(store, identity="menu", episode="episode", now=100):
                          opportunity_id=identity, episode_id=episode)
 
 
+def test_mix_menu_availability_owns_the_serving_connection(store, monkeypatch):
+    from yt_playlist.core import mix_choices
+
+    assert mix_choices.available(store.conn)
+    observed = []
+    original = mix_choices.available
+
+    def available(connection):
+        if connection is store.conn:
+            observed.append(store._lock.held_by_current_thread)
+        return original(connection)
+
+    monkeypatch.setattr(mix_choices, 'available', available)
+    identity = choices.issue(store, 'mixes', [
+        {'id': 'comfort', 'label': 'Comfort listening', 'intent': 'comfort', 'genres': ['jazz']}],
+        100, context={}, opportunity_id='serving-guard')
+
+    assert identity == 'serving-guard'
+    assert observed and all(observed), observed
+    assert choices.opportunity(store, identity)['options'][0]['descriptor_id']
+
+
 def test_actual_visibility_controls_prediction_denominator_and_actions_are_distinct(store):
     oid = offer(store)
     choices.respond(store, oid, "visible", 101, visible=["b"])

@@ -39,21 +39,23 @@ def document(raw):
     return encoded
 
 
-def publish(root, raw):
+def publish(root, raw, *, age=None):
     encoded = document(raw)
     digest = hashlib.sha256(encoded).hexdigest()
     path = Path(root) / digest[:2] / (digest + '.json')
-    fao.write_bytes(path, encoded, immutable=True, max_bytes=MAX_BYTES)
+    fao.write_bytes(path, encoded, immutable=True, max_bytes=MAX_BYTES, age=age)
     return str(path), digest, len(encoded)
 
 
-def _existing(path):
+def _existing(path, *, with_age=False):
     with fao.open_reader(path) as stream:
-        return stream.read(MAX_BYTES + 1)
+        encoded = stream.read(MAX_BYTES + 1)
+        age = stream.info
+    return (encoded, age) if with_age else encoded
 
 
-def read(filename, digest):
-    encoded = _existing(filename)
+def read(filename, digest, *, with_age=False):
+    encoded, age = _existing(filename, with_age=True)
     if (len(encoded) > MAX_BYTES or hashlib.sha256(encoded).hexdigest() != digest
             or Path(filename).stem != digest):
         raise ValueError('Album description file does not match its digest')
@@ -61,7 +63,7 @@ def read(filename, digest):
     if (not isinstance(value, dict) or set(value) != {'format', 'record_json'}
             or value['format'] != FORMAT or document(value['record_json']) != encoded):
         raise ValueError('Unsupported album description file')
-    return value['record_json']
+    return (value['record_json'], age) if with_age else value['record_json']
 
 
 def _references(conn):
@@ -81,7 +83,8 @@ def export(conn, root):
         raise ValueError('Paid description backup requires a separate directory')
     entries, chunks = [], []
     for owner, key, filename, digest in _references(conn):
-        target, copied, _size = publish(root, read(filename, digest))
+        value, age = read(filename, digest, with_age=True)
+        target, copied, _size = publish(root, value, age=age)
         if copied != digest:
             raise ValueError('Paid description backup changed original evidence')
         entries.append({'owner': owner, 'key': key, 'digest': digest,
@@ -143,8 +146,8 @@ def restore(conn, manifest, *, memory_key=None):
             raise ValueError('Paid description backup does not match the restored database')
         targets = []
         for (owner, key), entry in entries.items():
-            filename, copied, _size = publish(directory(conn, memory_key),
-                read(root / entry['relative_filename'], entry['digest']))
+            value, age = read(root / entry['relative_filename'], entry['digest'], with_age=True)
+            filename, copied, _size = publish(directory(conn, memory_key), value, age=age)
             if copied != entry['digest']:
                 raise ValueError('Paid description restore changed original evidence')
             targets.append((owner, key, filename))

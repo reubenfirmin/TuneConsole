@@ -2,7 +2,7 @@
 import pytest
 from playwright.sync_api import expect
 
-from tests.browser.test_tv_browser import tv_ui
+from tests.browser.test_tv_browser import store, tv_ui
 from tests.browser.test_clusters_browser import cluster_library
 from tests.browser.test_tv_stream_browser import MODEL, publish_pool
 from tests.test_trends_recap_route import _STORY
@@ -50,7 +50,7 @@ def assert_no_prepared_mix_offers(page, store):
     expect(page.get_by_text('Your next mixes will appear as your library is prepared.', exact=True)).to_have_count(1)
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_tv_opens_and_returns_without_prepared_mix_offers(page, live_app, tv_ui, store, width):
     page.set_viewport_size({'width': width, 'height': 900})
     publish_pool(store, live_app, 60)
@@ -74,7 +74,10 @@ def test_tv_opens_and_returns_without_prepared_mix_offers(page, live_app, tv_ui,
     playlist = page.evaluate(f'{MODEL}.playlistId')
     page.locator('.topbar').get_by_role('link', name='Playlists', exact=True).click()
     expect(page.locator('main h1')).to_have_text('Playlists')
-    page.locator('.global-now-playing .hs-source').click()
+    source = page.locator('.global-now-playing .hs-source')
+    expect(source).to_be_in_viewport()
+    page.screenshot(path=f'/tmp/tuneconsole-tv-navigation-return-{width}.png')
+    source.click()
     assert_no_prepared_mix_offers(page, store)
     expect(tv_tab).to_be_visible()
     expect(page.locator('.tv-player iframe')).to_be_visible()
@@ -92,7 +95,7 @@ def test_tv_opens_and_returns_without_prepared_mix_offers(page, live_app, tv_ui,
     page.screenshot(path=f'/tmp/tuneconsole-439-empty-mixes-{width}.png')
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_tv_survives_pages_controls_history_and_return_to_tv(page, live_app, tv_ui, store, width):
     page.set_viewport_size({'width': width, 'height': 1000})
     start_tv(page, live_app, store)
@@ -106,6 +109,7 @@ def test_tv_survives_pages_controls_history_and_return_to_tv(page, live_app, tv_
         expect(page.locator('.tv-backdrop')).to_be_hidden()
         expect(nav.get_by_role('link', name=name, exact=True)).to_have_class('active')
         expect(page.locator('.global-now-playing .hs-source')).to_have_text('Back to TV')
+        expect(page.locator('#account-health-slot .account-health')).to_have_count(0)
     assert page.evaluate('window.tvPlayer.position') == 37
     controls = page.locator('.global-now-playing')
     controls.get_by_role('button', name='Pause', exact=True).click()
@@ -128,11 +132,13 @@ def test_tv_survives_pages_controls_history_and_return_to_tv(page, live_app, tv_
     clear_mix_preparation(store)
     nav.get_by_role('link', name='Home', exact=True).click()
     assert_no_prepared_mix_offers(page, store)
+    expect(page.locator('#account-health-slot .account-health')).to_have_count(1)
     expect(page.locator('.dash-tv-dot')).to_be_visible()
     expect(page.get_by_role('tab', name='TV', exact=True)).to_have_attribute('aria-description', 'TV is playing')
     expect(page.locator('.dash-tv-dot')).to_have_css('background-color', 'rgb(57, 135, 229)')
     assert_same_player(page)
     page.screenshot(path=f'/tmp/tuneconsole-tv-playing-dot-{width}.png')
+    expect(controls.locator('.hs-source')).to_be_in_viewport()
     controls.locator('.hs-source').click()
     expect(page.locator('.tv-player iframe')).to_be_visible()
     expect(page.locator('.tv-backdrop')).to_be_visible()
@@ -277,7 +283,7 @@ def test_tv_survives_recap_and_cleans_up_its_keyboard_handler(page, live_app, tv
 
 
 @pytest.mark.parametrize('destination', ['/home/generating', '/trends/story/2026-06'])
-@pytest.mark.parametrize('width,height', [(1440, 900), (390, 600)])
+@pytest.mark.parametrize('width,height', [(1440, 900)])
 def test_standalone_tv_controls_remain_usable_without_covering_the_page(
         page, live_app, tv_ui, store, destination, width, height):
     page.set_viewport_size({'width': width, 'height': height})

@@ -1,10 +1,12 @@
 """Runtime metadata keeps bounded facts and reads optional detail from JSON."""
+import hashlib
 import json
 import time
 
 import pytest
 
-from yt_playlist.core import catalog, metadata, metadata_native
+from yt_playlist.core import catalog, fao, metadata, metadata_native
+from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core import metadata_runtime as runtime, metadata_runtime_files as files
 from yt_playlist.core.metadata_observations import MetadataObservation
 from yt_playlist.core.store import Store
@@ -135,6 +137,95 @@ def test_reopen_and_file_backup_restore_use_derived_paths(runtime_store, tmp_pat
         target.conn.close()
 
 
+@pytest.mark.parametrize('damage', (
+    'owner', 'kind', 'revision', 'envelope_checksum', 'transport_checksum',
+    'size', 'incomplete', 'missing_file', 'duplicate', 'unexpected',
+))
+def test_rejected_backup_preserves_all_live_metadata_bytes(runtime_store, tmp_path, damage):
+    store = runtime_store
+    track, _ = entry(store)
+    with store.conn:
+        catalog.choose_field(store.conn, track, 'bpm', 120)
+        catalog.choose_field(store.conn, track, 'genre', 'Jazz')
+    decisions = store.enrichment_reports.metadata_provenance(track)['decisions']
+    with store.conn:
+        store.conn.execute('BEGIN')
+        manifest = files.export(store.conn, tmp_path/'backup')
+    document = json.loads(fao.read_bytes(manifest))
+    paths = [files.relative(member['kind'], member['owner'], member['revision'])
+             for member in document['entries']]
+    before = {path: (files.directory(store.conn)/path).read_bytes() for path in paths}
+    assert len(paths) == 2
+    for index, (member, path) in enumerate(zip(document['entries'], paths)):
+        envelope = json.loads(fao.read_bytes(tmp_path/'backup'/path))
+        if index == 0:
+            # This member remains valid on its own. Rejecting a later member
+            # must preserve the original retained decision, including its time.
+            envelope['body']['data']['at'] += 100
+        elif damage in ('owner', 'kind', 'revision'):
+            envelope['body'][damage] = {'owner': [999999], 'kind': 'native', 'revision': 2}[damage]
+        envelope['sha256'] = hashlib.sha256(canonical(envelope['body'])).hexdigest()
+        if index == 1 and damage == 'envelope_checksum':
+            envelope['sha256'] = 'wrong'
+        encoded = canonical(envelope)
+        fao.write_bytes(tmp_path/'backup'/path, encoded)
+        member['bytes'] = len(encoded)
+        member['sha256'] = hashlib.sha256(encoded).hexdigest()
+    if damage == 'transport_checksum':
+        document['entries'][1]['sha256'] = 'wrong'
+    elif damage == 'size':
+        document['entries'][1]['bytes'] += 1
+    elif damage == 'incomplete':
+        document['entries'].pop()
+    elif damage == 'missing_file':
+        (tmp_path/'backup'/paths[1]).unlink()
+    elif damage == 'duplicate':
+        document['entries'].append(document['entries'][0])
+    elif damage == 'unexpected':
+        document['entries'].append({**document['entries'][1], 'owner': [999999]})
+    fao.write_bytes(manifest, canonical(document))
+    with pytest.raises((ValueError, FileNotFoundError)):
+        files.restore(store.conn, manifest)
+    assert {path: (files.directory(store.conn)/path).read_bytes() for path in paths} == before
+    assert store.enrichment_reports.metadata_provenance(track)['decisions'] == decisions
+
+
+def test_restore_publishes_verified_copies_after_backup_changes(runtime_store, tmp_path, monkeypatch):
+    store = runtime_store
+    track, _ = entry(store)
+    with store.conn:
+        catalog.choose_field(store.conn, track, 'bpm', None)
+        catalog.choose_field(store.conn, track, 'bpm', '')
+    decisions = store.enrichment_reports.metadata_provenance(track)['decisions']
+    with store.conn:
+        store.conn.execute('BEGIN')
+        manifest = files.export(store.conn, tmp_path/'backup')
+    members = json.loads(fao.read_bytes(manifest))['entries']
+    paths = [files.relative(member['kind'], member['owner'], member['revision']) for member in members]
+    root = files.directory(store.conn)
+    ages = {path: fao.stat(root/path) for path in paths}
+    for path in paths:
+        (root/path).unlink()
+    copy = fao.copy
+    published = []
+
+    def replace_backup_before_publication(source, target, **kwargs):
+        if target.is_relative_to(root):
+            for path in paths:
+                fao.write_bytes(tmp_path/'backup'/path, b'{}')
+            published.append(target)
+        return copy(source, target, **kwargs)
+
+    monkeypatch.setattr(fao, 'copy', replace_backup_before_publication)
+    files.restore(store.conn, manifest)
+    assert len(published) == len(paths)
+    assert store.enrichment_reports.metadata_provenance(track)['decisions'] == decisions
+    for path in paths:
+        restored = fao.stat(root/path)
+        assert restored.compressed
+        assert (restored.mtime_ns, restored.ctime_ns) == (ages[path].mtime_ns, ages[path].ctime_ns)
+
+
 def test_waterfall_reuses_expired_completed_providers_without_refetch(runtime_store, monkeypatch):
     from tests.test_waterfall import FakeProv, _cfg
     from yt_playlist.providers.waterfall import run_waterfall
@@ -244,8 +335,16 @@ def test_relocation_restores_current_native_inputs_alternatives_and_conflicts(ru
     source = store.conn.execute('SELECT source_key FROM rec_musical_sources').fetchone()[0]
     native = metadata_native.source_values(store.conn, source)
     with store.conn:
+        catalog.choose_field(store.conn, track, 'bpm', None)
+        catalog.choose_field(store.conn, track, 'bpm', '')
+    decisions = store.enrichment_reports.metadata_provenance(track)['decisions']
+    store.enrichment_state.record_enrichment_attempt('song|artist', 'b', {'genre': 'Rock'},
+        now=now-runtime.ALTERNATIVE_SECONDS-1, video_id='video')
+    with store.conn:
         store.conn.execute('BEGIN')
         manifest = files.export(store.conn, tmp_path/'backup-files')
+    members = json.loads(fao.read_bytes(manifest))['entries']
+    assert sum(member['kind'] == 'alternatives' for member in members) == 1
     moved = Store(tmp_path/'moved.db')
     try:
         store.conn.backup(moved.conn)
@@ -253,6 +352,8 @@ def test_relocation_restores_current_native_inputs_alternatives_and_conflicts(ru
         moved.init_schema()
         assert metadata_native.source_values(moved.conn, source) == native
         assert moved.enrichment_state.enrichment_provider_state(recording)['a']['fields'] == {'genre':'Jazz'}
+        assert moved.enrichment_state.enrichment_provider_state(recording)['b']['fields'] == {}
+        assert moved.enrichment_reports.metadata_provenance(track)['decisions'] == decisions
         assert moved.enrichment.resolve_enrichment_candidate(track,'genre','Rock')
         assert moved.tracks.get_track_enrichment(track)[0] == 'Rock'
         row = moved.conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?',(source,)).fetchone()
@@ -262,6 +363,33 @@ def test_relocation_restores_current_native_inputs_alternatives_and_conflicts(ru
             metadata_native.source_values(moved.conn, source)
     finally:
         moved.conn.close()
+
+
+@pytest.mark.parametrize('kind', ('choices', 'native', 'conflicts'))
+def test_restore_requires_each_durable_metadata_kind(runtime_store, tmp_path, kind):
+    store = runtime_store
+    track, _ = entry(store)
+    with store.conn:
+        catalog.choose_field(store.conn, track, 'bpm', None)
+        catalog.choose_field(store.conn, track, 'bpm', '')
+    store.enrichment.upsert_conflict(track, 'genre', [
+        {'provider': 'a', 'value': 'Jazz'}, {'provider': 'b', 'value': 'Rock'}])
+    store.enrichment_state.record_metadata_observations(track, 'native', [
+        MetadataObservation('mood_party', .8, 'recording', 'native-id', 'prediction',
+            unit='classifier_probability')], run_id='native', now=time.time())
+    with store.conn:
+        store.conn.execute('BEGIN')
+        manifest = files.export(store.conn, tmp_path/'backup')
+    document = json.loads(fao.read_bytes(manifest))
+    paths = [files.relative(member['kind'], member['owner'], member['revision'])
+             for member in document['entries']]
+    before = {path: (files.directory(store.conn)/path).read_bytes() for path in paths}
+    omitted = next(member for member in document['entries'] if member['kind'] == kind)
+    document['entries'].remove(omitted)
+    fao.write_bytes(manifest, canonical(document))
+    with pytest.raises(ValueError, match='missing a required document'):
+        files.restore(store.conn, manifest)
+    assert {path: (files.directory(store.conn)/path).read_bytes() for path in paths} == before
 
 
 def test_worker_retry_reopens_without_repeating_successful_providers(runtime_store, monkeypatch):

@@ -142,7 +142,7 @@ def build(ctx) -> APIRouter:
 
     @router.get("/playlists")
     def playlists_page(request: Request):
-        if store._db_path is not None and store.activity_paused:
+        if store._db_path is not None:
             with store.read_view() as reader:
                 return _playlists_page(request, reader)
         return _playlists_page(request, store)

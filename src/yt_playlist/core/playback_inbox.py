@@ -138,13 +138,14 @@ class Inbox:
                                    (capture,)).fetchone()
                 conn.execute('DELETE FROM playback_feedback_inbox WHERE capture_id=?', (capture,))
             if row is not None:
-                Path(row['filename']).unlink(missing_ok=True)
+                from . import fao
+                fao.delete(row['filename'], missing_ok=True)
 
     @staticmethod
     def body(row):
         path = Path(row['filename'])
-        with path.open('rb') as stream:
-            encoded = stream.read(row['byte_size'] + 1)
+        from . import fao
+        encoded = fao.read_bytes(path, max_bytes=row['byte_size'])
         if (len(encoded) != row['byte_size'] or path.stem != row['content_digest']
                 or hashlib.sha256(encoded).hexdigest() != row['content_digest']):
             raise ValueError('Playback observation does not match its retained content')

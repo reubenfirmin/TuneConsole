@@ -8,10 +8,39 @@ from yt_playlist.core import db_space, playback_feedback
 from yt_playlist.web.app import create_app
 
 
+@pytest.mark.parametrize('preparation', ['recommendations', 'enrichment', 'maintenance', 'retry'])
+def test_preparation_uses_existing_notice_without_pausing_normal_use(store, monkeypatch, preparation):
+    app = create_app(store, lambda: {}, background_work=False)
+    ctx = app.state.ctx
+    worker = ctx.rec_worker if preparation == 'recommendations' else ctx.enrich_worker
+    if preparation == 'retry':
+        from yt_playlist.rec.worker_queue import Job
+        ctx.rec_worker.jobs.retry[Job.HOME].dirty = True
+    elif preparation == 'maintenance':
+        ctx.storage_maintenance.ready.clear()
+    else:
+        monkeypatch.setattr(type(worker), 'busy', property(lambda _: True))
+    with TestClient(app, base_url='http://127.0.0.1') as client:
+        status = client.get('/storage-maintenance/status').json()
+        assert status['banner_message'] == 'Preparing library data. Features will appear as they are ready.'
+        assert not status['active'] and status['recording']
+        html = client.get('/playlists').text
+        assert html.count('id="storage-maintenance"') == 1
+        assert status['banner_message'] in html
+        ctx.storage_maintenance.active = True
+        assert client.get('/storage-maintenance/status').json()['banner_message'] == (
+            'Performing database maintenance - this should take just a few minutes.')
+        ctx.storage_maintenance.active = False
+        ctx.storage_maintenance.ready.set()
+        ctx.rec_worker.jobs.cancel()
+        monkeypatch.undo()
+        assert client.get('/storage-maintenance/status').json()['banner_message'] == ''
+
+
 @pytest.mark.parametrize('state,expected,active,warning', [
     ('idle', '', False, False),
-    ('compacting', 'Library updates are paused.', True, False),
-    ('evidence', 'Library updates are paused.', True, False),
+    ('compacting', 'Performing database maintenance - this should take just a few minutes.', True, False),
+    ('evidence', 'Performing database maintenance - this should take just a few minutes.', True, False),
     ('retrying', 'Library updates need attention.', True, True),
     ('feedback', 'Catching up on your listening.', True, False),
     ('low_space', 'Free disk space to finish.', False, True),

@@ -9,7 +9,7 @@ from contextvars import ContextVar
 import threading
 import time
 
-from yt_playlist.core.db_diagnostics import (
+from yt_playlist.core.lock_diagnostics import (
     LockWaitDiagnostics, cooperative_lock_yield, database_lock_wait,
 )
 

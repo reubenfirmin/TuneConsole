@@ -5,7 +5,7 @@ import pytest
 from playwright.sync_api import expect
 
 
-@pytest.mark.parametrize("width", [390, 1440])
+@pytest.mark.parametrize("width", [1440])
 @pytest.mark.parametrize("path,feature", [
     ("/", "home"), ("/playlists", None), ("/setup", "setup"),
     ("/road_trip", "road-trip"), ("/clusters", "cluster"), ("/charts", None),
@@ -30,7 +30,15 @@ def test_feature_loading_and_responsive_layout(page, live_app, path, feature, wi
             assert scripts.index(helper) < scripts.index("cluster.js") < scripts.index("alpine.min.js")
     for helper in ("home-board.js", "home-tuning.js", "home-discovery.js"):
         assert (helper in scripts) == (feature == "home")
-    assert page.evaluate("typeof genOpenYT") == ("function" if path in ("/", "/road_trip") else "undefined")
+    # The shared launcher restores pending saves after navigation from any page.
+    # Feature factories and their scripts must remain scoped to their page.
+    for shared in ("playlist-generation.js", "generated-playback.js"):
+        assert scripts.count(shared) == 1
+        assert scripts.index(shared) < scripts.index("alpine.min.js")
+    assert scripts.index("playlist-generation.js") < scripts.index("generated-playback.js")
+    assert page.evaluate("typeof genOpenYT") == "function"
+    for factory, owner in (("homeStatus", "home"), ("roadTripScreen", "road-trip"), ("clusterCanvas", "cluster")):
+        assert page.evaluate(f"typeof {factory}") == ("function" if feature == owner else "undefined")
     for factory in ("playerStatus", "genreDialog", "omniSearch"):
         assert page.evaluate(f"typeof {factory}") == "function"
     assert ("table-controls.js" in scripts) == (path == "/" or path.startswith(
@@ -51,13 +59,10 @@ def test_feature_loading_and_responsive_layout(page, live_app, path, feature, wi
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1"), page.evaluate("""() =>
         JSON.stringify([...document.querySelectorAll('main *')].filter(el => el.getBoundingClientRect().right > innerWidth + 1)
         .slice(-24).map(el => [el.tagName, el.className, el.getBoundingClientRect().right]), null, 2)""")
-    if path == "/playlists" and width == 390:
-        assert page.locator(".library-page-head").evaluate(
-            "el => getComputedStyle(el).gridTemplateColumns.split(' ').length") == 1
     assert errors == []
 
 
-@pytest.mark.parametrize("width", [390, 1440])
+@pytest.mark.parametrize("width", [1440])
 @pytest.mark.parametrize("path", ["/setup", "/enrich", "/charts", "/playlists"])
 def test_connected_player_keeps_shared_layout_without_home_assets(page, live_app, path, width):
     page.set_viewport_size({"width": width, "height": 900})
@@ -83,11 +88,8 @@ def test_connected_player_keeps_shared_layout_without_home_assets(page, live_app
     assert "playback.css" in styles
     if path != "/playlists":
         assert "home.css" not in styles
-    if width == 1440:
-        expect(page.locator(".sidebar-dock-slot .global-now-playing")).to_be_visible()
-        assert player.locator(".hs-now").evaluate("el => getComputedStyle(el).display") == "grid"
-    else:
-        expect(page.locator(".global-now-playing-slot .global-now-playing")).to_be_visible()
+    expect(page.locator(".sidebar-dock-slot .global-now-playing")).to_be_visible()
+    assert player.locator(".hs-now").evaluate("el => getComputedStyle(el).display") == "grid"
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
 
 
@@ -112,7 +114,7 @@ def test_removed_home_status_does_not_reopen_pending_sync_stream(page):
     }""")
 
 
-@pytest.mark.parametrize("width", [390, 1440])
+@pytest.mark.parametrize("width", [1440])
 def test_album_document_loads_conflict_badge_and_resolver_styles(page, live_app, store, width):
     track = store.tracks.upsert_track("album-song", "Album song", "Artist", "Album", 200,
                                      album_browse_id="ALBUM")

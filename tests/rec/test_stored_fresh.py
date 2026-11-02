@@ -40,8 +40,12 @@ def fresh(recommendations):
 
 
 def forbid_legacy(monkeypatch):
-    def forbidden(*args, **kwargs):
-        pytest.fail('Typed Fresh serving attempted to decode a legacy proposal')
+    original = RecProposalsRepo._proposal_json
+
+    def forbidden(self, surface, *args, **kwargs):
+        if surface in ('mode_bundles', 'fresh_pool'):
+            pytest.fail('Typed Fresh serving attempted to decode a legacy candidate proposal')
+        return original(self, surface, *args, **kwargs)
     monkeypatch.setattr(RecProposalsRepo, '_proposal_json', forbidden)
 
 

@@ -131,7 +131,7 @@ def test_common_or_familiar_genre_supports_an_artist_instead_of_leading(store, m
     seed_catalog_track(store, 'song|band', 'Song', 'Band', video_id='song', genre=genre)
     _heard(store, 'song')
     if historical:
-        identity = store.accounts.upsert_account('listener', 'channel', None, True)
+        identity = store.accounts.get_master_account().id
         events = [('song|band', None, NOW - (100 + i) * 86400) for i in range(12)]
         store.history.import_listening_events(identity, events, source='spotify_export', source_timezone='UTC')
     subjects = [{'kind': 'genre', 'subject': f'genre:{genre.lower()}', 'display': genre},

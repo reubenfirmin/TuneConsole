@@ -7,10 +7,11 @@ conservative root, never a recorded offer whose group history was collected.
 from contextlib import contextmanager
 import threading
 import uuid
+import sqlite3
 
 from yt_playlist.core import group_documents, group_evidence, policy_documents
 from yt_playlist.core.prepared_references import FIELDS, PREPARED, context, replace_prepared
-from yt_playlist.core.activity import WorkBudgetExceeded, check_cancellable_work
+from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing, check_cancellable_work
 from yt_playlist.core.evidence_ledger import _mkdir
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import recommendation_roots
@@ -190,16 +191,26 @@ def _pending(store, resolve, at):
                 with admission(store, blocking=False):
                     release(store, 'pending', identity)
                     retired = True
-            except WorkBudgetExceeded:
+            except (WorkBudgetExceeded, WorkClosing):
                 # The unlocked lifetime file lets the bounded reaper retire
-                # this conservative SQL root after publication becomes free.
+                # this conservative SQL root after publication becomes free or
+                # another owner resumes maintenance after shutdown.
                 pass
+            except sqlite3.OperationalError as error:
+                if getattr(error, 'sqlite_errorcode', 0) & 255 not in (
+                        sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                    raise
             finally:
                 unlock()
                 stream.close()
                 closed = True
+                if callbacks is not None:
+                    callbacks.remove(close)
             if retired:
                 path.unlink(missing_ok=True)
+    callbacks = getattr(store.conn, '_before_close_callbacks', None)
+    if callbacks is not None:
+        callbacks.append(close)
     return captured, close
 
 

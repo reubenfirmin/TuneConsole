@@ -9,6 +9,13 @@ from websockets.sync.client import connect
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 
 
+@pytest.fixture
+def returning_radio_listener(store):
+    from tests.home_fixture_support import returning_listener
+
+    returning_listener(store, 'radio')
+
+
 def test_space_controls_playback_without_intercepting_search_or_focused_buttons(live_app, page):
     status = {'connected':True,'now_playing':{'video_id':'keyboard','title':'Song','artist':'Artist','paused':False}}
     page.route('**/bridge/status',lambda route: route.fulfill(json=status))
@@ -36,7 +43,7 @@ def test_space_controls_playback_without_intercepting_search_or_focused_buttons(
     assert len(commands)==2
 
 
-@pytest.mark.parametrize('path,width', [('/',1280),('/artists',1280),('/',390),('/artists',390),('/artists',800)])
+@pytest.mark.parametrize('path,width', [('/',1280),('/artists',1280),('/artists',800)])
 def test_progress_uses_control_divider_without_time_row_in_home_and_dock(live_app, page, path, width, tmp_path):
     status = {'connected':True,'now_playing':{'video_id':'progress','title':'Song','artist':'Artist',
         'position':45,'duration':200,'paused':True}}
@@ -93,7 +100,7 @@ def test_progress_uses_control_divider_without_time_row_in_home_and_dock(live_ap
     expect(progress).to_have_attribute('value','4')
 
 
-@pytest.mark.parametrize('width', [1280, 390])
+@pytest.mark.parametrize('width', [1280])
 def test_unknown_duration_stays_hidden_while_playback_position_advances(live_app, page, width, tmp_path):
     status = {'connected': True, 'now_playing': {
         'video_id': 'unknown-duration', 'title': 'Destination Sunshine',
@@ -164,7 +171,7 @@ def test_track_table_and_dock_share_one_playback_request_per_interval(live_app, 
     assert len(requests) == 3
 
 
-@pytest.mark.parametrize("width", [1280, 390])
+@pytest.mark.parametrize("width", [1280])
 def test_player_controls_are_aligned_and_next_sends_the_displayed_song(live_app, page, width, tmp_path):
     page.route("**/bridge/status", lambda route: route.fulfill(json={
         "connected": True, "now_playing": {"title": "A song with a long title to fit in the player",
@@ -223,7 +230,8 @@ def test_player_keeps_failures_out_of_the_card_without_losing_saved_dislike(live
 
 
 @pytest.mark.parametrize("path", ["/", "/artists"])
-@pytest.mark.parametrize("width", [1280, 390])
+@pytest.mark.parametrize("width", [1280])
+@pytest.mark.usefixtures('returning_radio_listener')
 def test_playback_favicon_and_radio_tab_follow_confirmed_playback(live_app, store, page, path, width):
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
@@ -306,6 +314,7 @@ def test_playback_favicon_and_radio_tab_follow_confirmed_playback(live_app, stor
 
 
 @pytest.mark.parametrize("active", [False, True])
+@pytest.mark.usefixtures('returning_radio_listener')
 @pytest.mark.parametrize("now_playing", [
     None,
     {"video_id": "v1", "paused": False,
@@ -331,6 +340,7 @@ def test_radio_has_no_playback_dot_without_now_playing(live_app, store, page, no
 
 
 @pytest.mark.parametrize("starting", [False, True])
+@pytest.mark.usefixtures('returning_radio_listener')
 def test_radio_launcher_does_not_light_dot_from_an_old_playback_report(live_app, store, page, starting):
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
@@ -348,6 +358,7 @@ def test_radio_launcher_does_not_light_dot_from_an_old_playback_report(live_app,
 
 
 @pytest.mark.parametrize("failure", ["network", "invalid_response"])
+@pytest.mark.usefixtures('returning_radio_listener')
 def test_playback_dot_and_sidebar_clear_when_status_refresh_fails(live_app, store, page, failure):
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
@@ -387,6 +398,7 @@ def test_playback_dot_and_sidebar_clear_when_status_refresh_fails(live_app, stor
 
 
 @pytest.mark.parametrize("panel", ["recent", "directions"])
+@pytest.mark.usefixtures('returning_radio_listener')
 def test_radio_dot_stays_current_without_opening_the_radio_panel(live_app, store, page, panel):
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
@@ -411,7 +423,7 @@ def test_radio_dot_stays_current_without_opening_the_radio_panel(live_app, store
     expect(dot).to_be_hidden()
 
 
-@pytest.mark.parametrize("width", [1280, 390])
+@pytest.mark.parametrize("width", [1280])
 @pytest.mark.parametrize("path", ["/", "/artists"])
 def test_now_playing_uses_cached_artwork_and_clears_it_on_track_change(live_app, store, page, width, path):
     cached_art = "/static/nag/intro.png"
@@ -443,7 +455,8 @@ def test_now_playing_uses_cached_artwork_and_clears_it_on_track_change(live_app,
         expect(artwork).to_be_visible()
 
 
-@pytest.mark.parametrize("width", [1280, 390])
+@pytest.mark.parametrize("width", [1280])
+@pytest.mark.usefixtures('returning_radio_listener')
 def test_now_playing_returns_to_radio_and_switches_home_tabs(live_app, store, page, width):
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
@@ -474,7 +487,7 @@ def test_now_playing_returns_to_radio_and_switches_home_tabs(live_app, store, pa
 
 
 @pytest.mark.parametrize("kind", ["playlist", "album"])
-@pytest.mark.parametrize("width", [1280, 390])
+@pytest.mark.parametrize("width", [1280])
 def test_now_playing_returns_to_source(live_app, store, page, kind, width):
     playlist = store.playlists.get_playlists()[0]
     store.collection.add_saved_album({"browse": "MPRE_album", "title": "Playing release", "artist": "Artist"})

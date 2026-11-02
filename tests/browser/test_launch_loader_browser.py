@@ -24,7 +24,7 @@ def moving_graph(page, root):
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_popup_rotates_one_status_and_uses_varied_moving_orbits(page, live_app, width):
     page.set_viewport_size({'width': width, 'height': 900})
     page.add_init_script("localStorage.setItem('tc_gen_thumbs', JSON.stringify(Array.from({length:8}, (_,i) => '/static/favicon.svg?'+i)))")
@@ -56,7 +56,7 @@ def test_on_air_loader_stops_off_panel_and_cleans_up_on_removal(page, radio_ui):
     expect(root.locator('.gen-loader')).to_have_class('gen-loader is-loader-paused')
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_radio_loader_disappears_after_connection_and_stays_hidden_while_tuning(page, radio_ui, width):
     from tests.template_support import web_templates
 

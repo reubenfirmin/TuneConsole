@@ -216,9 +216,10 @@ def test_disabled_missing_key_or_zero_limit_never_requests_provider(store, gener
 
 def test_usage_and_generated_records_do_not_contain_credentials(store, generated):
     copy.get(store, ALBUM, 100)
-    from yt_playlist.core import album_description_files
+    from yt_playlist.core import album_description_files, fao
     rows = [tuple(row) for row in store.conn.execute('SELECT * FROM album_description_requests')]
-    files = [path.read_text() for path in album_description_files.directory(store.conn).glob('*/*.json')]
+    files = [fao.read_bytes(path).decode('utf-8')
+             for path in album_description_files.directory(store.conn).glob('*/*.json')]
     assert rows and files
     assert 'secret-key' not in json.dumps(rows + files)
     assert not store.conn.execute("SELECT 1 FROM rec_proposals WHERE surface LIKE 'album_description%'").fetchone()

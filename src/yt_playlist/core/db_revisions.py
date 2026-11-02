@@ -31,6 +31,7 @@ _KEY_COLUMNS = {"settings": "key", "rec_proposals": "surface", "player_events": 
                 "rec_musical_profiles": "identity_key", "entry_artists": "entry_id", "track_artists": "entry_id",
                 "recording_vibes": "recording_id", "sample_attributes": "recording_id",
                 "measurements": "recording_id",
+                "vibe_versions": "id",
                 "choice_learning_heads": "surface", "choice_learning_publications": "id",
                 "choice_learning_parameters": "publication_id", "choice_learning_exclusions": "publication_id",
                 "choice_mode_estimates": "publication_id", "choice_group_estimates": "publication_id",

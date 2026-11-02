@@ -7,6 +7,21 @@ from tests.conftest import FakeClient
 from yt_playlist.rec import choice_evidence
 
 
+@pytest.fixture
+def returning_album_listener(store):
+    from tests.rec.test_album_menu import records
+    from yt_playlist.core import albums
+    # These consumers serve an earned destination even while its output is
+    # unavailable. Fresh-user progression tests retain the real readiness gates.
+    store.rec_proposals.put_proposals('listening_choices', {
+        'home_format': {'episodes': {'albums': 1}}}, 1)
+    with store.conn:
+        for item in [*records(),
+                     {'browse_id': 'MPREb_x', 'title': 'The Album', 'artist': 'Artist X'}]:
+            albums.observe(store.conn,item['browse_id'],title=item['title'],artist=item['artist'],
+                           genre=item.get('genre'),year=item.get('year'))
+
+
 def test_unsaved_album_reads_plays_without_album_membership_and_refreshes_locally(store):
     from types import SimpleNamespace
     from yt_playlist.library import live_plays
@@ -27,9 +42,10 @@ def test_unsaved_album_reads_plays_without_album_membership_and_refreshes_locall
     assert client.get('/album/track-plays?videos=' + ','.join(f'v{i}' for i in range(501))).status_code == 400
 
 
-def test_album_choices_serve_independently_of_missing_mix_preparation(store, monkeypatch):
+def test_album_choices_serve_independently_of_missing_mix_preparation(store, monkeypatch, returning_album_listener):
     from yt_playlist.rec import album_choices, home_prepared
     c, _fc, _iid = _client(store)
+    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) is None
     store.rec_proposals.put_proposals(album_choices.SURFACE, {
         'built_at': 1, 'context': {'at': 1},
         'items': [{'browse_id': 'MPREb_x', 'title': 'The Album', 'artist': 'Artist X',
@@ -50,7 +66,7 @@ def test_album_choices_serve_independently_of_missing_mix_preparation(store, mon
     assert len(store.rec_ledger.evidence().records('opportunity')) == 1
 
 
-def test_album_choices_waiting_fragment_refreshes_until_worker_publishes(store):
+def test_album_choices_waiting_fragment_refreshes_until_worker_publishes(store, returning_album_listener):
     from yt_playlist.rec import album_choices
     c, _fc, _iid = _client(store)
     waiting = c.get('/home/album-choices')
@@ -64,7 +80,7 @@ def test_album_choices_waiting_fragment_refreshes_until_worker_publishes(store):
     assert 'hx-get="/home/album-choices" hx-trigger="every 3s"' not in ready.text
 
 
-def test_refresh_excludes_the_held_four_without_editing_their_ledger(store):
+def test_refresh_excludes_the_held_four_without_editing_their_ledger(store, returning_album_listener):
     from tests.rec.test_album_menu import records
     c, _fc, _iid = _client(store)
     store.rec_proposals.put_proposals('album_prepared', {'built_at': 1, 'context': {}, 'items': records()}, 1)
@@ -81,7 +97,7 @@ def test_refresh_excludes_the_held_four_without_editing_their_ledger(store):
 
 
 @pytest.mark.parametrize('endpoint', ['refresh', 'tune'])
-def test_album_refresh_closes_only_the_requesting_tabs_offer(store, endpoint):
+def test_album_refresh_closes_only_the_requesting_tabs_offer(store, endpoint, returning_album_listener):
     from tests.rec.test_album_menu import records
     c, _fc, _iid = _client(store)
     payload = {'built_at': 1, 'context': {'revision': 'a'}, 'items': records()}
@@ -108,7 +124,7 @@ def test_album_refresh_closes_only_the_requesting_tabs_offer(store, endpoint):
 
 
 @pytest.mark.parametrize('previous', ['', 'missing', 'x' * 65, 'wrong-format'])
-def test_album_refresh_without_a_valid_held_offer_does_not_close_latest(store, previous):
+def test_album_refresh_without_a_valid_held_offer_does_not_close_latest(store, previous, returning_album_listener):
     from tests.rec.test_album_menu import records
     c, _fc, _iid = _client(store)
     store.rec_proposals.put_proposals('album_prepared', {'built_at': 1, 'context': {}, 'items': records()}, 1)
@@ -118,7 +134,7 @@ def test_album_refresh_without_a_valid_held_offer_does_not_close_latest(store, p
     assert not store.rec_ledger.evidence().records('response')
 
 
-def test_album_controls_capture_policy_and_surface_effective_values_in_taste(store):
+def test_album_controls_capture_policy_and_surface_effective_values_in_taste(store, returning_album_listener):
     from tests.rec.test_album_menu import records
     from yt_playlist.rec import album_tuning
     c, _fc, _iid = _client(store)
@@ -158,7 +174,7 @@ def test_album_controls_capture_policy_and_surface_effective_values_in_taste(sto
         'novelty': 'nan'}).status_code == 422
 
 
-def test_new_album_state_issues_current_policy_without_rewriting_held_offers(store):
+def test_new_album_state_issues_current_policy_without_rewriting_held_offers(store, returning_album_listener):
     from tests.rec.test_album_menu import records
     from yt_playlist.rec import album_choices
     c, _fc, _iid = _client(store)
@@ -180,7 +196,7 @@ def test_new_album_state_issues_current_policy_without_rewriting_held_offers(sto
     assert store.rec_proposals.get_proposals('album_prepared')['items'] == prepared
 
 
-def test_album_notes_use_cached_sources_without_request_network_and_keep_held_identity(store, monkeypatch):
+def test_album_notes_use_cached_sources_without_request_network_and_keep_held_identity(store, monkeypatch, returning_album_listener):
     from yt_playlist.providers import release_notes
     c, _fc, _iid = _client(store)
     album = {'browse_id': 'record', 'artist': 'Artist X', 'title': 'Record', 'score': .8}
@@ -206,7 +222,7 @@ def test_album_notes_use_cached_sources_without_request_network_and_keep_held_id
     assert c.get('/home/album-notes?browse=unoffered').status_code == 404
 
 
-def test_album_familiarity_uses_track_plays_without_counts_or_changing_held_experiment(store):
+def test_album_familiarity_uses_track_plays_without_counts_or_changing_held_experiment(store, returning_album_listener):
     c, _fc, iid = _client(store)
     entry = store.tracks.upsert_track('v1', 'One', 'Artist X', 'The Album', None,
                                      album_browse_id='MPREb_x')
@@ -283,6 +299,7 @@ def test_album_page_renders_table_and_create_form(store):
 
 
 def test_open_album_inline_keeps_the_complete_tracklist_and_simple_controls(store):
+    import re
     c, _fc, _iid = _client(store)
     r = c.get('/album/inline?browse=MPREb_x&opportunity=held-menu')
     assert r.status_code == 200
@@ -292,7 +309,8 @@ def test_open_album_inline_keeps_the_complete_tracklist_and_simple_controls(stor
     assert '/album/feedback' not in r.text and 'Album page' not in r.text
     assert 'value="held-menu"' in r.text
     assert '/collection/save-album' in r.text
-    assert 'class="track-table"' in r.text and 'data-vid="v1"' in r.text
+    assert re.search(r'<table class="track-table(?: [^"]*)?"', r.text)
+    assert 'data-vid="v1"' in r.text
     assert 'album-inline-tracks' not in r.text
     assert not store.collection.saved_album_ids()
     assert not store.rec_ledger.evidence().records('response')
@@ -301,7 +319,7 @@ def test_open_album_inline_keeps_the_complete_tracklist_and_simple_controls(stor
 def test_unsaved_album_and_expansion_reuse_identical_standard_rows(store):
     import re
     c, _fc, _iid = _client(store)
-    table = lambda html: re.search(r'(<table class="track-table".*?</table>)', html, re.S).group(1)
+    table = lambda html: re.search(r'(<table class="track-table(?: [^"]*)?".*?</table>)', html, re.S).group(1)
     page = table(c.get('/album?browse=MPREb_x').text)
     inline = table(c.get('/album/inline?browse=MPREb_x').text)
     assert page == inline

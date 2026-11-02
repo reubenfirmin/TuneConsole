@@ -150,6 +150,17 @@ class RadioPersistence:
             self.legacy_checkpoint = json.loads(raw) if raw else None
         return migrate(json.loads(raw)) if raw else None
 
+    def view(self, reader) -> dict | None:
+        """Project a committed page snapshot without changing our write token."""
+        if self.transient is not None:
+            return migrate(json.loads(self.transient))
+        with reader._lock:
+            if radio_storage.available(reader.conn):
+                state, _ = radio_storage.load(reader.conn)
+                return migrate(state) if state else None
+            raw = reader.settings.get_setting(SESSION_KEY)
+        return migrate(json.loads(raw)) if raw else None
+
     def save(self, session: Session):
         with self.lock:
             self._write(encode(session))

@@ -9,6 +9,7 @@ from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
 from yt_playlist.providers.waterfall import TrackSink, run_waterfall
 from tests.test_waterfall import FakeProv
+from tests.historical_support import upgrade_fixture
 
 
 @pytest.mark.parametrize('values', [('Rock','Pop'),('Rock','')])
@@ -25,7 +26,7 @@ def test_duplicate_legacy_decisions_reconcile_without_arbitrary_winner(legacy_st
                        'resolved_value,updated_at) VALUES (?,?,?,1,?,?)',
                        (track,'genre','[]',value,at))
     s.conn.commit()
-    s.init_schema()
+    upgrade_fixture(s)
     assert s.tracks.get_track_enrichment(3)[0] == ''
     detail = s.enrichment_reports.enrichment_conflict_detail(3,'genre')
     assert {o['value'] for o in detail['options']} >= set(values)
@@ -69,12 +70,19 @@ def test_provider_refresh_selection_and_blank_override_with_worker_sink(store):
     fields = store.enrichment_reports.metadata_provenance(track)['fields']
     assert fields['genre'] == {'value':'','override':True,'source':'user'}
     assert fields['bpm'] == {'value':None,'override':True,'source':'user'}
-    assert tuple(store.conn.execute('SELECT genre,bpm,typeof(bpm) FROM recordings').fetchone()) == ('House',128,'real')
+    from yt_playlist.core import genre_classifications
+    recording = store.tracks.catalog_subject(track)['recording_id']
+    assert genre_classifications.read(store.conn, 'recordings', recording) == 'House'
+    assert tuple(store.conn.execute('SELECT bpm,typeof(bpm) FROM recordings WHERE id=?',
+                                    (recording,)).fetchone()) == (128,'real')
     with store.conn:
-        store.conn.execute('DELETE FROM entry_field_choices WHERE entry_id=?', (track,))
+        catalog.withdraw_choice(store.conn, track, 'genre')
+        catalog.withdraw_choice(store.conn, track, 'bpm')
     fields = store.enrichment_reports.metadata_provenance(track)['fields']
     assert fields['genre'] == {'value':'House','override':False,'source':'musicbrainz'}
-    assert store.conn.execute('SELECT COUNT(*) FROM metadata_findings').fetchone()[0] == 12
+    assert store.conn.execute("SELECT COUNT(*) FROM metadata_observations o JOIN metadata_deliveries d "
+                              "ON d.id=o.delivery_id WHERE d.provider IN ('musicbrainz','discogs') "
+                              "AND o.field IN ('genre','bpm')").fetchone()[0] == 12
 
 
 def test_populated_upgrade_does_not_invent_user_intent_and_rolls_back(tmp_path):
@@ -94,7 +102,7 @@ def test_populated_upgrade_does_not_invent_user_intent_and_rolls_back(tmp_path):
         migrate(s.conn,registry=(*MIGRATIONS[:19],Migration(20,MIGRATIONS[19].name,interrupted)))
     assert not s.conn.execute("SELECT 1 FROM sqlite_master WHERE name='metadata_decisions'").fetchone()
     assert s.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 19
-    s.init_schema()
+    upgrade_fixture(s)
     fields = s.enrichment_reports.metadata_provenance(1)['fields']
     assert fields['genre'] == {'value':'Rock','override':False,'source':'legacy_unknown'}
     assert fields['title'] == {'value':'Edited','override':True,'source':'user'}
@@ -110,10 +118,11 @@ def test_resolution_and_override_commit_atomically(store):
     track = store.tracks.upsert_track('video','Song','Artist',None,200)
     store.enrichment.upsert_conflict(track,'genre',[{'provider':'a','value':'Rock'},
                                                   {'provider':'b','value':'Pop'}])
-    store.conn.execute("CREATE TEMP TRIGGER reject_resolution BEFORE UPDATE ON enrichment_conflict "
+    store.conn.execute("CREATE TEMP TRIGGER reject_resolution BEFORE UPDATE ON metadata_conflicts "
                        "BEGIN SELECT RAISE(ABORT,'interrupted resolution'); END")
     with pytest.raises(sqlite3.IntegrityError,match='interrupted resolution'):
         store.enrichment.resolve_conflict(track,'genre','')
     assert store.conn.execute('SELECT COUNT(*) FROM entry_field_choices').fetchone()[0] == 0
+    assert store.conn.execute('SELECT COUNT(*) FROM metadata_runtime_choices').fetchone()[0] == 0
     assert store.conn.execute('SELECT COUNT(*) FROM metadata_decisions').fetchone()[0] == 0
     assert store.conn.execute('SELECT resolved FROM enrichment_conflict').fetchone()[0] == 0

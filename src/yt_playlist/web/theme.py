@@ -14,6 +14,43 @@ They used to be two hard-coded dicts in two modules that disagreed with each
 other on every shared key (house was violet in one and orange in the other).
 """
 
+from functools import lru_cache
+from pathlib import Path
+import re
+
+from yt_playlist.core import fao
+
+
+def mix_launch_tokens() -> str:
+    """Embed recovery roles and their palette so recovery needs no asset request.
+
+    Keep the values in tokens.css, including when a popup survives its opener
+    or a failed stylesheet load. Only this small dependency closure is embedded.
+    """
+    path = Path(__file__).with_name('static') / 'tokens.css'
+    return _mix_launch_tokens(fao.stat(path).identity)
+
+
+@lru_cache(maxsize=1)
+def _mix_launch_tokens(identity: tuple) -> str:
+    css = fao.read_bytes(Path(__file__).with_name('static') / 'tokens.css').decode()
+    definitions = dict(re.findall(r'(--[a-z0-9-]+)\s*:\s*([^;{}]+);', css))
+    selected = {}
+
+    def include(name):
+        if name in selected:
+            return
+        value = definitions[name]
+        selected[name] = value
+        for dependency in re.findall(r'var\((--[a-z0-9-]+)', value):
+            include(dependency)
+
+    for name in definitions:
+        if name.startswith('--mix-launch-'):
+            include(name)
+    return ':root{' + ''.join(f'{name}:{value};' for name, value in selected.items()) + '}'
+
+
 # Families that have a dedicated chart band. Anything else falls back.
 _BAND_FAMILIES = frozenset({"ambient", "electro-synth", "house", "techno", "trance"})
 

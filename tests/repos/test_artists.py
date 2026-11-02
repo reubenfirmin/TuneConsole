@@ -105,6 +105,7 @@ def test_populated_upgrade_retains_literal_credit_state_and_feedback_without_bac
         migrate(s.conn,registry=(*MIGRATIONS[:20],Migration(21,MIGRATIONS[20].name,interrupted)))
     assert not s.conn.execute("SELECT 1 FROM sqlite_master WHERE name='artists'").fetchone()
     assert s.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 20
+    migrate(s.conn, registry=MIGRATIONS)
     s.init_schema()
     credits = s.artists.track_credits(1)
     assert len(credits) == 1 and credits[0]['credit'] == 'Group, with comma'
@@ -161,11 +162,12 @@ def test_installed_v21_upgrades_references_atomically(tmp_path, monkeypatch, exi
     monkeypatch.setattr(registry,'MIGRATIONS',(*MIGRATIONS[:21],Migration(22,MIGRATIONS[21].name,interrupted)))
     before = list(s.conn.iterdump())
     with pytest.raises(MigrationError,match='interrupted reference'):
-        migrate(s.conn)
+        migrate(s.conn, registry=registry.MIGRATIONS)
     assert list(s.conn.iterdump()) == before
     monkeypatch.setattr(registry,'MIGRATIONS',MIGRATIONS)
     s.conn.close()
     s = Store(path)
+    migrate(s.conn, registry=MIGRATIONS)
     s.init_schema()
     assert s.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == MIGRATIONS[-1].version
     assert s.conn.execute('SELECT artist_id FROM discovered_albums').fetchone()[0] == aid

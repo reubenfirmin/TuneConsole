@@ -153,7 +153,7 @@ def test_quit_stops_disconnected_sync_and_closes_its_live_stream(store, monkeypa
         assert remote.reads == ["NEXT-0"]
         assert app.state.ctx.work.wait(0)
         assert app.state.ctx.jobs.get(job_id).done
-        assert store.settings.get_setting("last_sync_at") == "1"
+        assert float(store.settings.get_setting("last_sync_at")) == 1.0
         assert [p.provider_playlist_id for p in store.playlists.get_playlists()] == ["OLD"]
         assert store.playlists.get_playlist_track_keys(cached) == {"cached song|artist"}
     finally:

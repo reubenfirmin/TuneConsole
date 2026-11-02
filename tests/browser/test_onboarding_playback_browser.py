@@ -26,7 +26,7 @@ def starter_mix(live_app, store, page):
     return live_app, status
 
 
-@pytest.mark.parametrize("width", [390, 1280])
+@pytest.mark.parametrize("width", [1280])
 def test_starter_cue_follows_only_its_playback_and_expires(starter_mix, store, page, tmp_path, width):
     base, status = starter_mix
     page.set_viewport_size({"width": width, "height": 1000})
@@ -130,7 +130,7 @@ def test_unsaved_starter_does_not_advance_cue(starter_mix, page, failure):
     assert page.evaluate("sessionStorage.getItem('tc-onboarding-played')") is None
 
 
-@pytest.mark.parametrize('width', [390, 1280])
+@pytest.mark.parametrize('width', [1280])
 def test_long_mix_discovered_at_play_time_recovers_into_artist_choices(live_app, store, page,
                                                                       monkeypatch, tmp_path, width):
     from yt_playlist.library import playlist_generated

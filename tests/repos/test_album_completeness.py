@@ -35,7 +35,8 @@ def test_scoped_completeness_preserves_full_occurrence_and_membership_rules(stor
         elif damage == "unresolved":
             tracklist = album_tracklists.begin(store.conn,album_id,'target',expected_count=2)
             album_tracklists.occurrence(store.conn,tracklist,entry_id=entry,position=0)
-            album_tracklists.occurrence(store.conn,tracklist,raw_identity_key='unknown|artist',position=1)
+            album_tracklists.occurrence(store.conn,tracklist,raw_identity_key='unknown|artist',
+                                       raw_source_ref='unmaterialized-video',position=1)
             album_tracklists.finish(store.conn,tracklist,complete=True)
 
     complete = damage in (None,'count')
@@ -45,7 +46,8 @@ def test_scoped_completeness_preserves_full_occurrence_and_membership_rules(stor
     assert store.collection.complete_album_tracklist_ids() == (
         {"target", "unrelated"} if complete else {"unrelated"})
     share = store.collection.cached_album_share("target")
-    assert (share is not None) is complete
+    # Saving an album is separate from publishing its materialized sources.
+    assert (share is not None) is (damage in (None, 'count', 'membership'))
     if share:
         assert share["video_ids"] == ["video-target", "video-target"]
 

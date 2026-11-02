@@ -5,10 +5,16 @@ import threading
 import time
 
 from tests.test_home_other_genres import seed_genres
-from tests.test_mode_cards_route import _client
+from tests.test_mode_cards_route import _client as _home_client
+from tests.home_fixture_support import returning_listener
 from tests.recommendation_support import publish_bundles
 from yt_playlist.rec import library_pool, mode_surfaces, surfaces
 from yt_playlist.util.matching import identity_key
+
+
+def _client(store):
+    returning_listener(store, 'mixes')
+    return _home_client(store)
 
 
 def two_ready_cards(store, monkeypatch):

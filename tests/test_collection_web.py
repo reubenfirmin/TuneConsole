@@ -82,7 +82,7 @@ def test_unsave_targets_unique_non_main_owner_and_carries_owner_in_both_views(st
     c = _client(store, lambda: clients)
     for path in ("/albums", "/artist?name=Artist%20X"):
         html = c.get(path).text
-        assert f'name="account_id" value="{other}"' in html
+        assert f'name="identity_id" value="{other}"' in html
         assert "Other" in html
     response = c.post("/collection/unsave-album", data={"browse_id": "B"})
     assert _refreshes(response)
@@ -104,7 +104,7 @@ def test_multiple_owners_require_choice_and_remove_only_selected_membership(stor
     assert c.post("/collection/unsave-album", data={"browse_id": "B"}).status_code == 422
     assert all(client.rated == [] for client in clients.values())
     chosen, retained = (main, other) if selected == "main" else (other, main)
-    response = c.post("/collection/unsave-album", data={"browse_id": "B", "account_id": chosen})
+    response = c.post("/collection/unsave-album", data={"browse_id": "B", "identity_id": chosen})
     assert _refreshes(response)
     assert clients[chosen].rated == [("PLAUDIO", "INDIFFERENT")]
     assert clients[retained].rated == []
@@ -123,7 +123,7 @@ def test_unavailable_album_owner_never_falls_back_to_main(store, owner_state):
             store.conn.execute('UPDATE accounts SET active=0 WHERE id=?', (other,))
         clients[other] = AlbumClient()
     c = _client(store, lambda: clients)
-    response = c.post("/collection/unsave-album", data={"browse_id": "B", "account_id": other})
+    response = c.post("/collection/unsave-album", data={"browse_id": "B", "identity_id": other})
     assert response.status_code == 422 and "not connected" in response.text
     assert all(client.rated == [] for client in clients.values())
     assert [a['browse'] for a in store.collection.get_saved_albums(account_id=other)] == ['B']
@@ -137,8 +137,8 @@ def test_album_unsave_rejects_non_owner_and_unknown_legacy_ownership(store):
     store.collection.add_saved_album({"browse": "legacy", "title": "Legacy"})
     clients = {main: AlbumClient(), other: AlbumClient()}
     c = _client(store, lambda: clients)
-    for data in ({"browse_id": "owned", "account_id": main}, {"browse_id": "legacy"},
-                 {"browse_id": "legacy", "account_id": main}, {"browse_id": "owned", "account_id": "bad"}):
+    for data in ({"browse_id": "owned", "identity_id": main}, {"browse_id": "legacy"},
+                 {"browse_id": "legacy", "identity_id": main}, {"browse_id": "owned", "identity_id": "bad"}):
         assert c.post("/collection/unsave-album", data=data).status_code == 422
     assert all(client.rated == [] for client in clients.values())
     assert store.collection.saved_album_ids() == {'owned', 'legacy'}
@@ -183,7 +183,7 @@ def test_rejected_album_change_preserves_account_memberships(store, ack, saved):
     client = _client(store, lambda: {main: fc, other: AlbumClient()})
     before = store.collection.saved_album_owners('B')
     response = client.post('/collection/' + ('save-album' if saved else 'unsave-album'),
-                           data={'browse_id': 'B', 'account_id': main})
+                           data={'browse_id': 'B', 'identity_id': main})
     assert response.status_code == 422
     assert 'did not confirm' in response.text
     assert 'hx-refresh' not in response.headers

@@ -15,6 +15,7 @@ import pytest
 
 from tests.conftest import FakeClient
 from tests.group_support import publish as publish_groups, recordings as grouped_recordings
+from tests.home_fixture_support import returning_listener
 from tests.musical_support import prepare_profiles
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 from yt_playlist.core.activity import Activity
@@ -25,7 +26,7 @@ from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 
 
-def seed(store, *, tracks_per_lane=8):
+def seed(store, *, tracks_per_lane=8, publish=True):
     modes, bundles = [], {"all": {}, "_meta": {"comfort_pool": 100, "full_pools": True}}
     for mid, genre in enumerate(("Jazz", "Techno", "Classical", "Ambient", "Trance", "Indie Rock")):
         modes.append({"mode_id": mid, "label": genre, "families": [], "size": 50,
@@ -48,7 +49,8 @@ def seed(store, *, tracks_per_lane=8):
             bundles["all"].setdefault(lane, []).extend(items)
     store.modes.replace_modes(modes, [], 1)
     prepare_profiles(store)
-    publish_bundles(store, bundles, vibes=True)
+    if publish:
+        publish_bundles(store, bundles, vibes=True)
     return bundles
 
 
@@ -65,14 +67,15 @@ def service(store):
 
 
 def test_history_diagnostics_do_not_change_generation_but_effective_allocation_does(store):
-    from yt_playlist.rec import choice_bandit, group_serving
+    from yt_playlist.rec import choice_bandit, group_learning, group_serving
     head = publish_groups(store, grouped_recordings([('Jazz', 20, .1), ('Techno', 20, .9)]), now=90)
     groups = [group for group in head['groups'] if group['leaf']]
     assert len(groups) == 2
     first, second = [group['group_id'] for group in groups]
     store.rec_proposals.put_proposals(group_serving.SURFACE, {
         'generation': head['generation'], 'groups': groups}, 90)
-    stats = {'generation': head['generation'], 'parameters': choice_bandit.parameters(store), 'at': 90,
+    stats = {'policy': group_learning.POLICY, 'generation': head['generation'],
+             'parameters': choice_bandit.parameters(store), 'at': 90,
              'expires_at': 200, 'state_version': 'first',
              'rows': [{'group_id': first, 'estimate': .8}, {'group_id': second, 'estimate': .2}]}
     store.rec_proposals.put_proposals('group_choice_bandit', stats, 90)
@@ -89,6 +92,12 @@ def test_history_diagnostics_do_not_change_generation_but_effective_allocation_d
     assert expired != home_prepared._proposal_generation(store, None, 104)
     store.rec_proposals.put_proposals('group_choice_bandit', {**stats, 'at': 300}, 300)
     assert home_prepared._proposal_generation(store, None, 201) == expired
+    for policy in (None, 'obsolete-policy'):
+        invalid = {**stats, 'policy': policy}
+        if policy is None:
+            invalid.pop('policy')
+        store.rec_proposals.put_proposals('group_choice_bandit', invalid, 90)
+        assert home_prepared._proposal_generation(store, None, 100) == expired
     # Pool publication and changed reward configuration remain real inputs.
     store.rec_proposals.put_proposals('group_choice_bandit', stats, 90)
     fresh = [{'key': 'new candidate|artist', 'title': 'New candidate', 'artist': 'Artist',
@@ -245,10 +254,15 @@ def test_served_whole_menu_probability_is_recorded_and_frozen(store, prepared):
     again = home_prepared.cards(store, prepared, 1002, service(store))
     assert again.protos[0]["assignment"] == assignment
     assert [p["experiment_id"] for p in again.protos] == [p["experiment_id"] for p in first.protos]
-    impressions = store.conn.execute("SELECT provenance FROM rec_served_impressions").fetchall()
-    import json
-    live = [json.loads(row[0]) for row in impressions if json.loads(row[0])["policy_kind"] == "live"]
-    assert live and all(row["propensity"] == assignment["probability"] for row in live)
+    from yt_playlist.rec import choice_evidence
+    options = [{'id': p['experiment_id'], 'position': i + 1, 'label': p['label'],
+                'note': p['note'], 'intent': p['lane'], 'genres': p.get('genres', []),
+                'assignment': p['assignment']} for i, p in enumerate(first.protos)]
+    offered = choice_evidence.present(store, 'mixes', options, 1001,
+        context=first.choice_context or prepared['choice_context'], window=first.epoch)
+    held = choice_evidence.opportunity(store, offered)
+    assert held and all(option['assignment'] == assignment for option in held['options'])
+    assert store.conn.execute('SELECT count(*) FROM rec_served_impressions').fetchone()[0] == 0
 
 
 def test_missing_candidate_dependencies_keep_last_usable_home(store, prepared):
@@ -424,6 +438,7 @@ def test_corrupt_prepared_payload_never_breaks_home_routes(store, prepared, dama
     iid = store.accounts.upsert_account('main', 'cred', None, True)
     store.settings.set_setting('last_sync_at', '1000')
     store.settings.set_setting('onboard_dismissed', '1')
+    returning_listener(store, 'mixes', now=1000)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1001)
     scheduled = []
     app.state.ctx.rec_worker.trigger_home_refresh = lambda **kw: scheduled.append(True)
@@ -520,8 +535,8 @@ def test_presync_previews_and_onboarding_menus_are_not_exposures(store, prepared
     iid = store.accounts.upsert_account("main", "cred", None, True)
     if state == 'onboarding':
         store.modes.replace_modes([], list(range(6)), 1000)
-        # A usable prepared offer opens Home even without modes. Genuine
-        # onboarding has no playable prepared mixes or prior completed setup.
+        # Genuine onboarding has neither retained playable mixes nor prior
+        # completed setup. The presync case retains output but no earned access.
         with store.conn.atomic():
             from yt_playlist.core import home_outputs
             home_outputs.clear(store.conn)
@@ -531,8 +546,9 @@ def test_presync_previews_and_onboarding_menus_are_not_exposures(store, prepared
                         base_url="http://127.0.0.1")
     response = client.get("/")
     assert response.status_code == 200
-    assert ('id="onboarding-feed"' in response.text) == (state == 'onboarding')
-    assert ('id="home-feed"' in response.text) == (state == 'presync')
+    # Prepared output alone does not skip the fresh listener's first stop.
+    assert 'id="onboarding-feed"' in response.text
+    assert 'id="home-feed"' not in response.text
     assert store.modes.impression_counts() == {}
     assert store.rec_ledger.scorecard_inputs(0, 2000)[0] == []
     assert all(t["offered_count"] == 0 for t in store.discovery.get_discovered_tracks())
@@ -542,6 +558,7 @@ def test_visible_prepared_home_without_modes_records_exposures(store, prepared):
     iid = store.accounts.upsert_account("main", "cred", None, True)
     store.modes.replace_modes([], list(range(6)), 1000)
     store.settings.set_setting("last_sync_at", "1000")
+    returning_listener(store, 'mixes', now=1000)
     client = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000),
                         base_url="http://127.0.0.1")
 
@@ -554,13 +571,15 @@ def test_visible_prepared_home_without_modes_records_exposures(store, prepared):
     expected = {(p["lane"], t["key"]) for p in shown for t in p["tracks"]}
     assert all(f'data-key="{key}"' in response.text for _, key in expected)
     assert store.modes.impression_counts() == Counter(p["mode_id"] for p in shown)
-    impressions = store.rec_ledger.scorecard_inputs(0, 2000)[0]
-    assert len(impressions) == len(expected)
-    assert {(r["lane"], r["identity_key"]) for r in impressions} == expected
+    offers = store.rec_ledger.evidence().records('opportunity')
+    assert len(offers) == 1 and offers[0]['format'] == 'mixes'
+    assert len(offers[0]['options']) == 4
+    assert store.rec_ledger.scorecard_inputs(0, 2000)[0] == []
     offered = {t["identity_key"]: t["offered_count"] for t in store.discovery.get_discovered_tracks()}
     fresh = {key for lane, key in expected if lane == "fresh"}
     assert fresh
-    assert offered == {key: int(key in fresh) for key in offered}
+    # A displayed mix exposes its theme, not each song it might later play.
+    assert offered == {key: 0 for key in offered}
 
 
 @pytest.mark.parametrize("bad", [None, {}, {"schema": 999}, "bad-json"])
@@ -649,6 +668,7 @@ def test_lost_card_stays_a_clickable_slot_and_polls_for_a_prepared_replacement(s
         'lane': 'wheelhouse', 'epoch': result.epoch, 'include_genres': [], 'avoid_genres': []}
     assert calls
     iid = store.accounts.upsert_account('main', 'cred', None, True)
+    returning_listener(store, 'mixes', now=1000)
     client = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1001),
                         base_url='http://127.0.0.1')
     response = client.get('/home/feed')
@@ -664,6 +684,7 @@ def test_lost_card_stays_a_clickable_slot_and_polls_for_a_prepared_replacement(s
 @pytest.mark.parametrize('cached_placeholders', [False, True])
 def test_startup_cards_keep_polling_with_backoff_until_offers_recover(
         store, prepared, monkeypatch, attempt, next_attempt, interval, cached_placeholders):
+    returning_listener(store, 'mixes', now=1000)
     client = TestClient(create_app(store, lambda: {}, now_fn=lambda: 1000,
                                    background_work=False), base_url='http://127.0.0.1')
     pending = None
@@ -710,10 +731,8 @@ def test_cached_discovery_honors_unavailability_and_current_tile_metadata(store,
     store.discovery.upsert_discovered_album("new-album", "Artist", "Album", "2020", None, 1000, genre="Jazz")
     tiles = home_prepared.prepare(store, 1001)
     assert tiles["discovery_albums"]
-    with store.conn:
-        store.conn.execute("UPDATE albums SET genre='Techno' WHERE id IN "
-                           "(SELECT album_id FROM album_provider_ids "
-                           "WHERE provider='youtube' AND provider_id='new-album')")
+    store.discovery.upsert_discovered_album("new-album", "Artist", "Album", "2020", None, 1002,
+                                           genre="Techno")
     store.rec_model.set_weight("genre:techno", 0, lo=0, now=1002)
     assert home_prepared.discovery(store, tiles, 1002)["discovery_albums"] == []
 

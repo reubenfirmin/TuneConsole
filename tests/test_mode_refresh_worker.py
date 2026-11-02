@@ -11,6 +11,7 @@ from yt_playlist.rec import (content_model, embedding_training as training, embe
                              model_refresh, mode_surfaces, rec_params, rec_worker, taste_modes, taste_viz)
 from yt_playlist.web.app import create_app
 from tests.model_support import build_content_model
+from tests.recommendation_support import publish_bundles
 
 
 @pytest.fixture
@@ -42,6 +43,19 @@ def _settle(store):
     assert model_refresh.rebuild(store, 2000) is not None
 
 
+def _pool_keys(store, lane):
+    head = store.recommendations.head('home')
+    assert head is not None
+    after, keys = -1, []
+    while True:
+        page = store.recommendations.candidate_page('home', 'all', lane,
+            generation=head['id'], after=after, limit=128)
+        keys.extend(track['key'] for track in page['tracks'])
+        if page['exhausted']:
+            return keys
+        after = page['after']
+
+
 def test_missing_pools_are_scheduled_even_while_models_need_refresh(store, monkeypatch):
     worker = _worker(store)
     worker.jobs.retry[rec_worker.Job.FULL].dirty = True
@@ -63,7 +77,8 @@ def test_deferred_model_fit_still_prepares_candidates(store, monkeypatch):
 
 @pytest.mark.parametrize("reason", ["stale", "missing"])
 def test_startup_repairs_groups_without_sync_or_extension(store, library, monkeypatch, reason):
-    old_ids = {m["mode_id"] for m in taste_modes.live_modes(store)}
+    old_modes = taste_modes.live_modes(store)
+    old_ids = {m["mode_id"] for m in old_modes}
     if reason == "missing":
         store.conn.execute("DELETE FROM taste_modes")
         store.conn.commit()
@@ -106,14 +121,23 @@ def test_startup_repairs_groups_without_sync_or_extension(store, library, monkey
                 assert "Updating your music groups automatically" in pending
         finally:
             release.set()
-        assert finished.wait(5)
+        # This is background model adoption and typed publication; the request
+        # availability assertions above retain their independent short bound.
+        assert finished.wait(60)
         deadline = time.monotonic() + 60
         while app.state.ctx.rec_worker.busy and time.monotonic() < deadline:
             time.sleep(0.02)
         assert not app.state.ctx.rec_worker.busy
         live = taste_modes.live_modes(store)
         assert len(live) == 3
-        assert {m["mode_id"] for m in live} == old_ids
+        if reason == 'stale':
+            assert {m["mode_id"] for m in live} == old_ids
+        else:
+            # Deleted identities cannot be reused after the retained high-water
+            # mark. Reconstructed groups must cover the same musical regions.
+            assert {m['mode_id'] for m in live}.isdisjoint(old_ids)
+            assert {tuple(tuple(pair) for pair in m['families']) for m in live} == {
+                tuple(tuple(pair) for pair in m['families']) for m in old_modes}
         assert all(m["last_seen"] == 2000.0 for m in live)
         recent = taste_viz.overview(store, 2000.0)["recent"]
         assert recent["styles_current"] and recent["n"] == 4
@@ -123,7 +147,8 @@ def test_startup_repairs_groups_without_sync_or_extension(store, library, monkey
             html = client.get("/taste/panels/overview").text
         assert "genre groups need to be updated" not in html
         assert 'hx-trigger="every 3s"' not in html
-        assert store.rec_proposals.get_proposals("mode_bundles") is not None
+        assert store.recommendations.head('home') is not None
+        assert _pool_keys(store, 'temporal')
 
 
 def test_content_update_refreshes_original_models_and_places_track(store, library, monkeypatch):
@@ -139,36 +164,35 @@ def test_content_update_refreshes_original_models_and_places_track(store, librar
     assert {m['mode_id'] for m in taste_modes.live_modes(store)} == {
         m['mode_id'] for m in store.modes.list_modes(active_only=True)}
     assert key in store.rec_model.content_vectors_by_keys([key])
-    bundles = store.rec_proposals.get_proposals("mode_bundles")
-    assert key in {row["key"] for row in bundles["all"]["temporal"]}
+    assert key in _pool_keys(store, 'temporal')
 
 
 @pytest.mark.parametrize("prepared", [False, True], ids=["missing-bundles", "saved-bundles"])
 def test_current_groups_are_not_recomputed_at_every_startup(store, library, monkeypatch, prepared):
+    # Adopt this pre-ledger fixture before guarding an unchanged restart.
+    _settle(store)
     saved = None
     if prepared:
         mode_surfaces.prepare_bundles(store, 1000.0)
-        saved = store.rec_proposals.get_proposals("mode_bundles")
+        saved = _pool_keys(store, 'temporal')
+    else:
+        assert store.recommendations.head('home') is None
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Startup must reuse the saved model and current groups")
 
     monkeypatch.setattr(content_model, "build_library_content", forbidden)
     monkeypatch.setattr(taste_modes, "recompute", forbidden)
-    # The one-time adoption of a pre-ledger model is itself incremental. Once
-    # adopted, a restart with no source changes must not learn the corpus twice.
-    _settle(store)
-    mode_surfaces.prepare_bundles(store, 2000)
-    saved = store.rec_proposals.get_proposals('mode_bundles')
     generation = store.rec_model.content_generation()
+    groups = store.modes.list_modes()
     worker = _worker(store)
     monkeypatch.setattr(worker, '_start_loop', lambda: None)
     worker._do_mode_refresh()
     assert store.rec_model.content_generation() == generation
-    bundles = store.rec_proposals.get_proposals("mode_bundles")
-    assert bundles is not None
+    assert store.recommendations.head('home') is not None
+    assert [m['mode_id'] for m in store.modes.list_modes()] == [m['mode_id'] for m in groups]
     if prepared:
-        assert bundles == saved
+        assert _pool_keys(store, 'temporal') == saved
 
 
 @pytest.mark.parametrize("cached", [None, []], ids=["absent", "empty"])
@@ -178,10 +202,14 @@ def test_startup_repairs_absent_discovery_songs_while_reusing_saved_groups(store
     for i in range(12):
         store.discovery.upsert_discovered_track(f"new {i}|new artist {i}", f"v{i}", f"New {i}",
             f"New artist {i}", None, None, "Jazz", "2020", "radio:seed", 1001)
-    store.conn.execute("DELETE FROM rec_proposals WHERE surface='fresh_pool'")
-    store.conn.commit()
-    if cached is not None:
-        store.rec_proposals.put_proposals("fresh_pool", cached, 1000)
+    if cached is None:
+        with store.conn:
+            store.conn.execute("DELETE FROM recommendation_heads WHERE surface='fresh'")
+        assert store.recommendations.head('fresh') is None
+    else:
+        publish_bundles(store, {}, 1000, fresh=cached)
+        empty = store.recommendations.candidate_page('fresh', 'all', 'fresh', limit=1)
+        assert empty['tracks'] == [] and empty['exhausted']
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Discovery repair must reuse the saved groups and model")
@@ -339,7 +367,8 @@ def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, libr
         worker._refresh_bundles()
     assert len(attempts) == 2 and all(attempts)
     assert store.settings.get_setting("rec_content_model")
-    assert store.rec_proposals.get_proposals("mode_bundles")
+    assert store.recommendations.head('home') is not None
+    assert _pool_keys(store, 'temporal')
 
 
 def test_enrichment_requests_repair_when_saved_clusters_have_lost_their_model(store, library, monkeypatch):

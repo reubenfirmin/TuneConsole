@@ -29,6 +29,9 @@
 
 # Test coordination
 
+- Mobile and phone support are out of scope. Do not test phone viewports,
+  mobile-device emulation or phone-only layouts. Preserve useful desktop and
+  TV behavior checks when removing phone variants.
 - CI tests run only on pull requests. Main pushes, manual main runs and releases
   must never run unit/browser suites, packaged smoke tests or synthetic publisher
   rehearsals. Releases build and publish from main without requiring PR or CI test

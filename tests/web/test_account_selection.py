@@ -1,6 +1,7 @@
 """Remote mutations and their local memberships must agree on the destination account."""
 import json
 from types import SimpleNamespace
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 import pytest
@@ -42,7 +43,8 @@ def test_global_mutations_keep_the_configured_main_account(store,monkeypatch,ord
         url,data = '/clusters/save',dict(name='Mix',keep_keys=json.dumps([key]))
     elif operation=='road-trip':
         rid = store.road_trip.save_road_trip_recipe(None,'Trip',50,[],[],30,1)
-        state = dict(picked=[track],own_pct=50,familiarity_pct=50,target_minutes=30,stats={})
+        state = dict(revision=uuid4().hex,picked=[track],picks=['video'],own_pct=50,
+                     familiarity_pct=50,target_minutes=30,stats={})
         store.road_trip.save_road_trip_draft(rid,state,1)
         monkeypatch.setattr(road_trip,'normalized',lambda state,*args:state)
         monkeypatch.setattr(road_trip,'draft_tracks',lambda state:state['picked'])
@@ -75,7 +77,7 @@ def test_global_mutations_keep_the_configured_main_account(store,monkeypatch,ord
             assert remote_main.rated==[('AUDIO','LIKE')] and not remote_other.rated
             assert {r[0] for r in store.conn.execute(
                 'SELECT account_id FROM saved_album_memberships')}==owners
-            assert http.post('/collection/unsave-album',data={**data,'account_id':main}).status_code==200
+            assert http.post('/collection/unsave-album',data={**data,'identity_id':main}).status_code==200
             assert remote_main.rated==[('AUDIO','LIKE'),('AUDIO','INDIFFERENT')]
             assert not remote_other.rated
             assert store.collection.get_saved_albums(account_id=other)

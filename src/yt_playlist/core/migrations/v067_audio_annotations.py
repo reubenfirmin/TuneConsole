@@ -197,67 +197,76 @@ def _evaluation(conn, annotation_id, prediction):
                      ((annotation_id, version, label, position) for position, label in enumerate(trained)))
 
 
+def prepare_row(table, kind, row):
+    """Validate one captured annotation without changing its original owner."""
+    run = row['run_id']
+    version = row.get('taxonomy_version', 'audio-feedback-presets-1')
+    samples = _list(row['sample_ids'], source=table, run=run, field='sample_ids')
+    labels = ([row['vibe']] if row['vibe'] else []) if kind == 'feedback' else _list(
+        row['vibes'], source=table, run=run, field='vibes')
+    try:
+        prediction = json.loads(row['prediction'])
+    except (TypeError, ValueError) as exc:
+        raise MigrationError(f'Invalid prediction in {table}/{run}; original rows retained') from exc
+    if (not run or not isinstance(version, str) or not version or any(not label for label in labels)
+            or not isinstance(row['updated_at'], (float, int)) or not math.isfinite(row['updated_at'])):
+        raise MigrationError(f'Invalid annotation identity in {table}/{run}; original rows retained')
+    if version in VOCABULARIES and not set(labels) <= set(VOCABULARIES[version]):
+        raise MigrationError(f'Unrecognized label in {table}/{run}/{version}; original rows retained')
+    return table, kind, version, row, samples, labels, prediction
+
+
+def copy_row(conn, prepared):
+    table, kind, version, row, samples, labels, prediction = prepared
+    root = audio_annotation_files.directory(conn)
+    run = row['run_id']
+    resolved = bool(conn.execute('SELECT 1 FROM audio_vibe_runs WHERE run_id=?', (run,)).fetchone())
+    missing, members, seen = [], [], set()
+    for position, sample_id in enumerate(samples):
+        owner = conn.execute('SELECT run_id FROM sample_attributes WHERE id=?', (sample_id,)).fetchone()
+        if owner is None or owner[0] != run:
+            missing.append({'position': position, 'sample_id': sample_id,
+                            'reason': 'missing_sample' if owner is None else 'wrong_run'})
+        elif sample_id not in seen:
+            members.append((sample_id, position))
+            seen.add(sample_id)
+    if version not in VOCABULARIES:
+        conn.execute("INSERT OR IGNORE INTO audio_taxonomies VALUES (?,'legacy_observed')", (version,))
+        conn.executemany('INSERT OR IGNORE INTO audio_taxonomy_labels VALUES (?,?)',
+                         ((version, label) for label in labels))
+    filename = audio_annotation_files.publish(root, {
+        'format': 'audio-annotation-1', 'run_key': run, 'kind': kind, 'taxonomy_version': version,
+        'revision': 1, 'prediction': prediction, 'legacy_source': table,
+        'legacy': row, 'unresolved_samples': missing})
+    state = 'labeled' if labels else ('withdrawn' if kind == 'feedback' else 'empty')
+    annotation_id = conn.execute('INSERT INTO audio_annotations('
+        'run_id,kind,taxonomy_version,revision,state,created_at,legacy_run_key,resolution_status,'
+        'unresolved_sample_count,model_output_filename,model_output_digest,file_format) '
+        'VALUES (?,?,?,1,?,?,?,?,?,?,?,?)',
+        (run if resolved else None, kind, version, state, row['updated_at'], None if resolved else run,
+         'resolved' if resolved else 'legacy_missing_run', len(missing), filename, Path(filename).stem,
+         'audio-annotation-1')).lastrowid
+    conn.executemany('INSERT INTO audio_annotation_samples VALUES (?,?,?)',
+                     ((annotation_id, sample_id, position) for sample_id, position in members))
+    conn.executemany('INSERT INTO audio_annotation_vibes VALUES (?,?,?,?)',
+                     ((annotation_id, version, label, position)
+                      for position, label in enumerate(dict.fromkeys(labels))))
+    _evaluation(conn, annotation_id, prediction)
+    conn.execute('UPDATE audio_annotations SET sealed=1 WHERE id=?', (annotation_id,))
+
+
 def apply(conn, context):
     rows = []
     for table, kind in (('audio_vibe_feedback', 'feedback'), ('audio_vibe_labels', 'development'),
                         ('audio_session_labels', 'session')):
         fields = [row[1] for row in conn.execute(f'PRAGMA table_info({table})')]
         for values in conn.execute(f'SELECT * FROM {table} ORDER BY updated_at,run_id'):
-            row = dict(zip(fields, values))
-            run = row['run_id']
-            version = row.get('taxonomy_version', 'audio-feedback-presets-1')
-            samples = _list(row['sample_ids'], source=table, run=run, field='sample_ids')
-            labels = ([row['vibe']] if row['vibe'] else []) if kind == 'feedback' else _list(
-                row['vibes'], source=table, run=run, field='vibes')
-            try:
-                prediction = json.loads(row['prediction'])
-            except (TypeError, ValueError) as exc:
-                raise MigrationError(f'Invalid prediction in {table}/{run}; original rows retained') from exc
-            if (not run or not isinstance(version, str) or not version or any(not label for label in labels)
-                    or not isinstance(row['updated_at'], (float, int)) or not math.isfinite(row['updated_at'])):
-                raise MigrationError(f'Invalid annotation identity in {table}/{run}; original rows retained')
-            if version in VOCABULARIES and not set(labels) <= set(VOCABULARIES[version]):
-                raise MigrationError(f'Unrecognized label in {table}/{run}/{version}; original rows retained')
-            rows.append((table, kind, version, row, samples, labels, prediction))
+            rows.append(prepare_row(table, kind, dict(zip(fields, values))))
     for sql in statements():
         conn.execute(sql)
     seed(conn)
-    root = audio_annotation_files.directory(conn)
-    for table, kind, version, row, samples, labels, prediction in rows:
-        run = row['run_id']
-        resolved = bool(conn.execute('SELECT 1 FROM audio_vibe_runs WHERE run_id=?', (run,)).fetchone())
-        missing, members, seen = [], [], set()
-        for position, sample_id in enumerate(samples):
-            owner = conn.execute('SELECT run_id FROM sample_attributes WHERE id=?', (sample_id,)).fetchone()
-            if owner is None or owner[0] != run:
-                missing.append({'position': position, 'sample_id': sample_id,
-                                'reason': 'missing_sample' if owner is None else 'wrong_run'})
-            elif sample_id not in seen:
-                members.append((sample_id, position))
-                seen.add(sample_id)
-        if version not in VOCABULARIES:
-            conn.execute("INSERT OR IGNORE INTO audio_taxonomies VALUES (?,'legacy_observed')", (version,))
-            conn.executemany('INSERT OR IGNORE INTO audio_taxonomy_labels VALUES (?,?)',
-                             ((version, label) for label in labels))
-        filename = audio_annotation_files.publish(root, {
-            'format': 'audio-annotation-1', 'run_key': run, 'kind': kind, 'taxonomy_version': version,
-            'revision': 1, 'prediction': prediction, 'legacy_source': table,
-            'legacy': row, 'unresolved_samples': missing})
-        state = 'labeled' if labels else ('withdrawn' if kind == 'feedback' else 'empty')
-        annotation_id = conn.execute('INSERT INTO audio_annotations('
-            'run_id,kind,taxonomy_version,revision,state,created_at,legacy_run_key,resolution_status,'
-            'unresolved_sample_count,model_output_filename,model_output_digest,file_format) '
-            'VALUES (?,?,?,1,?,?,?,?,?,?,?,?)',
-            (run if resolved else None, kind, version, state, row['updated_at'], None if resolved else run,
-             'resolved' if resolved else 'legacy_missing_run', len(missing), filename, Path(filename).stem,
-             'audio-annotation-1')).lastrowid
-        conn.executemany('INSERT INTO audio_annotation_samples VALUES (?,?,?)',
-                         ((annotation_id, sample_id, position) for sample_id, position in members))
-        conn.executemany('INSERT INTO audio_annotation_vibes VALUES (?,?,?,?)',
-                         ((annotation_id, version, label, position)
-                          for position, label in enumerate(dict.fromkeys(labels))))
-        _evaluation(conn, annotation_id, prediction)
-        conn.execute('UPDATE audio_annotations SET sealed=1 WHERE id=?', (annotation_id,))
+    for row in rows:
+        copy_row(conn, row)
     for table in ('audio_vibe_feedback', 'audio_vibe_labels', 'audio_session_labels'):
         conn.execute(f'DROP TABLE {table}')
 

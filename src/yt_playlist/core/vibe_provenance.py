@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import tempfile
 
-from . import fao
+from . import fao, file_collection
 from .evidence_ledger import canonical
 
 CHUNK_ROWS = 128
@@ -19,6 +19,36 @@ SQL = '''CREATE TABLE prediction_provenance (
     byte_size INTEGER NOT NULL CHECK(byte_size>0),
     state TEXT NOT NULL CHECK(state IN ('ready','expired'))
 )'''
+
+
+def allocation_sql():
+    yield 'CREATE TABLE prediction_id_state (id INTEGER PRIMARY KEY CHECK(id=1),high_water INTEGER NOT NULL CHECK(high_water>=0))'
+    for action, side in (('insert', 'NEW'), ('delete', 'OLD')):
+        yield (f'CREATE TRIGGER prediction_id_{action} AFTER {action.upper()} ON predictions BEGIN '
+               f'UPDATE prediction_id_state SET high_water=max(high_water,{side}.id) WHERE id=1; END')
+    yield ("CREATE TRIGGER prediction_id_monotonic BEFORE UPDATE ON prediction_id_state WHEN "
+           "NEW.high_water<OLD.high_water BEGIN SELECT RAISE(ABORT,'Calculation allocation cannot go backwards'); END")
+
+
+def install_allocation(conn, context=None):
+    for sql in allocation_sql():
+        conn.execute(sql)
+    conn.execute('INSERT INTO prediction_id_state SELECT 1,coalesce(max(id),0) FROM predictions')
+
+
+def validate_allocation(conn):
+    from .migrations.current import _tokens
+    for sql in allocation_sql():
+        row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (sql.split()[2],)).fetchone()
+        if row is None or _tokens(row[0]) != _tokens(sql):
+            raise ValueError('Incompatible calculation allocation')
+
+
+def next_id(conn):
+    row = conn.execute('SELECT high_water FROM prediction_id_state WHERE id=1').fetchone()
+    if row is None:
+        raise ValueError('Missing calculation allocation state')
+    return row[0] + 1
 
 
 def available(conn):
@@ -35,6 +65,67 @@ def validate(conn):
     row = conn.execute("SELECT sql FROM main.sqlite_schema WHERE name='prediction_provenance'").fetchone()
     if row is None or _tokens(row[0]) != _tokens(SQL):
         raise ValueError('Incompatible prediction provenance owner')
+
+
+def guards():
+    lineage = ("p.lineage_complete=0 OR EXISTS(SELECT 1 FROM prediction_provenance f "
+               "WHERE f.prediction_id=p.id AND f.state='ready') OR "
+               "(EXISTS(SELECT 1 FROM prediction_inputs i WHERE i.prediction_id=p.id) "
+               "AND (p.kind='genre' OR EXISTS(SELECT 1 FROM prediction_artists a WHERE a.prediction_id=p.id)))")
+    for action in ('insert', 'update'):
+        name = 'recording_vibes_' + action
+        yield name, (f'CREATE TRIGGER {name} BEFORE {action.upper()} ON recording_vibes WHEN '
+            'NEW.measurement_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM measurements m WHERE '
+            'm.id=NEW.measurement_id AND m.source=NEW.source AND m.score=NEW.score AND m.support=NEW.support) '
+            'OR NEW.prediction_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM predictions p WHERE '
+            'p.id=NEW.prediction_id AND p.score=NEW.score AND p.support=NEW.support AND p.kind=NEW.source '
+            f"AND ({lineage})) BEGIN SELECT RAISE(ABORT,'Current vibe does not match its original score'); END")
+    yield 'prediction_provenance_expiry', ("CREATE TRIGGER prediction_provenance_expiry BEFORE UPDATE OF state "
+        "ON prediction_provenance WHEN NEW.state='expired' AND EXISTS(SELECT 1 FROM recording_vibes "
+        "WHERE prediction_id=OLD.prediction_id) BEGIN SELECT RAISE(ABORT,'Current provenance is required'); END")
+    yield 'prediction_provenance_immutable', ("CREATE TRIGGER prediction_provenance_immutable BEFORE UPDATE OF "
+        "prediction_id,input_fingerprint,byte_size ON prediction_provenance BEGIN "
+        "SELECT RAISE(ABORT,'Calculation provenance is immutable'); END")
+
+
+def install_guards(conn, context=None):
+    for name, sql in guards():
+        conn.execute('DROP TRIGGER IF EXISTS ' + name)
+        conn.execute(sql)
+
+
+def validate_guards(conn):
+    from .migrations.current import _tokens
+    for name, sql in guards():
+        saved = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
+        if saved is None or _tokens(saved[0]) != _tokens(sql):
+            raise ValueError('Incompatible file-owned vibe guard: ' + name)
+
+
+def lifecycle_sql():
+    # One root per original measurement, never one row per calculation edge.
+    # Original measurements remain durable inputs under #692 as well.
+    yield ('prediction_measurement_roots', 'CREATE TABLE prediction_measurement_roots ('
+           'measurement_id INTEGER PRIMARY KEY REFERENCES measurements(id)) WITHOUT ROWID')
+    for table in ('prediction_inputs','prediction_artists'):
+        for operation in ('insert','update'):
+            name = table+'_file_'+operation
+            yield name, (f'CREATE TRIGGER {name} BEFORE {operation.upper()} ON {table} '
+                'WHEN EXISTS(SELECT 1 FROM prediction_provenance WHERE prediction_id=NEW.prediction_id) '
+                "BEGIN SELECT RAISE(ABORT,'Calculation provenance is immutable; inputs require distinct original recordings'); END")
+
+
+def install_lifecycle(conn, context=None):
+    for _,sql in lifecycle_sql():
+        conn.execute(sql)
+
+
+def validate_lifecycle(conn):
+    from .migrations.current import _tokens
+    for name,sql in lifecycle_sql():
+        row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?',(name,)).fetchone()
+        if row is None or _tokens(row[0])!=_tokens(sql):
+            raise ValueError('Incompatible provenance lifecycle: '+name)
 
 
 def directory(conn):
@@ -70,19 +161,41 @@ def fingerprint(inputs):
     return hashlib.sha256(canonical(sorted(inputs))).digest()
 
 
-def read(conn, pid):
-    row = conn.execute('SELECT input_fingerprint,byte_size,state FROM prediction_provenance WHERE prediction_id=?', (pid,)).fetchone()
+def _read(conn, pid, load, installed):
+    row = (conn.execute('SELECT input_fingerprint,byte_size,state FROM prediction_provenance WHERE prediction_id=?', (pid,)).fetchone()
+           if installed else None)
     if row is None:
+        if not conn.execute('SELECT 1 FROM predictions WHERE id=?', (pid,)).fetchone():
+            return None  # Retired history is unavailable, not invented empty lineage.
         # Installed rows remain usable until the explicit conversion reaches them.
         return {'inputs': [r[0] for r in conn.execute('SELECT measurement_id FROM prediction_inputs WHERE prediction_id=? ORDER BY measurement_id', (pid,))],
                 'artists': [r[0] for r in conn.execute('SELECT artist_id FROM prediction_artists WHERE prediction_id=? ORDER BY artist_id', (pid,))]}
     if row[2] == 'expired':
         return None
-    value = _chunk(conn, pid).get(str(pid))
+    value = load(pid).get(str(pid))
     if (not isinstance(value, dict) or set(value) != {'inputs', 'artists'}
             or len(canonical(value)) != row[1] or fingerprint(value['inputs']) != row[0]):
         raise fao.CorruptFile('Required calculation provenance is missing or corrupt')
     return value
+
+
+def read(conn, pid):
+    return _read(conn, pid, lambda identity: _chunk(conn, identity), available(conn))
+
+
+def read_many(conn, identities):
+    """Verify each calculation while retaining at most one shared file chunk."""
+    chunk, records = None, None
+    installed = available(conn)
+    def load(pid):
+        nonlocal chunk, records
+        key = pid // CHUNK_ROWS
+        if key != chunk:
+            records = _chunk(conn, pid)
+            chunk = key
+        return records
+    for pid in identities:
+        yield pid, _read(conn, pid, load, installed)
 
 
 def same_inputs(conn, pid, inputs):
@@ -95,17 +208,66 @@ def same_inputs(conn, pid, inputs):
     return {r[0] for r in conn.execute('SELECT measurement_id FROM prediction_inputs WHERE prediction_id=?', (pid,))} == set(inputs)
 
 
+def stage_many(conn, values):
+    """Prepare complete chunks against a pinned snapshot, before SQL publication.
+
+    The preparation planner validates original subjects and calculation identity.
+    Snapshot revisions fence these inputs and the allocation high-water mark.
+    The physical identity check additionally fences repacking/conversion races.
+    """
+    grouped, markers, originals = {}, [], set()
+    for pid, inputs, artists in values:
+        value = {'inputs':sorted(set(inputs)), 'artists':sorted(set(artists))}
+        grouped.setdefault(pid//CHUNK_ROWS,{})[str(pid)] = value
+        markers.append((pid,fingerprint(value['inputs']),len(canonical(value))))
+        originals.update(value['inputs'])
+    staged = []
+    try:
+        for chunk, pending in grouped.items():
+            pid = int(next(iter(pending)))
+            path = directory(conn)/relative(pid)
+            identity = fao.stat(path).identity if fao.exists(path) else False
+            records = _chunk(conn,pid)
+            records.update(pending)
+            staged.append(fao.stage_bytes(path,canonical({'format':1,'calculations':records}),
+                                          expected=identity,max_bytes=MAX_BYTES))
+        # Existing roots need no repeated write during the guarded publication.
+        roots = [mid for mid in sorted(originals) if not conn.execute(
+            'SELECT 1 FROM prediction_measurement_roots WHERE measurement_id=?',(mid,)).fetchone()]
+        return staged, markers, roots
+    except BaseException:
+        for publication in staged:
+            publication.close()
+        raise
+
+
 def publish_many(conn, values):
     if not conn.in_transaction:
         raise RuntimeError('Provenance publication requires the calculation writer reservation')
     grouped = {}
     for pid, inputs, artists in values:
-        if not conn.execute('SELECT 1 FROM predictions WHERE id=?', (pid,)).fetchone():
+        prediction = conn.execute('SELECT vibe,recording_id,lineage_complete,kind FROM predictions WHERE id=?', (pid,)).fetchone()
+        if not prediction:
             raise ValueError('Unknown prediction owner')
         value = {'inputs': sorted(set(inputs)), 'artists': sorted(set(artists))}
-        if not value['inputs'] or any(type(i) is not int or i < 1 for i in value['inputs'] + value['artists']):
+        if any(type(i) is not int or i < 1 for i in value['inputs'] + value['artists']):
             raise ValueError('Invalid calculation provenance subjects')
-        grouped.setdefault(pid // CHUNK_ROWS, {})[str(pid)] = value
+        if prediction[2] and (not value['inputs'] or prediction[3] != 'genre' and not value['artists']):
+            raise ValueError('Complete calculation requires original inputs and conditioning')
+        subjects = set()
+        for mid in value['inputs']:
+            original = conn.execute('SELECT vibe,recording_id FROM measurements WHERE id=?', (mid,)).fetchone()
+            if original is None or original[0] != prediction[0] or original[1] == prediction[1] or original[1] in subjects:
+                raise ValueError('Prediction inputs require distinct original recordings of the same vibe')
+            subjects.add(original[1])
+            conn.execute('INSERT OR IGNORE INTO prediction_measurement_roots VALUES (?)',(mid,))
+        for aid in value['artists']:
+            if not conn.execute('SELECT 1 FROM artists WHERE id=?', (aid,)).fetchone():
+                raise ValueError('Unknown conditioning artist')
+        pending = grouped.setdefault(pid // CHUNK_ROWS, {})
+        if str(pid) in pending and pending[str(pid)] != value:
+            raise ValueError('Conflicting calculation provenance')
+        pending[str(pid)] = value
     for chunk, values in grouped.items():
         pid = int(next(iter(values)))
         records = _chunk(conn, pid)
@@ -125,9 +287,10 @@ def prepare_batch(conn, limit=128):
     """Explicit resumable conversion; files are verified before removing SQL edges."""
     rows = conn.execute('SELECT p.id FROM predictions p LEFT JOIN prediction_provenance f ON f.prediction_id=p.id '
                         'WHERE f.prediction_id IS NULL ORDER BY p.id LIMIT ?', (limit,)).fetchall()
-    values = [(row[0], *read(conn, row[0]).values()) for row in rows]
-    # Empty original lineage remains explicitly incomplete in its prediction row.
-    values = [row for row in values if row[1]]
+    values = []
+    for (pid,) in rows:
+        saved = read(conn, pid)
+        values.append((pid, saved['inputs'], saved['artists']))
     publish_many(conn, values)
     for pid, inputs, artists in values:
         if read(conn, pid) != {'inputs': inputs, 'artists': artists}:
@@ -139,26 +302,81 @@ def prepare_batch(conn, limit=128):
 
 def references(conn):
     if available(conn):
-        for pid, in conn.execute("SELECT prediction_id FROM prediction_provenance WHERE state='ready' ORDER BY prediction_id"):
-            yield directory(conn) / relative(pid)
+        for chunk, in conn.execute("SELECT DISTINCT prediction_id/128 FROM prediction_provenance WHERE state='ready'"):
+            yield directory(conn) / relative(chunk*CHUNK_ROWS+1)
 
 
 def maintain(conn, now, limit=128):
     """Expire only superseded calculations, thirty days from their saved mtime."""
     rows = conn.execute("SELECT f.prediction_id FROM prediction_provenance f JOIN predictions p ON p.id=f.prediction_id "
-        "WHERE f.state='ready' AND p.predicted_at<? AND NOT EXISTS(SELECT 1 FROM recording_vibes r WHERE r.prediction_id=p.id) "
+        "WHERE f.state='ready' AND p.predicted_at<? AND NOT EXISTS(SELECT 1 FROM recording_vibes r "
+        "WHERE r.recording_id=p.recording_id AND r.vibe=p.vibe AND r.prediction_id=p.id) "
         "ORDER BY p.predicted_at,p.id LIMIT ?", (now-30*86400, limit)).fetchall()
     for pid, in rows:
         conn.execute("UPDATE prediction_provenance SET state='expired' WHERE prediction_id=?", (pid,))
-    for group in sorted({pid // CHUNK_ROWS for pid, in rows}):
+    return len(rows)
+
+
+def collect(conn, now, limit=16):
+    """Repack committed expiry only, under the owner's snapshot fence.
+
+    Never remove bytes before the SQL expiry transaction commits. A failed or
+    interrupted repack leaves either the old exact chunk or its verified subset.
+    """
+    if conn.in_transaction:
+        raise RuntimeError('Provenance collection requires committed expiry')
+    if type(limit) is not int or not 1 <= limit <= 128:
+        raise ValueError('Provenance collection limit must be 1 to 128')
+    root = directory(conn)
+    with file_collection.collection(conn, root, name='.collection.json', valid_shard=_shard) as work, fao.collector(root) as admitted:
+        if not admitted:
+            return 0
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            return _collect_reserved(conn,root,work,now,limit)
+        finally:
+            conn.rollback()
+
+
+def _shard(name):
+    return isinstance(name, str) and name.isascii() and name.isdigit() and str(int(name)) == name
+
+
+def _collect_reserved(conn,root,work,now,limit):
+    examined = 0
+    for _ in range(limit):
+        path = work.next()
+        if path is None or path.suffix != '.json' or not _shard(path.stem):
+            continue
+        group = int(path.stem)
         pid = group * CHUNK_ROWS + 1
+        if path.relative_to(root) != relative(pid):
+            continue
+        examined += 1
         records = _chunk(conn, pid)
         ready = {str(r[0]) for r in conn.execute("SELECT prediction_id FROM prediction_provenance "
             "WHERE state='ready' AND prediction_id>=? AND prediction_id<?", (group*CHUNK_ROWS, (group+1)*CHUNK_ROWS))}
+        owned = {str(r[0]) for r in conn.execute('SELECT prediction_id FROM prediction_provenance '
+            'WHERE prediction_id>=? AND prediction_id<?', (group*CHUNK_ROWS, (group+1)*CHUNK_ROWS))}
+        # Orphans from a rolled-back publication have a thirty-day grace.
+        if not ready and records.keys() - owned and not fao.Retention(30, 'ctime').eligible(fao.stat(path), now):
+            continue
         retained = {key: value for key, value in records.items() if key in ready}
-        path = directory(conn) / relative(pid)
-        if retained:
-            fao.write_bytes(path, canonical({'format': 1, 'calculations': retained}), max_bytes=MAX_BYTES)
-        else:
+        if ready - retained.keys():
+            raise fao.CorruptFile('Required calculation provenance is missing')
+        if retained and retained != records:
+            info = fao.stat(path)
+            fao._write(path, [canonical({'format': 1, 'calculations': retained})],
+                       max_bytes=MAX_BYTES, age=info, expected=info.identity)
+        elif not retained:
             fao.delete(path, missing_ok=True)
-    return len(rows)
+    work.save()
+    return examined
+
+
+def export(conn, target):
+    return fao.export(directory(conn), references(conn), target)
+
+
+def restore(conn, manifest):
+    fao.restore(directory(conn), manifest, expected=references(conn))

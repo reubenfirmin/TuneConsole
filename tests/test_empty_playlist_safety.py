@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.conftest import FakeClient, _track
+from yt_playlist.core import fao
 from yt_playlist.library import executor
 from yt_playlist.util.retry import with_retry
 
@@ -80,12 +81,15 @@ def test_confirmed_empty_response_still_backs_up_deletes_and_records_action(empt
 
     monkeypatch.setattr(t.client, "get_playlist", read)
     backup = executor.delete_empty_playlist(t.store, t.pid, t.client, 2)
-    assert json.loads(Path(backup).read_text())["tracks"] == []
+    assert json.loads(fao.read_bytes(backup))["tracks"] == []
     assert t.client.deleted == ["EMPTY"]
     assert t.store.playlists.get_playlist(t.pid) is None
     action, = t.store.actions.get_actions()
     assert action.kind == "delete_empty" and action.status == "executed"
-    assert json.loads(action.undo_json)["backup"] == backup
+    # The action owns a retained recovery copy, independent of the export's
+    # location. Both must decode to the exact confirmed empty playlist.
+    retained = json.loads(action.undo_json)['backup']
+    assert fao.read_bytes(retained) == fao.read_bytes(backup)
 
 
 @pytest.mark.parametrize("gained_tracks", [False, True])

@@ -124,8 +124,8 @@ def test_failed_publication_rolls_back_then_retry_and_gc_are_fenced(predecessor,
     with predecessor.conn:
         predecessor.conn.execute("INSERT INTO legacy_track_evidence VALUES ('library','old','exact')")
     publish = policy_documents._publish_encoded
-    def fail(*args):
-        publish(*args)
+    def fail(*args, **kwargs):
+        publish(*args, **kwargs)
         raise OSError('interrupted after durable file')
     with monkeypatch.context() as changed:
         changed.setattr(policy_documents, '_publish_encoded', fail)

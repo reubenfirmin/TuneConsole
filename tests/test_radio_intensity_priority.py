@@ -7,6 +7,8 @@ from tests.musical_support import prepare_vibes
 from tests.test_radio_catalog import catalog_track
 from tests.test_radio_genres import genre_pools
 from tests.radio_session_support import poc, play
+from tests.recommendation_support import publish_bundles
+from copy import deepcopy
 from yt_playlist.core import catalog
 from yt_playlist.rec import embedding_vectors, musical_character, radio_tuning
 from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, RadioCandidates
@@ -28,12 +30,12 @@ def distant_chill(store, genre_pools):
             tid = store.tracks.track_ids_for_videos([track['video_id']])[track['video_id']]
             with store.conn:
                 catalog.choose_field(store.conn, tid, 'energy', .04 if track['key'] in quiet_keys else .96)
-    bundles = store.rec_proposals.get_proposals('mode_bundles')
+    bundles = deepcopy(store._fixture_bundle_payload)
     bundles['9']['wheelhouse'] = pools['9'][:12]
     bundles['all'] = {'wheelhouse': [t for rows in pools.values() for t in rows]}
     bundles['_radio'] = {'generation': None, 'space': '',
                          'members': {mid: [t['key'] for t in rows] for mid, rows in pools.items()}}
-    store.rec_proposals.put_proposals('mode_bundles', bundles)
+    publish_bundles(store, bundles)
     prepare_vibes(store)
     return pools, quiet
 
@@ -191,8 +193,11 @@ def test_live_retune_respects_genre_without_restarting_current_playback(poc, dis
     playlist, before_frames = controller.session.playlist, list(frames)
     heard, playing = list(controller.session.heard), controller.session.observed_video
     assert controller.tune({**radio_tuning.DEFAULTS, 'theme': theme, 'energy': 0})['ok']
+    # The disabled monitor normally refreshes playback before each advance.
+    controller.listening.observe(controller.session)
     controller.advance(controller.session)
     assert not controller.status()['updating']
+    assert controller.session.browser['playback_synced']
     assert controller.session.playlist == playlist
     assert controller.session.heard == heard
     assert controller.session.observed_video == playing

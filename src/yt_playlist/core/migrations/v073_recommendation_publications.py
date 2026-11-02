@@ -251,13 +251,13 @@ def statements():
                    "BEGIN SELECT RAISE(ABORT,'Recommendation pool ranks must be unique'); END")
 
 
-def _legacy_plan(conn):
+def _legacy_plan(conn, *, destination=None):
     from yt_playlist.core import json_cache
     from yt_playlist.rec import bundle_storage
     from yt_playlist.repos import proposal_cache
 
     values, timestamps, identities = {}, [], []
-    known = {row[0] for row in conn.execute('SELECT identity_key FROM recordings')}
+    destination = conn if destination is None else destination
     for surface in proposal_cache.SURFACES:
         head = conn.execute('SELECT cache_id,built_at FROM rec_proposal_cache_heads WHERE surface=?',
                             (surface,)).fetchone()
@@ -272,7 +272,9 @@ def _legacy_plan(conn):
         if len(raw.encode()) > bundle_storage.publication.MAX_PLAN_BYTES:
             raise ValueError('Legacy candidate source exceeds its migration byte budget')
         values[surface] = json_cache.decode(raw, profile_fields=('digest',),
-                                           preserve_profiles=lambda item: item.get('key') not in known,
+                                           preserve_profiles=lambda item: not conn.execute(
+                                               'SELECT 1 FROM recordings WHERE identity_key=?',
+                                               (item.get('key'),)).fetchone(),
                                            max_bytes=bundle_storage.publication.MAX_PLAN_BYTES)
         timestamps.append(built)
         identities.append((surface, hashlib.sha256(raw.encode()).hexdigest(), built))
@@ -310,7 +312,7 @@ def _legacy_plan(conn):
         return None
     families = set()
     for version in sorted(versions):
-        row = conn.execute('SELECT COALESCE(base_version,version) FROM recommendation_policies WHERE version=?',
+        row = destination.execute('SELECT COALESCE(base_version,version) FROM recommendation_policies WHERE version=?',
                            (version,)).fetchone()
         if row is None:
             raise ValueError('Missing original candidate policy: ' + version)
@@ -319,7 +321,7 @@ def _legacy_plan(conn):
         raise ValueError('Original candidate pools have different recorded input families')
     from yt_playlist.core.evidence_ledger import canonical
     key = 'legacy-bundle:' + hashlib.sha256(canonical(identities)).hexdigest()
-    plan = bundle_storage.prepare(conn, bundle, fresh, external_key=key, policy_version=min(versions),
+    plan = bundle_storage.prepare(destination, bundle, fresh, external_key=key, policy_version=min(versions),
                                   input_revision=None, created_at=max(timestamps))
     if values.get('mode_bundles') is None:
         plan = replace(plan, outputs=tuple(output for output in plan.outputs if output.surface != 'home'),

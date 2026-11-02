@@ -1,6 +1,8 @@
 import json
+import re
 import threading
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -30,12 +32,16 @@ def _app(store, client=None, monkeypatch=None):
 def _stub_pools(monkeypatch, store=None, own_count=20, other_count=20):
     """A library of 5-minute songs on your side and a matching pool on theirs, so no route test
     touches the network. Your side is stubbed at the library query, theirs at the per-input fetch."""
-    songs = [{"key": f"k{i}", "video_id": f"m{i}", "title": f"Mine {i}",
+    songs = [{"key": identity_key(f"Mine {i}", f"Mine Artist {i}"), "video_id": f"m{i}", "title": f"Mine {i}",
               "artist": f"Mine Artist {i}", "album": "", "thumbnail": None, "duration": 300,
               "genre": "Rock", "year": 1990, "liked": False} for i in range(own_count)]
     if store is not None:
+        from tests.conftest import seed_catalog_track
+        for song in songs:
+            seed_catalog_track(store, song['key'], song['title'], song['artist'],
+                               video_id=song['video_id'], genre=song['genre'])
         monkeypatch.setattr(store.rec_query, "library_songs", lambda: songs)
-        monkeypatch.setattr(store.rec_query, "play_counts", lambda: {f"k{i}": i for i in range(own_count)})
+        monkeypatch.setattr(store.rec_query, "play_counts", lambda: {song['key']: i for i, song in enumerate(songs)})
 
     def songs_fn(client, kind, name, cap, store=None, decade=None):
         rows = [{"video_id": f"t{i}", "title": f"Theirs {i}", "artist": f"Their Artist {i}",
@@ -71,8 +77,13 @@ def test_draft_serving_and_generated_save_are_measured_without_counting_progress
     assert c.post(f"/road_trip/recipes/{rid}/build").status_code == 200
     draft = store.road_trip.get_road_trip_draft(rid)
     rows = store.conn.execute("SELECT * FROM rec_served_impressions WHERE surface='road_trip' ORDER BY rank").fetchall()
-    assert [r["identity_key"] for r in rows] == [identity_key(t["title"], t["artist"])
-                                               for t in road_trip_rec.draft_tracks(draft)]
+    tracks = road_trip_rec.draft_tracks(draft)
+    expected = [identity_key(t['title'], t['artist']) if t['video_id'].startswith('m')
+                else '@unresolved-video:' + t['video_id'] for t in tracks]
+    assert [r["identity_key"] for r in rows] == expected
+    traces = [store.rec_ledger.served_recommendation_inputs(row['id'])[0]['provenance'] for row in rows]
+    assert [trace['candidate']['video_id'] for trace in traces] == [t['video_id'] for t in tracks]
+    assert any(key.startswith('@unresolved-video:') for key in expected)
     assert rows
     before = scorecard.recommendation_scorecard(store, 999, 1001)["impressions"]
     for _ in range(3):
@@ -90,7 +101,7 @@ def test_reopening_and_saving_repairs_passenger_genre_membership(store):
     c, _ = _app(store, client)
     rid = _recipe(store, own_pct=0, artists=seeds, target_minutes=15)
     state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=7)
-    state.update(building=False, pending=[], artist_contexts={})
+    state.update(revision=uuid4().hex, building=False, pending=[], artist_contexts={})
     for name, genre in zip(seeds, ["Alternative Rock", "Indie Rock", "Alternative Rock"]):
         state["artist_contexts"][name] = {"genre": genre, "year": None, "related": []}
         candidate = candidates._candidate(name, name, name, "", None, 300, "theirs", genre, None)
@@ -109,7 +120,8 @@ def test_reopening_and_saving_repairs_passenger_genre_membership(store):
 
     html = c.get("/road_trip").text
 
-    assert "Like Weezer, Staind" in html
+    labels = [set(label.split(', ')) for label in re.findall(r'Like ([A-Z][^<]{0,100})</small>', html)]
+    assert {'Weezer', 'Staind'} in labels
     assert "Like We Were Promised Jetpacks</small>" in html
     assert "Like Weezer, We Were Promised Jetpacks" not in html
     assert "Passenger genre balance" in html
@@ -134,7 +146,7 @@ def test_reopening_and_saving_repairs_passenger_genre_membership(store):
 def test_new_route_is_a_library_action_and_hides_the_active_draft(store):
     c, _ = _app(store)
     rid = _recipe(store)
-    store.road_trip.save_road_trip_draft(rid, {"name": "Old draft", "stats": {}, "picked": []}, 1000.0)
+    store.road_trip.save_road_trip_draft(rid, {"revision": uuid4().hex, "name": "Old draft", "stats": {}, "picked": []}, 1000.0)
 
     html = c.post("/road_trip/new").text
 
@@ -324,6 +336,7 @@ def test_added_genre_is_balanced_before_discovery_and_can_grow_a_full_pool(store
     state["targets"]["theirs"] = {"genre:" + g: p for g, p in zip(genres, [.6, .3, .1])}
     state["done_inputs"] = genres.copy()
     road_trip_rec.finish_draft(state, store, 1000)
+    state['revision'] = uuid4().hex
     store.road_trip.save_road_trip_draft(rid, state, 1000)
     held = []
     monkeypatch.setattr(road_trip_route, "_spawn", held.append)
@@ -504,7 +517,7 @@ def test_saving_the_draft_creates_the_generated_playlist(store, monkeypatch):
     playlist = next(p for p in store.playlists.get_playlists() if p.provider_playlist_id == recipe["last_playlist_id"])
     assert f'window.location.assign("/playlist/{playlist.id}")' in r.text
     assert "music.youtube.com/watch?list=" + recipe["last_playlist_id"] in r.text
-    assert "__ytTab" in r.text
+    assert f'genComplete("", "{recipe["last_playlist_id"]}", false, false, true)' in r.text
 
 
 def test_saving_plays_in_the_connected_youtube_tab_when_ready(store, monkeypatch):
@@ -547,7 +560,7 @@ def test_save_failures_use_the_standard_feedback_and_leave_no_saved_link(store, 
 
     assert response.status_code == 200
     assert "Couldn't save" in response.text
-    assert "__ytTab" in response.text
+    assert 'genComplete("", null, true, false)' in response.text
     assert "private provider details" not in response.text
     assert "window.location.assign" not in response.text
     assert store.road_trip.get_road_trip_recipe(rid)["last_playlist_id"] is None
@@ -610,7 +623,7 @@ def test_road_trip_page_shows_saved_recipe_and_last_playlist_link(store):
 
     assert "Beach Run" in html
     assert "Tame Impala" in html
-    assert "synthpop" in html
+    assert "Synth-Pop" in html
     assert "60" in html                 # own_pct shown somewhere
     assert "PL_ABC" in html             # last-saved playlist link present
 

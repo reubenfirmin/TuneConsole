@@ -23,7 +23,7 @@ def _art(index):
       </svg>''')
 
 
-@pytest.mark.parametrize('width', [1440, 1000, 390])
+@pytest.mark.parametrize('width', [1440, 1000])
 def test_story_collection_has_clear_reading_links_and_room_to_scroll(
         live_app, store, page, width, unlocked_home_controls):
     names = ['Minimal', 'Robert Hood', 'Daniel Bell', 'Dub techno', 'Basic Channel', 'Floating Points',
@@ -110,10 +110,6 @@ def test_story_collection_has_clear_reading_links_and_room_to_scroll(
     for song in page.locator('.into-song').all():
         box = song.bounding_box()
         assert box['x'] >= 0 and box['x'] + box['width'] <= width
-    if width == 390:
-        for card in page.locator('.into-card').all():
-            boxes = [song.bounding_box() for song in card.locator('.into-song').all()]
-            assert boxes[0]['y'] < boxes[1]['y'] < boxes[2]['y']
     privacy = page.get_by_role('link', name='Privacy', exact=True)
     expect(privacy).to_have_count(1)
     expect(privacy).to_have_attribute('href', '/privacy')

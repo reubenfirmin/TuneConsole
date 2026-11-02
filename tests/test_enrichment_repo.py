@@ -11,12 +11,23 @@ def _track(store, title="Hyperballad", artist="Bjork", genre=None, year=None):
 
 def test_log_enrichment_rows(store):
     tid = _track(store)
+    ingestion = list(map(tuple, store.conn.execute('SELECT id,provider,field,value FROM enrichment_log '
+                                                   'WHERE track_id=? ORDER BY id', (tid,))))
+    assert {('youtube', 'title', 'Hyperballad'), ('youtube', 'artist', 'Bjork')} <= {
+        row[1:] for row in ingestion}
+    other = _track(store, title='Other')
     store.enrichment_state.log_enrichment(tid, "run1", "musicbrainz", "genre", "Electronic", now=1.0)
     store.enrichment_state.log_enrichment(tid, "run1", "discogs", "genre", "Art Pop", now=1.0)
-    rows = store.conn.execute("SELECT provider, field, value FROM enrichment_log WHERE track_id=? "
-                              "ORDER BY id", (tid,)).fetchall()
+    store.enrichment_state.log_enrichment(other, 'run1', 'lastfm', 'genre', 'Rock', now=1.0)
+    store.enrichment_state.log_enrichment(tid, 'another-run', 'lastfm', 'genre', 'Jazz', now=2.0)
+    rows = store.conn.execute("SELECT provider, field, value,created_at,input_video_id,field_scope FROM enrichment_log "
+                              "WHERE track_id=? AND run_id=? ORDER BY id", (tid, 'run1')).fetchall()
     assert [(r["provider"], r["field"], r["value"]) for r in rows] == [
         ("musicbrainz", "genre", "Electronic"), ("discogs", "genre", "Art Pop")]
+    assert all((r['created_at'], r['input_video_id'], r['field_scope']) ==
+               (1.0, 'v_Hyperballad', 'recording') for r in rows)
+    assert list(map(tuple, store.conn.execute('SELECT id,provider,field,value FROM enrichment_log '
+        'WHERE track_id=? AND provider=? ORDER BY id', (tid, 'youtube')))) == ingestion
 
 
 def test_genre_provenance_returns_latest_value_per_provider_and_current(store):
@@ -29,6 +40,8 @@ def test_genre_provenance_returns_latest_value_per_provider_and_current(store):
 
     assert result["current"] == "Art Pop"
     assert result["candidates"] == [
+        # The fixture's supported setter records the selected value's source.
+        {"provider": "track_enrichment", "value": "Art Pop"},
         {"provider": "lastfm", "value": "Art Pop"},
         {"provider": "discogs", "value": ""},
     ]
@@ -39,6 +52,7 @@ def test_genre_provenance_falls_back_to_retained_conflict_candidates(store):
     store.enrichment.upsert_conflict(tid, "genre", [{"provider": "musicbrainz", "value": "Electronic"},
                                           {"provider": "discogs", "value": "Art Pop"}])
     assert store.enrichment_reports.genre_provenance(tid)["candidates"] == [
+        {"provider": "track_enrichment", "value": "Electronic"},
         {"provider": "musicbrainz", "value": "Electronic"},
         {"provider": "discogs", "value": "Art Pop"},
     ]
@@ -110,7 +124,7 @@ def test_conflict_current_value_keeps_historical_provider_evidence(store):
     conflict = store.enrichment_reports.enrichment_conflict_detail(tid, "genre")
     current, *alternatives = conflict["options"]
     assert current["value"] == "Electronic" and current["current"]
-    assert current["providers"] == ["musicbrainz"]
+    assert current["providers"] == ["track_enrichment", "musicbrainz"]
     assert current["source_note"] == ""
     assert [o["value"] for o in alternatives] == ["Rock", "Pop"]
 

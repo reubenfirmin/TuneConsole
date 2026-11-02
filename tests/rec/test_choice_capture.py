@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from yt_playlist.core.activity import Activity
+from yt_playlist.core import fao
 from yt_playlist.core.evidence_ledger import EvidenceLedger
 from yt_playlist.core.store import Store
 from yt_playlist.rec import choice_evidence as choices, choice_outcomes
@@ -167,12 +168,12 @@ def test_storage_pressure_preserves_capture_context_and_responses_until_due_retr
     reference = choices.freeze_context(store, {'at': 50, 'layers': {'saved': {'version': 1}}})
     from yt_playlist.rec import rec_worker
     for path in ledger.directory.glob('artifact/*/*.json'):
-        os.utime(path, (1, 1))
+        fao.touch(path, mtime_ns=1_000_000_000)
     monotonic = [100]
     monkeypatch.setattr(rec_worker.time, 'monotonic', lambda: monotonic[0])
     monkeypatch.setattr(store.rec_ledger, 'evidence', lambda: ledger)
     worker.ctx.now_fn = lambda: 10_000
-    ledger.byte_budget = sum(path.stat().st_size for path in ledger.directory.glob('*/*/*.json')) + 1
+    ledger.byte_budget = sum(fao.stat(path).logical_bytes for path in ledger.directory.glob('*/*/*.json')) + 1
     oid = choices.issue(store, 'albums', [{'id': 'a'}], 100, context=reference)
     assert choices.respond(store, oid, 'choice', 101, option_id='a')
     captures = list(worker.jobs.measurements)
@@ -231,14 +232,14 @@ def test_worker_reclaims_acknowledged_diagnostics_for_the_actual_failed_allocati
     original = ledger.get('opportunity', old)
     original_responses = ledger.records('response')
     for path in ledger.directory.glob('artifact/*/*.json'):
-        os.utime(path, (1, 1))
+        fao.touch(path, mtime_ns=1_000_000_000)
     choices.maintain_storage(store, 2000)
     learned = checkpoint(ledger, original['context'])
     assert learned and ledger.get('artifact', original['context'])
     # Controlled protected byte pressure keeps this diagnostic graph below the
     # ten-percent ceiling, while leaving too little space for a new publication.
     ledger.put('forecast', 'capacity-fixture', {'padding': 'p' * 400_000})
-    used = sum(path.stat().st_size for path in ledger.directory.glob('*/*/*.json'))
+    used = sum(fao.stat(path).logical_bytes for path in ledger.directory.glob('*/*/*.json'))
     ledger.byte_budget = used + 1
     ordinary = choices.maintain_storage(store, 2000)
     assert ordinary['optional_context_bytes'] > 0 and not ordinary['full']
@@ -277,14 +278,14 @@ def test_preparation_reclaims_capacity_and_keeps_original_inputs(capture, monkey
         originals.append(identity)
     worker._flush_measurements()
     for path in ledger.directory.glob('artifact/*/*.json'):
-        os.utime(path, (1, 1))
+        fao.touch(path, mtime_ns=1_000_000_000)
     choices.maintain_storage(store, 2000)
     offers = [ledger.get('opportunity', identity) for identity in originals]
     learned = {offer['context']: checkpoint(ledger, offer['context']) for offer in offers}
     assert all(learned.values())
     responses = ledger.records('response')
     ledger.put('forecast', 'preparation-capacity-fixture', {'padding': 'p' * 4_000_000})
-    ledger.byte_budget = sum(path.stat().st_size for path in ledger.directory.glob('*/*/*.json')) + 1
+    ledger.byte_budget = sum(fao.stat(path).logical_bytes for path in ledger.directory.glob('*/*/*.json')) + 1
     ordinary = choices.maintain_storage(store, 2000)
     assert ordinary['optional_context_bytes'] > 200_000
     context = {'at': 2000, 'groups': groups, 'layers': {'saved': 'new preparation' * 100}}
@@ -298,7 +299,7 @@ def test_preparation_reclaims_capacity_and_keeps_original_inputs(capture, monkey
         assert ledger.get('opportunity', offer['id']) == offer
         assert checkpoint(ledger, offer['context']) == learned[offer['context']]
     assert ledger.records('response') == responses
-    used = sum(path.stat().st_size for path in ledger.directory.glob('*/*/*.json'))
+    used = sum(fao.stat(path).logical_bytes for path in ledger.directory.glob('*/*/*.json'))
     assert int((ledger.directory / '.budget').read_text()) == used <= ledger.byte_budget
 
 
@@ -335,7 +336,7 @@ def test_ledger_retention_preserves_response_admitted_after_protection_inventory
     offer = choices.issue(store, 'albums', [{'id': 'a'}], 100, context={'at': 100, 'groups': []})
     worker._flush_measurements()
     for path in ledger.directory.glob('artifact/*/*.json'):
-        os.utime(path, (1, 1))
+        fao.touch(path, mtime_ns=1_000_000_000)
     maintain = ledger.maintain
 
     def admit_after_inventory(before, **kwargs):
@@ -419,7 +420,8 @@ def test_capacity_cleanup_failure_keeps_capture_and_shutdown_releases_it(capture
     assert store.choice_capture.get(oid) is None
 
 
-def test_slow_durable_write_does_not_hold_serving_connection(capture, monkeypatch):
+@pytest.mark.parametrize('format', ['radio', 'mixes'])
+def test_slow_durable_write_does_not_hold_serving_connection(capture, monkeypatch, format):
     store, worker = capture
     entered, release = threading.Event(), threading.Event()
     put = EvidenceLedger.put
@@ -430,7 +432,7 @@ def test_slow_durable_write_does_not_hold_serving_connection(capture, monkeypatc
         return put(ledger, *args, **kwargs)
 
     monkeypatch.setattr(EvidenceLedger, 'put', slow_put)
-    oid = choices.issue(store, 'radio', [{'id': 'seed'}], 100, context={})
+    oid = choices.issue(store, format, [{'id': 'seed'}], 100, context={})
     with ThreadPoolExecutor(2) as threads:
         future = threads.submit(worker._flush_measurements)
         try:

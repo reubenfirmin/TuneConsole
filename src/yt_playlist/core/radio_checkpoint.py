@@ -1,6 +1,19 @@
 """Decode the versioned Radio wire format without controller dependencies."""
 
 
+def choice_key(choice):
+    """Project the branch ID; menu attribution stays in the recovery document."""
+    key = choice.get('id') if isinstance(choice, dict) else choice
+    if key is not None and not isinstance(key, str):
+        raise ValueError('Radio choice requires a text branch ID')
+    return key
+
+
+def project_choice(choice, key):
+    """Apply the typed branch ID without discarding captured menu attribution."""
+    return {**choice, 'id': key} if isinstance(choice, dict) else key
+
+
 def normalize(state):
     state = dict(state)
     if state.get('version') == 1:

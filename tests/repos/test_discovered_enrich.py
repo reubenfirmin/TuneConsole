@@ -60,7 +60,8 @@ def test_legacy_discovery_stamps_are_requeued_once_without_metadata_changes(tmp_
     s.settings.delete_setting("discovery_enrichment_audit_requeued")  # simulate a pre-repair database
     s.conn.close()
     repaired = Store(path)
-    repaired.init_schema()
+    from tests.historical_support import upgrade_fixture
+    upgrade_fixture(repaired)
     assert repaired.enrichment_reports.queue_remaining() == 2
     row = repaired.discovery.discovered_tracks_by_keys(["cold"])["cold"]
     assert row["last_enriched"] is None

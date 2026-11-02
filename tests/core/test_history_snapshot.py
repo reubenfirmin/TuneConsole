@@ -1,10 +1,9 @@
 """Explicit empty history succeeds; unsupported sections retain bounded diagnostics."""
-import json
-
 import pytest
 
 from tests.test_saved_album_snapshot import _production_client
 from yt_playlist.core.history_snapshot import HistorySnapshotError
+from yt_playlist.core import sync_state
 from yt_playlist.library import sync
 
 
@@ -190,7 +189,7 @@ def test_unsupported_history_preserves_prior_plays_and_success_freshness(store, 
     assert history['last_attempt_at'] == 200
     assert [tuple(row) for row in store.conn.execute('SELECT * FROM listening_observations').fetchall()] == before
     assert 'unsupported or empty history shelf' in history['message']
-    assert json.loads(store.settings.get_setting('library_sync_state')) == result
+    assert sync_state.state(store) == result
 
 
 def test_verified_empty_history_advances_freshness_without_removing_retained_listening(store, monkeypatch):
@@ -213,4 +212,4 @@ def test_verified_empty_history_advances_freshness_without_removing_retained_lis
     assert history['last_attempt_at'] == 200 and history['refreshed'] == 0
     assert len(bridge.calls) == 1
     assert [tuple(row) for row in store.conn.execute('SELECT * FROM listening_observations').fetchall()] == before
-    assert json.loads(store.settings.get_setting('library_sync_state')) == result
+    assert sync_state.state(store) == result

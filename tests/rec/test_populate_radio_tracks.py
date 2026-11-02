@@ -28,6 +28,8 @@ def test_radio_pull_persists_unowned_and_dedups(monkeypatch, store):
     store.settings.set_setting("radio_discovery_enabled", "1")
     owned = identity_key("Owned", "Owned Artist")
     store.tracks.upsert_track('own1','Owned','Owned Artist',None,None)
+    for video in ('seed1', 'seed2'):
+        store.tracks.upsert_track(video, 'Seed ' + video, 'Seed artist', None, None)
     monkeypatch.setattr(store.charts, "top_tracks", lambda n: [{"video_id": "seed1"}, {"video_id": "seed2"}])
 
     n = discover.populate_radio_tracks(_ctx(store), 1000.0)

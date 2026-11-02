@@ -49,7 +49,8 @@ class EnrichmentReportsRepo(Repo):
                 fields[field] = {'value': track[field], 'override': override,
                     'source': source or metadata.selected_source(self.conn, track_id, field)
                     or ('missing' if track[field] is None else 'unknown')}
-            return {'fields': fields, 'decisions': sorted(decisions, key=lambda d: (d['chosen_at'], d['id']))}
+            return {'fields': fields, 'decisions': sorted(decisions, key=lambda d: (
+                d['chosen_at'] is not None, d['chosen_at'] if d['chosen_at'] is not None else 0, d['id']))}
         choices = {r['field']:dict(r) for r in self.conn.execute(
             'SELECT * FROM '+metadata_publication.read_table(self.conn,'entry_field_choices')+' WHERE entry_id=?', (track_id,))}
         fields = {}

@@ -58,7 +58,7 @@ def test_registered_cutover_preserves_values_unknowns_subjects_and_restart(prede
         reopened.conn.close()
 
 
-def test_group_learning_retains_exact_published_aliases_and_replacement_releases_only_its_root(predecessor):
+def test_historical_group_estimates_keep_values_without_pinning_snapshots(predecessor):
     from tests.group_support import publish, recordings
     store = predecessor
     head = publish(store, recordings([('Jazz', 16, .2)]), now=10)
@@ -69,13 +69,16 @@ def test_group_learning_retains_exact_published_aliases_and_replacement_releases
     store.rec_proposals.put_proposals('group_choice_bandit', value, 11)
     upgrade(store)
     assert store.rec_proposals.get_proposals('group_choice_bandit') == value
-    root = store.conn.execute('SELECT external_key FROM choice_learning_group_roots').fetchone()[0]
-    assert store.conn.execute('SELECT external_version FROM group_evidence_versions WHERE external_key=?', (root,)).fetchone()[0] == group['version']
-    with pytest.raises(ValueError, match='cannot be established'):
-        store.rec_proposals.put_proposals('group_choice_bandit', {**value, 'generation': 'missing'}, 12)
-    assert store.rec_proposals.get_proposals('group_choice_bandit') == value
+    assert not store.conn.execute('SELECT 1 FROM choice_learning_group_roots').fetchone()
+    # #688 retains the historical numerical result without requiring its group
+    # tree. It cannot become a new snapshot owner when the projection changes.
+    replacement = {**value, 'generation': 'missing'}
+    store.rec_proposals.put_proposals('group_choice_bandit', replacement, 12)
+    assert store.rec_proposals.get_proposals('group_choice_bandit') == replacement
     store.rec_proposals.put_proposals('group_choice_bandit', {**value, 'rows': []}, 13)
-    assert not store.conn.execute('SELECT 1 FROM group_evidence_owners WHERE external_key=?', (root,)).fetchone()
+    assert not store.conn.execute('SELECT 1 FROM choice_learning_group_roots').fetchone()
+    assert store.taste_groups.head_generation() == head['generation']
+    assert store.taste_groups.definition(group['version'], generation=head['generation']) is not None
 
 
 def test_interrupted_cutover_leaves_original_rows_and_schema(predecessor):

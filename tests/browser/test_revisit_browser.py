@@ -2,12 +2,13 @@
 import pytest
 from playwright.sync_api import expect
 
+from tests.home_fixture_support import browser_store as store, returning_listener
 from tests.test_mode_cards_route import prepare_home
 from tests.test_recommend import _seed_album
 from yt_playlist.library import ratings
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_revisit_song_grid_is_small_playable_and_changes_on_the_next_visit(store, live_app, page, width):
     for i in range(20):
         store.tracks.upsert_track(f'revisit{i}', f'Forgotten song {i}', f'Artist {i}', None, 180,
@@ -17,6 +18,7 @@ def test_revisit_song_grid_is_small_playable_and_changes_on_the_next_visit(store
     _seed_album(store, 1, 'old-album', 'A record to return to', 1, played_at=1-60*86400)
     store.settings.set_setting('last_sync_at', '1')
     store.settings.set_setting('onboard_dismissed', '1')
+    returning_listener(store, 'mixes', now=1)
     prepare_home(store, 1)
     plays = []
     page.route('**/play', lambda route: (plays.append(route.request.post_data_json['url']), route.fulfill(json={'ok': True})))

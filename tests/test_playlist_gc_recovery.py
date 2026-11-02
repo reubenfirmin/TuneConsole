@@ -11,6 +11,7 @@ from ytmusicapi.exceptions import YTMusicServerError
 from tests.conftest import _track
 from tests.test_saved_album_snapshot import _production_client
 from tests.test_undo_recovery import RecoveryClient
+from yt_playlist.core import fao
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
 from yt_playlist.library import playlist_backups, playlist_deletion, playlist_gc_retry, playlist_generated
@@ -90,7 +91,7 @@ def test_saved_failure_confirmed_absent_completes_original_without_another_delet
 
     result = collect(case)
 
-    assert len(result)==1 and Path(result[0]['backup']).read_bytes()==original
+    assert len(result)==1 and fao.read_bytes(result[0]['backup']) == fao.read_bytes(backup)
     retained = case.store.conn.execute('SELECT retained_filename FROM action_backups WHERE action_id=?',(aid,)).fetchone()[0]
     assert result[0]['backup']==retained
     assert case.store.actions.get_action(aid).status == "executed"
@@ -110,7 +111,7 @@ def test_confirmed_survivor_requires_fresh_complete_backup_and_committed_intent(
         newest = case.store.actions.get_actions()[0]
         assert newest.id != old_aid and newest.status == "delete_pending"
         entry, = json.loads(newest.undo_json)["deletions"]
-        saved = json.loads(Path(entry["backup"]).read_text())
+        saved = json.loads(fao.read_bytes(entry["backup"]))
         assert [row["video_id"] for row in saved["tracks"]] == ["a", "b", "new"]
         assert entry["backup"] != str(old_backup)
         return delete(ytm)
@@ -204,7 +205,7 @@ def test_production_complete_pages_back_up_new_members_before_fresh_delete(case,
     assert len(result) == 1 and case.client.writes == ["SOURCE"]
     assert len(bridge.calls) == 2
     assert backup.read_bytes() == original
-    fresh = json.loads(Path(result[0]["backup"]).read_text())
+    fresh = json.loads(fao.read_bytes(result[0]["backup"]))
     assert [row["video_id"] for row in fresh["tracks"]] == ["a", "b", "new"]
     assert case.store.actions.get_actions()[0].id != old_aid
 
@@ -403,7 +404,7 @@ def test_eligibility_changed_during_backup_prevents_automatic_delete(case, monke
 
     assert case.client.writes == []
     assert len(retained) == 1 and retained[0].is_file()
-    assert [row["video_id"] for row in json.loads(retained[0].read_text())["tracks"]] == ["a", "b"]
+    assert [row["video_id"] for row in json.loads(fao.read_bytes(retained[0]))["tracks"]] == ["a", "b"]
     assert case.store.actions.get_actions() == []
     assert playlist_gc_retry.states(case.store) == {}
 

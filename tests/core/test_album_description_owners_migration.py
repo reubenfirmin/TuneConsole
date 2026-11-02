@@ -9,7 +9,8 @@ from threading import Barrier
 import pytest
 
 from yt_playlist.core import (album_description_files as files, album_description_requests as requests,
-                              album_aliases, audio_annotation_files, audio_annotations, policy_documents, policy_recovery)
+                              album_aliases, audio_annotation_files, audio_annotations, choice_evidence_files,
+                              policy_documents, policy_recovery, sample_files)
 from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations import v070_policy_documents as policies
 from yt_playlist.core.migrations import v071_album_descriptions as migration
@@ -440,7 +441,12 @@ def test_recovery_file_bundle_combines_policy_annotation_and_paid_owners_from_on
             manifests = policy_recovery._export_files(conn, tmp_path / 'all-domains.db',
                                                        backup_root=tmp_path / 'backup')
             conn.backup(restored)
-        assert set(manifests) == {'annotations', 'policies', 'descriptions'}
+        assert set(manifests) == {'annotations', 'policies', 'descriptions', 'samples', 'choice_evidence'}
+        # This historical fixture predates populated sample/choice owners; their
+        # independent recovery cases exercise content after producer removal.
+        assert list(sample_files._entries(manifests['samples'])) == []
+        assert json.loads(choice_evidence_files._read(Path(manifests['choice_evidence']))) == {
+            'format': 'choice-evidence-1', 'pages': []}
         for root in (files.directory(conn), audio_annotation_files.directory(conn), policy_documents.directory(conn)):
             shutil.rmtree(root)
         restored.execute('PRAGMA foreign_keys=ON')
@@ -465,10 +471,10 @@ def test_interrupted_restore_publishes_no_database_paths_and_reuses_completed_fi
         original = references(conn)
         publish = files.publish
         count = 0
-        def interrupted(*args):
+        def interrupted(*args, **kwargs):
             nonlocal count
             count += 1
-            value = publish(*args)
+            value = publish(*args, **kwargs)
             if count == 2:
                 raise KeyboardInterrupt('controlled restore interruption')
             return value

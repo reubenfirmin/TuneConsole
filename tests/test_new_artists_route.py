@@ -2,9 +2,11 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.home_fixture_support import returning_listener
 
 
 def test_new_artists_fragment_serves_cached(store):
+    returning_listener(store, 'mixes')
     iid = store.accounts.upsert_account("main", "cred", None, True)
     store.discovery.upsert_discovered_artist("Donato Dozzy", 1.0, ["Recondite", "Rrose"], ["Deep Focus"], None, now=1.0)
     from yt_playlist.rec import home_prepared
@@ -18,6 +20,7 @@ def test_new_artists_fragment_serves_cached(store):
 
 
 def test_new_artists_building_polls(store):
+    returning_listener(store, 'mixes')
     iid = store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     app.state.ctx.rec_worker.jobs.merge('full')

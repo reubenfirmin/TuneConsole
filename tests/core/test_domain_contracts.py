@@ -3,10 +3,11 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core import genre_identity, group_progress
-from yt_playlist.core.migrations import current, registry, regular, migrate, Migration, MigrationError
+from yt_playlist.core import genre_identity
+from yt_playlist.core.migrations import current, registry, migrate, Migration, MigrationError
 from yt_playlist.core.migrations import v104_domain_contracts as domains
 from yt_playlist.core.store import Store
+from tests.regular_schema_support import admit_regular_schema, captured
 
 
 def seed(conn):
@@ -145,33 +146,6 @@ def test_mode_size_rejects_coercion_before_partial_publication(store,size):
     assert captured(store.conn)==before
 
 
-def captured(conn):
-    return {name:sorted((tuple(row) for row in conn.execute('SELECT * FROM "'+name+'"')),key=repr)
-            for name, in conn.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
-
-
-def admit_independent_change(store):
-    """Only exact bounded independent additions may precede legacy conversion."""
-    before = captured(store.conn)
-    definitions = dict(store.conn.execute('SELECT name,sql FROM sqlite_schema'))
-    assert 'schema_changes' not in before
-    assert migrate(store.conn, clock=lambda: 1234) is True
-    assert captured(store.conn) == {
-        **before, 'schema_changes': [(1, 'independent_playback_feedback_receipts', 1234),
-                                    (2, 'group_preparation_failure_progress', 1234)],
-        group_progress.TABLE: []}
-    actual = dict(store.conn.execute('SELECT name,sql FROM sqlite_schema'))
-    additions = dict(group_progress.definitions(store.conn))
-    assert actual.keys() - definitions.keys() == {'schema_changes', *additions}
-    assert {name: current._tokens(actual[name]) for name in additions} == {
-        name: current._tokens(sql) for name, sql in additions.items()}
-    assert {name:actual[name] for name in definitions} == definitions
-    assert current._tokens(actual['schema_changes']) == current._tokens(regular.HISTORY_SQL)
-    regular.validate_receipts(store.conn)
-    group_progress.validate(store.conn)
-    return captured(store.conn)
-
-
 def converted_history(before):
     return sorted(before['schema_migrations'] + [
         (entry.version, entry.name, 2000) for entry in registry.MIGRATIONS[103:]], key=repr)
@@ -189,7 +163,7 @@ def test_installed_upgrade_preserves_values_sequences_dependencies_and_matches_f
         store.conn.execute('DELETE FROM rec_musical_pending')
         store.conn.execute("UPDATE sqlite_sequence SET seq=1000 WHERE name='rec_musical_pending'")
         store.conn.commit()
-        before = admit_independent_change(store)
+        before = admit_regular_schema(store)
         sql = dict(store.conn.execute("SELECT name,sql FROM sqlite_schema WHERE type IN ('view','trigger')"))
         migrate(store.conn, registry=registry.MIGRATIONS, clock=lambda: 2000)
         store.init_schema()
@@ -230,7 +204,7 @@ def test_invalid_predecessor_stops_with_exact_owner_and_retains_original_databas
         # Admission may independently adopt the existing receipt owner. Once
         # committed, that exact ledger and all numbered v103 rows survive a
         # later failed conversion along with every original application owner.
-        admit_independent_change(store)
+        admit_regular_schema(store)
         before = list(store.conn.iterdump())
         with pytest.raises(MigrationError,match=table+r'\.'+column+r'.*original rows retained'):
             migrate(store.conn, registry=registry.MIGRATIONS)
@@ -246,7 +220,7 @@ def test_invalid_predecessor_stops_with_exact_owner_and_retains_original_databas
 def test_interrupted_replacement_rolls_back_every_owner_then_restarts(tmp_path):
     store = installed(tmp_path/'interrupted.db')
     try:
-        admitted = admit_independent_change(store)
+        admitted = admit_regular_schema(store)
         before = list(store.conn.iterdump())
         def interrupted(conn,context):
             domains.apply(conn,context)

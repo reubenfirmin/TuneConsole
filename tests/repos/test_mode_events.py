@@ -25,9 +25,9 @@ def test_impression_counts_since(store):
 
 
 def test_picks_idempotent_and_rows(store):
-    store.modes.log_pick(playlist_id=10, mode_id=1, now=100.0)
-    store.modes.log_pick(playlist_id=10, mode_id=1, now=150.0)   # same playlist, ignored
-    store.modes.log_pick(playlist_id=11, mode_id=2, now=200.0)
+    store.modes.log_pick(membership_ref_id=10, mode_id=1, now=100.0)
+    store.modes.log_pick(membership_ref_id=10, mode_id=1, now=150.0)   # same membership, ignored
+    store.modes.log_pick(membership_ref_id=11, mode_id=2, now=200.0)
     rows = sorted(store.modes.pick_rows())
     assert rows == [(10, 1), (11, 2)]
     assert sorted(store.modes.pick_rows(since=150.0)) == [(11, 2)]

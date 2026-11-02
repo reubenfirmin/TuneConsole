@@ -49,11 +49,11 @@ def export(directory, install=False):
     paths = [SOURCE, ORIGINAL / 'plan.json', ORIGINAL / 'evaluation.receipt.json',
              ORIGINAL / 'primary.predictions.npz', ORIGINAL / 'inputs/soundtracks-all.npz',
              ORIGINAL / 'inputs/soundtracks-all.json', LOCAL / 'receipt.json',
-             Path(__file__), Path(runtime.__file__), Path(runtime.ridge.__file__), Path(runtime.bounded.__file__)]
+             Path(__file__), Path(runtime.__file__), Path(runtime.bounded.__file__)]
     inputs = {str(p): digest(p) for p in paths}
     directory.mkdir(parents=True)
     for name, source in (('export.py', Path(__file__)), ('runtime.py', Path(runtime.__file__)),
-                         ('ridge.py', Path(runtime.ridge.__file__)), ('bounded.py', Path(runtime.bounded.__file__))):
+                         ('bounded.py', Path(runtime.bounded.__file__))):
         shutil.copyfile(source, directory / name)
     save(directory / 'plan.json', {'created_at': stamp(), 'inputs': inputs, 'fit': False,
          'decision': 'User selected the exact #577 aggression candidate after #614 mapping comparison.',

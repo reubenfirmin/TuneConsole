@@ -52,10 +52,10 @@ def test_evaluation_excludes_targets_and_feature_fitting_inputs(store, monkeypat
     active_training = set()
     tested = []
 
-    def model(content, audio):
+    def model(content, audio, *, conn=None):
         assert set(content) == active_training
         assert set(audio) == active_training
-        return original_model(content, audio)
+        return original_model(content, audio, conn=conn)
 
     def solve(lhs, rhs):
         # Orthogonal reference targets make any held-out row entering Y observable here.

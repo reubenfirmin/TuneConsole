@@ -1,5 +1,5 @@
 """Typed TV append and radio edit admission; exact metadata stays owner-file backed."""
-from . import collection_recovery
+from . import collection_recovery, radio_checkpoint
 
 
 def available(conn):
@@ -76,7 +76,7 @@ def save_radio(conn,owner,revision,state):
          state.get('pending_started_at') if append else operation.get('waiting_at'),receipt.get('status'),receipt.get('videoId'),receipt.get('setVideoId'),
          len(allowed),int(not append and operation.get('waiting') is not None),int(not append and operation.get('play_prefix') is not None),
          (operation.get('adding') or {}).get('video_id') if not append else pending['video_id'],
-         None if append else operation.get('slot'),None if append else operation.get('choice_id')))
+         None if append else operation.get('slot'),None if append else radio_checkpoint.choice_key(operation.get('choice_id'))))
     conn.execute('DELETE FROM radio_operation_items WHERE session_id=?',(owner,))
     if not append:
         lists = [('allowed',index,items) for index,items in enumerate(allowed)]
@@ -94,12 +94,13 @@ def load_radio(conn,owner,state):
     if row['kind']=='append':
         state.update(pending_sent=bool(row['sent']),pending_started_at=row['started_at'])
         if state.get('pending_result') is not None:
-            state['pending_result'] = receipt
+            state['pending_result'].update(receipt)
         return
     operation = state['replacement']
-    operation.update(waiting_at=row['started_at'],slot=row['slot'],choice_id=row['choice_id'])
+    operation.update(waiting_at=row['started_at'],slot=row['slot'],
+        choice_id=radio_checkpoint.project_choice(operation.get('choice_id'),row['choice_id']))
     if operation.get('receipt') is not None:
-        operation['receipt'] = receipt
+        operation['receipt'].update(receipt)
     items = list(conn.execute('SELECT * FROM radio_operation_items WHERE session_id=? ORDER BY role,list_position,position',(owner,)))
     def sequence(role,index=0):
         return [item['video_id_snapshot'] for item in items if item['role']==role and item['list_position']==index]

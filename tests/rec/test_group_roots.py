@@ -94,6 +94,23 @@ def test_pending_retirement_uses_the_os_lifetime_instead_of_age(groups):
     assert not roots(groups, 'pending') and not path.exists()
 
 
+def test_database_close_leaves_contended_retirement_for_the_lifetime_reaper(groups):
+    close = group_roots.pending(groups, context(), 10)
+    identity = roots(groups, 'pending')[0]
+    path = group_documents.directory(groups.conn) / '.pending' / (identity + '.lock')
+    other = Store(groups._db_path)
+    other._bind_repositories()
+    try:
+        with group_roots.admission(other):
+            groups.conn.close()
+            assert roots(other, 'pending') == [identity] and path.exists()
+        close()  # A later finalizer cannot use the closed connection.
+        group_roots.reap_pending(other)
+        assert not roots(other, 'pending') and not path.exists()
+    finally:
+        other.conn.close()
+
+
 def test_irrelevant_historical_generation_is_not_a_choice_dependency(groups):
     jobs = []
     groups.choice_capture = CaptureQueue(lambda job: jobs.append(job) or True)

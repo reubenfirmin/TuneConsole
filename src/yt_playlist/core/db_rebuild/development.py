@@ -32,9 +32,11 @@ def insert(conn, table, value):
                  ','.join('?' for _ in value)+')', tuple(value.values()))
 
 
-def rows(table, convert, *, name=None):
+def rows(table, convert, *, name=None, capture=None):
     def copy(reader, target, cursor, limit):
         values, cursor, done = source.scan(reader, table, cursor, limit)
+        if capture is not None:
+            capture(target, values)
         for value in values:
             convert(reader, target, value)
         return Batch(cursor,len(values),done)
@@ -69,6 +71,8 @@ def _draft(reader, target, row):
 
 def settings(reader, target, cursor, limit):
     """Convert fixed-size owner groups together; prefix owners remain batched."""
+    from ...rec.choice_evidence import STORAGE_PENDING
+
     if cursor is None:
         original = source.settings(reader,collections.KEYS)
         collections.copy_settings(target,original,Context(0.))
@@ -83,6 +87,11 @@ def settings(reader, target, cursor, limit):
     values, bookmark, done = source.scan(reader,'settings',cursor[1],limit)
     for row in values:
         key,value = row['key'],row['value']
+        if key == STORAGE_PENDING:
+            # This retry belongs to cleanup of the original database. The new
+            # copy is verified before publication; normal worker polling will
+            # schedule its own retention pass after analytics completes.
+            value = '0'
         if key in collections.KEYS or key in taste.KEYS or key in {
                 'spotify_library_import_job','radio_seed_offer','rec_autotune_result',
                 'trend_first_play_watermark','trend_first_play_source'}:
@@ -127,14 +136,17 @@ def proposal(reader, target, row):
 
 
 def _discovery(reader, target, row, *, table):
+    discovery.copy_row(target,table,row)
+
+
+def _retain_discovery(target, values, *, table):
     # Retain exact captured input, including display fields absent from the
     # typed destination. The immutable original remains separate recovery too.
     domain = 'artist' if table in ('artist_scans','discovered_artists') else 'discovery'
-    key = json.dumps(row,sort_keys=True,separators=(',',':'))
     import hashlib
-    legacy_evidence.retain_many(target,domain,[('discovery_cutover:'+table,
-        hashlib.sha256(key.encode()).hexdigest(),key,'direct rebuild retained discovery input')])
-    discovery.copy_row(target,table,row)
+    originals = [json.dumps(row,sort_keys=True,separators=(',',':')) for row in values]
+    legacy_evidence.stage_many(target,domain,[('discovery_cutover:'+table,
+        hashlib.sha256(raw.encode()).hexdigest(),raw,'direct rebuild retained discovery input') for raw in originals])
 
 
 def _offers(reader, target, row, *, kind):
@@ -156,7 +168,8 @@ def album_tracks(reader, target, cursor, limit):
                                   'ORDER BY is_primary DESC,provider_id LIMIT 1',(aid,)).fetchone()
         if provider is None:
             raise ValueError('Album has no retained provider representation: '+str(aid))
-        counts = reader.execute('SELECT count(*),count(position) FROM album_tracks WHERE album_id=? AND is_full=1',
+        counts = reader.execute('SELECT count(*),count(position),min(position),max(position) '
+                                'FROM album_tracks WHERE album_id=? AND is_full=1',
                                 (aid,)).fetchone()
         captured = reader.execute('SELECT * FROM album_fetch_state WHERE album_id=?',(aid,)).fetchone()
         captured = dict(captured) if captured else {}
@@ -165,7 +178,8 @@ def album_tracks(reader, target, cursor, limit):
             expected_count=captured.get('expected_track_count'),fetched_at=captured.get('fetched_at'))
         return Batch(dict(phase='rows',album=aid,tracklist=tracklist,last=None,count=0,
                           complete=bool(counts[0] and captured.get('complete') and
-                                        captured.get('expected_track_count')==counts[0])),0,False)
+                                        captured.get('expected_track_count')==counts[0] and
+                                        counts[1]==counts[0] and counts[2]==0 and counts[3]==counts[0]-1)),0,False)
     query = 'SELECT * FROM album_tracks WHERE album_id=? AND is_full=1'
     parameters = [cursor['album']]
     if cursor['last'] is not None:
@@ -208,7 +222,8 @@ def stages():
         rows('album_tracks',_album_observation,name='album_observations'),Stage('album_occurrences',album_tracks),
         rows('album_share_snapshots',_share)]
     for table in discovery.TABLES[:-1]:
-        result.append(rows(table,partial(_discovery,table=table)))
+        result.append(rows(table,partial(_discovery,table=table),capture=partial(_retain_discovery,table=table)))
     for kind,table in (('track','discovery_memberships'),('album','album_discovery_memberships'),('artist','discovered_artists')):
-        result.append(rows(table,partial(_offers,kind=kind),name=kind+'_offers'))
+        result.append(rows(table,partial(_offers,kind=kind),name=kind+'_offers',
+                           capture=partial(_retain_discovery,table=table) if kind!='artist' else None))
     return tuple(result)

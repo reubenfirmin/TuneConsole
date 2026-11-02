@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.historical_support import upgrade_fixture
 
 from tests.rec.test_vibe_prediction import capture, drain, fits, track
 from tests.repos.test_recording_vibes import legacy
@@ -24,7 +25,7 @@ def test_upgrade_unknown_video_cannot_change_an_existing_text_identity(tmp_path,
                 store.conn.execute('DELETE FROM recording_aliases')
             store.conn.execute('INSERT INTO audio_vibe_samples VALUES (?,?,?,?,?)',
                 (extra['id'], extra['run_id'], extra['point'], json.dumps(extra), 11))
-        store.init_schema()
+        upgrade_fixture(store)
         assert tuple(store.conn.execute('SELECT id,identity_key FROM recordings WHERE id=?',
                                         (original[0],)).fetchone()) == original
         moved = store.conn.execute('SELECT recording_id,filename FROM sample_attributes WHERE id=?',
@@ -67,7 +68,7 @@ def test_upgrade_last_good_prediction_does_not_invent_latest_contributors(tmp_pa
                                ('last-good-target', None, 'psybient', None, 'old-model'))
             store.conn.execute('INSERT INTO rec_musical_profiles VALUES (?,?,?,?,?)',
                                ('last-good-target', json.dumps(profile), 'old', 'digest', 13))
-        store.init_schema()
+        upgrade_fixture(store)
         row = store.conn.execute('SELECT p.* FROM predictions p JOIN recordings r ON r.id=p.recording_id '
                                  "WHERE r.identity_key='last-good-target'").fetchone()
         assert (row['score'], row['support'], row['predicted_at'], row['lineage_complete']) == (.17, .24, 13, 0)
@@ -91,7 +92,7 @@ def test_upgrade_last_good_measurement_does_not_invent_its_measurement_time(
         with store.conn:
             store.conn.execute('UPDATE rec_musical_profiles SET payload=?,prepared_at=? WHERE identity_key=?',
                                (json.dumps(profile), 1333, key))
-        store.init_schema()
+        upgrade_fixture(store)
         historical = store.conn.execute(
             'SELECT m.* FROM recording_vibes v JOIN measurements m ON m.id=v.measurement_id').fetchone()
         assert (historical['score'], historical['support'], historical['source'], historical['model_version']) == (

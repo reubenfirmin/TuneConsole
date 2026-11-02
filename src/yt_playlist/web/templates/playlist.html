@@ -1,5 +1,5 @@
 {% extends "base.html" %}{% from "_macros.html" import sort_indicator %}{% block title %}{{ pl.title }} · TuneConsole{% endblock %}{% block page_class %}page-playlist{% endblock %}{% block body %}
-<div x-data="enrichPanel({{ pl.id }}, {{ 'true' if lastfm_configured else 'false' }}, {{ active_job.id if active_job else 0 }}, '{{ active_job.source if active_job else '' }}', null, {{ conflict_count }})"
+<div x-data="enrichPanel({{ pl.id|tojson }}, {{ 'true' if lastfm_configured else 'false' }}, {{ active_job.id if active_job else 0 }}, '{{ active_job.source if active_job else '' }}', null, {{ conflict_count }})"
      x-init="rejoinIfActive()" @conflicts-count.window="conflictCount = $event.detail.count">
 <div class="artist-head pl-head library-hero release-hero{{ ' has-art' if pl.thumbnail }}">
   <span class="pl-art pl-art-strip" aria-hidden="true">
@@ -31,6 +31,7 @@
       {% endif %}
       {% if show_playlist_radio %}
       <a class="playlist-radio" href="/?radio_playlist={{ pl.id }}#radio"
+         {% if pl.id is none %}inert{% endif %}
          title="Start radio from this playlist" aria-label="Start radio from this playlist">
         <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor"
              stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -44,7 +45,7 @@
       </p>
     </div>
   </div>
-  <div class="head-tools" aria-label="Playlist tools">
+  <div class="head-tools" aria-label="Playlist tools"{% if pl.id is none %} inert{% endif %}>
         <a class="head-icon" href="/playlist/{{ pl.id }}/share.txt" download="{{ pl.title }}.txt"
            title="Share: download one song URL per line as a .txt" aria-label="Share playlist">
           <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
@@ -78,7 +79,7 @@
   <span class="enrich-status" x-text="status"></span>
 </div>
 
-<div x-data="rowSort({{ pl.id }})" x-init="$nextTick(() => initSortable())">
+<div x-data="rowSort({{ pl.id|tojson }})"{% if pl.id is not none %} x-init="$nextTick(() => initSortable())"{% endif %}>
 {% if position_pending %}
 <div class="notice" role="status">
   Tracks added. Their placement after the original song on YouTube is still pending.
@@ -171,9 +172,9 @@
     </div>
   </template>
 </div>
-<section class="pl-suggest space-before"
+{% if pl.id is not none %}<section class="pl-suggest space-before"
          hx-get="/playlist/{{ pl.id }}/suggestions" hx-trigger="load" hx-swap="innerHTML">
   <p class="section-note">Finding tracks that fit…</p>
-</section>
+</section>{% endif %}
 </div>
 {% endblock %}

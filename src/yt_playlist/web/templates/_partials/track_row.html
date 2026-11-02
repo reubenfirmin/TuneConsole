@@ -44,7 +44,7 @@
   <td class="num mono col-length"><div class="track-cell">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</div></td>
   <td class="rowmenu"{% if is_generated and t.identity_key %} x-data="{ mood: {{ (mood_states|default({})).get(t.identity_key, 0) }} }"{% endif %}>
     <div class="track-cell">
-    {{ song_menu(t, {"playlist": true, "play_url": play_url, "mood_key": t.identity_key if is_generated else ''}) }}
+    {{ song_menu(t, {"playlist": pl.id is not none, "play_url": play_url, "mood_key": t.identity_key if is_generated else ''}) }}
     </div>
   </td>
 </tr>

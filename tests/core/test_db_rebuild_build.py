@@ -132,6 +132,130 @@ def test_stage_cannot_commit_data_without_its_bookmark(conversion):
     assert build.construct(source, output, destination)['rows'] == {'choices': 11}
 
 
+def test_domain_savepoint_stays_inside_the_atomic_batch(conversion):
+    source, output, destination, _ = conversion
+    original = destination.stages[0].copy
+    def copy(reader,target,cursor,limit):
+        target.execute('SAVEPOINT domain_admission')
+        batch = original(reader,target,cursor,limit)
+        target.execute('RELEASE domain_admission')
+        raise InterruptedError('failed before bookmark')
+    interrupted = replace(destination,stages=(build.Stage('choices',copy),))
+    with pytest.raises(InterruptedError,match='before bookmark'):
+        build.construct(source,output,interrupted)
+    assert pending(output)['cursor'] is None
+    with closing(sqlite3.connect(output)) as conn:
+        assert conn.execute('SELECT count(*) FROM choices').fetchone()==(0,)
+    assert build.construct(source,output,destination)['rows']=={'choices':11}
+
+
+@pytest.mark.parametrize('without_rowid', [False, True])
+def test_sql_copy_resumes_exact_key_ranges_and_retains_storage_types(tmp_path, without_rowid):
+    from yt_playlist.core.db_rebuild import destination as schema
+    source, output = tmp_path/'source.db', tmp_path/'candidate.db'
+    definition = ('CREATE TABLE captures(name TEXT PRIMARY KEY NOT NULL,body BLOB,text TEXT,number REAL)'
+                  + (' WITHOUT ROWID' if without_rowid else ''))
+    with closing(sqlite3.connect(source)) as original:
+        original.execute(definition)
+        values = [('z',b'\x00\xff','caf\u00e9',1.25),('a',None,None,None),
+                  ('m',b'', 'unchanged',-2.5),('b',b'\x01','\u97f3\u697d',0.)]
+        original.executemany('INSERT INTO captures VALUES(?,?,?,?)',values)
+        original.commit()
+        expected = original.execute('SELECT '+('' if without_rowid else 'rowid,')
+                                    +'* FROM captures ORDER BY '+('name' if without_rowid else 'rowid')).fetchall()
+    before = source.read_bytes()
+    statements = []
+    def initialize(target):
+        target.execute(definition.replace('captures','retained').replace('name TEXT','renamed TEXT'))
+        target.execute("INSERT INTO retained VALUES('initial',NULL,NULL,NULL)")
+    mapping = {'name':'renamed','body':'body','text':'text','number':'number'}
+    if not without_rowid:
+        mapping = {'_legacy_id':'rowid',**mapping}
+    def copy(reader, target, cursor, limit):
+        target.set_trace_callback(statements.append)
+        return schema._copy(reader,target,cursor,limit,table='captures',destination='retained',mapping=mapping)
+    def verify(reader,target):
+        assert target.execute('SELECT '+('' if without_rowid else 'rowid,')
+                              +'* FROM retained ORDER BY '+('renamed' if without_rowid else 'rowid')).fetchall()==expected
+    contract = build.Destination('sql-copy-v1',initialize,(build.Stage('rows',copy,batch_size=8192),),verify)
+    def interrupt(phase,detail):
+        if phase=='copy':
+            raise InterruptedError('SQL range committed')
+    with pytest.raises(InterruptedError,match='range committed'):
+        build.construct(source,output,contract,batch_size=2,progress=interrupt)
+    with closing(sqlite3.connect(output)) as target:
+        assert target.execute('SELECT count(*) FROM retained').fetchone()[0]==2
+    build.construct(source,output,contract,batch_size=2)
+    assert any('FROM rebuild_source."captures"' in statement for statement in statements)
+    assert source.read_bytes()==before
+
+
+def test_sql_copy_window_bounds_utf8_and_blob_bytes(tmp_path,monkeypatch):
+    from yt_playlist.core.db_rebuild import source
+    path = tmp_path/'input.db'
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute('CREATE TABLE captures(id INTEGER PRIMARY KEY,body TEXT,data BLOB)')
+        conn.executemany('INSERT INTO captures VALUES(?,?,?)',[(i,'\u97f3'*10,b'x'*10) for i in range(1,5)])
+        monkeypatch.setattr(source,'MAX_BATCH_BYTES',80)
+        bookmark,count,done = source.window(conn,'captures',None,8192)
+        assert bookmark==[2] and count==2 and not done
+        assert source.window(conn,'captures',bookmark,8192)==([4],2,False)
+        assert source.window(conn,'captures',[4],8192)==([4],0,True)
+
+
+def test_converter_cannot_write_through_the_attached_source(conversion):
+    source,output,contract,_ = conversion
+    original = source.read_bytes()
+    def attempted_write(reader,target,cursor,limit):
+        target.execute("UPDATE rebuild_source.captures SET body='changed' WHERE id=1")
+        return build.Batch(done=True)
+    broken = replace(contract,stages=(build.Stage('choices',attempted_write),))
+    with pytest.raises(sqlite3.OperationalError,match='readonly'):
+        build.construct(source,output,broken)
+    assert source.read_bytes()==original
+
+
+def test_repository_writes_and_bookmark_share_one_transaction(production64, tmp_path):
+    from yt_playlist.core.db_rebuild import destination as schema
+    from yt_playlist.core.migrations import current, regular
+    from yt_playlist.core.store import Store
+
+    output = tmp_path / 'repositories.db'
+    fail = True
+
+    def prepare(reader, store, cursor, limit):
+        nonlocal fail
+        assert isinstance(store, Store)
+        assert store.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
+        expected = str(cursor) if cursor is not None else None
+        with store.read_view() as reader:
+            assert reader.settings.get_setting('repository_batch') == expected
+        value = (cursor or 0) + 1
+        store.settings.set_setting('repository_batch', value)
+        # A repository's normal commit must remain private until its bookmark.
+        with store.read_view() as reader:
+            assert reader.settings.get_setting('repository_batch') == expected
+        if cursor == 1 and fail:
+            fail = False
+            raise InterruptedError('repository batch before bookmark')
+        return build.Batch(value, rows=1, done=value == 3)
+
+    def verify(reader, target):
+        current.validate(target)
+        regular.validate(target)
+        assert target.execute("SELECT value FROM settings WHERE key='repository_batch'").fetchone()[0] == '3'
+
+    contract = build.Destination('repositories-v1', schema.initialize,
+        (build.Stage('indexes', schema.indexes), build.Stage('guards', schema.finish),
+         build.Stage('preparation', prepare, repositories=True)), verify)
+    with pytest.raises(InterruptedError, match='before bookmark'):
+        build.construct(production64, output, contract)
+    assert pending(output)['cursor'] == 1
+    with closing(sqlite3.connect(output)) as conn:
+        assert conn.execute("SELECT value FROM settings WHERE key='repository_batch'").fetchone()[0] == '1'
+    assert build.construct(production64, output, contract)['rows']['preparation'] == 3
+
+
 def test_validation_failure_is_resumable_without_recopy(conversion):
     source, output, destination, copied = conversion
     def reject(*_):

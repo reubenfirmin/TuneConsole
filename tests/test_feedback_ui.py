@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
-from tests.test_mode_cards_route import prepare_home
+from tests.home_fixture_support import publish_menu, returning_listener
 
 
 def _seed(store):
@@ -21,21 +21,12 @@ def test_home_proto_curation_not_pre_listen_taste_chips(store):
     # The Home proto-playlists are drafts you curate before listening, so each row offers a plain
     # "remove from this playlist", NOT taste feedback that only makes sense after hearing a track.
     # Cards are now lazy-loaded; assert against /home/cards instead of /.
-    import numpy as np
-    from yt_playlist.rec import mode_surfaces as ms
     _, c = _seed(store)
-    store.modes.replace_modes([
-        {"mode_id": 1, "label": "a", "families": [["house", 1]],
-         "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 80, "rep_keys": []},
-    ], retired_ids=[], now=1000.0)
-    payload = {"1": {}}
-    for surf in ms.CARD_SURFACES:
-        payload["1"][surf] = [{"key": f"{surf}{i}", "video_id": f"{surf}{i}", "title": f"Song {surf} {i}",
-                               "artist": f"Art {i}", "album": "", "thumbnail": None,
-                               "plays": 0, "reason": "", "lane": "", "genre": ""} for i in range(4)]
-    store.rec_proposals.put_proposals("mode_bundles", payload, 1000.0)
-    prepare_home(store)
-    html = c.get("/home/cards").text
+    publish_menu(store, now=1000)
+    returning_listener(store, 'mixes', now=1000)
+    response = c.get("/home/cards")
+    assert response.status_code == 200
+    html = response.text
     assert "gen-rm" in html and "Remove from this playlist" in html
     for chip in ("More like this", "Not the vibe", "Wrong era", "Too mainstream", "Already know it"):
         assert chip not in html

@@ -29,6 +29,7 @@ def context(store):
 
 
 def test_slow_import_keeps_requests_and_bridge_replies_responsive_and_serializes_history(store, monkeypatch):
+    store.accounts.upsert_account('main', 'credential', None, True)
     ctx = context(store)
     app = FastAPI()
     app.include_router(setup.build(ctx))
@@ -116,6 +117,7 @@ def test_import_error_is_terminal_visible_and_keeps_retry_form(store, monkeypatc
 
 
 def test_cancelled_import_request_remains_owned_until_worker_finishes(store, monkeypatch):
+    store.accounts.upsert_account('main', 'credential', None, True)
     ctx = context(store)
     imports = HistoryImports(ctx)
     entered, release = threading.Event(), threading.Event()

@@ -5,6 +5,7 @@ axis archive were added. Accept only those known definitions on admission;
 the next numbered transaction installs the current definitions and constraints.
 """
 import re
+from functools import lru_cache
 
 from . import v086_genre_classifications
 
@@ -49,11 +50,21 @@ def legacy_statements(statements):
         yield sql
 
 
-def validate_predecessor(conn, version, *, foreign_keys=True, data=True):
+@lru_cache(maxsize=6)
+def _contracts(version):
+    """Reuse fixed reference DDL; live installed schemas are checked each time."""
     from . import current
     statements = tuple(current.statements(version=version))
-    expected = current._schema_contract(statements)
-    earlier = current._schema_contract(legacy_statements(statements))
+    return (current._schema_contract(statements),
+            current._schema_contract(legacy_statements(statements)))
+
+
+def validate_predecessor(conn, version, *, foreign_keys=True, data=True):
+    from . import current
+    reference, earlier = _contracts(version)
+    # Admission adapts only this call's expected map to the observed finite
+    # predecessor. Never retain another database's accepted replacements.
+    expected = reference.copy()
     objects = {name: (kind, sql) for name, kind, sql in conn.execute(
         "SELECT name,type,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'")}
     for name in (*REPLACEMENTS, 'taste_axes', 'taste_axis_legacy'):

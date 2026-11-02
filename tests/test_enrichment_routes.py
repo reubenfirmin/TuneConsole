@@ -6,6 +6,9 @@ from fastapi.testclient import TestClient
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 from tests.web_support import _client
+
+pytestmark = pytest.mark.usefixtures('canonical_genre_matcher')
+
 def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     import json as _json
     import yt_playlist.providers.musicbrainz as mb
@@ -32,7 +35,7 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     assert [e["title"] for e in events if e.get("provider") == "musicbrainz"] == ["S0", "S1", "Sx"]
 
     detail = {t["video_id"]: (t["genre"], t["year"]) for t in store.charts.playlist_tracks_detail(a)}
-    assert detail["v0"] == ("rock", "1998") and detail["v1"] == ("jazz", "2003")
+    assert detail["v0"] == ("Rock", "1998") and detail["v1"] == ("Jazz", "2003")
     assert detail["v2"] == ("", "")                      # no match this run
     # fully-resolved tracks are done; the no-match one stays eligible for a re-run
     assert [t["video_id"] for t in store.tracks.tracks_to_enrich(a)] == ["v2"]
@@ -45,13 +48,13 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     with c.stream("GET", f"/playlist/enrich/events/{jid2}") as st:
         "".join(st.iter_text())
     v2 = next(t for t in store.charts.playlist_tracks_detail(a) if t["video_id"] == "v2")
-    assert (v2["genre"], v2["year"]) == ("ambient", "2010")
+    assert (v2["genre"], v2["year"]) == ("Ambient", "2010")
     assert store.tracks.tracks_to_enrich(a) == []
 
     # a blank result must never clobber values we already have
     store.tracks.set_track_enrichment(store.tracks.track_ids_for_videos(["v0"])["v0"], "", "")
     v0 = next(t for t in store.charts.playlist_tracks_detail(a) if t["video_id"] == "v0")
-    assert (v0["genre"], v0["year"]) == ("rock", "1998")
+    assert (v0["genre"], v0["year"]) == ("Rock", "1998")
 
 
 def test_jobs_find_active():
@@ -88,10 +91,10 @@ def test_discogs_fills_genre_and_year(store, monkeypatch):
     store.settings.set_setting('discogs_token', 'fixture-token')
     # Styles map to the whitelist; the earliest year among matching releases wins.
     monkeypatch.setattr(dc, "_search", lambda q, tok: [
-        {"title": "Underworld - Born Slippy", "year": "1996", "genre": ["Electronic"],
+        {"id": 101, "title": "Underworld - Born Slippy", "year": "1996", "genre": ["Electronic"],
          "style": ["Techno", "Drum n Bass"]},
-        {"title": "Underworld - Born Slippy", "year": "1995", "genre": ["Electronic"], "style": ["Techno"]},
-        {"title": "Unrelated Artist - Different Song", "year": "1952", "genre": ["Classical"]},
+        {"id": 102, "title": "Underworld - Born Slippy", "year": "1995", "genre": ["Electronic"], "style": ["Techno"]},
+        {"id": 103, "title": "Unrelated Artist - Different Song", "year": "1952", "genre": ["Classical"]},
     ] if "Born Slippy" in q else [])
     iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
@@ -99,6 +102,7 @@ def test_discogs_fills_genre_and_year(store, monkeypatch):
                                   store.tracks.upsert_track("v1", "Unknown", "Nobody", "Al", 200, 1)])
     from tests.conftest import only_provider
     only_provider(store, "discogs")
+    store.genres.configure_catalog()
     c = _client(store, lambda: {iid: FakeClient()})
 
     jid = c.post(f"/playlist/{a}/enrich").json()["job_id"]

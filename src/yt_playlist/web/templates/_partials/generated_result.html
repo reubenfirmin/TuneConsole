@@ -1,6 +1,6 @@
-{# Swapped in for a proto-playlist card after "Save & play": success or a friendly failure. #}
-<section class="gen-card card gen-done{% if save_uncertain %} gen-recovery{% endif %}"{% if not error and ytm %} data-generated-playlist="{{ ytm }}"{% endif %}>
-  {% if error %}
+{# Failures retain the selected mix. Successful saves open the normal playlist. #}
+{% if error %}
+<section class="gen-card card gen-done{% if save_uncertain %} gen-recovery{% endif %}">
   <header class="gen-head"><span class="status-label status-label--error">{% if partial_ytm %}Partially saved{% elif save_uncertain %}Playback unconfirmed{% else %}Couldn't save{% endif %}</span>
     <h2 class="gen-name">{{ name }}</h2></header>
   <p class="section-note">{{ error }}</p>
@@ -27,24 +27,14 @@
   {# Close the loading window we opened on click, otherwise it spins forever on a failure (e.g. no
      YouTube Music tab open to run the request). #}
   <script>genComplete({{ launch_id|default('')|tojson }}, null, true, {{ save_uncertain|default(false)|tojson }});</script>
-  {% else %}
-  <header class="gen-head"><span class="status-label status-label--success">Saved ✓. Opening in your YouTube Music tab…</span>
-    <h2 class="gen-name">{{ name }}</h2></header>
-  <p class="section-note">{{ added }} track{{ '' if added == 1 else 's' }} added to a new playlist in
-    your <strong>Generated</strong> group, kept out of your recommendations until you promote it to
-    your library.</p>
-  <div class="gen-foot">
-    <a class="cta" href="https://music.youtube.com/watch?list={{ ytm }}"
-       target="_blank" rel="noopener">▶ Open on YouTube Music {{ arrow_icon('external') }}</a>
-  </div>
-  {% if pid %}{% include "_partials/mood_panel.html" %}{% endif %}
-  {# The extension plays the playlist in your EXISTING YouTube Music tab (see home_generate's navigate
-     control), so we NEVER open a YouTube tab here: the loading window just closes. If the extension is
-     off, the "Open on YouTube Music" link above is the manual way. Send THIS tab to the playlist page
-     in our own UI. #}
-  <script>(function () {
-    genComplete({{ launch_id|default('')|tojson }}, {{ ytm|tojson }}, false, false, {{ (pid is defined and pid is not none)|tojson }});
-    {% if pid %}window.location.assign("/playlist/{{ pid }}");{% endif %}
-  })();</script>
-  {% endif %}
 </section>
+{% else %}
+{# Fetch consumers read this receipt without inserting a success screen. #}
+<span hidden data-generated-playlist="{{ ytm }}"></span>
+<script>(function () {
+  window.addEventListener('pagehide', function () {
+    genComplete({{ launch_id|default('')|tojson }}, {{ ytm|tojson }}, false, false, true);
+  }, {once: true});
+  window.location.assign({{ (playlist_url|default('/playlist/' ~ pid))|tojson }});
+})();</script>
+{% endif %}

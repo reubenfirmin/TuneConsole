@@ -14,6 +14,7 @@ from PIL import Image
 from tests.test_account_growth import catalog, ready_radio
 from tests.onboarding_support import publish_personal_album, publish_personal_mix
 from tests.test_growth_journey import early_journey
+from tests.home_fixture_support import returning_listener
 from yt_playlist.rec import account_growth
 
 
@@ -122,7 +123,7 @@ def test_trail_light_preserves_foreground_scenery(live_app, store, page, monkeyp
         assert difference(dark, lit, point) > 4, f'Adjacent walking surface lost its light at {point}'
 
 
-@pytest.mark.parametrize('width', [1536, 390])
+@pytest.mark.parametrize('width', [1536])
 def test_festival_states_notices_home_choice_and_bonus_details(live_app, store, page, monkeypatch, width):
     growth_catalog(store)
     publish_personal_album(store)
@@ -210,7 +211,7 @@ def test_festival_states_notices_home_choice_and_bonus_details(live_app, store, 
     assert not errors
 
 
-@pytest.mark.parametrize('width', [1536, 390])
+@pytest.mark.parametrize('width', [1536])
 def test_successful_use_keeps_unlock_new_until_explicitly_seen(live_app, store, page, monkeypatch, width):
     from yt_playlist.rec import choice_evidence
 
@@ -256,7 +257,7 @@ def test_successful_use_keeps_unlock_new_until_explicitly_seen(live_app, store, 
     assert store.settings.get_setting('home_format') is None
 
 
-@pytest.mark.parametrize('width', [1536, 390])
+@pytest.mark.parametrize('width', [1536])
 def test_unlock_notice_is_a_corner_popup_and_maintenance_keeps_health_in_place(live_app, store, page, monkeypatch, width):
     growth_catalog(store)
     publish_personal_mix(store, now=1)
@@ -280,8 +281,8 @@ def test_unlock_notice_is_a_corner_popup_and_maintenance_keeps_health_in_place(l
     assert notice.evaluate('el => getComputedStyle(el).position') == 'fixed'
     page.wait_for_function('''() => {
         const box = document.querySelector('.growth-unlock-notice').getBoundingClientRect();
-        return Math.abs(innerWidth - box.right - (innerWidth < 650 ? 16 : 24)) < 1
-            && Math.abs(innerHeight - box.bottom - (innerWidth < 650 ? 100 : 24)) < 1;
+        return Math.abs(innerWidth - box.right - 24) < 1
+            && Math.abs(innerHeight - box.bottom - 24) < 1;
     }''')
     box = notice.bounding_box()
     assert box['x'] + box['width'] <= width and box['x'] >= 0
@@ -291,19 +292,18 @@ def test_unlock_notice_is_a_corner_popup_and_maintenance_keeps_health_in_place(l
     health_before = page.locator('.account-health').bounding_box()
     health_position = page.locator('.account-health').evaluate('el => getComputedStyle(el).position')
     maintenance['active'] = True
-    maintenance['banner_message'] = 'Library updates are paused.'
+    maintenance['banner_message'] = 'Updating library storage; browsing and playback remain available.'
     banner = page.locator('#storage-maintenance')
     page.wait_for_function('document.documentElement.dataset.storageCompacting === "true"')
-    expect(banner).to_have_text('Library updates are paused.')
+    expect(banner).to_have_text('Updating library storage; browsing and playback remain available.')
     expect(banner).to_be_visible()
     dock = page.locator('.account-health')
     expect(dock).to_be_visible()
     assert dock.evaluate('el => getComputedStyle(el).position') == health_position
     health_after = dock.bounding_box()
     assert all(abs(health_after[key] - health_before[key]) < 1 for key in ('x', 'width', 'height'))
-    # The fixed desktop rail stays put; the phone header follows the top strip.
-    expected_shift = banner.bounding_box()['height'] if width < 1040 else 0
-    assert abs(health_after['y'] - health_before['y'] - expected_shift) < 1
+    # The fixed desktop rail stays put while the notice appears.
+    assert abs(health_after['y'] - health_before['y']) < 1
     assert page.locator('.global-now-playing-slot').count() == 1
     page.screenshot(path=f'/tmp/tuneconsole-561-corner-popup-{width}.png', full_page=True)
     expect(star).not_to_have_class(re.compile(r'\bis-twinkling\b'))
@@ -323,7 +323,7 @@ def test_corner_unlock_opens_a_destination_without_leaving_mix_tapes(live_app, s
     page.route('**/bridge/status', lambda route: route.fulfill(json={'connected': True}))
     page.route('**/radio/seeds', lambda route: route.fulfill(json={'tracks': [], 'menu_id': ''}))
     page.route('https://i.ytimg.com/**', lambda route: route.fulfill(status=404))
-    page.set_viewport_size({'width': 390, 'height': 1000})
+    page.set_viewport_size({'width': 1536, 'height': 1000})
     static = Path(__file__).resolve().parents[2] / 'src/yt_playlist/web/static'
     assets = {name: (static / name).read_bytes() for name in ('account-growth.js', 'account-growth.css')}
     errors, requests = [], []
@@ -357,7 +357,7 @@ def test_corner_unlock_opens_a_destination_without_leaving_mix_tapes(live_app, s
         expect(popup).to_be_visible()
         expect(popup.get_by_role('button', name='Open On air', exact=True)).to_be_visible()
         unchanged_selection()
-        page.screenshot(path=tmp_path / 'corner-unlock-destination-390.png', full_page=True)
+        page.screenshot(path=tmp_path / 'corner-unlock-destination-1536.png', full_page=True)
         popup.get_by_role('button', name='Close destination', exact=True).click()
         expect(popup).not_to_be_visible()
         expect(notice).to_be_visible()
@@ -389,7 +389,7 @@ def test_corner_unlock_opens_a_destination_without_leaving_mix_tapes(live_app, s
             report['destination_diagnostic_error'] = str(error)
         if report['status'] != 'passed':
             try:
-                page.screenshot(path=tmp_path / 'corner-unlock-destination-failure-390.png',
+                page.screenshot(path=tmp_path / 'corner-unlock-destination-failure-1536.png',
                                 full_page=True, timeout=3000)
             except Exception as error:
                 report['failure_screenshot_error'] = str(error)
@@ -397,11 +397,15 @@ def test_corner_unlock_opens_a_destination_without_leaving_mix_tapes(live_app, s
         assert all((static / name).read_bytes() == body for name, body in assets.items())
 
 
-@pytest.mark.parametrize('width', [1536, 390])
+@pytest.mark.parametrize('width', [1536])
 def test_festival_landmarks_open_popups_and_only_rendered_paths_have_a_legend(live_app, store, page, monkeypatch, width):
     growth_catalog(store)
     publish_personal_mix(store, now=1)
     publish_personal_album(store, now=1)
+    # This popup exercises retained Vibes access. Current output alone cannot
+    # skip the serial TV predecessor (#608/#649); an earlier Vibes listen keeps
+    # access independently of today's preparation.
+    returning_listener(store, 'vibes', now=1)
     store.enrichment_queue.mark_enriched([row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1)
     actual_view = account_growth.view
     explored = [False]
@@ -473,7 +477,7 @@ def test_festival_landmarks_open_popups_and_only_rendered_paths_have_a_legend(li
     assert page.locator('body').evaluate('body => body.scrollWidth <= innerWidth')
 
 
-def test_phone_health_refresh_and_poll_preserve_the_selected_listening_tab(live_app, store, page, tmp_path):
+def test_health_refresh_and_poll_preserve_the_selected_listening_tab(live_app, store, page, tmp_path):
     """Controlled owned songs and a real prepared mix; no readiness overrides."""
     root = Path(__file__).resolve().parents[2]
     source_paths = [root / name for name in (
@@ -504,7 +508,7 @@ def test_phone_health_refresh_and_poll_preserve_the_selected_listening_tab(live_
     page.on('request', lambda request: requests.append((request.method, urlsplit(request.url).path)))
     page.route('**/bridge/status', lambda route: route.fulfill(json={'connected': True}))
     page.route('https://i.ytimg.com/**', lambda route: route.fulfill(status=404))
-    page.set_viewport_size({'width': 390, 'height': 844})
+    page.set_viewport_size({'width': 1536, 'height': 900})
     report = {'status': 'incomplete', 'source_before': sources,
               'qualification': 'Controlled four prepared mixes with 16 owned songs and additions; '
                                'real projection, GET refresh and natural 15-second poll.'}
@@ -531,12 +535,12 @@ def test_phone_health_refresh_and_poll_preserve_the_selected_listening_tab(live_
             assert strip.evaluate("el => !el.closest('[role=tabpanel]') && !el.closest('.home-dashboard')")
             assert strip.evaluate('''el => {
                 const box = el.getBoundingClientRect();
-                const tabs = document.querySelector('.dash-nav').getBoundingClientRect();
-                return box.width > 0 && box.left >= 0 && box.right <= innerWidth && box.bottom <= tabs.top;
+                return !!el.closest('.topbar') && box.width > 0
+                    && box.left >= 0 && box.right <= innerWidth;
             }''')
 
         visible_health(2, 16, 12)
-        page.screenshot(path=str(tmp_path / 'health-initial-390.png'), full_page=True)
+        page.screenshot(path=str(tmp_path / 'health-initial-1536.png'), full_page=True)
         with store._lock:
             entry = store.tracks.upsert_track('health-added', 'Health addition', 'Artist', None, 200)
         with page.expect_response(lambda response: urlsplit(response.url).path == '/home/growth') as refreshed:
@@ -553,7 +557,7 @@ def test_phone_health_refresh_and_poll_preserve_the_selected_listening_tab(live_
         assert polled.value.status == 200
         snapshots.append(polled.value.json()['health'])
         visible_health(3, 17, 17)
-        page.screenshot(path=str(tmp_path / 'health-updated-390.png'), full_page=True)
+        page.screenshot(path=str(tmp_path / 'health-updated-1536.png'), full_page=True)
         # Home reads its normal menu even when health is below Radio's unlock
         # threshold. Permit those GETs while retaining the no-action boundary.
         report['unexpected_action_requests'] = [

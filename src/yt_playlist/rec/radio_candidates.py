@@ -30,6 +30,39 @@ logger = logging.getLogger(__name__)
 _cache_lock = threading.Lock()
 
 
+def _allowed_seed(track, blocked, muted, maximum, genre_allowed):
+    return (track.get('video_id') and track.get('key') and track['key'] not in blocked
+            and track.get('available') != 0
+            and (track.get('artist') or '').casefold() not in muted
+            and genre_allowed(track.get('genre'))
+            and (not track.get('duration') or track['duration'] <= maximum))
+
+
+def eligible_seeds(store, tracks, now):
+    """Recheck a saved offer in place, preserving its order and attribution."""
+    if not tracks:
+        return []
+    with store.read_view() as reader:
+        current = reader.rec_eligibility.offered_tracks(track.get('video_id') for track in tracks)
+        blocked = reader.rec_model.suppressed_keys('for_you', now, keys=[track['key'] for track in current.values()])
+        muted = {artist.casefold() for artist in reader.rec_model.muted_artists()}
+        weights = reader.rec_model.get_weights(now=now)
+        maximum = 60 * rec_params.get_param(reader, 'max_track_minutes')
+        axes = reader.genres.feature_axes(track.get('genre') for track in current.values())
+
+        def genre_allowed(label):
+            family, subgenre = axes.get(label, ('', None))
+            return weights.get(f'genre:{family}', 1) != 0 and weights.get(f'genre:{subgenre}', 1) != 0
+
+        result = []
+        for offered in tracks:
+            track = current.get(offered.get('video_id'))
+            if (track and track['key'] == offered.get('key')
+                    and _allowed_seed(track, blocked, muted, maximum, genre_allowed)):
+                result.append({**offered, **track})
+        return result
+
+
 def _input_cache(store):
     with _cache_lock:
         if not hasattr(store, '_radio_input_cache'):
@@ -48,9 +81,12 @@ def _prepared_inputs(store, *, project=None, prepared=None, blocked=(), muted=()
         modes = {str(mode['mode_id']): mode for mode in reader.modes.list_modes()
                  if mode.get('space') == space}
         if prepared is not None:
-            return generation, encoding_model, space, modes, prepared.inputs(
+            captured = prepared.capture_inputs(
                 reader, modes, space, generation, blocked, muted, comfort)
-        encoded = reader.rec_proposals._proposal_json('mode_bundles')
+        else:
+            encoded = reader.rec_proposals._proposal_json('mode_bundles')
+    if prepared is not None:
+        return generation, encoding_model, space, modes, prepared.decode_inputs(captured)
     # Preserve every Radio pool and its fallback, without restoring unrelated
     # Home preset/genre copies of the same musical profiles.
     fields = {'all', '_meta', '_radio', '_ppr', *modes}
@@ -141,8 +177,9 @@ class RadioCandidates:
                 self.prepared = PreparedRadio(store, now, generation=paired['_ranked_generation'],
                                               surface_prefix=paired['_ranked_prefix'])
                 with store.read_view() as reader:
-                    bundles = self.prepared.inputs(reader, self.modes, space, self.generation,
-                                                   self.blocked, self.muted, self.tuning['comfort'])
+                    captured = self.prepared.capture_inputs(reader, self.modes, space, self.generation,
+                                                           self.blocked, self.muted, self.tuning['comfort'])
+                bundles = self.prepared.decode_inputs(captured)
             else:
                 bundles = paired.get('bundles', {})
             self.choice_context = {**paired['context'], 'comparison': self.comparison}
@@ -418,11 +455,7 @@ class RadioCandidates:
         return radio_tuning.now_bonus(base, self.now_posterior.get(str(mid), 0), self.now_gain)
 
     def _allowed(self, track):
-        return (track.get("video_id") and track["key"] not in self.blocked
-                and track.get("available") != 0
-                and (track.get("artist") or "").casefold() not in self.muted
-                and self._genre_allowed(track.get('genre'))
-                and (not track.get("duration") or track["duration"] <= self.maximum_length))
+        return _allowed_seed(track, self.blocked, self.muted, self.maximum_length, self._genre_allowed)
 
     def _genre_allowed(self, label):
         with self.store._lock:

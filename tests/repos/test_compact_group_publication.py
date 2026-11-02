@@ -294,6 +294,17 @@ def test_foreground_can_read_and_write_between_compact_member_batches(database, 
 
 def test_store_retains_group_files_until_the_last_old_snapshot_read(database, tmp_path):
     store, _prepared = database
+    # Give one owner a pack with an unowned record. Restoring an already compact
+    # pack can reuse its path, so it would not exercise retirement of old files.
+    table, key, kind, filename, digest, size, offset = next(group_documents.references(store.conn))
+    assert table == 'group_versions'
+    value, age = group_documents.read(filename, digest, size, offset, kind, with_age=True)
+    replacement = next(group_documents.publish_many(group_documents.directory(store.conn),
+        [(kind, value), ('definition', {'unowned': True})], age=age))
+    with store.conn:
+        store.conn.execute('UPDATE group_versions SET definition_filename=?,definition_offset=? WHERE id=?',
+                           (replacement[0], replacement[3], key[0]))
+    group_documents.collect_orphans(store.conn)
     with store.read_view() as view:
         original = list(group_documents.references(view.conn))
         manifest = group_documents.export(view.conn, tmp_path / 'pinned-backup')
@@ -340,7 +351,6 @@ def test_real_offer_learning_reuses_the_same_external_alias_in_two_generations(d
     from tests.test_group_learning import menu, compiled
     from yt_playlist.rec import choice_evidence as choices
     store, prepared = database
-    # Only bind this controlled post-v72 test. Production stays on schema 69.
     store.taste_groups = CompactTasteGroupsRepo(store)
     first = store.taste_groups.head(members=True)
     for group in prepared['groups']:

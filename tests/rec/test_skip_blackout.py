@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.test_radio_catalog import catalog_track
+from tests.recommendation_support import publish_bundles
 from yt_playlist.core.store import Store
 from yt_playlist.library import player_events
 from yt_playlist.rec import eligibility, radio_tuning
@@ -162,7 +163,7 @@ def test_a_file_backed_restart_retains_the_break(tmp_path):
 @pytest.mark.parametrize('energy', [0, .5, 1])
 def test_live_skip_removes_a_cached_radio_choice_and_cannot_return_on_refill(store, listener, energy):
     tracks = [catalog_track(store, f'radio-{i}')[0] for i in range(32)]
-    store.rec_proposals.put_proposals('mode_bundles', {'all': {'wheelhouse': tracks}})
+    publish_bundles(store, {'all': {'wheelhouse': tracks}})
     candidates = RadioCandidates(store, 100, {**radio_tuning.DEFAULTS, 'energy': energy})
     directions = RadioDirections(candidates, tracks[0])
     directions.update([tracks[0]], [], 0)

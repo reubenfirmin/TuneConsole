@@ -1,5 +1,6 @@
 """Evidence and blind listening remain separate, scoped, versioned and retractable."""
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 
@@ -61,13 +62,25 @@ def test_observations_keep_native_units_actual_model_coverage_and_version_identi
     assert evidence[2].match_evidence['interval_s'] == [2, 10.99]
     assert evidence[2].match_evidence['sample_coverage'] == pytest.approx(.0899)
     assert evidence[2].match_evidence['reliability'] is None
-    # Scratch-only ingestion uses existing idempotence and leaves selected corrections intact.
+    # Scratch descriptors retain their native vocabulary; production admission
+    # rejects arbitrary fields rather than treating RMS as a catalog dimension.
     tid = store.tracks.upsert_track('video', 'Song', 'Artist', '', 100)
     store.enrichment.set_track_field(tid, 'energy', .2)
     selected = store.conn.execute('SELECT energy FROM catalog_tracks WHERE id=?', (tid,)).fetchone()[0]
+    with pytest.raises(ValueError, match='Unsupported native metadata field'):
+        store.enrichment_state.record_metadata_observations(tid, 'audio-lab', evidence, run_id='raw', now=10)
+    assert store.enrichment_state.metadata_observations('song|artist') == []
+    # The supported instrumental prediction keeps its actual source/model,
+    # units and coverage when explicitly admitted under the catalog vocabulary.
+    admitted = replace(evidence[2], field='instrumental')
     for _ in range(2):
-        store.enrichment_state.record_metadata_observations(tid, 'audio-lab', evidence, run_id='same', now=10)
-    assert store.conn.execute('SELECT COUNT(*) FROM metadata_findings WHERE provider=?', ('audio-lab',)).fetchone()[0] == 3
+        store.enrichment_state.record_metadata_observations(tid, 'audio-lab', [admitted], run_id='same', now=10)
+    rows = store.enrichment_state.metadata_observations('song|artist')
+    assert len(rows) == 1
+    assert rows[0]['provider'] == 'audio-lab'
+    assert rows[0]['field'] == 'instrumental' and rows[0]['value'] == .8
+    assert {**rows[0]['provenance'], 'field': 'instrumental', 'value': .8} == {
+        **admitted.payload(), 'delivery_id': 'same'}
     assert store.conn.execute('SELECT energy FROM catalog_tracks WHERE id=?', (tid,)).fetchone()[0] == selected
     report['results'][0]['prediction']['model_version'] = '2'
     assert observations(report)[2].payload() != evidence[2].payload()

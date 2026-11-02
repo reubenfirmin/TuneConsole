@@ -1,5 +1,43 @@
 # Audio lab (#406)
 
+The [matched encoder comparison](ENCODER_COMPARISON_RESULTS.md) completes #708:
+288 recordings, 576 matched intervals, 24 native targets and 72 mapped cases.
+Retain all six incumbents; Focus/Cruise point gains fail uncertainty or domain
+limits. Use `./experiments/run.py encoder-comparison verify` for six receipts.
+
+November source-provenance correction: the initial freezer omitted CLI modules
+executed as `__main__`. It now captures them. The five earlier November rounds
+retain separate `postrun-source/` copies and receipts, explicitly captured after
+their outcomes; these do not establish missing prospective entrypoint hashes.
+#708 archives fitting/evaluation prospectively in its corrected round and
+independently audits reused extraction, with the original extraction source gap
+still explicit. Original plans and measured outputs remain unchanged.
+
+The [reserved Memo confirmation](MEMO_CONFIRMATION_RESULTS.md) completes #710:
+120 aligned recordings / 119 components, no fits. Cruise/Relax are inconclusive
+against both frozen controls; Uplift/Energize trigger declared regression limits.
+Use `./experiments/run.py memo-confirmation verify` for its six receipts.
+
+The [Jamendo artist extension](RELEASE_EXTENSION_RESULTS.md) records #709's
+bounded, inconclusive acquisition: both official endpoints returned HTTP503,
+leaving zero new audio and no extension-quality claim. Use
+`./experiments/run.py release-extension verify` for its five receipts.
+
+The [arousal-conditioned Uplift comparison](UPLIFT_GATE_RESULTS.md) completes
+#712 with a retain decision: the nine-pair convex gate fails ranking and domain
+regression criteria. Use `./experiments/run.py uplift-gate verify` for its eleven
+evidence receipts.
+
+The [all-window ManyMusic comparison](MANY_WINDOWS_RESULTS.md) completes #707
+with a retain decision: 1,695 rated windows are accounted for, but native
+ranking gains and domain regression criteria fail. Use
+`./experiments/run.py many-windows verify` for the seventeen evidence receipts.
+
+The [count-aware Focus follow-up](FOCUS_COUNTS_RESULTS.md) completes #711 with
+a retain decision: count likelihood improves but ranking does not. Use
+`./experiments/run.py focus-counts verify` and
+`check --test test_focus_counts.py` for its evidence and focused checks.
+
 The [external dataset plan for the vibe model](DATASET_PLAN.md)
 describes how each emotion dataset will be used, prioritizing supplied audio
 before datasets that need YouTube recording matching.
@@ -68,7 +106,10 @@ Use `./experiments/run.py product-baseline --help` for that bounded audit.
 The [Cruise production preparation](CRUISE_PRODUCTIONIZATION.md) records the
 compact individual artifact, mixed routing contract, real-capture checks and
 refreshed shared-model comparison. Use `cruise-package` and `cruise-baselines`
-through the same entrypoint. [Release production integration](RELEASE_PRODUCTIONIZATION.md)
+through the same entrypoint. The [six-specialist runtime extraction](SPECIALIST_RUNTIME_702.md)
+records the neutral helper owner, research-only routing adapter, unchanged-output
+replays, installed-wheel checks and retained legacy correction consumers (#702).
+[Release production integration](RELEASE_PRODUCTIONIZATION.md)
 and [Relax production integration](RELAX_PRODUCTIONIZATION.md) record the next
 two specialist scorers. Relax uses #617's [fixed consensus](RELAX_CONSENSUS_RESULTS.md)
 with per-excerpt prediction averaging. Use `relax-package`, `relax-production`

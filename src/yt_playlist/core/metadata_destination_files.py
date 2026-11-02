@@ -22,7 +22,7 @@ def export(conn, root):
 
 def _contents(conn):
     return conn.execute('SELECT DISTINCT filename,digest,byte_size,byte_offset FROM '
-                        + destinations.table('deliveries'))
+                        + destinations.table('deliveries') + ' ORDER BY filename,byte_offset')
 
 
 def restore(conn, manifest):

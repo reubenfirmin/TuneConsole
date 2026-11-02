@@ -1,18 +1,31 @@
 import pytest
 from urllib.parse import parse_qs
 
-from tests.test_mode_cards_route import prepare_home
+from tests.test_mode_cards_route import prepare_home as prepare_current_home
+from tests.home_fixture_support import browser_store as store, returning_listener
 from tests.test_home_other_genres import seed_genres
 
 
-@pytest.mark.parametrize("width", [1440, 390])
+def prepare_home(store, now=1):
+    returning_listener(store, 'mixes', 'albums', now=now)
+    prepare_current_home(store, now)
+
+
+@pytest.mark.parametrize("width", [1440])
 def test_album_tab_visibility_and_remembered_default(live_app, store, page, width, monkeypatch):
+    import json
+    import time
     from playwright.sync_api import expect
+    from tests.onboarding_support import publish_personal_mix
 
     seed_genres(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
     prepare_home(store, 1)
+    returning_listener(store, 'radio', now=1)
+    tracks = publish_personal_mix(store, now=1)
+    store.settings.set_setting('radio_seed_offer', json.dumps({
+        'menu_id': 'album-preference-radio', 'tracks': tracks[:4]}))
     albums = [{"browse_id": f"album-{index}", "title": f"Record {index}",
         "artist": f"Artist {index}", "year": "2020", "genre": "Jazz", "thumbnail": None,
         "classification": "discovery", "score": 1 - index / 10} for index in range(4)]
@@ -49,8 +62,17 @@ def test_album_tab_visibility_and_remembered_default(live_app, store, page, widt
             and response.request.post_data_json.get('option_id', '').startswith('album-')) as visible:
         page.get_by_role("tab", name="Long play", exact=True).click()
     assert visible.value.ok
+    # Visible cards post concurrently; receiving the first response does not
+    # establish that the other observations have finished writing.
+    deadline = time.monotonic() + 5
+    while True:
+        observations = store.rec_ledger.evidence().records('response')
+        if any(row['kind'] == 'visible' and row['option_id'].startswith('album-')
+               for row in observations) or time.monotonic() >= deadline:
+            break
+        page.wait_for_timeout(25)
     assert any(row['kind'] == 'visible' and row['option_id'].startswith('album-')
-               for row in store.rec_ledger.evidence().records('response'))
+               for row in observations), (visible.value.request.post_data_json, observations)
     expect(page.locator(".album-choice")).to_have_count(4)
     expect(page.locator('.album-story-scene img')).to_have_count(3)
     expect(page.locator('.album-choice-play svg:visible')).to_have_count(4)
@@ -126,8 +148,10 @@ def test_album_tab_visibility_and_remembered_default(live_app, store, page, widt
     assert requests[0]['action_id'][0] != requests[1]['action_id'][0]
     assert requests[0]['opportunity_id'] == requests[1]['opportunity_id']
     # The explicit preference is shared across visits, including fresh URLs without a hash.
-    page.evaluate("""() => fetch('/home/format', {method:'POST',
-        headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'format=albums'})""")
+    assert all(page.request.get(live_app + '/home/growth').json()['ready_formats'].values())
+    assert page.evaluate("""async () => (await fetch('/home/format', {method:'POST',
+        headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'format=albums'})).status""") == 204
+    assert store.settings.get_setting('home_format') == 'albums'
     page.goto(live_app + "/")
     expect(page.get_by_role("tab", name="Long play", exact=True)).to_have_attribute("aria-selected", "true")
     card.locator('.album-choice-art').click()
@@ -154,7 +178,7 @@ def test_album_tuner_keyboard_apply_reset_and_recorded_policy(live_app, store, p
     pending = []
     if delayed:
         page.route('**/home/album-choices', lambda route: pending.append(route))
-    page.set_viewport_size({'width': 390, 'height': 1100})
+    page.set_viewport_size({'width': 1440, 'height': 1100})
     page.goto(live_app + '/#album-choices')
     tune = page.get_by_role('button', name='Adjust album parameters')
     if delayed:

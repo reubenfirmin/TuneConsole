@@ -14,15 +14,7 @@
   <script defer src="/static/generating.js?v={{ asset_v }}"></script>
 </head>
 <body>
-  <div class="gen-stage" data-generation-terminal role="status" aria-live="polite" aria-label="Preparing playlist">
-    {% with loader_status='Wiring up your playlist', loader_detail='Keep YouTube Music open. Your mix will play in that tab.' %}
-    {% include "_partials/launch_loader.html" %}
-    {% endwith %}
-    <span class="gen-brand brand" aria-label="TuneConsole">
-      <img class="brand-mark" src="/static/favicon.svg?v={{ asset_v }}" width="28" height="28" alt="">
-      <span class="brand-name" aria-hidden="true">tuneconsole</span>
-    </span>
-  </div>
+  {% include "_partials/mix_launch_loader.html" %}
   <script>
   {% include "_partials/mix_launch_view.html" %}
   (() => {

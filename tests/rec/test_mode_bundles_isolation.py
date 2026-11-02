@@ -12,6 +12,7 @@ from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
 from yt_playlist.rec import embedding_vectors as embed, measurement, mode_surfaces, surfaces
 from tests import model_support
+from tests.recommendation_support import publish_bundles
 from yt_playlist.rec.rec_worker import RecWorker
 
 
@@ -32,8 +33,21 @@ def _seed(store):
     store.modes.replace_modes([{"mode_id": 1, "label": "House", "families": [["house", 1]],
         "centroid": vectors[0], "size": 1, "rep_keys": keys,
         "space": embed.content_space_id(store)}], retired_ids=[], now=1)
-    store.rec_proposals.put_proposals("mode_bundles", {"saved": True}, 1)
-    store.rec_proposals.put_proposals("fresh_pool", [{"saved": True}], 1)
+    fresh = {'key': 'fresh|new artist', 'video_id': 'fresh', 'title': 'Fresh',
+             'artist': 'New artist', 'genre': 'House'}
+    store.discovery.upsert_discovered_track(fresh['key'], fresh['video_id'], fresh['title'],
+        fresh['artist'], None, None, fresh['genre'], None, 'test', 1)
+    publish_bundles(store, {'all': {'wheelhouse': [{'key': keys[0], 'video_id': 'video',
+        'title': 'Song', 'artist': 'Artist', 'genre': 'House'}]}}, 1, fresh=[fresh])
+    store._isolation_saved_heads = store.recommendations.heads()
+
+
+def _saved(store):
+    assert store.recommendations.heads() == store._isolation_saved_heads
+    assert [row['video_id'] for row in store.recommendations.candidate_page(
+        'home', 'all', 'wheelhouse', limit=4)['tracks']] == ['video']
+    assert [row['video_id'] for row in store.recommendations.candidate_page(
+        'fresh', 'all', 'fresh', limit=4)['tracks']] == ['fresh']
 
 
 def test_ui_read_and_write_complete_while_bundle_scorer_is_still_running(tmp_path, monkeypatch):
@@ -57,7 +71,7 @@ def test_ui_read_and_write_complete_while_bundle_scorer_is_still_running(tmp_pat
     async def interact():
         release = store.priority.enter()
         try:
-            assert store.rec_proposals.get_proposals("mode_bundles") == {"saved": True}
+            _saved(store)
             store.settings.set_setting("ui-write", "saved")
             await asyncio.sleep(0)
             return store.settings.get_setting("ui-write")
@@ -74,8 +88,7 @@ def test_ui_read_and_write_complete_while_bundle_scorer_is_still_running(tmp_pat
             worker.shutdown()
             worker.join(3)
             assert work.wait(0)
-            assert store.rec_proposals.get_proposals("mode_bundles") == {"saved": True}
-            assert store.rec_proposals.get_proposals("fresh_pool") == [{"saved": True}]
+            _saved(store)
             assert not store.conn.in_transaction
         finally:
             work.close_admission()
@@ -95,25 +108,29 @@ def test_mutation_during_calculation_preserves_saved_bundles_and_retries(databas
 
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", mutate)
     assert mode_surfaces.prepare_bundles(store, 100) is None
-    assert store.rec_proposals.get_proposals("mode_bundles") == {"saved": True}
-    assert store.rec_proposals.get_proposals("fresh_pool") == [{"saved": True}]
-    assert not store.conn.execute("SELECT 1 FROM rec_serving_policies").fetchone()
+    _saved(store)
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", calculate)
     assert mode_surfaces.prepare_bundles(store, 100) is not None
-    payload = store.rec_proposals.get_proposals("mode_bundles")
-    assert "song|artist" not in {item["key"] for item in payload["all"]["temporal"]}
+    assert "song|artist" not in {item['key'] for item in store.recommendations.candidate_page(
+        'home', 'all', 'temporal', limit=4)['tracks']}
 
 
 def test_bundle_failure_rolls_back_both_surfaces_and_their_policy_rows(database):
     store = database
+    policies = [tuple(row) for row in store.conn.execute(
+        'SELECT h.surface,g.policy_version FROM recommendation_heads h '
+        'JOIN recommendation_generations g ON g.id=h.generation_id ORDER BY h.surface')]
     with store.conn:
-        store.conn.execute("CREATE TRIGGER reject_fresh BEFORE INSERT ON rec_proposals "
-            "WHEN NEW.surface='fresh_pool' BEGIN SELECT RAISE(ABORT,'rejected bundles'); END")
+        store.conn.execute("CREATE TRIGGER reject_fresh BEFORE INSERT ON recommendation_heads "
+            "WHEN NEW.surface='fresh' BEGIN SELECT RAISE(ABORT,'rejected bundles'); END")
     with pytest.raises(sqlite3.IntegrityError, match="rejected bundles"):
         mode_surfaces.prepare_bundles(store, 100)
-    assert store.rec_proposals.get_proposals("mode_bundles") == {"saved": True}
-    assert store.rec_proposals.get_proposals("fresh_pool") == [{"saved": True}]
-    assert not store.conn.execute("SELECT 1 FROM rec_serving_policies").fetchone()
+    _saved(store)
+    # Staged policies can belong to the failed, recoverable build. Neither
+    # surface may expose one until their common publication commits.
+    assert [tuple(row) for row in store.conn.execute(
+        'SELECT h.surface,g.policy_version FROM recommendation_heads h '
+        'JOIN recommendation_generations g ON g.id=h.generation_id ORDER BY h.surface')] == policies
     assert not store.conn.in_transaction
 
 
@@ -131,9 +148,8 @@ def test_build_fingerprints_models_once_and_stamps_each_pool_with_its_ranker(dat
     payload = mode_surfaces.prepare_bundles(store, 100)
     assert len(calls) == 1
     temporal = payload["all"]["temporal"][0]
-    configuration = store.conn.execute("SELECT configuration FROM rec_serving_policies "
-        "WHERE model_version=?", (temporal["pool_policy"],)).fetchone()[0]
-    assert '"ranker":"temporal"' in configuration
+    configuration = store.rec_ledger.policy_configuration(temporal['pool_policy'])
+    assert configuration['ranker'] == 'temporal'
 
 
 def test_bundle_publication_survives_unrelated_watermarks_and_policy_writes(database, monkeypatch):
@@ -147,21 +163,26 @@ def test_bundle_publication_survives_unrelated_watermarks_and_policy_writes(data
 
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", write_unrelated)
     assert mode_surfaces.prepare_bundles(database, 100) is not None
-    assert database.rec_proposals.get_proposals("mode_bundles") != {"saved": True}
+    assert database.recommendations.heads() != database._isolation_saved_heads
 
 
 def test_radio_and_trend_updates_do_not_discard_prepared_style_pools(database, monkeypatch):
+    account = database.accounts.upsert_account('Radio', 'credentials', None, True)
     calculate = mode_surfaces._calculate_bundles
 
     def update_playback(reader, now, policies):
         result = calculate(reader, now, policies)
-        database.settings.set_setting("radio_current_session", '{"position":2}')
+        from yt_playlist.core import radio_storage
+        with database.conn:
+            radio_storage.save(database.conn, {'episode_id': 'unrelated-radio',
+                'identity': account, 'phase': 'playing', 'position': 2, 'tracks': []},
+                expected=None, now=now)
         database.rec_proposals.put_proposals("trend_rollups", {"updated": now}, now)
         return result
 
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", update_playback)
     assert mode_surfaces.prepare_bundles(database, 100) is not None
-    assert "1" in database.rec_proposals.get_proposals("mode_bundles")
+    assert database.recommendations.pool('home', '1', 'temporal') is not None
     assert database.rec_proposals.get_proposals("trend_rollups") == {"updated": 100}
 
 
@@ -170,17 +191,18 @@ def test_changed_home_genres_still_discard_prepared_style_pools(database, monkey
 
     def change_preferences(reader, now, policies):
         result = calculate(reader, now, policies)
-        database.rec_proposals.put_proposals("home_genre_request", {"include": ["jazz"]}, now)
+        database.rec_proposals.put_proposals('home_genre_request',
+            {'epoch': 1, 'include_genres': ['jazz']}, now)
         return result
 
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", change_preferences)
     assert mode_surfaces.prepare_bundles(database, 100) is None
-    assert database.rec_proposals.get_proposals("mode_bundles") == {"saved": True}
+    _saved(database)
 
 
 def test_missing_pools_publish_during_reenrichment_and_import(database, monkeypatch):
     with database.conn:
-        database.conn.execute("DELETE FROM rec_proposals WHERE surface IN ('mode_bundles','fresh_pool')")
+        database.conn.execute("DELETE FROM recommendation_heads WHERE surface IN ('home','fresh')")
     entry_id = database.conn.execute(
         "SELECT id FROM catalog_entries WHERE video_id='video'").fetchone()[0]
     calculate = mode_surfaces._calculate_bundles
@@ -196,11 +218,11 @@ def test_missing_pools_publish_during_reenrichment_and_import(database, monkeypa
     result = mode_surfaces.prepare_bundles(database, 100)
     assert result is not None
     assert result['all']['temporal']
-    assert database.rec_proposals.get_proposals('mode_bundles') == result
+    assert [row['key'] for row in database.recommendations.candidate_page(
+        'home', 'all', 'temporal', limit=4)['tracks']] == [row['key'] for row in result['all']['temporal']]
     # Keep attribution to the model actually used, rather than refitting under a writer lock.
     policy = result['all']['temporal'][0]['pool_policy']
-    assert database.conn.execute('SELECT 1 FROM rec_serving_policies WHERE model_version=?',
-                                 (policy,)).fetchone()
+    assert database.rec_ledger.policy_configuration(policy)['ranker'] == 'temporal'
 
 
 def test_replacing_model_during_ranking_still_rejects_publication(database, monkeypatch):
@@ -209,9 +231,9 @@ def test_replacing_model_during_ranking_still_rejects_publication(database, monk
     def replace_model(reader, now, policies):
         result = calculate(reader, now, policies)
         with database.conn:
-            database.conn.execute("DELETE FROM recording_embeddings WHERE space='content_library'")
+            database.conn.execute("DELETE FROM recording_embedding_files WHERE space='content_library'")
         return result
 
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', replace_model)
     assert mode_surfaces.prepare_bundles(database, 100) is None
-    assert database.rec_proposals.get_proposals('mode_bundles') == {'saved': True}
+    _saved(database)

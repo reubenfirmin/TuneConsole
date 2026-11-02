@@ -1,12 +1,14 @@
 from playwright.sync_api import expect
 
 from yt_playlist.core import updatecheck
+from tests.home_fixture_support import returning_listener
 from tests.onboarding_support import publish_personal_mix
 
 
 def update_card(monkeypatch, page, store, *, kind="flatpak"):
     store.settings.set_setting("last_sync_at", "1")
     publish_personal_mix(store, now=1)
+    returning_listener(store, 'mixes', now=1)
     monkeypatch.setattr(updatecheck, "update_nudge", lambda _: {
         "kind": kind, "current": "0.1.9", "latest": "0.2.0",
         "command": "Update now", "link": None,

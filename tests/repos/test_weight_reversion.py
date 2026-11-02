@@ -15,7 +15,7 @@ def test_nudge_persists_updated_at_and_skips_flat_shrink():
     s = _store()
     w = s.rec_model.nudge_weight("lane:deep_cut", 2.0, now=1000.0)
     assert w == pytest.approx(2.0)                    # no flat 5% pull anymore
-    row = s.conn.execute("SELECT weight, updated_at FROM rec_weights WHERE axis='lane:deep_cut'").fetchone()
+    row = s.rec_model.weight_records()["lane:deep_cut"]
     assert row["updated_at"] == 1000.0
 
 
@@ -38,7 +38,9 @@ def test_reinforced_weight_does_not_erode():
 
 def test_legacy_row_without_updated_at_reads_as_prior_age_zero():
     s = _store()
-    s.conn.execute("INSERT INTO rec_weights(axis, weight) VALUES ('old', 2.5)")
+    s.rec_model.set_weight("old", 2.5, now=0.0)
+    # Retained evidence can lack a timestamp; keep its typed axis identity.
+    s.conn.execute("UPDATE rec_weights SET updated_at=NULL")
     s.conn.commit()
     assert s.rec_model.get_weights(now=1e9)["old"] == pytest.approx(2.5)   # NULL updated_at: no reversion applied
 
@@ -55,9 +57,10 @@ def test_manual_set_weight_is_fresh_evidence():
 @pytest.mark.parametrize("updated_at", [None, 0.0])
 def test_automatic_nudges_preserve_explicit_genre_mutes(store, factor, updated_at):
     # Legacy mutes and fresh mutes survive both elapsed-time reversion and a positive clamp floor.
-    store.conn.execute("INSERT INTO rec_weights(axis, weight, updated_at) VALUES (?, ?, ?)",
-                       ("genre:jazz", 0.0, updated_at))
-    store.conn.commit()
+    store.rec_model.set_weight("genre:jazz", 0.0, lo=0.0, now=0.0)
+    if updated_at is None:
+        store.conn.execute("UPDATE rec_weights SET updated_at=NULL")
+        store.conn.commit()
     for day in (1, 60, 365):
         assert store.rec_model.nudge_weight("genre:jazz", factor, now=day * DAY) == 0.0
         assert store.rec_model.nudge_weight("genre:jazz", factor, lo=0.0, hi=2.0, now=day * DAY) == 0.0

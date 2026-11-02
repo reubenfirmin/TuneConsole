@@ -4,6 +4,7 @@ import pytest
 from yt_playlist.core.migrations import migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
+from tests.historical_support import upgrade_fixture
 
 DAY = 86400
 
@@ -26,7 +27,7 @@ def test_upgrade_rebuilds_populated_history_only_checkpoint(tmp_path, old_versio
     path = tmp_path / "history.db"
     store = Store(path)
     migrate(store.conn, registry=MIGRATIONS[:old_version])
-    store.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'main','bridge',1)")
+    store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','bridge',1)")
     if old_version < 8:
         store.conn.execute("INSERT INTO tracks(video_id,title,artist,identity_key) VALUES ('v','Song','Artist','song|artist')")
     else:
@@ -37,15 +38,15 @@ def test_upgrade_rebuilds_populated_history_only_checkpoint(tmp_path, old_versio
         store.conn.execute("INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (1,1,'v')")
         store.conn.execute("INSERT INTO library_memberships(entry_id,origin) VALUES (1,'legacy_library')")
         store.conn.execute("INSERT INTO recording_aliases(alias,recording_id,source) VALUES ('song|artist',1,'legacy_library')")
-    store.conn.execute("INSERT INTO history_snapshots(id,account_id,taken_at) VALUES (1,1,?)", (10 * DAY,))
+    store.conn.execute("INSERT INTO history_snapshots(id,identity_id,taken_at) VALUES (1,1,?)", (10 * DAY,))
     store.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (1,'song|artist')")
-    store.conn.execute("INSERT INTO history_snapshots(id,account_id,taken_at) VALUES (2,1,?)", (20 * DAY,))
+    store.conn.execute("INSERT INTO history_snapshots(id,identity_id,taken_at) VALUES (2,1,?)", (20 * DAY,))
     store.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (2,'song|artist')")
     store.conn.execute("INSERT INTO trend_first_play VALUES ('track','song|artist',10,?,'history')", (10 * DAY,))
     store.conn.execute("INSERT INTO trend_first_play VALUES ('artist','Artist',10,?,'history')", (10 * DAY,))
     store.conn.execute("INSERT INTO settings VALUES ('trend_first_play_watermark','2')")
     store.conn.commit()
-    store.init_schema()
+    upgrade_fixture(store)
     key = store.tracks.identity_key_for_video("v")
     _assert_first(store, key, "Artist", 10)
     store.conn.close()

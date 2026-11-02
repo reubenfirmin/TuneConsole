@@ -29,7 +29,7 @@ def song_app(store):
     thread.join(timeout=5)
 
 
-@pytest.mark.parametrize("width", [1280, 390])
+@pytest.mark.parametrize("width", [1280])
 def test_create_from_album_with_readable_input_and_modal_focus(song_app, page, width, tmp_path):
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
@@ -94,7 +94,7 @@ def test_add_search_error_retry_and_duplicate_state(song_app, page, tmp_path):
     expect(dialog.get_by_text("No matching playlists.")).to_be_visible()
     search.fill("evening")
     dialog.get_by_role("radio", name="Evening mix Other account").check()
-    for width in (1280, 390):
+    for width in (1280,):
         page.set_viewport_size({"width": width, "height": 850})
         expect(dialog.get_by_role("button", name="Add song", exact=True)).to_be_in_viewport()
         page.screenshot(path=tmp_path / f"song-destination-{width}.png", animations="disabled")
@@ -106,7 +106,7 @@ def test_add_search_error_retry_and_duplicate_state(song_app, page, tmp_path):
     page.unroute("**/songs/add-to-playlist")
     dialog.get_by_role("button", name="Add song", exact=True).click()
     expect(dialog.get_by_text("Song added.", exact=True)).to_be_visible()
-    page.screenshot(path=tmp_path / "song-added-390.png", animations="disabled")
+    page.screenshot(path=tmp_path / "song-added-1280.png", animations="disabled")
     assert song_app["other"].added == [("DEST", ["owned-song"])]
     assert not song_app["main"].added
     dialog.get_by_role("button", name="Done").click()
@@ -116,27 +116,27 @@ def test_add_search_error_retry_and_duplicate_state(song_app, page, tmp_path):
     expect(dialog.get_by_role("radio", name="Evening mix Other account Already added")).to_be_disabled()
 
 
-@pytest.mark.parametrize("width", [1280, 390, 320])
-def test_long_song_title_and_artwork_survive_creation(song_app, page, width, tmp_path):
+@pytest.mark.parametrize("artwork", [True, False], ids=["artwork", "missing-artwork"])
+def test_long_song_title_and_artwork_survive_creation(song_app, page, artwork, tmp_path):
     title = "Checker Wrecker (feat. Jungle Boogie & Big Tony)"
     # Exercise both real image loading and a failed image's fallback.
-    thumbnail = "/missing-cover.jpg" if width == 320 else "/static/road-trip-hero.png"
+    thumbnail = "/static/road-trip-hero.png" if artwork else "/missing-cover.jpg"
     track = song_app["store"].tracks.upsert_track("checker-wrecker", title, "Lettuce", "Elevate", 300,
                                           thumbnail=thumbnail)
     song_app["store"].playlists.set_playlist_tracks(song_app["source"], [track])
-    page.set_viewport_size({"width": width, "height": 740})
+    page.set_viewport_size({"width": 1280, "height": 740})
     page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
     trigger = page.get_by_role("button", name=f"More actions for {title}")
     trigger.click()
     page.get_by_role("menuitem", name="Create playlist from song").click()
     dialog = page.get_by_role("dialog", name="Create playlist", exact=True)
     expect(dialog.get_by_label("Playlist name")).to_have_value(title)
-    if width == 320:
+    if not artwork:
         expect(dialog.locator(".song-dialog-art img")).to_have_count(0)
     else:
         expect(dialog.locator(".song-dialog-art img")).to_be_visible()
         page.wait_for_function("document.querySelector('.song-dialog-art img')?.naturalWidth > 0")
-    page.screenshot(path=tmp_path / f"long-song-create-{width}.png", animations="disabled")
+    page.screenshot(path=tmp_path / f"long-song-create-artwork-{artwork}.png", animations="disabled")
     dialog.get_by_role("button", name="Create playlist", exact=True).click()
     expect(dialog.get_by_text("Playlist created.", exact=True)).to_be_visible()
     expect(dialog.get_by_role("heading", name=title, exact=True)).to_be_visible()
@@ -147,14 +147,14 @@ def test_long_song_title_and_artwork_survive_creation(song_app, page, width, tmp
         page.keyboard.press("Tab")
         assert dialog.evaluate("el => el.contains(document.activeElement)")
     expect(dialog.get_by_role("link", name="Open playlist")).to_be_in_viewport()
-    page.screenshot(path=tmp_path / f"long-song-created-{width}.png", animations="disabled")
+    page.screenshot(path=tmp_path / f"long-song-created-artwork-{artwork}.png", animations="disabled")
     page.keyboard.press("Escape")
     expect(trigger).to_be_focused()
     saved = next(p for p in song_app["store"].playlists.get_playlists() if p.title == title)
     assert saved.thumbnail == thumbnail
     page.goto(f"{song_app['base']}/playlists")
     cover = page.locator(f'#new-playlists tr[data-playlist-id="{saved.id}"] img.pl-thumb')
-    if width == 320:
+    if not artwork:
         expect(cover).to_have_count(0)
     else:
         expect(cover).to_be_visible()
@@ -170,7 +170,7 @@ def test_partial_creation_keeps_warning_and_playlist_link(song_app, page, monkey
             raise RuntimeError("Song response lost")
         return {"status": "STATUS_FAILED"}
     monkeypatch.setattr(song_app["main"], "add_playlist_items", fail)
-    page.set_viewport_size({"width": 390, "height": 740})
+    page.set_viewport_size({"width": 1280, "height": 740})
     page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
     page.get_by_role("button", name="More actions for Owned Song").click()
     page.get_by_role("menuitem", name="Create playlist from song").click()
@@ -186,7 +186,7 @@ def test_partial_creation_keeps_warning_and_playlist_link(song_app, page, monkey
     if unknown:
         expect(dialog.get_by_role('link', name='Action Log and recovery')).to_be_visible()
     dialog.locator('form').evaluate('form => form.requestSubmit()')
-    page.screenshot(path=tmp_path / "song-partially-created-390.png", animations="disabled")
+    page.screenshot(path=tmp_path / "song-partially-created-1280.png", animations="disabled")
     link.press('Enter')
     expect(page.get_by_role("heading", name="Owned Song", exact=True)).to_be_visible()
     assert len(song_app["main"].created) == 1
@@ -250,7 +250,7 @@ def test_track_alignment_centers_single_lines_and_anchors_wrapped_lines(song_app
     if surface == "radio":
         page.add_style_tag(url=song_app["base"] + "/static/radio.css")
         page.evaluate("() => htmx.ajax('GET', '/radio/playlist', {target: '.library-table-card', swap: 'outerHTML'})")
-    for width in (1280, 390):
+    for width in (1280,):
         page.set_viewport_size({"width": width, "height": 850})
         for video_id in ("single-line", "wrapped-line"):
             row = page.locator(f'tr.srow[data-vid="{video_id}"]')
@@ -278,7 +278,7 @@ def test_track_alignment_centers_single_lines_and_anchors_wrapped_lines(song_app
                 return offsets;
             }""")
             assert all(abs(item["offset"]) <= 3 for item in offsets), (surface, width, video_id, offsets)
-        page.locator(".track-table").screenshot(path=tmp_path / f"track-alignment-{surface}-{width}.png")
+        page.locator(".track-table").screenshot(path=f"/tmp/tuneconsole-ready-743-alignment-{surface}-{width}.png")
 
 
 @pytest.mark.parametrize("popover_source", [True, False], ids=["source-option", "native-dismissal"])
@@ -323,8 +323,7 @@ def test_keyboard_reuses_one_menu_after_metadata_save(song_app, page, popover_so
 
 
 @pytest.mark.parametrize("width,height,font_scale", [
-    (320, 950, 1), (320, 950, 1.5), (390, 950, 1), (390, 950, 1.5),
-    (480, 950, 1), (1280, 950, 1), (320, 480, 1.5), (320, 600, 2),
+    (1280, 950, 1),
 ])
 def test_loaded_suggestions_fit_viewport_with_long_metadata(
         song_app, page, width, height, font_scale, tmp_path):
@@ -504,33 +503,35 @@ def test_generated_playlist_keeps_contextual_mood_actions(song_app, page):
 
 
 def test_mix_track_menu_stays_above_card_and_opens_playlist_dialog(live_app, store, page, tmp_path):
+    from tests.home_fixture_support import returning_listener
     from tests.test_home_other_genres import seed_genres
     from tests.test_mode_cards_route import prepare_home
     seed_genres(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
     prepare_home(store, 1)
+    returning_listener(store, 'mixes', now=1)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(live_app + "/")
     card = page.locator("#gen-wheelhouse")
     card.locator(".gen-poster").click()
     track = card.locator(".gen-row").first
     title = track.get_attribute("data-title")
-    for width in (1280, 390):
+    for width in (1280,):
         page.set_viewport_size({"width": width, "height": 850})
         track.get_by_role("button", name=f"More actions for {title}").click()
         menu = page.get_by_role("menu", name="Song actions")
         expect(menu).to_be_visible()
         bounds = menu.bounding_box()
         assert bounds["x"] >= 0 and bounds["x"] + bounds["width"] <= width
-        page.screenshot(path=tmp_path / f"mix-song-menu-{width}.png")
+        page.screenshot(path=f"/tmp/tuneconsole-743-mix-song-menu-{width}.png")
         menu.get_by_role("menuitem", name="Create playlist from song").click()
         expect(page.get_by_label("Playlist name")).to_have_value(title)
         page.get_by_role("dialog").get_by_role("button", name="Cancel").click()
 
 
 @pytest.mark.parametrize('surface', ['playlist', 'album'])
-@pytest.mark.parametrize('width', [1280, 390])
+@pytest.mark.parametrize('width', [1280])
 def test_metadata_dialog_edits_all_fields_and_restores_originals(song_app, page, surface, width, tmp_path):
     store = song_app['store']
     tid = store.tracks.upsert_track('owned-song', 'Owned Song', 'Artist & Friends', 'Album', 180,

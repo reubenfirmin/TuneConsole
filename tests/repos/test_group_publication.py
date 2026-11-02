@@ -14,6 +14,7 @@ from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.migrations.runner import MigrationError
 from yt_playlist.core.migrations import v059_group_publication, v060_group_build_expiry
 from yt_playlist.core.activity import WorkClosing
+from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.store import Store
 from yt_playlist.rec import group_discovery, group_preparation, group_versions
 from yt_playlist.repos import group_publication
@@ -26,6 +27,8 @@ def database(tmp_path):
     # protections. The compact protocol has its own current-schema tests.
     migrate(store.conn, registry=MIGRATIONS[:69])
     store._bind_repositories()
+    store.conn.execute('PRAGMA journal_mode=WAL')
+    store._snapshot_revisions = Revisions(store.conn)
     yield store
     store.conn.close()
 
@@ -260,7 +263,9 @@ def test_upgrade_preserves_existing_head_history_graph_and_assignments(tmp_path)
                   'rec_group_members', 'rec_group_unknown', 'rec_group_head', 'rec_group_edges',
                   'rec_group_assignments')
         before = {table: [tuple(row) for row in store.conn.execute(f'SELECT * FROM {table}')] for table in tables}
-        store.init_schema()
+        # Verify the publication migration itself against its frozen predecessor.
+        migrate(store.conn, registry=MIGRATIONS[:59])
+        store._bind_repositories()
         assert before == {table: [tuple(row) for row in store.conn.execute(f'SELECT * FROM {table}')] for table in tables}
         assert store.taste_groups.head_generation() == 'old'
         assert store.taste_groups.assignment('assigned')['version'] == 'version'
@@ -291,11 +296,12 @@ def test_already_applied_group_migration_can_reach_expiry_lookup_upgrade(tmp_pat
         # retroactively become a v59 requirement and prevent reaching its upgrade.
         if existing_index == 'incompatible':
             with pytest.raises(MigrationError, match='ix_group_build_expiry'):
-                migrate(store.conn)
+                migrate(store.conn, registry=MIGRATIONS[:60])
             assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 59
         else:
-            store.init_schema()
-            assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == MIGRATIONS[-1].version
+            migrate(store.conn, registry=MIGRATIONS[:60])
+            store._bind_repositories()
+            assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 60
             v060_group_build_expiry.validate(store.conn)
             assert store.taste_groups.head_generation() == 'retained'
         assert before == [tuple(row) for row in store.conn.execute('SELECT * FROM rec_group_generations')]

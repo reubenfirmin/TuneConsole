@@ -76,14 +76,20 @@ def test_independent_adjacent_day_is_not_guessed_to_be_a_radio_shadow():
             ('radio|x',day+offset*86400+43200)]
 
 
-def test_play_events_identity_key_index_exists():
-    # H1: the shadow-suppression NOT EXISTS probes play_events by identity_key once per history row;
-    # without this index that is a correlated full scan (measured ~25 s at 33k history rows x 20k
-    # events, vs 67 ms indexed), run four times per ranking pass once radio settings exist.
+def test_play_events_subject_time_indexes_exist():
+    # Shadow suppression must probe canonical and unresolved subjects without
+    # scanning every event. Current owners store those subjects separately.
     s = _store()
     indexed_cols = {r["name"]: [c["name"] for c in s.conn.execute(f"PRAGMA index_info({r['name']})")]
                     for r in s.conn.execute("PRAGMA index_list(play_events)")}
-    assert indexed_cols.get("ix_play_events_key") == ["identity_key"]
+    assert indexed_cols.get('ix_play_event_account_subject_time') == ['account_id', 'recording_id', 'played_at']
+    assert indexed_cols.get('ix_play_event_unresolved_time') == ['unresolved_subject_key', 'played_at']
+    for predicate, index in (
+        ('account_id=1 AND recording_id=1 AND played_at>=0', 'ix_play_event_account_subject_time'),
+        ("recording_id IS NULL AND unresolved_subject_key='song' AND played_at>=0", 'ix_play_event_unresolved_time'),
+    ):
+        plan = s.conn.execute('EXPLAIN QUERY PLAN SELECT 1 FROM play_events WHERE ' + predicate).fetchall()
+        assert any('SEARCH' in row['detail'] and index in row['detail'] for row in plan)
 
 
 def test_history_row_without_matching_radio_event_survives_exclusion():

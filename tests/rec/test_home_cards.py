@@ -39,20 +39,23 @@ def test_empty_menu_has_four_buildable_slots_and_does_not_admit_work(store):
 def test_other_genre_fallback_records_only_final_offer_once(store, monkeypatch):
     store.rec_proposals.put_proposals("home_genre_request", {"epoch": 0, "avoid_genres": ["jazz"]}, 1000)
     home = service(store)
-    offered, served, searches = [], [], []
+    final_menus, searches = [], []
 
     def candidates(store, now, **filters):
         searches.append(filters)
         return [] if filters.get('avoid') else [proto()]
 
     monkeypatch.setattr(stored_home, "unmodeled_cards", candidates)
-    monkeypatch.setattr(home_cards, "_record_served_cards", lambda store, protos, now: served.append(protos))
-    monkeypatch.setattr(store.discovery, "mark_offered", lambda kind, keys, now: offered.append(keys))
+    monkeypatch.setattr(home, "record_offer", lambda protos, now: final_menus.append((protos, now)))
+    def no_track_exposure(*args, **kwargs):
+        raise AssertionError("A mix menu does not expose its individual tracks")
+    monkeypatch.setattr(home_cards, "_record_served_cards", no_track_exposure)
+    monkeypatch.setattr(store.discovery, "mark_offered", no_track_exposure)
     result = home.cards(home_cards.CardsRequest(1000))
     assert "usual mixes" in result.genre_warning
     assert any(search.get("avoid") == {"jazz"} for search in searches)
-    assert offered == [["a|b"]]
-    assert served == [[result.protos[0]]]
+    assert [track['key'] for track in result.protos[0]['tracks']] == ['a|b']
+    assert final_menus == [(result.protos, 1000)]
     assert home.jobs.admitted == []
 
 

@@ -5,6 +5,9 @@ A rolled-back publication leaves an unreferenced file, never a changed old head.
 """
 import hashlib
 import json
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from pathlib import Path
 import tempfile
 
@@ -50,7 +53,7 @@ def relative(kind, owner, revision):
     return Path(kind, parts[0][-2:].zfill(2), *parts, name + '.json')
 
 
-def publish(conn, kind, owner, revision, data):
+def _prepared(conn, kind, owner, revision, data):
     if not conn.in_transaction:
         raise RuntimeError('Runtime metadata publication requires a writer transaction')
     body = {'format': 1, 'kind': kind, 'owner': list(owner), 'revision': revision, 'data': data}
@@ -65,7 +68,7 @@ def publish(conn, kind, owner, revision, data):
         old = None
     if old is not None:
         if old == encoded:
-            return path
+            return path, None
         # A failed transaction may leave its next revision on disk. Only a
         # committed/current revision is immutable; no snapshot owns an orphan.
         from . import metadata_runtime as runtime
@@ -80,9 +83,52 @@ def publish(conn, kind, owner, revision, data):
                     'ON p.name=s.provider WHERE s.recording_id=? AND p.id=?', owner).fetchone()
         if current is not None and revision <= current[0]:
             raise ValueError('Runtime metadata revision cannot change its content')
+    return path, encoded
+
+
+def publish(conn, kind, owner, revision, data):
+    path, encoded = _prepared(conn, kind, owner, revision, data)
     # The owner's SQL reservation fences this revision's publication.
-    fao.write_bytes(path, encoded, max_bytes=MAX_BYTES)
+    if encoded is not None:
+        fao.write_bytes(path, encoded, max_bytes=MAX_BYTES)
     return path
+
+
+def publish_many(conn, documents):
+    """Durably write at most 128 documents before the caller commits SQL.
+
+    Owner checks and encoding stay on the SQLite thread. Four file writers
+    overlap durable I/O, holding at most 8 MiB of pending encoded documents.
+    Every writer has stopped before this call returns or raises.
+    """
+    if not conn.in_transaction:
+        raise RuntimeError('Runtime metadata publication requires a writer transaction')
+
+    pending, size, seen = deque(), 0, set()
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix='metadata-files') as pool:
+        for count, document in enumerate(documents, 1):
+            check_cancellable_work()
+            if count > 128:
+                raise ValueError('Runtime metadata batch exceeds its document budget')
+            if len(pending) == 4:
+                future, length = pending.popleft()
+                future.result()
+                size -= length
+            path, encoded = _prepared(conn, *document)
+            if path in seen:
+                raise ValueError('Runtime metadata batch repeats a revision')
+            seen.add(path)
+            if encoded is None:
+                continue
+            while pending and size + len(encoded) > MAX_BYTES:
+                future, length = pending.popleft()
+                future.result()
+                size -= length
+            future = pool.submit(copy_context().run, fao.write_bytes, path, encoded, max_bytes=MAX_BYTES)
+            pending.append((future, len(encoded)))
+            size += len(encoded)
+        for future, _ in pending:
+            future.result()
 
 
 def read(conn, kind, owner, revision, *, missing=False, max_bytes=MAX_BYTES):
@@ -96,6 +142,10 @@ def read(conn, kind, owner, revision, *, missing=False, max_bytes=MAX_BYTES):
         raise ValueError('Missing runtime metadata document: ' + str(path)) from None
     if len(encoded) > min(max_bytes, MAX_BYTES):
         raise WorkBudgetExceeded('Runtime metadata document exceeds its byte budget')
+    return _verified_data(encoded, kind, owner, revision)
+
+
+def _verified_data(encoded, kind, owner, revision):
     document = json.loads(encoded)
     body = document.get('body') if isinstance(document, dict) else None
     if (not isinstance(body, dict) or set(document) != {'body', 'sha256'}
@@ -150,31 +200,32 @@ def export(conn, root):
 
 
 def restore(conn, manifest):
-    """Copy owned files, checking custody; no SQL locator needs rewriting."""
-    import shutil
+    """Validate the complete backup before replacing any live owned files."""
     manifest = Path(manifest)
     document = json.loads(fao.read_bytes(manifest))
     if not isinstance(document, dict) or document.get('format') != 1 or not isinstance(document.get('entries'), list):
         raise ValueError('Invalid runtime metadata backup')
     expected = {(kind, tuple(owner), revision): required for kind, owner, revision, required in references(conn, include_expired=True)}
-    seen = set()
-    for entry in document['entries']:
-        check_cancellable_work()
-        key = entry['kind'], tuple(entry['owner']), entry['revision']
-        if key not in expected or key in seen:
-            raise ValueError('Runtime metadata backup differs from SQL ownership')
-        seen.add(key)
-        relative_path = relative(*key)
-        source = manifest.parent / relative_path
-        with fao.open_reader(source) as stream:
-            encoded = stream.read(MAX_BYTES+1)
-        if len(encoded) > MAX_BYTES:
-            raise ValueError('Runtime metadata backup document exceeds its byte budget')
-        if len(encoded) != entry['bytes'] or hashlib.sha256(encoded).hexdigest() != entry['sha256']:
-            raise ValueError('Runtime metadata backup file failed verification')
-        target = directory(conn) / relative_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        fao.copy(source, target, max_bytes=MAX_BYTES)
-        read(conn, *key)
-    if any(required and key not in seen for key, required in expected.items()):
-        raise ValueError('Runtime metadata backup is missing a required document')
+    with tempfile.TemporaryDirectory(prefix='tuneconsole-metadata-restore-') as staging:
+        staged = Path(staging)
+        seen = set()
+        for entry in document['entries']:
+            check_cancellable_work()
+            key = entry['kind'], tuple(entry['owner']), entry['revision']
+            if key not in expected or key in seen:
+                raise ValueError('Runtime metadata backup differs from SQL ownership')
+            seen.add(key)
+            relative_path = relative(*key)
+            prepared = staged / relative_path
+            fao.copy(manifest.parent / relative_path, prepared, max_bytes=MAX_BYTES)
+            encoded = fao.read_bytes(prepared, max_bytes=MAX_BYTES)
+            if len(encoded) != entry['bytes'] or hashlib.sha256(encoded).hexdigest() != entry['sha256']:
+                raise ValueError('Runtime metadata backup file failed verification')
+            _verified_data(encoded, *key)
+        if any(required and key not in seen for key, required in expected.items()):
+            raise ValueError('Runtime metadata backup is missing a required document')
+        # Publish only the private, verified copies, so backup replacements
+        # after validation cannot introduce unchecked bytes into live history.
+        for key in seen:
+            relative_path = relative(*key)
+            fao.copy(staged / relative_path, directory(conn) / relative_path, max_bytes=MAX_BYTES)

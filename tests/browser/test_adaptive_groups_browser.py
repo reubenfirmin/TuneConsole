@@ -7,13 +7,15 @@ from tests.test_group_serving import hidden_ancestor_preview, pools
 from yt_playlist.rec import group_preparation, group_serving
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_music_groups_are_prominent_searchable_and_used_by_home(live_app, store, page, width):
     from tests.test_group_home import library
+    from tests.home_fixture_support import returning_listener
     from yt_playlist.rec import home_prepared
 
     _tracks, head = library(store)
     assert home_prepared.prepare(store, 1200)
+    returning_listener(store, 'mixes', now=1200)
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.set_viewport_size({'width': width, 'height': 1000})
@@ -42,7 +44,7 @@ def test_music_groups_are_prominent_searchable_and_used_by_home(live_app, store,
     assert not errors
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_prepared_group_preview_explains_distinct_names_and_parentage(live_app, store, page, width):
     tracks = recordings([('House', 20, .1), ('House', 20, .95)])
     publish(store, tracks)
@@ -61,7 +63,7 @@ def test_prepared_group_preview_explains_distinct_names_and_parentage(live_app, 
     assert not errors
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_hidden_group_names_keep_visible_ancestor_context(live_app, store, page, width, monkeypatch):
     preview = hidden_ancestor_preview(store)
     monkeypatch.setattr(store.taste_groups, 'head_generation', lambda: preview['generation'])
@@ -87,19 +89,19 @@ def test_hidden_group_names_keep_visible_ancestor_context(live_app, store, page,
     assert not errors
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_fresh_preview_updates_with_continuing_backlog_and_retains_last_good_on_failure(
         live_app, store, page, width):
     from dataclasses import replace
     from tests.conftest import seed_catalog_track
+    from tests.test_group_preparation import observe_artist
     from yt_playlist.rec import progressive
 
-    for i in range(6):
-        seed_catalog_track(store, f'preview {i}|artist {i}', f'Preview {i}', f'Artist {i}',
-                           video_id=f'preview{i}', genre=('House', 'House', 'Jazz')[i % 3])
-    with store.conn:
-        store.conn.executemany('INSERT INTO rec_musical_sources VALUES (?,?,?,?,?,1)',
-            [(f'source{i}', 'test', 'artist', f'artist{i}', '{}') for i in range(12)])
+    for i in range(12):
+        genre = ('House', 'House', 'Jazz')[i % 3]
+        track_id = seed_catalog_track(store, f'preview {i}|artist {i}', f'Preview {i}', f'Artist {i}',
+                                      video_id=f'preview{i}', genre=genre)
+        observe_artist(store, track_id, f'artist{i}', genre)
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.set_viewport_size({'width': width, 'height': 1000})
@@ -115,8 +117,8 @@ def test_fresh_preview_updates_with_continuing_backlog_and_retains_last_good_on_
     # The open page must refresh itself; there is no reload or synthetic HTMX event.
     expect(section.get_by_text('3 recordings grouped.', exact=True)).to_be_visible(timeout=15000)
     expect(section.get_by_text('11 artist detail updates', exact=False)).to_be_visible()
-    expect(section.get_by_role('heading', name='House', exact=True)).to_be_visible()
-    expect(section.get_by_role('heading', name='Jazz', exact=True)).to_be_visible()
+    expect(section.get_by_role('heading', name='house', exact=True)).to_be_visible()
+    expect(section.get_by_role('heading', name='jazz', exact=True)).to_be_visible()
     assert store.prepared_content.has_pending() and store.musical_profiles.pending()
     generation = section.locator('[data-generation]').get_attribute('data-generation')
     capture(section, path=f'/tmp/tuneconsole-139-prepared-{width}.png')

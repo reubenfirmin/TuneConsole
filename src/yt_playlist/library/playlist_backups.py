@@ -5,7 +5,7 @@ import re
 from types import SimpleNamespace
 from uuid import uuid4
 
-from yt_playlist.core import paths
+from yt_playlist.core import fao, paths
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.util.matching import track_artist
@@ -78,15 +78,6 @@ def _capture_backup(store,pl,now,detail):
     for parent in reversed(backups.parents):
         _sync_directory(parent)
     # A failed write must never replace a previous recovery artifact or authorize deletion.
-    temporary = path.with_suffix(".tmp")
-    try:
-        with temporary.open("x", encoding="utf-8") as stream:
-            json.dump(payload, stream, indent=2)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        _sync_directory(backups)
-    finally:
-        temporary.unlink(missing_ok=True)
+    fao.write_bytes(path, json.dumps(payload, indent=2).encode(), immutable=True)
     return str(path)
 

@@ -14,6 +14,21 @@ ROOT = EXPERIMENTS.parent
 LOCAL = EXPERIMENTS / 'audio_lab/local'
 CHECKPOINT = LOCAL / 'external-20261028/checkpoint-1'
 MODULES = {
+    'quality-round': 'quality_round',
+    'focus-counts': 'focus_count_experiment',
+    'focus-confirmation': 'focus_confirmation',
+    'many-windows': 'many_window_experiment',
+    'uplift-gate': 'uplift_gate_experiment',
+    'release-extension': 'release_extension',
+    'memo-confirmation': 'memo_confirmation',
+    'encoder-assets': 'encoder_assets',
+    'encoder-comparison': 'encoder_experiment',
+    'representation-study': 'representation_study',
+    'chroma-study': 'chroma_study',
+    'midlevel-study': 'midlevel_study',
+    'midlevel-pilot': 'midlevel_pilot',
+    'wcmed-study': 'wcmed_study',
+    'situnes-study': 'situnes_study',
     'checkpoint': 'external_checkpoint',
     'acquire': 'dataset_range',
     'audit': 'dataset_audit',
@@ -77,6 +92,14 @@ MODULES = {
     'release-wheel': 'release_package_check',
 }
 TESTS = (
+    'test_representation_study.py',
+    'test_focus_counts.py',
+    'test_many_windows.py',
+    'test_uplift_gate.py',
+    'test_release_extension.py',
+    'test_memo_confirmation.py',
+    'test_encoder_models.py',
+    'test_quality_round.py',
     'test_research_coordination.py',
     'test_output_evaluation.py',
     'test_external_checkpoint.py',

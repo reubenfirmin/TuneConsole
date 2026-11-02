@@ -146,7 +146,7 @@ def test_start_radio_during_repair_has_no_error_banner(current_vacuum_store, pag
         with connect(f'ws://127.0.0.1:{port}/bridge/ws', origin=EXTENSION_ORIGIN, open_timeout=5) as extension, \
                 _radio_diagnostics(page, ctx, tmp_path) as diagnostics:
             page.goto(f'http://127.0.0.1:{port}/#radio')
-            expect(page.locator('#storage-maintenance')).to_have_text('Library updates are paused.')
+            expect(page.locator('#storage-maintenance')).to_have_text('Updating library storage; browsing and playback remain available.')
             expect(page.locator('html')).to_have_attribute('data-storage-compacting', 'true')
             expect(page.locator('.authbar')).to_be_hidden()
             start = page.get_by_role('button', name='Start radio with ').first
@@ -182,7 +182,7 @@ def test_start_radio_during_repair_has_no_error_banner(current_vacuum_store, pag
             assert store.settings.get_setting('radio_current_session') is None
             assert store.conn.execute('SELECT count(*) FROM play_events').fetchone()[0] == 0
             assert not diagnostics['errors']
-            page.screenshot(path=str(tmp_path / 'active-storage-repair-radio.png'))
+            page.screenshot(path=f'/tmp/tuneconsole-728-active-{height}-{enough_space}.png')
             release.set()
             assert ctx.storage_maintenance.ready.wait(10)
             playback_feedback.drain(store)
@@ -202,7 +202,7 @@ def test_start_radio_during_repair_has_no_error_banner(current_vacuum_store, pag
             assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
             store.settings.set_setting('after-compaction', 'writes resumed')
             assert store.settings.get_setting('after-compaction') == 'writes resumed'
-            page.screenshot(path=str(tmp_path / 'storage-repair-result.png'))
+            page.screenshot(path=f'/tmp/tuneconsole-728-result-{height}-{enough_space}.png')
             # The server renders the same warning even when polling is unavailable.
             page.route('**/static/storage-maintenance.js*', lambda route: route.abort())
             page.reload()
@@ -211,7 +211,7 @@ def test_start_radio_during_repair_has_no_error_banner(current_vacuum_store, pag
             else:
                 expect(banner).to_be_visible()
                 expect(banner).to_have_text('Free disk space to finish.')
-            page.screenshot(path=str(tmp_path / 'storage-repair-result-after-reload.png'))
+            page.screenshot(path=f'/tmp/tuneconsole-728-reloaded-{height}-{enough_space}.png')
     finally:
         release.set()
         server.should_exit = True

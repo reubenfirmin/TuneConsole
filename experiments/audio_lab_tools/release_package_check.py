@@ -18,7 +18,7 @@ def check(directory, wheel):
     directory.mkdir(parents=True)
     installed = directory / 'installed'
     root = Path(release.__file__).resolve().parents[1]
-    names = ['rec/audio_vibe_release.py', 'rec/audio_vibe_cruise.py', 'rec/audio_vibe_model.py',
+    names = ['rec/audio_vibe_runtime.py', 'rec/audio_vibe_release.py', 'rec/audio_vibe_cruise.py', 'rec/audio_vibe_model.py',
              'rec/audio_vibe_external.py', 'rec/vibe_preparation.py', 'rec/musical_character.py',
              'repos/vibe_predictions.py', 'core/audio_vibe_contract.py', 'rec/data/release-vibes.json',
              'rec/data/release-vibes.NOTICE.md', 'rec/data/cruise-vibes.json', 'rec/data/emotify-vibes.json']

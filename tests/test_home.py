@@ -13,13 +13,21 @@ def _client(store, now=1000.0, *, prepare=True):
     return TestClient(app, base_url="http://127.0.0.1")
 
 
-def _publish_existing_listener_mix(store):
-    from tests.onboarding_support import publish_personal_mix
+def _publish_existing_listener_mix(store, *, prefix='prepared'):
+    from tests.home_fixture_support import publish_menu
+    from yt_playlist.rec import taste_analysis, transient
 
-    publish_personal_mix(store)
     # Publish the complete menu as the ordinary worker baseline; this fixture
     # has no held tuning window that should supersede later history updates.
-    store.rec_proposals.put_proposals('home_prepared', store.rec_proposals.get_proposals('home_tuned'), 1000)
+    with store.read_view() as reader:
+        facets = reader.rec_query.play_weighted_facets(reader.rec_query.play_counts())
+        fingerprint = {'breadth': taste_analysis.taste_breadth(reader,genre_plays=facets['genres']),
+                       'eras': taste_analysis.era_distribution(reader,era_plays=facets['eras']),
+                       'genre_plays': facets['genres'],
+                       'transient': transient.prepared_facet_leans(reader,1000)}
+    publish_menu(store,prefix=prefix,surface='home_tuned')
+    payload = store.rec_proposals.get_proposals('home_tuned')
+    store.rec_proposals.put_proposals('home_prepared', {**payload,'fingerprint':fingerprint}, 1000)
     store.rec_proposals.put_proposals('home_tuned', {}, 1000)
     # Controlled worker output for a returning listener. These tests exercise
     # fingerprint rendering after earned access, without mocking the journey.
@@ -52,16 +60,15 @@ def test_home_is_default_route(store):
     assert "Extension connected" not in r.text  # connection alone is not useful Home content
     assert "Library synced" not in r.text  # freshness line only appears after a first sync
     assert 'id="arrival-title"' in r.text
-    assert 'Your festival starts here.' in r.text
+    assert 'Welcome to TuneConsole' in r.text
     assert 'class="festival-map"' in r.text
     assert 'id="home-mode-cards"' not in r.text
     assert "homeStatus()" in r.text
     assert "Sync now" not in r.text and "Full sync" not in r.text
     assert "Sync plays" not in r.text and "sync-toggle" not in r.text
     feed = c.get("/home/feed")
-    assert feed.status_code == 200
-    assert 'id="steer-toast"' in feed.text
-    assert "Mixes updated." in feed.text and "Adjust recommendation settings" in feed.text
+    assert feed.status_code == 409
+    assert 'id="home-feed"' not in feed.text
 
     store.settings.set_setting("last_sync_at", "1000")
     html = c.get("/").text
@@ -71,7 +78,9 @@ def test_home_is_default_route(store):
 
 def test_next_home_visit_expires_a_day_old_theme_menu(store):
     from tests.mode_fixtures import seed_modes
+    from tests.home_fixture_support import returning_listener
     seed_modes(store,1)
+    returning_listener(store, 'mixes', now=1000)
     from yt_playlist.rec import rec_params
     from yt_playlist.web.routes import home
     rec_params.set_param(store, "erosion_view_cap", 10)
@@ -114,19 +123,30 @@ def test_revisit_shows_full_current_playlist_in_saved_order(store):
               for i in range(8)]
     tracks.append(seed_catalog_track(store, "offline|artist", "Offline song", "Artist"))
     store.playlists.set_playlist_tracks(pid, tracks)
+    # Revisit opens with two saved playlists (or another sufficiently useful
+    # collection). A lone playlist is still below the real output threshold.
+    other = store.playlists.upsert_playlist(iid, 'another-quiet-list', 'Second quiet mix', 9, None, 1000)
+    store.playlists.set_playlist_tracks(other, list(reversed(tracks)))
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
     client = _client(store)
-    # The worker can prepare this quiet playlist independently of a full mix
-    # board. A dismissal alone still cannot graduate initial listening setup.
-    assert client.get('/home/growth').json()['ready_areas']['rediscover']
+    # Prepared Revisit output cannot skip its journey predecessor. Dismissing
+    # onboarding alone does not establish earlier listening or complete setup.
+    assert not client.get('/home/growth').json()['ready_areas']['rediscover']
     assert 'id="onboarding-feed"' in client.get('/').text
     publish_personal_mix(store)
+    from tests.home_fixture_support import returning_listener
+    returning_listener(store, 'mixes', now=1000)
+    # Importing the mix changes catalog inputs; rebuild against the new library.
+    from tests.test_mode_cards_route import prepare_home
+    prepare_home(store, 1000)
+    assert client.get('/home/growth').json()['ready_areas']['rediscover']
     assert client.get('/home/onboard/status').json()['setup']['complete']
     html = client.get('/').text
-    assert 'x-show="growth.ready_areas.rediscover"' in html
+    assert 'x-show="areaAccessible(\'rediscover\')"' in html
     section = html.split('<section id="rediscover">', 1)[1].split('</section>', 1)[0]
-    table = re.search(r'<table class="track-table redis-tracks".*?</table>', section, re.S).group()
+    table = re.search(r'<table class="track-table redis-tracks" aria-label="Quiet mix tracks".*?</table>',
+                      section, re.S).group()
     rows = re.findall(r'<tr class="srow".*?</tr>', table, re.S)
     titles = [unescape(re.search(r'class="ptitle"[^>]*>(.*?)</(?:a|span)>', row).group(1)) for row in rows]
     assert titles == [*[f"Song {i}" for i in range(8)], "Offline song"]
@@ -164,9 +184,13 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
                                "artist": "X" if surf == "wheelhouse" and i == 0 else f"Art {surf} {i}",
                                "album": "", "thumbnail": None,
                                "plays": 0, "reason": "", "lane": "", "genre": ""} for i in range(8)]
-    store.rec_proposals.put_proposals("mode_bundles", payload, now)
+    from tests.recommendation_support import seed_bundle_subjects, publish_bundles
+    seed_bundle_subjects(store,payload)
+    publish_bundles(store,payload,now)
     from tests.test_mode_cards_route import prepare_home
     prepare_home(store, now)
+    store.rec_proposals.put_proposals('listening_choices', {
+        'home_format': {'episodes': {'mixes': 1}}}, now)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now)
     c = TestClient(app, base_url="http://127.0.0.1")
 
@@ -194,8 +218,7 @@ def test_steering_panel_hidden_until_genres_exist(store):
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
-    from tests.test_mode_cards_route import prepare_home
-    prepare_home(store, 1000)
+    _publish_existing_listener_mix(store,prefix='updated')
     response = c.get("/home/feed")
     assert response.status_code == 200
     assert 'id="fingerprint"' in response.text
@@ -225,6 +248,7 @@ def test_home_page_has_steering_and_fingerprint(store):
 
 def test_home_steer_writes_lean_not_permanent_weight(store):
     iid = store.accounts.upsert_account("main", "cred", None, True)
+    _publish_existing_listener_mix(store)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.post("/home/steer", data={"axis": "genre:techno", "weight": "1.5"})
@@ -245,7 +269,7 @@ def test_presync_shows_recs_placeholder_not_feed(store):
 
     html = c.get("/").text
     assert 'id="arrival-title"' in html
-    assert 'Your festival starts here.' in html
+    assert 'Welcome to TuneConsole' in html
     assert 'class="festival-map"' in html
     assert c.post('/home/onboard/format', data={'format': 'mixes'}).status_code == 409
     assert store.settings.get_setting('home_format') is None
@@ -390,6 +414,7 @@ def test_home_breadth_bar_is_interactive(store):
     store.tracks.set_track_genre(t, "Techno")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
     c = _client(store)
+    _publish_existing_listener_mix(store)
     html = c.get("/home/feed").text
     assert "/home/breadth" in html                       # the breadth bar is now a steering control
     assert 'name="breadth_bias"' in html                 # ...bound to the breadth_bias param
@@ -421,6 +446,7 @@ def test_home_genres_taxonomy(store):
     """GET /home/genres -> 200, the full taxonomy (families + sub-genres) the Home genre picker filters
     client-side. Must include a known subgenre ('minimal techno') so a zero-play genre is pinnable."""
     c = _client(store)
+    _publish_existing_listener_mix(store)
     r = c.get("/home/genres")
     assert r.status_code == 200
     opts = r.json()["options"]

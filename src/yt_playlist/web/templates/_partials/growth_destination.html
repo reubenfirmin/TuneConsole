@@ -3,8 +3,8 @@
   <button class="growth-dialog-close" type="button" @click="closeNode()" aria-label="Close destination">×</button>
   <template x-if="selectedNode"><div>
     <div class="growth-dialog-scene" aria-hidden="true" :style="'background-position:' + selectedNode.x + '% ' + Math.max(0, selectedNode.y - 12) + '%'"></div>
-    <span class="growth-eyebrow" x-text="selectedNode.bonus ? 'Optional bonus' : selectedNode.id === 'vibes' ? (selectedNode.unlocked ? 'Unlocked in Mix tapes' : 'Coming to Mix tapes') : selectedNode.status"></span>
     <h2 id="growth-destination-title" x-text="({vibes: 'Set the mood.', takeout: 'Rediscover old favorites sooner', lastfm: 'Find more music that fits', deepseek: 'Get a feel for an album before you play'})[selectedNode.id] || selectedNode.label"></h2>
+    <p x-text="selectedNode.bonus ? 'Optional bonus' : selectedNode.id === 'vibes' ? (selectedNode.unlocked ? 'Unlocked in Mix tapes' : 'Coming to Mix tapes') : selectedNode.status"></p>
     <template x-if="!selectedNode.bonus"><div>
       <p x-text="selectedNode.detail"></p>
       <p x-show="selectedNode.unlocked && !selectedNode.usable">Your access is kept while fresh choices are prepared.</p>

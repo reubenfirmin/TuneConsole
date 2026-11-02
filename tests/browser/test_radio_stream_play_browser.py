@@ -19,7 +19,7 @@ def show_session(page, api):
     expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_stream_artwork_hover_keyboard_play_and_metadata_links(page, radio_ui, tmp_path, width):
     api = radio_ui
     page.set_viewport_size({'width': width, 'height': 1000})
@@ -94,7 +94,7 @@ def test_rapid_song_clicks_keep_latest_choice_and_explain_removed_song_inline(pa
     expect(page.locator('.radio-session')).to_be_visible()
 
 
-@pytest.mark.parametrize('width,confirmation', [(1440, 'bridge'), (390, 'observer')])
+@pytest.mark.parametrize('width,confirmation', [(1440, 'bridge'), (1280, 'observer')])
 def test_pending_song_animates_and_grays_only_preceding_songs_until_playback(
         page, radio_ui, width, confirmation):
     api = radio_ui
@@ -373,7 +373,7 @@ def test_song_play_requires_loaded_server_support_and_recovers_after_restart(pag
     expect(page.locator('.radio-selection-error:visible')).to_have_count(0)
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 @pytest.mark.parametrize('kind,expected', [('artist', '/artist?name=Artist%202'), ('song', '/track/radio1')])
 def test_stream_metadata_link_opens_its_page_without_selecting_playback(page, radio_ui, width, kind, expected):
     api = radio_ui

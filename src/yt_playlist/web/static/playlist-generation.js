@@ -174,9 +174,12 @@ function genOpenYT(id) {
       const token = JSON.stringify(record.token);
       const script = renderMixLaunch.toString() + '\n' + startMixLaunch.toString() +
         '\nstartMixLaunch(' + context + ',' + token + ');';
+      const loader = document.getElementById('mix-launch-loader').innerHTML;
       record.popupUrl = URL.createObjectURL(new Blob([
-        '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
-        '</head><body><script>' + script + '</script></body></html>'
+        '<!doctype html><html class="gen-page"><head><meta charset="utf-8">' +
+        '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+        '<base href="' + location.origin + '/"></head><body>' + loader +
+        '<script>' + script + '</script></body></html>'
       ], {type:'text/html'}));
       tab.location.replace(record.popupUrl);
     }
@@ -187,6 +190,14 @@ document.addEventListener('htmx:configRequest', event => {
   if (event.detail.path !== '/home/generate') return;
   const record = Array.from(generationWindows.values()).find(item => item.node.contains(event.detail.elt));
   if (record) event.detail.parameters.launch_id = record.token;
+});
+
+// HTMX delivers this before following HX-Redirect, without replacing the mix.
+document.addEventListener('generated-playlist-saved', event => {
+  // Keep the spoke loader open while the destination is still loading.
+  window.addEventListener('pagehide', () => {
+    genComplete(event.detail.launch_id, event.detail.playlist, false, false, true);
+  }, {once: true});
 });
 
 document.addEventListener('htmx:beforeRequest', event => {

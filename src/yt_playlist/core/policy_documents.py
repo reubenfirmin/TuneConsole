@@ -4,7 +4,7 @@ import json
 import os
 import math
 from contextlib import contextmanager
-from itertools import chain
+from itertools import chain, groupby
 from pathlib import Path
 import tempfile
 import time
@@ -13,6 +13,7 @@ from .activity import check_cancellable_work
 from .evidence_ledger import _mkdir, _sync_directory, canonical
 from .policy_config import BASE_FIELD
 from . import fao
+from .fao import _try_file_lock
 
 FORMAT = 'recommendation-policy-1'
 MAX_BYTES = 8 * 1024 * 1024
@@ -35,47 +36,6 @@ def directory(conn, memory_key=None):
     if memory_key is None:
         memory_key = getattr(conn, '_policy_memory_key', f'{os.getpid()}-{id(conn)}')
     return root_for_database(None, memory_key)
-
-
-def _try_file_lock(stream, *, exclusive):
-    """Return an unlock callback, or None when another handle owns the range."""
-    if os.name != 'nt':
-        import fcntl
-        try:
-            fcntl.flock(stream, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return None
-        return lambda: fcntl.flock(stream, fcntl.LOCK_UN)
-
-    # CRT byte locks are exclusive. Native shared locks allow nested policy
-    # reads and independent readers while still fencing orphan collection.
-    import ctypes
-    from ctypes import wintypes
-    import msvcrt
-
-    class Overlapped(ctypes.Structure):
-        _fields_ = [('internal', ctypes.c_size_t), ('internal_high', ctypes.c_size_t),
-                    ('offset', wintypes.DWORD), ('offset_high', wintypes.DWORD),
-                    ('event', wintypes.HANDLE)]
-
-    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-    kernel.LockFileEx.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
-                                 wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Overlapped))
-    kernel.LockFileEx.restype = wintypes.BOOL
-    kernel.UnlockFileEx.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
-                                   wintypes.DWORD, ctypes.POINTER(Overlapped))
-    kernel.UnlockFileEx.restype = wintypes.BOOL
-    handle, overlapped = msvcrt.get_osfhandle(stream.fileno()), Overlapped()
-    if not kernel.LockFileEx(handle, 1 | (2 if exclusive else 0), 0, 1, 0, ctypes.byref(overlapped)):
-        error = ctypes.get_last_error()
-        if error == 33:  # ERROR_LOCK_VIOLATION
-            return None
-        raise ctypes.WinError(error)
-
-    def unlock():
-        if not kernel.UnlockFileEx(handle, 0, 1, 0, ctypes.byref(overlapped)):
-            raise ctypes.WinError(ctypes.get_last_error())
-    return unlock
 
 
 @contextmanager
@@ -114,9 +74,9 @@ def publish(root, configuration):
     return _publish_encoded(root, encoded, digest), digest, len(encoded)
 
 
-def _publish_encoded(root, encoded, digest):
+def _publish_encoded(root, encoded, digest, *, age=None):
     path = Path(root) / digest[:2] / (digest + '.json')
-    fao.write_bytes(path, encoded, immutable=True)
+    fao.write_bytes(path, encoded, immutable=True, age=age)
     return str(path)
 
 
@@ -125,7 +85,7 @@ def _existing(path, size=MAX_BYTES):
         return stream.read(size + 1)
 
 
-def publish_many(root, configurations):
+def publish_many(root, configurations, *, age=None):
     """Pack small configurations without allocating a filesystem block per leaf.
 
     Rows own the filename, offset, byte size and digest of their exact record.
@@ -135,7 +95,7 @@ def publish_many(root, configurations):
     records, size = [], len(PACK_HEADER)
     def sealed():
         encoded = PACK_HEADER + b''.join(records)
-        filename = _publish_encoded(root, encoded, hashlib.sha256(encoded).hexdigest())
+        filename = _publish_encoded(root, encoded, hashlib.sha256(encoded).hexdigest(), age=age)
         offset = len(PACK_HEADER)
         for record in records:
             yield filename, hashlib.sha256(record).hexdigest(), len(record), offset
@@ -155,20 +115,24 @@ def publish_many(root, configurations):
         yield from sealed()
 
 
-def read(filename, digest, *, offset=0, size=None):
-    path = Path(filename)
+def repack(root, records, publisher):
+    """Pack verified (value, age) records without merging distinct custody clocks.
+
+    Source-file ordering keeps existing packs together. Grouping is lazy and the
+    domain publisher retains its normal byte bound; no file-age registry is used.
+    """
+    for _clocks, group in groupby(records, key=lambda record: (record[1].mtime_ns, record[1].ctime_ns)):
+        first, age = next(group)
+        yield from publisher(root, chain((first,), (value for value, _age in group)), age=age)
+
+
+def _range(offset,size):
     if (type(offset) is not int or offset < 0
             or size is not None and (type(size) is not int or not 0 < size <= MAX_BYTES)):
         raise ValueError('Invalid recommendation policy file range')
-    with fao.open_reader(path) as stream:
-        if offset:
-            if (size is None or offset < len(PACK_HEADER) or stream.read(len(PACK_HEADER)) != PACK_HEADER
-                    or len(path.stem) != 64 or any(c not in '0123456789abcdef' for c in path.stem)):
-                raise ValueError('Invalid recommendation policy pack reference')
-            stream.seek(offset)
-            encoded = stream.read(size)
-        else:
-            encoded = stream.read(MAX_BYTES + 1)
+
+
+def _decoded(path,digest,encoded,offset,size):
     if (len(encoded) > MAX_BYTES or size is not None and len(encoded) != size
             or hashlib.sha256(encoded).hexdigest() != digest or not offset and path.stem != digest):
         raise ValueError('Recommendation policy file does not match its digest')
@@ -179,6 +143,52 @@ def read(filename, digest, *, offset=0, size=None):
     if canonical(document) != encoded:
         raise ValueError('Noncanonical recommendation policy document')
     return document['configuration']
+
+
+def read(filename, digest, *, offset=0, size=None, with_age=False):
+    path = Path(filename)
+    _range(offset,size)
+    with fao.open_reader(path) as stream:
+        age = stream.info
+        if offset:
+            if (size is None or offset < len(PACK_HEADER) or stream.read(len(PACK_HEADER)) != PACK_HEADER
+                    or len(path.stem) != 64 or any(c not in '0123456789abcdef' for c in path.stem)):
+                raise ValueError('Invalid recommendation policy pack reference')
+            stream.seek(offset)
+            encoded = stream.read(size)
+        else:
+            encoded = stream.read(MAX_BYTES + 1)
+    value = _decoded(path,digest,encoded,offset,size)
+    return (value,age) if with_age else value
+
+
+def read_many(references, *, with_age=False):
+    """Stream ordered file/range references with one pinned reader per pack.
+
+    Each record retains the same range, digest and canonical-format checks as
+    read(). Keeping adjacent offsets together avoids decompressing every prefix
+    again during export and restore; memory stays bounded to one record.
+    """
+    for filename,records in groupby(references,key=lambda reference:reference[0]):
+        path = Path(filename)
+        with fao.open_reader(path) as stream:
+            header = None
+            for _,digest,offset,size in records:
+                _range(offset,size)
+                if offset:
+                    if header is None:
+                        stream.seek(0)
+                        header = stream.read(len(PACK_HEADER))
+                    if (size is None or offset<len(PACK_HEADER) or header!=PACK_HEADER
+                            or len(path.stem)!=64 or any(c not in '0123456789abcdef' for c in path.stem)):
+                        raise ValueError('Invalid recommendation policy pack reference')
+                    stream.seek(offset)
+                    encoded = stream.read(size)
+                else:
+                    stream.seek(0)
+                    encoded = stream.read(MAX_BYTES+1)
+                value = _decoded(path,digest,encoded,offset,size)
+                yield (value,stream.info) if with_age else value
 
 
 @contextmanager
@@ -238,6 +248,12 @@ def install(conn, rows, bases=(), *, memory_key=None):
             existing = conn.execute(f'SELECT content_digest FROM {owner} WHERE version=?', (version,)).fetchone()
             if existing is not None and existing[0] != digest:
                 raise ValueError(f'Conflicting immutable recommendation policy: {version!r}')
+            if existing is None and owner==OWNERS[1]:
+                from . import policy_history
+                if policy_history.available(conn):
+                    historical = policy_history.document(conn,version)
+                    if historical is not None and historical['configuration'] != _value:
+                        raise ValueError(f'Conflicting immutable historical policy: {version!r}')
             if (base is not None and base not in prepared[OWNERS[0]] and not conn.execute(
                     'SELECT 1 FROM recommendation_policy_bodies WHERE version=?', (base,)).fetchone()):
                 raise ValueError(f'Missing shared recommendation policy body: {base!r}')
@@ -315,10 +331,10 @@ def export(conn, root):
     used = 0
 
     def copy_batch():
-        values = (read(filename, digest, offset=offset, size=size)
-                  for _owner, _version, filename, digest, offset, size in pending)
+        values = read_many(((filename,digest,offset,size)
+                           for _owner,_version,filename,digest,offset,size in pending),with_age=True)
         for (owner, version, _filename, digest, _offset, size), target in zip(
-                pending, publish_many(root, values)):
+                pending, repack(root, values, publish_many)):
             filename, copied, copied_size, offset = target
             if (copied, copied_size) != (digest, size):
                 raise ValueError('Policy backup changed a configuration')
@@ -332,7 +348,7 @@ def export(conn, root):
     for owner in OWNERS:
         for version, filename, digest, offset, size in conn.execute(
                 f'SELECT version,configuration_filename,content_digest,configuration_offset,byte_size '
-                f'FROM {owner} ORDER BY version'):
+                f'FROM {owner} ORDER BY configuration_filename,configuration_offset,version'):
             if pending and used + size > PACK_BYTES:
                 copy_batch()
                 pending, used = [], 0
@@ -414,9 +430,9 @@ def restore(conn, manifest, *, memory_key=None):
             raise ValueError('Policy backup does not match the restored database')
         targets = []
         root = directory(conn, memory_key)
-        values = (read(path.parent.parent / entry['relative_filename'], entry['digest'],
-                       offset=entry['offset'], size=entry['byte_size']) for entry in entries)
-        for entry, (filename, copied, size, offset) in zip(entries, publish_many(root, values)):
+        values = read_many(((path.parent.parent/entry['relative_filename'],entry['digest'],
+                             entry['offset'],entry['byte_size']) for entry in entries),with_age=True)
+        for entry, (filename, copied, size, offset) in zip(entries, repack(root, values, publish_many)):
             if (copied, size) != (entry['digest'], entry['byte_size']):
                 raise ValueError('Policy restore changed a configuration')
             targets.append((entry['owner'], filename, offset, entry['version']))
@@ -450,9 +466,7 @@ def collect_orphans(conn, *, memory_key=None):
                 removed = 0
                 for path in chain(root.glob('*/*.json'), root.glob('*/.pending-*')):
                     if path.resolve() not in retained:
-                        path.unlink()
-                        _sync_directory(path.parent)
-                        removed += 1
+                        removed += fao.delete(path, missing_ok=True)
                 conn.commit()
             finally:
                 unlock()

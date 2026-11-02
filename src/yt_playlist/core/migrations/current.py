@@ -182,6 +182,7 @@ def _statements(version):
         yield from discovery_subjects.fences()
 
 
+@lru_cache(maxsize=4096)
 def _tokens(sql):
     result = []
     for match in TOKEN.finditer(sql or ''):
@@ -340,9 +341,23 @@ def validate(conn, *, foreign_keys=True, data=True):
 
 def _validate(conn, expected_contract, version, *, replaced=frozenset(), foreign_keys=True, data=True):
     from .. import metadata_runtime
+    from .. import legacy_journals
+    from .. import vibe_versions
+    if vibe_versions.normalized(conn):
+        expected_contract = {**expected_contract, **vibe_versions.contract()}
+    replaced = replaced | legacy_journals.retired_relations(conn)
     runtime_views = metadata_runtime.views() if metadata_runtime.active(conn) else {}
     objects = {r[0]: (r[1], r[2]) for r in conn.execute(
         "SELECT name,type,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")}
+    file_vibe_guards = {}
+    if 'schema_changes' in objects and conn.execute(
+            "SELECT 1 FROM schema_changes WHERE version=16 AND name='file_owned_vibe_guards'").fetchone():
+        from .. import vibe_provenance
+        file_vibe_guards = dict(vibe_provenance.guards())
+    if 'schema_changes' in objects and conn.execute(
+            "SELECT 1 FROM schema_changes WHERE name='continuing_historical_policy_attribution'").fetchone():
+        from .. import policy_history
+        file_vibe_guards.update(policy_history.capture_guards())
     for name, (kind, expected) in expected_contract.items():
         if name in replaced:
             continue
@@ -361,6 +376,8 @@ def _validate(conn, expected_contract, version, *, replaced=frozenset(), foreign
             if any(observed[0].get(key) != value for key, value in columns.items()) or observed[1:] != tuple(constraints):
                 raise MigrationError(f'Incompatible current table/constraint: {name}')
         else:
+            if name in file_vibe_guards:
+                expected = _tokens(file_vibe_guards[name])
             if kind == 'view' and name in runtime_views:
                 expected = _tokens(runtime_views[name])
             if name == 'retained_group_publication_delete':

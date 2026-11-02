@@ -7,6 +7,7 @@ choice evidence projection. Serving this view never starts provider or model wor
 import json
 import math
 
+from yt_playlist.core import vibe_versions
 from yt_playlist.providers import deepseek, enrichment, lastfm
 from yt_playlist.rec import (artist_start, festival_layout, growth_readiness, home_preferences, home_prepared, home_vibe, into_recently,
                              onboarding, tv, vibe_preparation)
@@ -107,6 +108,38 @@ def has_access(state, area):
         node['unlocked'] and node['href'] == '/#'+area for node in state['nodes'])
 
 
+def retained_access(store, area):
+    """Answer only access already established by deliberate prior listening.
+
+    Match the historical prefix in _connect_paths without evaluating current
+    menus. Missing history still needs the ordinary readiness projection.
+    """
+    destination = {'directions': 'listening', 'album-choices': 'albums',
+                   'radio': 'radio', 'tv': 'tv', 'discover': 'discover',
+                   'vibes': 'vibes', 'recent': 'recent'}.get(area)
+    if destination is None:
+        return False
+    with store.read_view() as reader:
+        usage = reader.rec_proposals.choice_usage()
+        episodes = usage.get('episodes') or {}
+        resume = {identity for format, identity in
+                  (('mixes', 'listening'), ('albums', 'albums'), ('radio', 'radio'))
+                  if episodes.get(format)}
+        if usage.get('vibe_episodes'):
+            resume.add('vibes')
+        if tv.draw_number(reader) > 0:
+            resume.add('tv')
+        return any(MAIN_PATH.index(destination) <= MAIN_PATH.index(identity) for identity in resume)
+
+
+def vibe_access(store, now):
+    """Resolve a saved Vibe without rebuilding menus for already earned access."""
+    with store.read_view() as reader:
+        if reader.rec_proposals.choice_usage().get('vibe_episodes'):
+            return True
+        return has_access(view(reader, now), 'vibes')
+
+
 def _view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collections=None,
           for_radio_access=False):
     with store.read_view() as reader:
@@ -126,14 +159,14 @@ def _view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collec
             except (ValueError, TypeError):
                 radio = {}
             seeds = radio.get('tracks') or radio.get('seeds') or []
-            blocked = reader.rec_model.suppressed_keys('for_you', now, keys=[t['key'] for t in seeds]) if seeds else set()
-            seeds = [track for track in seeds if track['key'] not in blocked]
-            radio_usable = bool(len({track['key'] for track in seeds}) >= growth_readiness.MIN_RADIO_SEEDS
-                                and (radio.get('offer_id') or radio.get('menu_id')))
+            menu = radio.get('offer_id') or radio.get('menu_id')
+            active = False
         else:
-            radio_usable = bool((len({track['key'] for track in radio.get('seeds') or []}) >= growth_readiness.MIN_RADIO_SEEDS
-                                and radio.get('seedMenu')) or
-                                radio.get('state', {}).get('active'))
+            seeds, menu = radio.get('seeds') or [], radio.get('seedMenu')
+            active = radio.get('state', {}).get('active')
+        from yt_playlist.rec.radio_candidates import eligible_seeds
+        seeds = eligible_seeds(reader, seeds, now)
+        radio_usable = bool(active or menu and len({track['key'] for track in seeds}) >= growth_readiness.MIN_RADIO_SEEDS)
         format_usage = reader.rec_proposals.choice_usage()
         usage = format_usage.get('episodes') or {}
         radio_ready = bool(radio_usable and (usage.get('radio') or total and processed * 10 >= total * 9))
@@ -174,11 +207,12 @@ def _view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collec
                                 current_lastfm['status'], current_lastfm['fingerprint'])
                             and not reader.enrichment_state.provider_refresh_pending('lastfm'))
         prefix = vibe_preparation.serving_prefix()
+        version = vibe_versions.expression(reader.conn, 'recording_vibes', 'v')
         evidence = reader.conn.execute(_SCOPE +
             "SELECT COUNT(DISTINCT CASE WHEN v.source IN ('audio_measurement','provider_measurement') "
             "THEN v.recording_id END), COUNT(DISTINCT CASE WHEN v.source IN ('artist_genre','artist','genre') "
             "THEN v.recording_id END) FROM recording_vibes v JOIN scope s ON s.recording_id=v.recording_id "
-            "WHERE v.support>0 AND substr(v.inputs_version,1,?)=? AND length(v.inputs_version)>?",
+            "WHERE v.support>0 AND substr(" + version + ",1,?)=? AND length(" + version + ")>?",
             (len(prefix), prefix, len(prefix))).fetchone()
         measured, predicted = evidence
         vibes_ready = bool(not for_radio_access and measured + predicted and mixes

@@ -5,6 +5,7 @@ from yt_playlist.rec import measurement, rec_params, scorecard
 
 
 def test_policy_fingerprint_tracks_preferences_parameters_and_actual_vectors(store):
+    store.tracks.upsert_track('song', 'Song', 'Artist', None, None)
     baseline, _ = measurement.serving_policy(store, 100)
     assert measurement.serving_policy(store, 100)[0] == baseline
     rec_params.set_param(store, "axis_weight_cap", 2)

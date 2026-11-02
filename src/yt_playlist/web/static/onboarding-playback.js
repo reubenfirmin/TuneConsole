@@ -16,6 +16,12 @@
     } catch (_) {}
   }
 
+  function rememberPlaylist(playlist) {
+    pending = {playlist, expires: Date.now() + 10 * 60 * 1000};
+    save();
+    apply(window.playbackStatus?.snapshot);
+  }
+
   function finish() {
     clearTimeout(timer);
     timer = null;
@@ -81,14 +87,15 @@
   document.addEventListener('htmx:afterRequest', event => {
     if (event.detail.elt?.hasAttribute('data-onboarding-album') && event.detail.failed) finish();
   });
+  document.addEventListener('generated-playlist-saved', event => {
+    if (event.target.hasAttribute?.('data-onboarding-play')) rememberPlaylist(event.detail.playlist);
+  });
   document.addEventListener('htmx:beforeSwap', event => {
     if (!event.detail.requestConfig?.elt?.hasAttribute('data-onboarding-play')) return;
     const response = new DOMParser().parseFromString(event.detail.serverResponse, 'text/html');
     const playlist = response.querySelector('[data-generated-playlist]')?.dataset.generatedPlaylist;
     if (!event.detail.shouldSwap || event.detail.isError || !playlist) { finish(); return; }
-    pending = {playlist, expires: Date.now() + 10 * 60 * 1000};
-    save();
-    apply(window.playbackStatus?.snapshot);
+    rememberPlaylist(playlist);
   });
   window.addEventListener('bridge-status', event => apply(event.detail));
   const refresh = () => apply(window.playbackStatus?.snapshot);

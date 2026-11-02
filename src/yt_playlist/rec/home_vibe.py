@@ -78,7 +78,7 @@ def current(store, now):
     if value not in PRESETS:
         return ''
     from yt_playlist.rec import account_growth
-    return value if account_growth.has_access(account_growth.view(store, now), 'vibes') else ''
+    return value if account_growth.vibe_access(store, now) else ''
 
 
 def affinity(item, preset, profiles=None):

@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 from .. import fao
 
-from .. import append_work, collection_recovery, playlist_recipe_state, radio_storage
+from .. import append_work, collection_recovery, playlist_recipe_state, radio_checkpoint, radio_storage
 from ..evidence_ledger import canonical
 from ..migrations.runner import MigrationError
 from . import append_operations as preparation, document_plan
@@ -124,7 +124,7 @@ def apply_radio(conn, source, value):
     append = header['kind'] == 'append'
     operation = captured if append else captured['replacement']
     fields = (('pending_sent', 'sent'), ('pending_started_at', 'started_at')) if append else (
-        ('waiting_at', 'started_at'), ('slot', 'slot'), ('choice_id', 'choice_id'))
+        ('waiting_at', 'started_at'), ('slot', 'slot'))
     for field, column in fields:
         if field in operation:
             operation[field] = bool(header[column]) if field == 'pending_sent' else header[column]
@@ -140,6 +140,8 @@ def apply_radio(conn, source, value):
             if field in operation:
                 value[field] = operation[field]
         return value
+    if 'choice_id' in operation:
+        operation['choice_id'] = radio_checkpoint.project_choice(operation['choice_id'], header['choice_id'])
     if 'allowed' in operation:
         operation['allowed'] = [sequence(conn, name, header, 'allowed', index) for index in range(header['allowed_count'])]
     for role in ('confirmed', 'waiting', 'play_prefix', 'excluded'):

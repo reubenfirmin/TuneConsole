@@ -32,7 +32,7 @@ def directory(conn, memory_key=None):
     return root_for_database(path, key)
 
 
-def publish_many(root, documents):
+def publish_many(root, documents, *, age=None):
     """Yield filename/digest/size/offset for each bounded (kind, object) record."""
     records, used = [], len(HEADER)
 
@@ -40,7 +40,7 @@ def publish_many(root, documents):
         encoded = HEADER + b''.join(records)
         # This primitive only publishes immutable bytes under their SHA256. It
         # creates no shared registry or policy owner for these group files.
-        filename = policy_documents._publish_encoded(root, encoded, hashlib.sha256(encoded).hexdigest())
+        filename = policy_documents._publish_encoded(root, encoded, hashlib.sha256(encoded).hexdigest(), age=age)
         offset = len(HEADER)
         for record in records:
             yield filename, hashlib.sha256(record).hexdigest(), len(record), offset
@@ -61,11 +61,12 @@ def publish_many(root, documents):
         yield from flush()
 
 
-def read(filename, digest, size, offset, kind):
+def read(filename, digest, size, offset, kind, *, with_age=False):
     if (type(size) is not int or not 0 < size <= MAX_BYTES or type(offset) is not int
             or offset < len(HEADER) or kind not in KINDS):
         raise ValueError('Invalid musical group file reference')
     with fao.open_reader(filename) as stream:
+        age = stream.info
         if stream.read(len(HEADER)) != HEADER:
             raise ValueError('Invalid musical group pack')
         stream.seek(offset)
@@ -77,14 +78,78 @@ def read(filename, digest, size, offset, kind):
             or value['format'] != FORMAT or value['kind'] != kind or not isinstance(value['value'], dict)
             or canonical(value) != encoded):
         raise ValueError('Unsupported musical group document')
-    return value['value']
+    return (value['value'], age) if with_age else value['value']
 
 
 def references(conn):
     for table, keys, prefix, kind in OWNERS:
         fields = ','.join((*keys, prefix + '_filename', prefix + '_digest', prefix + '_bytes', prefix + '_offset'))
-        for row in conn.execute(f'SELECT {fields} FROM {table} ORDER BY ' + ','.join(keys)):
+        for row in conn.execute(f'SELECT {fields} FROM {table} ORDER BY {prefix}_filename,{prefix}_offset,' + ','.join(keys)):
             yield table, tuple(row[:len(keys)]), kind, *row[len(keys):]
+
+
+def repack_batch(conn, table, after=None, limit=128):
+    """Repack a bounded owner prefix within the caller's bookmarked transaction.
+
+    Return (last key, row count, complete). Files are immutable and published
+    before their SQL references; a failed batch leaves only collectible files.
+    """
+    if not conn.in_transaction or type(limit) is not int or not 0 < limit <= 128:
+        raise ValueError('Musical group repacking needs a bounded writer transaction')
+    keys, prefix, kind = next((keys, prefix, kind) for owner, keys, prefix, kind in OWNERS if owner == table)
+    fields = ','.join((*keys, prefix + '_filename', prefix + '_digest', prefix + '_bytes', prefix + '_offset'))
+    predicate = ' WHERE (' + ','.join(keys) + ')>(' + ','.join('?' for _ in keys) + ')' if after is not None else ''
+    rows = conn.execute('SELECT ' + fields + ' FROM ' + table + predicate + ' ORDER BY ' + ','.join(keys) +
+                        ' LIMIT ?', (*after, limit) if after is not None else (limit,)).fetchall()
+    pending, used = [], 0
+    for row in rows:
+        if pending and used + row[-2] > PACK_BYTES:
+            break
+        pending.append(row)
+        used += row[-2]
+    values = (((kind, value), age) for row in pending
+              for value, age in [read(*row[len(keys):], kind, with_age=True)])
+    for row, (filename, digest, size, offset) in zip(pending, policy_documents.repack(directory(conn), values, publish_many)):
+        if (digest, size) != (row[-3], row[-2]):
+            raise ValueError('Musical group repacking changed its content')
+        conn.execute('UPDATE ' + table + ' SET ' + prefix + '_filename=?,' + prefix + '_offset=? WHERE ' +
+                     ' AND '.join(column + '=?' for column in keys), (filename, offset, *row[:len(keys)]))
+    return (tuple(pending[-1][:len(keys)]) if pending else after), len(pending), len(rows) < limit and len(pending) == len(rows)
+
+
+def collect_orphans_batch(conn, limit=128):
+    """Drain one bounded traversal of a stable candidate's unowned files.
+
+    Repacking must already be committed. The caller never deletes an owned
+    range, including one visible to an older retained reader.
+    """
+    from . import file_collection
+    if not conn.in_transaction or type(limit) is not int or not 0 < limit <= 128:
+        raise ValueError('Musical group collection needs a bounded writer transaction')
+    root = directory(conn)
+    if not root.exists():
+        return 0, True
+    with (root / '.readers.lock').open('a+b') as stream:
+        unlock = policy_documents._try_file_lock(stream, exclusive=True)
+        if unlock is None:
+            raise RuntimeError('Musical group files still have a retained reader')
+        try:
+            with file_collection.collection(conn, root, name='.rebuild-collection.json',
+                    valid_shard=lambda name: len(name) == 2 and all(c in '0123456789abcdef' for c in name)) as cursor:
+                removed = 0
+                for _ in range(limit):
+                    path = cursor.next()
+                    if cursor.finished:
+                        break
+                    if path is None or not (path.name.endswith('.json') or path.name.startswith('.pending-')):
+                        continue
+                    if not any(conn.execute('SELECT 1 FROM ' + table + ' WHERE ' + prefix + '_filename=? LIMIT 1',
+                                            (str(path),)).fetchone() for table, _keys, prefix, _kind in OWNERS):
+                        removed += fao.delete(path, missing_ok=True)
+                cursor.save()
+                return removed, cursor.finished
+        finally:
+            unlock()
 
 
 def _manifest(root, value):
@@ -120,9 +185,11 @@ def export(conn, root):
     pending, entries, chunks, used = [], [], [], 0
 
     def copy_batch():
-        values = ((kind, read(filename, digest, size, offset, kind))
-                  for _table, _key, kind, filename, digest, size, offset in pending)
-        for (table, key, _kind, _filename, digest, size, _offset), file in zip(pending, publish_many(root, values)):
+        values = (((kind, value), age)
+                  for _table, _key, kind, filename, digest, size, offset in pending
+                  for value, age in [read(filename, digest, size, offset, kind, with_age=True)])
+        for (table, key, _kind, _filename, digest, size, _offset), file in zip(
+                pending, policy_documents.repack(root, values, publish_many)):
             filename, copied, copied_size, offset = file
             if (copied, copied_size) != (digest, size):
                 raise ValueError('Musical group backup changed its content')
@@ -189,10 +256,11 @@ def restore(conn, manifest):
         expected = {(table, key): (digest, size) for table, key, _kind, _filename, digest, size, _offset in references(conn)}
         if expected != actual:
             raise ValueError('Musical group backup does not match the restored database')
-        values = ((owners[entry['owner']][2], read(path.parent.parent / entry['relative_filename'],
-                   entry['digest'], entry['byte_size'], entry['offset'], owners[entry['owner']][2])) for entry in entries)
+        values = (((owners[entry['owner']][2], value), age) for entry in entries
+                  for value, age in [read(path.parent.parent / entry['relative_filename'],
+                    entry['digest'], entry['byte_size'], entry['offset'], owners[entry['owner']][2], with_age=True)])
         targets = []
-        for entry, file in zip(entries, publish_many(directory(conn), values)):
+        for entry, file in zip(entries, policy_documents.repack(directory(conn), values, publish_many)):
             filename, digest, size, offset = file
             if (digest, size) != (entry['digest'], entry['byte_size']):
                 raise ValueError('Musical group restore changed its content')
@@ -226,9 +294,7 @@ def collect_orphans(conn):
                 removed = 0
                 for path in chain(root.glob('*/*.json'), root.glob('*/.pending-*')):
                     if path.resolve() not in retained:
-                        path.unlink()
-                        _sync_directory(path.parent)
-                        removed += 1
+                        removed += fao.delete(path, missing_ok=True)
                 conn.commit()
                 return removed
             finally:

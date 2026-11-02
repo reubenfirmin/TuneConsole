@@ -94,7 +94,13 @@ def test_reassociation_between_result_publication_and_attempt_keeps_evidence_on_
             move(store, target)
         return False
     assert run(store, original, provider(probe, tripped=tripped)) == []
-    assert store.conn.execute('SELECT recording_id FROM metadata_findings WHERE provenance_json IS NOT NULL').fetchone()[0] == old
+    # Catalog readers follow the correction redirect; captured deliveries must
+    # still name the recording that supplied their inputs.
+    from yt_playlist.core import metadata_native
+    rows = store.conn.execute('SELECT o.id,d.input_recording_id FROM native_metadata_observations o '
+                              'JOIN metadata_deliveries d ON d.id=o.delivery_id').fetchall()
+    assert [(row['input_recording_id'], metadata_native.read(store.conn, row['id'])['value'])
+            for row in rows] == [(old, .9)]
     assert store.tracks.get_track_audio(target)[1] is None
     assert not store.conn.execute('SELECT 1 FROM provider_attempts').fetchone()
 

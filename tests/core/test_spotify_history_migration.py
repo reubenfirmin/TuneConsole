@@ -4,18 +4,22 @@ from yt_playlist.core.migrations import Migration, MigrationError, migrate
 from yt_playlist.core.migrations import v031_spotify_history as upgrade
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
-from yt_playlist.core import listening
-from yt_playlist.core.db_revisions import Revisions
+from tests.historical_support import upgrade_fixture
 
 
 def _predecessor(path):
     store = Store(path)
     migrate(store.conn, registry=MIGRATIONS[:30])
+    # Populate the actual v30 owners; current repositories require later schemas.
+    with store.conn:
+        store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','bridge',1)")
+        event = store.conn.execute("INSERT INTO play_events(identity_id,identity_key,raw_identity_key,played_at,source) "
+                                   "VALUES (1,'old-song','old-song',1700000000,'spotify')").lastrowid
+        store.conn.execute("INSERT INTO play_event_sources VALUES (?,'takeout')", (event,))
+        artist = store.conn.execute("INSERT INTO artists(name,provisional) VALUES ('Independent',1)").lastrowid
+        store.conn.execute("INSERT INTO discovered_artists(artist,artist_id,score,found_at) VALUES ('Independent',?,4,100)",
+                           (artist,))
     store._bind_repositories()
-    iid = store.accounts.upsert_account('main', 'bridge', None, True)
-    store.history.import_listening_events(iid, [('old-song',None,1700000000)], source='spotify')
-    store.history.import_listening_events(iid, [('old-song',None,1700000000)], source='takeout')
-    store.discovery.upsert_discovered_artist('Independent', 4, [], [], None, 100)
     return store
 
 
@@ -65,15 +69,17 @@ def test_interrupted_upgrade_rolls_back_source_rename_and_new_tables(tmp_path):
 def test_daily_only_spotify_history_marks_unknown_legacy_influence():
     store = Store(':memory:')
     migrate(store.conn, registry=MIGRATIONS[:30])
-    store._bind_repositories()
-    iid = store.accounts.upsert_account('main', 'bridge', None, True)
     with store.conn:
-        listening.calendar(store.conn, iid, 'America/Costa_Rica')
-        listening.observe_day(store.conn, iid, 'old-song', '2024-01-01', 'spotify', 'UTC', 100)
+        store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','bridge',1)")
+        store.conn.execute("INSERT INTO listening_calendars VALUES (1,'America/Costa_Rica',1)")
+        store.conn.execute("INSERT INTO listening_observations(identity_id,raw_identity_key,identity_key,source_day,day,"
+                           "source,timezone,precision,first_observed_at,last_observed_at) "
+                           "VALUES (1,'old-song','old-song','2024-01-01',NULL,'spotify','UTC','calendar_day',100,100)")
     migrate(store.conn, registry=_registry())
+    store._bind_repositories()
     assert store.settings.get_setting('spotify_legacy_discovery_unattributed') == '1'
-    # Install the runtime snapshot guard without upgrading this v031 fixture.
-    store._snapshot_revisions = Revisions(store.conn)
+    # Check today's statistics only after an explicit historical replay.
+    upgrade_fixture(store)
     assert store.history.spotify_history_stats()['days'] == 0
     assert store.history.spotify_history_stats()['unresolved_days'] == 1
     store.conn.close()

@@ -105,6 +105,10 @@ def test_in_flight_answer_cannot_follow_a_recording_correction(store):
         store.enrichment_state.record_metadata_observations(old, 'provider', [observation(value=0.3)],
             run_id='in-flight', now=30, expected_recording_id=old_recording)
     assert store.enrichment_state.metadata_observations('correct song|artist') == []
-    rows = store.conn.execute('SELECT recording_id,value_json FROM metadata_findings '
-                              'WHERE provenance_json IS NOT NULL').fetchall()
-    assert [tuple(row) for row in rows] == [(old_recording, '0.8')]
+    # The ordinary reader follows redirects. Inspect the immutable delivery's
+    # captured owner to prove the correction did not move its original evidence.
+    from yt_playlist.core import metadata_native
+    rows = store.conn.execute('SELECT o.id,d.input_recording_id FROM native_metadata_observations o '
+                              'JOIN metadata_deliveries d ON d.id=o.delivery_id').fetchall()
+    assert [(row['input_recording_id'], metadata_native.read(store.conn, row['id'])['value'])
+            for row in rows] == [(old_recording, 0.8)]

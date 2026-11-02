@@ -58,6 +58,9 @@ def advance(conn):
                    ('group_builds INDEXED BY ix_compact_group_build_parent', 'parent_generation_id', True)]
         if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='recommendation_generations'").fetchone():
             sources.append(('recommendation_generations', 'group_generation_id', True))
+        from yt_playlist.core import group_checkpoint_retention
+        if group_checkpoint_retention.available(conn):
+            sources.append(('group_preparation_state', 'generation_id', True))
         if source == len(sources):
             return [_state('evidence')]
         table, column, expand = sources[source]

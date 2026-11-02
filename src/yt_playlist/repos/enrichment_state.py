@@ -389,7 +389,10 @@ class EnrichmentStateRepo(Repo):
             if metadata_runtime.active(self.conn):
                 stale = ('SELECT s.recording_id FROM enrichment_provider_state s WHERE s.provider=:provider '
                          'AND s.recording_id IN (SELECT value FROM json_each(:ids)) AND s.at*1000000<=:cutoff')
-            if metadata_attempts.available(self.conn):
+            # Runtime activation retires legacy reads, but their child rows can
+            # still reference the state being refreshed.
+            if self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
+                                 "AND name='provider_state_fields'").fetchone():
                 self.conn.execute('DELETE FROM provider_state_fields WHERE provider=:provider '
                                   'AND recording_id IN (' + stale + ')', params)
             self.conn.execute('DELETE FROM enrichment_provider_state WHERE provider=:provider '

@@ -3,7 +3,7 @@
 SQLite's writer lock protects copying; this separate lifetime lock protects
 replacement after every participating connection is closed. Lock files remain.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import json
 from pathlib import Path
 import sqlite3
@@ -34,7 +34,11 @@ def state_path(path):
 
 def state(path):
     try:
-        value = json.loads(state_path(path).read_text())
+        from contextvars import Context
+        from . import fao
+        # Recovery admission must remain readable after cancellation of the
+        # disposable job whose durable outcome this record establishes.
+        value = json.loads(Context().run(fao.read_bytes,state_path(path),max_bytes=4*1024**2))
     except FileNotFoundError:
         return None
     if (not isinstance(value, dict) or value.get('format') != 1
@@ -102,6 +106,7 @@ class Connection(sqlite3.Connection):
         self._handle_cursors = weakref.WeakSet()
         self._handle_closed = False
         self._close_callbacks = []
+        self._before_close_callbacks = []
         if self._handle_path is not None and not self._handle_internal:
             self._handle_lease = self._enter_handles()
         try:
@@ -199,19 +204,35 @@ class Connection(sqlite3.Connection):
     def close(self):
         if self._handle_closed:
             return
-        # Release only after sqlite3_close_v2 has closed this connection. Active
-        # cursors must be drained by their owner before the exclusive lease.
-        for cursor in tuple(self._handle_cursors):
-            cursor.close()
-        self._handle_cursors.clear()
-        super().close()
-        self._handle_closed = True
-        if self._handle_lease is not None:
-            self._handle_lease.__exit__(None, None, None)
-            self._handle_lease = None
-        for callback in self._close_callbacks:
-            callback()
-        self._close_callbacks.clear()
+        # SQL-backed reader lifetimes must retire while their connection is
+        # usable. File-only cleanup remains after sqlite3_close_v2 below.
+        try:
+            with ExitStack() as readers:
+                for callback in reversed(tuple(self._before_close_callbacks)):
+                    readers.callback(callback)
+        finally:
+            self._before_close_callbacks.clear()
+            # Cleanup failures must not strand the other cursors or the handle
+            # lease. ExitStack preserves their errors after attempting each one.
+            try:
+                with ExitStack() as cursors:
+                    for cursor in tuple(self._handle_cursors):
+                        cursors.callback(cursor.close)
+            finally:
+                self._handle_cursors.clear()
+                super().close()
+                self._handle_closed = True
+                try:
+                    if self._handle_lease is not None:
+                        self._handle_lease.__exit__(None, None, None)
+                        self._handle_lease = None
+                finally:
+                    try:
+                        with ExitStack() as files:
+                            for callback in reversed(tuple(self._close_callbacks)):
+                                files.callback(callback)
+                    finally:
+                        self._close_callbacks.clear()
 
 
 def connect(database, *args, **kwargs):

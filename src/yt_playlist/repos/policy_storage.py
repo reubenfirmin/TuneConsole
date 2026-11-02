@@ -31,19 +31,40 @@ def typed(conn):
     return conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='recommendation_policies'").fetchone() is not None
 
 
-def _typed_protection(conn):
+def operational_protection(conn):
     """The concrete policy owners, in addition to immutable impressions."""
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
     owners = ('album_description_requests', 'group_generations', 'group_versions',
               'recommendation_generations', 'recommendation_pools', 'home_display_policies', 'model_pair_policies',
               'radio_session_policies', 'radio_seed_policies')
-    return ' AND '.join(['NOT EXISTS(SELECT 1 FROM recommendation_impression_policies i '
-                        'WHERE i.policy_version=p.version)'] + [
+    return ' AND '.join([
         f'NOT EXISTS(SELECT 1 FROM {table} r WHERE r.policy_version=p.version)'
         for table in owners if table in tables])
 
 
+def _typed_protection(conn):
+    return ('NOT EXISTS(SELECT 1 FROM recommendation_impression_policies i WHERE i.policy_version=p.version) AND '
+            +operational_protection(conn))
+
+
+def retained_closure(conn, now):
+    """Direct rebuild disposition using the same installed owner checks as GC."""
+    if not typed(conn):
+        return None
+    retained = {r[0] for r in conn.execute('SELECT version FROM recommendation_policies p '
+        'WHERE created_at>=? OR NOT (' + _typed_protection(conn) + ')', (now-GRACE_SECONDS,))}
+    retained.update(protected_references(conn))
+    bases = set()
+    for start in range(0, len(versions := sorted(retained)), 256):
+        batch = versions[start:start+256]
+        bases.update(r[0] for r in conn.execute('SELECT base_version FROM recommendation_policies '
+            'WHERE base_version IS NOT NULL AND version IN ('+','.join('?' for _ in batch)+')',batch))
+    return {'recommendation_policies': retained, 'recommendation_policy_bodies': bases}
+
+
 def _publish_typed(conn, rows, bases, enforce_budget):
+    if rows or bases:
+        require_database_space(conn, 2 * (sum(len(row[1].encode()) for row in rows) + sum(row[2] for row in bases)))
     # Serialize the budget decision with installation, including callers which
     # have not yet made their first SQL mutation in a surrounding context.
     if not conn.in_transaction:
@@ -141,7 +162,12 @@ def publish(conn, rows, bases=(), *, enforce_budget=False):
 
 def configuration(conn, version):
     if typed(conn):
-        return policy_documents.configuration(conn, version)
+        value = policy_documents.configuration(conn, version)
+        if value is None:
+            from yt_playlist.core import policy_history
+            if policy_history.available(conn):
+                return policy_history.configuration(conn,version)
+        return value
     row = conn.execute('SELECT configuration FROM rec_serving_policies WHERE model_version=?',
                        (version,)).fetchone()
     if row is None:
@@ -263,7 +289,8 @@ def protected_references(conn):
     return protected
 
 
-def retention_candidates(conn, now, *, limit=SCAN_LIMIT, cursor_key=CURSOR):
+def retention_candidates(conn, now, *, limit=None, cursor_key=CURSOR):
+    limit = SCAN_LIMIT if limit is None else limit
     row = conn.execute('SELECT value FROM settings WHERE key=?', (cursor_key,)).fetchone()
     try:
         cursor = json.loads(row[0]) if row else None

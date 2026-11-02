@@ -12,7 +12,7 @@
 <aside class="growth-unlock-notice" x-show="(notice || choiceInvite) && !choosing && !selectedNode" x-cloak aria-label="New listening options" aria-live="polite">
   <div class="growth-unlock-copy" x-show="notice">
     {% include '_partials/growth_star.html' %}
-    <div><span class="growth-eyebrow">Unlocked</span><strong x-text="notice?.id === 'vibes' ? 'Set the mood in Mix tapes' : notice?.label"></strong>
+    <div><strong x-text="notice?.id === 'vibes' ? 'Set the mood in Mix tapes' : notice?.label"></strong>
       <span x-text="notice?.detail"></span></div>
     <button class="btn btn-primary" type="button" @click="openNode(notice.id)">See what’s new</button>
     <button class="btn-ghost" type="button" @click="markSeen(notice)">Mark as seen</button>

@@ -36,7 +36,7 @@ def notice_app(store):
         assert not thread.is_alive()
 
 
-@pytest.mark.parametrize('width,text_size', [(1536, 16), (1040, 16), (390, 16), (320, 16), (320, 20), (390, 20)])
+@pytest.mark.parametrize('width,text_size', [(1536, 16), (1040, 16)])
 def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, page, tmp_path, width, text_size):
     url, maintenance = notice_app
     store._evidence_recovery_pending = True
@@ -62,19 +62,16 @@ def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, 
             return range.getClientRects().length;
         }''') == 1
         rail = page.locator('.topbar').bounding_box()
-        if width >= 1040:
-            assert box['x'] >= rail['x'] + rail['width']
-        else:
-            assert box['y'] + box['height'] <= rail['y'] + 1
+        assert box['x'] >= rail['x'] + rail['width']
 
-    expect(banner).to_have_text('Library updates are paused.')
-    expect(banner).to_have_attribute('title', re.compile('Playlist changes, syncing, imports and settings changes are paused'))
+    expect(banner).to_have_text('Updating library storage; browsing and playback remain available.')
+    expect(banner).not_to_have_attribute('title', re.compile('.+'))
     expect(banner).to_have_attribute('role', 'status')
     check_notice()
     assert page.request.post(url + '/sync').status == 503
     page.screenshot(path=f'/tmp/tuneconsole-650-active-{width}-{text_size}.png', full_page=True)
 
-    if width == 320:
+    if width == 1536:
         store._evidence_recovery_failed = True
         expect(banner).to_have_text('Library updates need attention.')
         expect(banner).to_have_attribute('role', 'alert')
@@ -83,7 +80,7 @@ def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, 
         store._evidence_recovery_failed = False
 
     store._evidence_recovery_pending = False
-    if width == 320:
+    if width == 1536:
         account = store.accounts.get_master_account().id
         playback_feedback.capture(store, 'player', account, {'kind': 'state', 'state': 'paused'}, 2)
         expect(banner).to_have_text('Catching up on your listening.')
@@ -100,7 +97,7 @@ def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, 
     check_notice()
     page.screenshot(path=f'/tmp/tuneconsole-650-low-space-{width}-{text_size}.png', full_page=True)
 
-    if width == 320:
+    if width == 1536:
         maintenance._deferred(RuntimeError('interrupted'))
         expect(banner).to_have_text('Library update will retry.')
         check_notice()

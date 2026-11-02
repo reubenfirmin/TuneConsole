@@ -11,7 +11,7 @@ import struct
 import time
 import uuid
 
-from . import artists
+from . import artists, embedding_files
 
 
 # These names are the fitter's existing message fields, not SQL identifiers.
@@ -70,7 +70,8 @@ def model_dimensions(name, settings):
 
 
 def head(conn, name):
-    _kind, space, table, _column = descriptor(name)
+    kind, space, table, _column = descriptor(name)
+    table = embedding_files.relation(conn, kind)
     row = conn.execute(f'SELECT model_version,dimensions FROM {table} WHERE space=? LIMIT 1',
                        (space,)).fetchone()
     return tuple(row) if row else None
@@ -78,6 +79,7 @@ def head(conn, name):
 
 def rows(conn, name, *, keys=None):
     kind, space, table, column = descriptor(name)
+    table = embedding_files.relation(conn, kind)
     if kind == 'recording':
         subject = 'recordings'
         key = 's.identity_key'
@@ -88,7 +90,7 @@ def rows(conn, name, *, keys=None):
         retired = 'artist_redirects'
     source = (f'{subject} s CROSS JOIN {table} e ON s.id=e.{column}' if keys is not None else
               f'{table} e JOIN {subject} s ON s.id=e.{column}')
-    sql = (f'SELECT {key},e.vector FROM {source} '
+    sql = (f'SELECT {key},e.vector,e.dimensions,e.publication,e.position FROM {source} '
            f'WHERE e.space=? AND NOT EXISTS(SELECT 1 FROM {retired} d WHERE d.retired_id=s.id)')
     args = [space]
     if keys is not None:
@@ -106,12 +108,13 @@ def rows(conn, name, *, keys=None):
             sql += ' AND s.id IN (' + ','.join('?' for _ in subjects) + ')'
             args.extend(subjects)
     # Source insertion order is part of the discovered cohort's tied rankings.
-    sql += ' ORDER BY e.rowid' if space == 'content_discovery' else f' ORDER BY {key}'
-    return [tuple(row) for row in conn.execute(sql, args)]
+    sql += ' ORDER BY e.insertion_order' if space == 'content_discovery' else f' ORDER BY {key}'
+    return embedding_files.load_many(conn, kind, conn.execute(sql, args))
 
 
 def count(conn, name):
-    _kind, space, table, _column = descriptor(name)
+    kind, space, table, _column = descriptor(name)
+    table = embedding_files.relation(conn, kind)
     return conn.execute(f'SELECT COUNT(*) FROM {table} WHERE space=?', (space,)).fetchone()[0]
 
 
@@ -158,6 +161,8 @@ def publish(conn, name, upserts, removed=(), *, replace=False, model_version=Non
         raise ValueError('Embedding publication time must be finite')
     if replace:
         conn.execute(f'DELETE FROM {table} WHERE space=?', (space,))
+        if embedding_files.available(conn):
+            conn.execute(f'DELETE FROM {kind}_embedding_files WHERE space=?', (space,))
     for key in removed:
         # A retired owner can be retracted without resolving it to a survivor.
         if kind == 'recording':
@@ -166,6 +171,22 @@ def publish(conn, name, upserts, removed=(), *, replace=False, model_version=Non
         else:
             subject = int(key[8:]) if str(key).startswith('@artist:') else artists.lookup(conn, key)
         conn.execute(f'DELETE FROM {table} WHERE {column}=? AND space=?', (subject, space))
+        if embedding_files.available(conn):
+            conn.execute(f'DELETE FROM {kind}_embedding_files WHERE {column}=? AND space=?', (subject, space))
+    if not admitted:
+        return
+    if embedding_files.available(conn):
+        logical = embedding_files.relation(conn, kind)
+        order = conn.execute(f'SELECT coalesce(max(insertion_order),0) FROM {logical} WHERE space=?', (space,)).fetchone()[0]
+        values = []
+        for subject, vector in admitted:
+            previous_order = conn.execute(f'SELECT insertion_order FROM {logical} WHERE {column}=? AND space=?',
+                                          (subject, space)).fetchone()
+            if previous_order is None:
+                order += 1
+            values.append((subject, vector, now, previous_order[0] if previous_order else order))
+        embedding_files.publish(conn, kind, space, model_version, size, values)
+        return
     conn.executemany(f'INSERT INTO {table}({column},space,model_version,dimensions,vector,built_at) '
                      f'VALUES (?,?,?,?,?,?) ON CONFLICT({column},space,model_version) '
                      'DO UPDATE SET vector=excluded.vector,built_at=excluded.built_at',

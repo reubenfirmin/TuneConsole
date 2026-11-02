@@ -4,6 +4,7 @@ These reads know about catalogue joins and evidence eligibility. They do not
 choose explanation kinds, rank explanations, or construct surface responses.
 """
 from dataclasses import dataclass
+from yt_playlist.core import embedding_files
 
 from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized
 from yt_playlist.repos.playlist_eligibility import QUARANTINED_PLAYLIST_IDS_SQL
@@ -125,22 +126,23 @@ class ClusterEvidenceRepo(Repo):
         if not qn:
             return SeedMatches()
         like, prefix = '%' + qn + '%', qn + '%'
+        vectors = embedding_files.relation(self.conn, 'recording')
         artists = self.conn.execute(
             "SELECT t.artist label,COUNT(DISTINCT t.identity_key) n,"
             "GROUP_CONCAT(DISTINCT t.identity_key) keys "
-            "FROM tracks t JOIN recording_embeddings rv ON rv.recording_id=t.recording_id AND rv.space='collaborative' "
+            f"FROM tracks t JOIN {vectors} rv ON rv.recording_id=t.recording_id AND rv.space='collaborative' "
             "WHERE searchnorm(t.artist) LIKE ? AND t.artist<>'' "
             "GROUP BY t.artist ORDER BY n DESC LIMIT ?", (like, limit)).fetchall()
         playlists = self.conn.execute(
             "SELECT p.title label,COUNT(DISTINCT t.identity_key) n,"
             "GROUP_CONCAT(DISTINCT t.identity_key) keys "
             "FROM playlists p JOIN playlist_tracks pt ON pt.playlist_id=p.id "
-            "JOIN tracks t ON t.id=pt.track_id JOIN recording_embeddings rv ON rv.recording_id=t.recording_id AND rv.space='collaborative' "
+            f"JOIN tracks t ON t.id=pt.track_id JOIN {vectors} rv ON rv.recording_id=t.recording_id AND rv.space='collaborative' "
             f"WHERE searchnorm(p.title) LIKE ? AND p.id NOT IN ({QUARANTINED_PLAYLIST_IDS_SQL}) "
             "GROUP BY p.id ORDER BY n DESC LIMIT ?", (like, GENERATED_GROUP, limit)).fetchall()
         songs = self.conn.execute(
             "SELECT MIN(t.title) title,MIN(t.artist) artist,t.identity_key key "
-            "FROM tracks t JOIN recording_embeddings rv ON rv.recording_id=t.recording_id AND rv.space='collaborative' "
+            f"FROM tracks t JOIN {vectors} rv ON rv.recording_id=t.recording_id AND rv.space='collaborative' "
             "WHERE searchnorm(t.title) LIKE ? GROUP BY t.identity_key "
             "ORDER BY CASE WHEN searchnorm(MIN(t.title))=? THEN 0 "
             "WHEN searchnorm(MIN(t.title)) LIKE ? THEN 1 ELSE 2 END,"

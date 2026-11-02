@@ -5,6 +5,18 @@ from .base import LIKED_EXISTS, Repo, lookup_read, snapshot_read, synchronized
 from . import recommendation_publication as publication
 
 
+def decode_display(chunks, ranks, surface):
+    """Inflate detached immutable output references after releasing SQL readers."""
+    wanted, result = set(ranks), {}
+    for row in chunks:
+        value = recommendation_outputs.read(row['filename'], row['content_digest'], row['byte_size'],
+                                             surface=surface, chunk_key=row['chunk_key'])
+        for rank, owner, explanation in value['rows']:
+            if rank in wanted:
+                result[rank] = {**explanation, 'owner': owner}
+    return result
+
+
 class RecommendationPublicationsRepo(Repo):
     def claim(self, plan, *, owner=None, policies=(), bases=()):
         return publication.claim(self, plan, owner=owner, policies=policies, bases=bases)
@@ -81,15 +93,21 @@ class RecommendationPublicationsRepo(Repo):
     @snapshot_read
     def display(self, surface, mode_key, purpose, ranks, *, generation=None):
         """Read only explanation chunks covering this bounded candidate lookahead."""
+        return decode_display(self.display_references(surface, mode_key, purpose, ranks,
+                              generation=generation), ranks, surface)
+
+    @snapshot_read
+    def display_references(self, surface, mode_key, purpose, ranks, *, generation=None):
+        """Capture bounded file owners without reading or decoding their content."""
         if (not isinstance(ranks, (list, tuple)) or len(ranks) > 512
                 or any(type(rank) is not int or rank < 0 for rank in ranks)):
             raise ValueError('Invalid bounded display ranks')
         if not ranks:
-            return {}
+            return []
         generation = self._generation(surface, generation)
         pool = self.pool(surface, mode_key, purpose, generation=generation) if generation is not None else None
         if pool is None:
-            return {}
+            return []
         wanted = set(ranks)
         # A predecessor seek per requested rank uses the composite rank index;
         # sparse explanation ranges do not cause a scan over unrelated chunks.
@@ -102,14 +120,7 @@ class RecommendationPublicationsRepo(Repo):
             (*wanted, generation, surface, pool['id'])).fetchall()
         if sum(row['byte_size'] for row in chunks) > 4 * recommendation_outputs.MAX_BYTES:
             raise WorkBudgetExceeded('Prepared display lookahead exceeds its read budget')
-        result = {}
-        for row in chunks:
-            value = recommendation_outputs.read(row['filename'], row['content_digest'], row['byte_size'],
-                                                 surface=surface, chunk_key=row['chunk_key'])
-            for rank, owner, explanation in value['rows']:
-                if rank in wanted:
-                    result[rank] = {**explanation, 'owner': owner}
-        return result
+        return [dict(row) for row in chunks]
 
 
     @lookup_read
@@ -211,7 +222,7 @@ class RecommendationPublicationsRepo(Repo):
 
     @snapshot_read
     def candidate_page(self, surface, mode_key, purpose, *, generation=None, after=-1, limit=128,
-                       band=None, genres=None, group_version=None):
+                       band=None, genres=None, group_version=None, include_display=True):
         """Hydrate one canonical rank page through the existing catalog owners.
 
         Source uploads, metadata corrections and library/discovery membership
@@ -244,7 +255,8 @@ class RecommendationPublicationsRepo(Repo):
         years = store.modes.years_for(keys)
         marks = ','.join('?' for _ in keys)
         plays = dict(self.conn.execute(f'SELECT identity_key,plays FROM listening_day_counts WHERE identity_key IN ({marks})', keys))
-        display = self.display(surface, mode_key, purpose, [row['rank'] for row in rows], generation=generation)
+        display = (self.display(surface, mode_key, purpose, [row['rank'] for row in rows], generation=generation)
+                   if include_display else {})
         for row in rows:
             key = row['key']
             current = owned.get(key) or discovered.get(key)

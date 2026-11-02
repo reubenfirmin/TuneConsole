@@ -13,8 +13,8 @@ import sqlite3
 from ..migrations import current, regular
 from ..migrations.registry import MIGRATIONS
 from ..migrations.runner import Context
-from ..migrations.v103_entity_names import COLUMNS
-from . import development, source
+from ..entity_names import PREDECESSOR_COLUMNS as COLUMNS
+from . import archives, development, mix_history, mix_verification, optimized, released, runtime_history, source, verification
 from .build import Batch, Destination, Stage, _configure, quote
 
 
@@ -24,11 +24,14 @@ PROVENANCE = ('CREATE TABLE database_rebuild_source_history ('
 REGULAR_PROVENANCE = ('CREATE TABLE database_rebuild_source_changes ('
                       'version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at REAL NOT NULL)')
 TRIGGERS = '_database_rebuild_triggers'
+INDEXES = '_database_rebuild_indexes'
 
 
 def signature():
     """Fence the DDL, conversion code and file-owner code across resumes."""
-    root = Path(__file__).resolve().parents[1]
+    # Converters also call recommendation/repository and vocabulary owners.
+    # A changed dependency cannot resume under the old candidate contract.
+    root = Path(__file__).resolve().parents[2]
     result = hashlib.sha256(str(FORMAT).encode())
     for path in sorted([*root.rglob('*.py'),*root.rglob('*.sql')]):
         result.update(str(path.relative_to(root)).encode())
@@ -50,12 +53,25 @@ def initialize(target):
     for name,sql in target.execute("SELECT name,sql FROM main.sqlite_schema WHERE type='trigger'").fetchall():
         target.execute('INSERT INTO '+TRIGGERS+' VALUES (?,?)',(name,sql))
         target.execute('DROP TRIGGER '+quote(name))
+    from .. import vibe_versions
+    vibe_versions.normalize_empty(target)
+    # Bulk insertion maintains only primary/unique identities. Build secondary
+    # indexes once before domain readers and converters need them.
+    target.execute('CREATE TABLE '+INDEXES+'(name TEXT PRIMARY KEY,sql TEXT NOT NULL) WITHOUT ROWID')
+    for name,sql in target.execute("SELECT name,sql FROM main.sqlite_schema WHERE type='index' "
+                                   "AND sql IS NOT NULL AND upper(sql) NOT LIKE 'CREATE UNIQUE%'").fetchall():
+        target.execute('INSERT INTO '+INDEXES+' VALUES (?,?)',(name,sql))
+        target.execute('DROP INDEX '+quote(name))
     target.execute(PROVENANCE)
     target.execute(REGULAR_PROVENANCE)
 
 
 def _mapping(reader, table, target_columns):
     mapping = dict(COLUMNS.get(table,{}))
+    from .. import vibe_versions
+    if table in vibe_versions.COLUMNS:
+        column = vibe_versions.COLUMNS[table]
+        mapping[column] = column+'_id'
     if table == 'quarantined_playlists':
         mapping['ytm'] = 'playlist_scope_id'
     names = {name:mapping.get(name,name) for name in source.columns(reader,table)}
@@ -68,29 +84,62 @@ def _mapping(reader, table, target_columns):
     return names
 
 
-def _copy(reader, target, cursor, limit, *, table, destination, mapping):
-    values, bookmark, done = source.scan(reader,table,cursor,limit)
+def _copy_rows(reader, target, cursor, limit, *, table, destination, mapping, retained=None):
+    values, bookmark, done = source.scan(reader,table,cursor,limit,legacy_id='_legacy_id' in mapping)
+    scanned = len(values)
+    if retained is not None:
+        values = [row for row in values if row['version'] in retained]
     if cursor is None:
         target.execute('DELETE FROM '+quote(destination))
     fields = ','.join(map(quote,mapping.values()))
     query = 'INSERT INTO '+quote(destination)+'('+fields+') VALUES ('+','.join('?' for _ in mapping)+')'
-    target.executemany(query,[tuple(row[name] for name in mapping) for row in values])
-    return Batch(bookmark,len(values),done)
-
-
-def _digest(conn, table, fields):
-    # Verification streams in source key order. Destination tables may have a
-    # different physical column order, so compare explicitly mapped values.
-    result,count = hashlib.sha256(),0
-    cursor = None
-    while True:
-        values,cursor,done = source.scan(conn,table,cursor,256)
+    from .. import vibe_versions
+    version_column = vibe_versions.COLUMNS.get(table)
+    target.executemany(query,[tuple(vibe_versions.intern(target,row[name]) if name == version_column else row[name]
+                                  for name in mapping) for row in values])
+    if table == 'predictions':
+        from .. import vibe_provenance
+        provenance = []
         for row in values:
-            result.update(repr(tuple(row[name] for name in fields)).encode())
-            result.update(b'\n')
-        count += len(values)
-        if done:
-            return count,result.digest()
+            saved = vibe_provenance.read(reader, row['id'])
+            if saved is not None:
+                provenance.append((row['id'], saved['inputs'], saved['artists']))
+        vibe_provenance.publish_many(target, provenance)
+    return Batch(bookmark,scanned,done)
+
+
+def _copy(reader, target, cursor, limit, *, table, destination, mapping, retained=None):
+    from .. import vibe_versions
+    if table in vibe_versions.COLUMNS or retained is not None:
+        return _copy_rows(reader,target,cursor,limit,table=table,destination=destination,
+                          mapping=mapping,retained=retained)
+    bookmark, count, done = source.window(reader,table,cursor,limit)
+    if cursor is None:
+        target.execute('DELETE FROM '+quote(destination))
+    if count:
+        keys = ','.join(map(quote,source.keys(reader,table)))
+        marks = ','.join('?' for _ in bookmark)
+        conditions, parameters = ['('+keys+')<=('+marks+')'], list(bookmark)
+        if cursor is not None:
+            conditions.append('('+keys+')>('+marks+')')
+            parameters.extend(cursor)
+        selected = ','.join(quote(source.keys(reader,table)[0] if name=='_legacy_id' else name)
+                            for name in mapping)
+        target.execute('INSERT INTO '+quote(destination)+'('+','.join(map(quote,mapping.values()))
+            +') SELECT '+selected+' FROM rebuild_source.'+quote(table)+' WHERE '
+            +' AND '.join(conditions)+' ORDER BY '+keys, parameters)
+    return Batch(bookmark,count,done)
+
+
+def indexes(reader, target, cursor, limit):
+    values = target.execute('SELECT name,sql FROM '+INDEXES+' WHERE name>? ORDER BY name LIMIT ?',
+                            (cursor or '',min(limit,8))).fetchall()
+    for _,sql in values:
+        target.execute(sql)
+    if len(values)<min(limit,8):
+        target.execute('DROP TABLE '+INDEXES)
+        return Batch(rows=len(values),done=True)
+    return Batch(values[-1][0],len(values),False)
 
 
 def finish(reader, target, cursor, limit):
@@ -106,6 +155,8 @@ def finish(reader, target, cursor, limit):
     if len(values)<limit:
         from ..migrations import v107_legacy_pending_deletions
         v107_legacy_pending_deletions.apply(target,Context(0.))
+        target.execute('UPDATE prediction_id_state SET high_water=max(high_water,'
+                       '(SELECT coalesce(max(id),0) FROM predictions)) WHERE id=1')
         # Preserve all retained auto-increment high-water marks, even when the
         # largest row was removed before the source snapshot.
         if reader.execute("SELECT 1 FROM sqlite_schema WHERE name='sqlite_sequence'").fetchone():
@@ -122,35 +173,58 @@ def finish(reader, target, cursor, limit):
     return Batch(values[-1][0],len(values),False)
 
 
-def for_source(path):
-    """Select the isolated development importer; unsupported inputs fail closed.
-
-    Production admission is defined alongside this importer, but selection must
-    wait for its domain mappings rather than silently applying a partial copy.
-    """
+def for_source(path, *, split=False):
+    """Select one of the two admitted input layouts; unknown owners fail closed."""
     path = Path(path).resolve(strict=True)
     with closing(sqlite3.connect(path.as_uri()+'?mode=ro',uri=True)) as reader:
         reader.row_factory = sqlite3.Row
         version = source.admit(reader)
-        if version != source.DEVELOPMENT_VERSION:
-            raise ValueError('The production schema-64 destination mappings are not installed')
+        from .. import metadata_runtime
+        metadata_active = metadata_runtime.active(reader)
+        # Inactive preparation is disposable staging, rather than selected
+        # application state. Rebuild it from the captured installed owners;
+        # stale partially prepared heads must not survive into the candidate.
+        metadata_staging = ({name for name, sql in metadata_runtime.definitions() if sql.startswith('CREATE TABLE')}
+                            | {'metadata_native_delivery_heads'}) if not metadata_active else set()
+        captured_at = path.stat().st_mtime
+        from ...repos import policy_storage
+        policy_closure = policy_storage.retained_closure(reader,path.stat().st_mtime) or {}
+        importer = released if version==source.RELEASE_VERSION else development
         version_signature = signature()
+        # The app rebuild retains catalog, learning state and usable outputs.
+        # Old diagnostic receipts are disposable; missing archive bodies must
+        # not prevent the user from returning to their music.
+        from .. import legacy_evidence
+        diagnostics = (set(legacy_evidence.DOMAINS.values()) |
+                       {'legacy_archive_heads', 'legacy_archive_cutovers'}) if split else set()
+        # Current values and manual choices survive. Alternatives/conflicts can
+        # be reacquired; restarting provider refresh also replaces old cursors.
+        if split:
+            diagnostics |= {'metadata_conflicts', 'metadata_conflict_candidates',
+                            'metadata_runtime_conflicts', 'provider_refresh_frontiers'}
         with closing(sqlite3.connect(':memory:')) as empty:
             _configure(empty)
             empty.execute('BEGIN')
             initialize(empty)
             target_tables = source.tables(empty)
             originals = source.tables(reader)
-            unknown = originals-target_tables-development.CONVERTED-development.DERIVED-{'identities'}
+            unknown = originals-target_tables-importer.CONVERTED-importer.DERIVED-{'identities'}
             if unknown:
                 raise ValueError('Unclassified source owners: '+', '.join(sorted(unknown)))
             copies = []
-            for table in sorted(originals-development.CONVERTED-development.DERIVED):
+            # An installed text layout may already own the additive dictionary.
+            # Preserve it before interning versions from the three score owners.
+            for table in sorted(originals-importer.CONVERTED-importer.DERIVED-metadata_staging-diagnostics-
+                                {'prediction_inputs', 'prediction_artists'},
+                                key=lambda table: (table != 'vibe_versions', table)):
                 destination = {'identities':'accounts','schema_migrations':'database_rebuild_source_history',
                                'schema_changes':'database_rebuild_source_changes'}.get(table,table)
                 if destination not in target_tables:
                     raise ValueError('Missing direct destination owner: '+table)
                 mapping = _mapping(reader,table,source.columns(empty,destination))
+                if source.keys(reader,table)[0] not in source.columns(reader,table) and (
+                        source.keys(empty,destination)[0] not in source.columns(empty,destination)):
+                    mapping = {'_legacy_id':source.keys(empty,destination)[0],**mapping}
                 copies.append((table,destination,mapping))
             empty.rollback()
 
@@ -160,13 +234,26 @@ def for_source(path):
         initialize(target)
 
     def verify(reader, target):
+        reader.row_factory = target.row_factory = sqlite3.Row
         if signature()!=version_signature:
             raise ValueError('Destination code changed during construction')
         current.validate(target)
         regular.validate(target)
+        protected_groups = mix_verification.protected(reader, at=captured_at)
         for table,destination,mapping in copies:
-            if _digest(reader,table,mapping) != _digest(target,destination,mapping.values()):
-                raise ValueError('Direct rebuild changed retained values: '+table)
+            if table in mix_verification.REPLACED:
+                continue
+            if table in ('prediction_measurement_roots', 'prediction_provenance'):
+                continue  # Populated by the prediction importer, checked below.
+            if table in ('artist_credit_replays', 'artist_credit_retention', 'taste_mode_retention',
+                         'taste_mode_retired_payloads', 'served_facts', 'served_fact_state'):
+                # These additive owners can gain verified rows during this
+                # build. Their exact captured facts and additions are checked
+                # together by the domain adapter below.
+                continue
+            verification.retained(reader,target,table,destination,mapping,retained=policy_closure.get(table),
+                                  at=captured_at,required=protected_groups.get(table))
+        verification.predictions(reader,target)
         # No captured event may disappear or acquire a guessed membership.
         for table in ('play_events','listening_observations','actions'):
             expected = reader.execute('SELECT count(*) FROM '+table).fetchone()[0]
@@ -175,11 +262,98 @@ def for_source(path):
                 raise ValueError('Direct rebuild changed captured history count: '+table)
         if target.execute('SELECT 1 FROM play_events WHERE membership_ref_id IS NOT NULL LIMIT 1').fetchone():
             raise ValueError('Direct rebuild invented an uncaptured listening membership')
+        if version==source.RELEASE_VERSION:
+            released.verify(reader,target)
+        verification.converted(reader,target)
+        optimized.verify(reader,target,at=captured_at,metadata_active=metadata_active)
+        runtime_history.verify(reader,target,at=captured_at)
+        mix_verification.verify(reader,target,at=captured_at)
 
-    stages = tuple(Stage('copy:'+table,partial(_copy,table=table,destination=destination,mapping=mapping))
+    stages = tuple(Stage('copy:'+table,partial(_copy,table=table,destination=destination,mapping=mapping,
+                                             retained=policy_closure.get(table)),batch_size=8192)
                    for table,destination,mapping in copies)
-    def configure(reader,target,cursor,limit):
+    def profiles(reader,target,cursor,limit):
+        from .. import profile_files
+        count = sum(profile_files.prepare_batch(target,kind,min(limit,128)) for kind in profile_files.KINDS)
+        return Batch((cursor or 0)+count,rows=count,done=count==0)
+    def vectors(reader,target,cursor,limit):
+        from .. import embedding_files
+        count = sum(embedding_files.prepare_batch(target,kind,min(limit,128)) for kind in ('recording','artist'))
+        return Batch((cursor or 0)+count,rows=count,done=count==0)
+    def with_rows(stage):
+        def copy(reader,target,cursor,limit):
+            # Resume opens new connections and can skip every earlier stage.
+            reader.row_factory = sqlite3.Row
+            connection = target.conn if stage.repositories else target
+            connection.row_factory = sqlite3.Row
+            return stage.copy(reader,target,cursor,limit)
+        return Stage(stage.name,copy,stage.repositories,stage.batch_size)
+    complete = Destination(version_signature,prepare,tuple(map(with_rows,
+        (*stages,Stage('indexes',indexes),*importer.stages(),*optimized.stages(at=captured_at,metadata_active=metadata_active),
+         *runtime_history.stages(captured_at),
+         Stage('profiles',profiles),Stage('vectors',vectors),*archives.stages(captured_at),Stage('guards',finish),
+         *mix_history.stages(captured_at)))),verify,compact=True)
+    if not split:
+        return complete
+
+    # These owners feed model preparation. Their writers are the workers held
+    # behind StorageMaintenance.ready, rather than ordinary application edits.
+    # Parents precede children because the installed connection enforces FKs.
+    deferred_tables = ('native_metadata_observations', 'musical_source_observations',
+        'rec_musical_profiles', 'rec_musical_source_profiles', 'recording_embeddings', 'artist_embeddings',
+        'recording_embedding_legacy_order', 'artist_embedding_legacy_order',
+        'recording_profile_files', 'source_profile_files', 'recording_embedding_files', 'artist_embedding_files')
+    deferred = {stage.name: stage for stage in stages if stage.name[5:] in deferred_tables}
+    runtime_copies = tuple(stage for stage in stages if stage.name not in deferred)
+    imports = tuple(importer.stages())
+    deferred_imports = tuple(stage for stage in imports
+                             if stage.name.startswith('embedding:') or stage.name == 'released_learning_cleanup')
+    runtime_imports = tuple(stage for stage in imports if stage not in deferred_imports
+                            and stage.name != 'metadata:enrichment_conflict')
+    runtime_metadata = tuple(stage for stage in optimized.stages(at=captured_at,
+        metadata_active=metadata_active, native=False)
+        if stage.name not in ('served-facts', 'metadata:providers', 'metadata:conflicts'))
+    # Current native values are also used by foreground provider lookups. Their
+    # documents and freshness must exist before activating runtime writers;
+    # historical observations, profiles and embeddings remain deferred.
+    native = optimized.native_stage(metadata_active=metadata_active)
+    runtime = (*runtime_copies, Stage('indexes',indexes), *runtime_imports,
+               native, *runtime_metadata,
+               Stage('metadata:refresh',partial(optimized.refresh_metadata,at=captured_at)),
+               Stage('guards',finish))
+    analytics = (*(deferred['copy:'+table] for table in deferred_tables if 'copy:'+table in deferred),
+        *deferred_imports,
+        # Each impression publishes a durable file while SQLite's writer is
+        # held. Keep this batch small so foreground writes can get admission.
+        Stage('served-facts',optimized._served,batch_size=16), *runtime_history.stages(captured_at),
+        Stage('profiles',profiles), Stage('vectors',vectors), *archives.stages(captured_at),
+        *mix_history.stages(captured_at))
+
+    def verify_runtime(reader, target):
         reader.row_factory = target.row_factory = sqlite3.Row
-        return Batch(done=True)
-    return Destination(version_signature,prepare,(Stage('source',configure),*stages,*development.stages(),
-                                                  Stage('guards',finish)),verify)
+        current.validate(target)
+        regular.validate(target)
+        for table,owner,mapping in copies:
+            if ('copy:'+table not in deferred
+                    and table not in ('prediction_measurement_roots', 'prediction_provenance')):
+                verification.retained(reader,target,table,owner,mapping,retained=policy_closure.get(table))
+        verification.predictions(reader,target)
+        verification.converted(reader,target)
+        optimized.verify_refresh(target, at=captured_at)
+        if not metadata_active:
+            from ..preparation.metadata_runtime_verification import verify_selected
+            verify_selected(target)
+            from ..preparation.metadata_runtime_verification import verify_native
+            verify_native(target,reader)
+
+    def verify_analytics(reader, target):
+        reader.row_factory = target.row_factory = sqlite3.Row
+        for table,owner,mapping in copies:
+            if 'copy:'+table in deferred:
+                verification.retained(reader,target,table,owner,mapping)
+        # Native runtime documents were verified before cutover. Foreground
+        # lookups may now advance those values and delivery heads normally.
+
+    return Destination(version_signature, prepare, tuple(map(with_rows, (*runtime,*analytics))), verify,
+                       runtime_stages=len(runtime), verify_runtime=verify_runtime,
+                       verify_analytics=verify_analytics)

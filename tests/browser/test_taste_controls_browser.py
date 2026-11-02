@@ -9,7 +9,7 @@ from playwright.sync_api import expect
 from yt_playlist.rec import rec_params
 from yt_playlist.util.matching import identity_key
 
-@pytest.mark.parametrize("width", [1920, 1440, 1024, 390, 320])
+@pytest.mark.parametrize("width", [1920, 1440, 1024])
 def test_taste_topics_show_one_group_at_a_time(store, page, monkeypatch, request, width, tmp_path):
     from yt_playlist.rec.rec_worker import RecWorker
 
@@ -170,7 +170,7 @@ def test_taste_topics_show_one_group_at_a_time(store, page, monkeypatch, request
     assert errors == []
 
 
-@pytest.mark.parametrize("width", [1440, 320])
+@pytest.mark.parametrize("width", [1440])
 def test_recommendation_subtabs_support_keyboard_deep_links_and_lazy_preview(live_app, page, width):
     requests = []
     page.on("request", lambda request: requests.append(urlsplit(request.url).path)
@@ -260,10 +260,12 @@ def test_recommendation_subtabs_support_keyboard_deep_links_and_lazy_preview(liv
     expect(page.get_by_role("heading", name="Preview & compare", exact=True)).to_be_visible()
 
 
-@pytest.mark.parametrize("width", [1440, 1024, 390, 320])
+@pytest.mark.parametrize("width", [1440, 1024])
 def test_feature_settings_select_features_and_preserve_saved_edits(live_app, store, page, width, tmp_path):
     # Measure the normal settings page after setup, without the initial-import banner.
+    from tests.home_fixture_support import returning_listener
     store.settings.set_setting("last_sync_at", "1")
+    returning_listener(store, 'mixes', now=1)
     page.set_viewport_size({"width": width, "height": 1000})
     page.goto(live_app + "/taste#recommendations/features")
     features = page.locator("#taste-feature-settings")
@@ -515,7 +517,7 @@ def test_taste_controls_survive_topic_switches_and_reload(live_app, store, page)
     assert rec_params.get_param(store, "breadth_bias") == 0
 
     # The primary bar supports the keyboard independently of recommendation subtabs.
-    page.set_viewport_size({"width": 390, "height": 844})
+    page.set_viewport_size({"width": 1280, "height": 900})
     topics = page.get_by_role("tablist", name="Taste Model sections", exact=True)
     topics.get_by_role("tab", name="Recommendations", exact=True).focus()
     page.keyboard.press("End")

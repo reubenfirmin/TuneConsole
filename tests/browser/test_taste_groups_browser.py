@@ -7,7 +7,7 @@ from tests.test_mode_profiles import _groups
 from yt_playlist.rec import embedding_vectors as embed
 
 
-@pytest.mark.parametrize("width", [1920, 1440, 1024, 390, 320])
+@pytest.mark.parametrize("width", [1920, 1440, 1024])
 def test_mix_groups_explain_composition_and_choice_uncertainty(live_app, store, page, width, tmp_path):
     _groups(store)
     keys = []

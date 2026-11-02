@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 from yt_playlist.core.store import Store
 from yt_playlist.rec import rec_params, mode_surfaces as ms
+from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 
 
 @pytest.fixture
@@ -25,7 +26,8 @@ def _seed_one_mode(store):
     payload = {"1": {"wheelhouse": items, "explore": [], "comfort": [], "fresh": []},
                "_ppr": {"1": ["w5", "w4", "w3", "w2", "w1", "w0"]},
                "_meta": {"comfort_pool": 0, "year_cuts": None}}
-    store.rec_proposals.put_proposals("mode_bundles", payload, 1.0)
+    seed_bundle_subjects(store, payload)
+    publish_bundles(store, payload, 1.0)
 
 
 def test_ppr_arm_reorders_card(store):
@@ -56,9 +58,9 @@ def test_ppr_arm_falls_back_to_cosine_when_ppr_pos_empty(store):
     # Coin flips 'ppr' (share=1.0), but this mode has no PPR data at all: the card must both order by
     # the true cosine path and be labeled honestly, not ship as 'ppr' with arbitrary bucket order.
     _seed_one_mode(store)
-    bundles = store.rec_proposals.get_proposals("mode_bundles")
+    bundles = store._fixture_bundle_payload
     bundles["_ppr"] = {}                                   # no PPR data for mode 1
-    store.rec_proposals.put_proposals("mode_bundles", bundles, 1.0)
+    publish_bundles(store, bundles, 1.0)
     rec_params.set_param(store, "ppr_ab_share", 1.0)       # coin would say 'ppr'
     cards = ms.assemble_cards(store, now=10.0, epoch=0)
     wh = next(c for c in cards if c["lane"] == "wheelhouse")
@@ -71,9 +73,9 @@ def test_ppr_arm_partial_ranking_ranked_lead_then_bucket_order(store):
     # unranked ones (all tied on the _PPR_TAIL sentinel) follow in their original bucket order. The
     # card stays labeled 'ppr' since PPR data does exist for this mode.
     _seed_one_mode(store)
-    bundles = store.rec_proposals.get_proposals("mode_bundles")
+    bundles = store._fixture_bundle_payload
     bundles["_ppr"] = {"1": ["w5", "w3"]}                  # only w5, w3 ranked; w0,w1,w2,w4 unranked
-    store.rec_proposals.put_proposals("mode_bundles", bundles, 1.0)
+    publish_bundles(store, bundles, 1.0)
     rec_params.set_param(store, "ppr_ab_share", 1.0)
     cards = ms.assemble_cards(store, now=10.0, epoch=0)
     wh = next(c for c in cards if c["lane"] == "wheelhouse")

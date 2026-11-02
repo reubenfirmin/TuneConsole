@@ -94,7 +94,10 @@ def read(conn, observation_id):
                        'JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE o.id=?', (observation_id,)).fetchone()
     if row is None:
         raise ValueError('Unknown native metadata observation')
-    body = deliveries.response(conn, row['delivery_id'])
+    return _payload(row, deliveries.response(conn, row['delivery_id']))
+
+
+def _payload(row, body):
     if row['legacy_finding_id'] is not None:
         if (not isinstance(body, dict) or body.get('format') != 'legacy-metadata-record-1'
                 or body.get('owner') != 'metadata_findings'
@@ -122,6 +125,11 @@ def source_values(conn, source_key, max_bytes=256 * 1024, *, store=None):
         if row is None:
             return {}
         return files.read(conn, 'native', (source_key,), row[0], max_bytes=max_bytes)['observations']
+    return installed_source_values(conn, source_key, max_bytes, store=store)
+
+
+def installed_source_values(conn, source_key, max_bytes=256 * 1024, *, store=None):
+    """Read captured SQL evidence, including while verifying its replacement."""
     with ExitStack() as guards:
         if store is not None:
             guards.enter_context(keyed_reads(store, 'musical_source_observations', [source_key]))
@@ -131,7 +139,7 @@ def source_values(conn, source_key, max_bytes=256 * 1024, *, store=None):
             delivery_ids = [row[0] for observation in observations for row in conn.execute(
                 'SELECT delivery_id FROM native_metadata_observations WHERE id=?', (observation,))]
             guards.enter_context(keyed_reads(store, 'metadata_deliveries', delivery_ids))
-        rows = conn.execute('SELECT o.id,d.raw_byte_size FROM musical_source_observations s '
+        rows = conn.execute('SELECT o.*,d.raw_byte_size FROM musical_source_observations s '
                             'JOIN native_metadata_observations o ON o.id=s.observation_id '
                             'JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE s.source_key=? ORDER BY s.field',
                             (source_key,)).fetchall()
@@ -139,7 +147,16 @@ def source_values(conn, source_key, max_bytes=256 * 1024, *, store=None):
         # document is loaded to discover that the profile budget was exceeded.
         if sum(row['raw_byte_size'] for row in rows) > max_bytes:
             raise WorkBudgetExceeded('Source profile input exceeds byte budget')
-        return {payload['field']: _profile_value(payload) for payload in (read(conn, row['id']) for row in rows)}
+        # Several selected fields commonly share a delivery. Read that bounded
+        # body once, then independently validate every observation reference.
+        bodies, result = {}, {}
+        for row in rows:
+            identity = row['delivery_id']
+            if identity not in bodies:
+                bodies[identity] = deliveries.response(conn, identity)
+            payload = _payload(row, bodies[identity])
+            result[payload['field']] = _profile_value(payload)
+        return result
 
 
 def _publish_source(conn, observation_id, payload, provider, recording_id, run_id):

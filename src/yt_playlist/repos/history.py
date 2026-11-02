@@ -561,6 +561,10 @@ class HistoryRepo(Repo):
                 listening.remove_source(self.conn,source)
             artists_removed = discovery_sources.remove_spotify_artists(self.conn)
             self.conn.execute("DELETE FROM recording_embeddings WHERE space='collaborative'")
+            from yt_playlist.core import embedding_files
+            if embedding_files.available(self.conn):
+                self.conn.execute("DELETE FROM recording_embedding_files WHERE space='collaborative'")
+                self.conn.execute('DELETE FROM artist_embedding_files')
             from yt_playlist.core import group_preparation_state, model_selection_heads, model_state
             if model_selection_heads.available(self.conn):
                 model_selection_heads.put(self.conn,{key:None for key in model_selection_heads.KEYS})

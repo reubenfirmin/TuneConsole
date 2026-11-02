@@ -1812,6 +1812,36 @@ Prepared policy writes reserve at least 256 MiB of filesystem headroom. Served
 attribution is protected independently of those disposable-data limits.
 
 Startup applies bounded schema changes separately from historical preparation.
+Installed v0.1.18 libraries (schema 64) and the explicitly supported development
+schema 93 start one background database rebuild. It creates the current schema
+once, copies and transforms retained data into it, verifies the result, compacts
+the candidate and installs it through the shared replacement/recovery boundary.
+The source's applied migration history is preserved as provenance in
+`database_rebuild_source_history` and `database_rebuild_source_changes`;
+the rebuild does not replay bulk historical migrations against the source.
+
+The implementation lives in `core/db_rebuild/`: `job.py` owns recovery custody
+and phase order, `build.py` owns atomic batch bookmarks and candidate construction,
+and `install.py` owns closed-handle replacement and rollback. `destination.py`
+selects the current schema and canonical domain converters. The released and
+development importers admit only their two declared source layouts. Domain
+readers, writers and retention policies remain with their existing owners.
+
+During construction the original serves reads while library writes are paused;
+released-schema compatibility preserves saved-playlist playback. Playback
+observations use the durable inbox described below. Cutover briefly fences
+requests while handles close and the installed database reopens. Failure retains
+the recovery source and candidate. Restart can resume committed batches only
+when the source and destination code still match the recorded contract. Changing
+the destination contract requires a fresh candidate.
+
+An explicit local `POST /storage-maintenance/rebuild` starts a fresh attempt;
+`POST /storage-maintenance/rebuild?resume=true` requests an eligible interrupted
+build. Status and phase details are available at
+`GET /storage-maintenance/status`. These requests use the same worker and
+installer as the automatic upgrade. Retained-copy compaction below is the
+separate operation for preserving an already installed format.
+
 Retained-copy compaction is an explicit maintenance request. Browsing, starting
 and tuning radio, and existing playback remain
 available during repair. Confirmed ratings and playback observations are captured
@@ -1825,7 +1855,7 @@ playlist provenance is saved so subsequent plays stay excluded from taste learni
 Recommendation, enrichment and sync workers wait until repair finishes or safely
 defers. Normal recording then resumes, including when final compaction is deferred.
 Progress and deferral reasons remain in the logs and maintenance status.
-The top storage banner says “Updating storage pauses sync.” while writes are paused.
+The top storage banner says “Library updates are paused.” while writes are paused.
 It stays on one line, including in narrow windows with enlarged text. A low-space
 warning remains visible after recording resumes.
 
@@ -1839,7 +1869,7 @@ To request retained-copy compaction in a running application, send a local
 `POST /storage-maintenance/compact`. For a stopped library, use:
 
 ```bash
-uv run python -m yt_playlist.core.copy_compaction /path/to/state.db \
+uv run python -m yt_playlist.core.db_rebuild.job /path/to/state.db \
   --scratch /existing/directory/with/space
 ```
 

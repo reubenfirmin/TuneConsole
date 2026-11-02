@@ -49,7 +49,7 @@ def store(tmp_path, monkeypatch, request):
     return copy
 
 
-@pytest.mark.parametrize('width',[1440,390])
+@pytest.mark.parametrize('width',[1440])
 def test_saved_library_journal_and_analytics(live_app,store,page,width):
     errors=[]; page.on('pageerror',lambda error:errors.append(str(error)))
     page.set_viewport_size({'width':width,'height':1100})

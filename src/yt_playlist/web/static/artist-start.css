@@ -2,7 +2,6 @@
 .artist-start { max-width: 1160px; margin: 0 auto; padding: 28px 0 48px; text-align: left; }
 .artist-start h2 { margin: 0 0 20px; font-size: clamp(1.4rem, 2.3vw, 1.9rem); line-height: 1.15; letter-spacing: -.025em; font-weight: 750; }
 .artist-start-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 20px; }
-.artist-start-eyebrow { margin: 0 0 16px; color: var(--amber); font-size: .85rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
 .artist-start-intro { color: var(--dim); margin: 0 0 24px; font-size: 1rem; max-width: 680px; }
 .artist-start-search { display: flex; align-items: center; gap: 16px; max-width: 740px; border: 2px solid var(--border-strong); background: var(--surface-card); border-radius: 12px; padding: 0 20px; }
 .artist-start-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }

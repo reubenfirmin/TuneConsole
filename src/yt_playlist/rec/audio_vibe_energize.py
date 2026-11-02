@@ -1,13 +1,11 @@
 """Frozen activation, energy and power consensus for Energize suitability."""
 from functools import lru_cache
-import hashlib
-import json
 from pathlib import Path
 from statistics import mean
 
-from yt_playlist.core import audio_embedding
+from yt_playlist.core import audio_embedding, fao
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
-from yt_playlist.rec import audio_vibe_cruise as bounded
+from yt_playlist.rec import audio_vibe_runtime as bounded
 
 FORMAT = 'audio-vibe-energize-1'
 VERSION = 'energize-routing-1'
@@ -26,21 +24,15 @@ PROCEDURE = 'consensus_no_joy'
 
 
 def configured_path():
-    return bounded._configured(ENVIRONMENT_KEY, str(DEFAULT_PATH)) or None
+    return bounded.configured(ENVIRONMENT_KEY, str(DEFAULT_PATH)) or None
 
 
 def mode():
-    return 'active' if bounded._configured(MODE_KEY, 'active') == 'active' else 'off'
+    return 'active' if bounded.configured(MODE_KEY, 'active') == 'active' else 'off'
 
 
 def identity():
-    selected_mode, path = mode(), configured_path()
-    if selected_mode == 'active' and path:
-        try:
-            return '/'.join((VERSION, selected_mode, load(path)['sha256']))
-        except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
-            pass
-    return '/'.join((VERSION, selected_mode, 'shared'))
+    return bounded.identity(VERSION, mode(), configured_path(), load)
 
 
 def validate(artifact):
@@ -53,7 +45,7 @@ def validate(artifact):
             or artifact.get('procedure') != PROCEDURE
             or artifact.get('score_semantics') != 'independent_uncalibrated_suitability'
             or artifact.get('weights') != WEIGHTS
-            or any(not bounded._hash(artifact.get(key)) for key in
+            or any(not bounded.valid_hash(artifact.get(key)) for key in
                    ('embedding_signature', 'source_model_sha256', 'source_plan_sha256'))
             or not isinstance(artifact.get('experts'), dict) or set(artifact['experts']) != set(TARGETS)):
         raise ValueError('Incompatible Energize model')
@@ -62,29 +54,19 @@ def validate(artifact):
         if (not isinstance(expert, dict) or expert.get('target_names') != targets
                 or type(expert.get('training_rows')) is not int or expert['training_rows'] <= 0):
             raise ValueError('Invalid Energize source identity')
-        bounded._stage(expert.get('model'), audio_embedding.DIMENSIONS, len(targets), allow_rff=False)
+        bounded.validate_stage(expert.get('model'), audio_embedding.DIMENSIONS, len(targets), allow_rff=False)
     return artifact
 
 
 @lru_cache(maxsize=2)
 def _load(path, mtime, size):
-    if not 0 < size <= MAX_BYTES:
-        raise ValueError('Energize artifact exceeds size bound')
-    with Path(path).open('rb') as stream:
-        raw = stream.read(MAX_BYTES + 1)
-    if len(raw) != size:
-        raise ValueError('Energize artifact changed during read')
-    try:
-        header = validate(json.loads(raw))
-    except RecursionError as error:
-        raise ValueError('Invalid Energize artifact nesting') from error
-    return {'header': header, 'sha256': hashlib.sha256(raw).hexdigest()}
+    return bounded.read_artifact(path, size, MAX_BYTES, lambda artifact: {'header': validate(artifact)})
 
 
 def load(path):
     path = Path(path).resolve()
-    stat = path.stat()
-    return _load(str(path), stat.st_mtime_ns, stat.st_size)
+    info = fao.stat(path)
+    return _load(str(path), info.identity, info.logical_bytes)
 
 
 def score(model, values):
@@ -92,7 +74,7 @@ def score(model, values):
     native, scores = {}, {}
     for source, targets in TARGETS.items():
         expert = model['header']['experts'][source]
-        scores[source] = mean(bounded._predict(expert['model'], row)[0] for row in values)
+        scores[source] = mean(bounded.predict(expert['model'], row)[0] for row in values)
         native[source] = {targets[0]: scores[source]}
     return {'score': sum(scores[source] * weight for source, weight in WEIGHTS.items()),
             'native': native, 'source_scores': scores, 'sample_count': len(values),
@@ -102,18 +84,5 @@ def score(model, values):
 
 def apply(samples, prediction):
     path = configured_path()
-    if mode() != 'active' or not path:
-        return prediction
-    try:
-        model = load(path)
-        if {audio_embedding.signature(sample) for sample in samples} != {model['header']['embedding_signature']}:
-            return prediction
-        candidate = score(model, [sample['embedding']['values'] for sample in samples])
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
-        return prediction
-    suitability = {row['vibe']: row['score'] for row in prediction['ranking']}
-    suitability.update(prediction.get('suitability', {}))
-    suitability['energize'] = candidate['score']
-    return {**prediction, 'suitability': suitability,
-            'individual_models': {**prediction.get('individual_models', {}),
-                                  'energize': {**candidate, 'mode': 'active'}}}
+    return bounded.apply(samples, prediction, selected_mode=mode(), path=path,
+                         loader=load, scorer=score, vibe='energize')

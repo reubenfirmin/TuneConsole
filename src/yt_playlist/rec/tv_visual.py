@@ -111,6 +111,10 @@ class Inspector:
         if not self.lock.acquire(blocking=False):
             return None
         try:
+            # Another request may have published after our first cache read,
+            # then released the lock before this request acquired it.
+            if result := cached(store, video_id, now):
+                return result
             result = {'verdict': 'unknown'}
             try:
                 if item['duration'] > TIMES[-1] and hasattr(client, 'get_video_storyboard'):

@@ -152,7 +152,9 @@ def test_radio_provenance_plays_are_excluded_from_now_layer_mood_evidence(store,
     _install_content_vectors(store, monkeypatch, keys, V)
     iid = _identity(store)
     now = 100_000.0
-    store.settings.set_setting("radio_playlist_ytm", "PLRADIO")
+    from yt_playlist.core import radio_provenance
+    with store.conn:
+        radio_provenance.remember(store.conn, 'PLRADIO', iid)
     # Radio-queued plays (mode 1 / "X"): carry the radio playlist's own ytm id as provenance.
     for i, k in enumerate(["x1", "x2", "x3"]):
         store.history.record_play_event(iid, k, "v" + k, now - i * 60, playlist_ytm_id="PLRADIO")

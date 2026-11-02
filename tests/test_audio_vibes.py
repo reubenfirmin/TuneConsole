@@ -434,6 +434,7 @@ def test_changing_labels_preserves_original_prediction_across_heuristic_versions
 
 
 def test_audio_migration_preserves_existing_settings_and_reopens(tmp_path):
+    from tests.historical_support import upgrade_fixture
     from yt_playlist.core.store import Store
     from yt_playlist.core.migrations import migrate
     from yt_playlist.core.migrations.registry import MIGRATIONS
@@ -450,7 +451,7 @@ def test_audio_migration_preserves_existing_settings_and_reopens(tmp_path):
     previous.conn.commit()
     previous.conn.close()
     upgraded = Store(path)
-    upgraded.init_schema()
+    upgrade_fixture(upgraded)
     assert upgraded.settings.get_setting('audio_test_sentinel') == 'keep'
     value = sample(run_id=legacy_run)
     upgraded.audio_vibes.save_sample(value, 10)

@@ -40,6 +40,44 @@ def test_existing_radio_keeps_running_with_discarded_writes_and_resumes_saving(p
     assert c.persistence.transient is None
 
 
+def test_prepared_radio_starts_readonly_then_retains_its_publication_on_resume(poc, monkeypatch):
+    from tests.test_radio_preparation import prepare_radio_styles
+
+    c, _, frames, _, pool = poc
+    store = c.ctx.store
+    prepare_radio_styles(c, pool, monkeypatch)
+    account = store.accounts.get_master_account().id
+    provider = FakeClient(catalog={track['video_id']: {
+        'videoId': track['video_id'], 'title': track['title'],
+        'artists': [{'name': track['artist']}], 'duration_seconds': 180} for track in pool})
+    c.ctx.client_provider = lambda: {account: provider}
+    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', create_generated_playlist)
+    generation = store.recommendations.head('home')['id']
+    store.activity_paused = True
+    store.conn.execute('PRAGMA query_only=ON')
+    changes = store.conn.total_changes
+    try:
+        result = c.start(seed_video_id='v1')
+        assert result['ok'], result.get('reason')
+        assert result['local_id'] is None
+        assert len(provider.created) == len(frames) == 1
+        assert c.session.candidates.prepared.generation == generation
+        assert store.conn.total_changes == changes
+        assert not store.conn.execute("SELECT 1 FROM recommendation_generation_refs WHERE kind='pending'").fetchone()
+    finally:
+        store.conn.execute('PRAGMA query_only=OFF')
+        store.activity_paused = False
+    try:
+        c.retain_provenance()
+        c.retain_provenance()
+        assert [row[0] for row in store.conn.execute(
+            "SELECT generation_id FROM recommendation_generation_refs WHERE kind='pending'")] == [generation]
+        assert c.session.candidates.prepared._lifetime.alive
+        assert len(provider.created) == len(frames) == 1
+    finally:
+        c.session.candidates.close()
+
+
 def test_radio_creation_finishing_after_repair_retains_only_source_provenance(poc, monkeypatch):
     c, _, frames, _, pool = poc
     store = c.ctx.store

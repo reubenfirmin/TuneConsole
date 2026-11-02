@@ -9,6 +9,7 @@ from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.rec import home_prepared, mode_surfaces
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.worker_tasks import ServingTasks
+from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 
 
 @pytest.mark.parametrize('publication_threshold', [0., float('inf')])
@@ -27,8 +28,8 @@ def test_publication_summaries_are_bounded_and_keep_phase_reason_and_progress_co
                     snapshot.store.settings.get_setting('input')
                     if attempt % 2 == 0:
                         store.settings.set_setting('input', str(clock[0]))
-                    published = snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(
-                        str(int(clock[0])), clock[0], surface='logging-probe'))
+                    published = snapshot.publish(lambda: store.settings.set_setting(
+                        'logging-probe-output', str(int(clock[0]))))
                     assert published == (attempt % 2 == 1)
             store.maintenance_diagnostics.record('deferred', phase='rec: Home collections',
                                                  reasons=('time_budget',))
@@ -49,7 +50,7 @@ def test_publication_summaries_are_bounded_and_keep_phase_reason_and_progress_co
             'rec: Home collections': {'time_budget': 60},
         }
         assert waiting == {'rec: Home collections': (index + 1) * 60}
-    assert store.rec_proposals.get_proposals('logging-probe') == 179
+    assert store.settings.get_setting('logging-probe-output') == '179'
     assert any('Maintenance publication deferred:' in r.message and r.levelno == logging.DEBUG
                for r in caplog.records)
     assert any('work start:' in r.message and r.levelno == logging.DEBUG for r in caplog.records)
@@ -105,7 +106,11 @@ def test_explicit_user_action_announcements_remain_at_info(caplog):
 
 
 def test_bundle_failure_preserves_traceback_retry_and_last_good_pool(store, monkeypatch, caplog):
-    store.rec_proposals.put_proposals('mode_bundles', {'last-good': True}, 1)
+    bundle = {'all': {'wheelhouse': [{'key': 'last good|artist', 'video_id': 'last-good',
+        'title': 'Last good', 'artist': 'Artist', 'genre': 'House'}]}}
+    seed_bundle_subjects(store, bundle)
+    publish_bundles(store, bundle, 1)
+    saved = store.recommendations.heads()
 
     def failed(*args):
         raise RuntimeError('forced preparation failure')
@@ -119,7 +124,9 @@ def test_bundle_failure_preserves_traceback_retry_and_last_good_pool(store, monk
         assert len(warnings) == 1
         assert warnings[0].exc_info and 'retry_backoff=' in warnings[0].message
         assert 'forced preparation failure' in caplog.text
-        assert store.rec_proposals.get_proposals('mode_bundles') == {'last-good': True}
+        assert store.recommendations.heads() == saved
+        assert [row['video_id'] for row in store.recommendations.candidate_page(
+            'home', 'all', 'wheelhouse', limit=4)['tracks']] == ['last-good']
     finally:
         worker.shutdown()
 

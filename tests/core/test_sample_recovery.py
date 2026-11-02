@@ -8,7 +8,7 @@ import pytest
 
 from tests.core.test_predecessor_writes import installed
 from tests.test_audio_vibes import sample
-from yt_playlist.core import copy_compaction, policy_recovery, sample_files
+from yt_playlist.core import copy_compaction, db_handles, fao, policy_recovery, sample_files
 from yt_playlist.core.policy_documents import coordinate_updates
 from yt_playlist.core.store import Store
 
@@ -29,6 +29,8 @@ def test_public_recovery_retains_samples_without_producer(installed, tmp_path, k
     original = list(store.conn.iterdump())
     root = sample_files.directory(store.conn)
     hashes = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in root.glob('*/*.json')}
+    clocks = {path.stem: (fao.stat(path).mtime_ns, fao.stat(path).ctime_ns)
               for path in root.glob('*/*.json')}
     report = policy_recovery.recover(store._db_path, tmp_path/'recovered', progress=lambda _: None)
     candidate_path = Path(report['compact_database'])
@@ -51,7 +53,9 @@ def test_public_recovery_retains_samples_without_producer(installed, tmp_path, k
             assert not candidate.conn.execute('PRAGMA foreign_key_check').fetchall()
             for filename, in candidate.conn.execute('SELECT filename FROM sample_attributes'):
                 assert Path(filename).is_relative_to(sample_files.directory(candidate.conn))
-                assert hashlib.sha256(Path(filename).read_bytes()).hexdigest() == Path(filename).stem
+                assert hashlib.sha256(fao.read_bytes(filename)).hexdigest() == Path(filename).stem
+                copied = fao.stat(filename)
+                assert (copied.mtime_ns, copied.ctime_ns) == clocks[Path(filename).stem]
         finally:
             candidate.conn.close()
     finally:
@@ -98,12 +102,12 @@ def test_interruption_rolls_back_coordinates_and_retry_preserves_exact_bytes(ins
         target_before = list(target.iterdump())
         calls = 0
         original_publish = sample_files._publish
-        def interrupted(*args):
+        def interrupted(*args, **kwargs):
             nonlocal calls
             calls += 1
             if calls == 2:
                 raise InterruptedError('controlled sample interruption')
-            return original_publish(*args)
+            return original_publish(*args, **kwargs)
         with monkeypatch.context() as patch:
             patch.setattr(sample_files, '_publish', interrupted)
             with pytest.raises(InterruptedError, match='controlled sample'):
@@ -116,7 +120,7 @@ def test_interruption_rolls_back_coordinates_and_retry_preserves_exact_bytes(ins
         assert list(target.iterdump()) == target_before
         sample_files.restore(target, manifest)
         expected = {value['id']: sample_files.canonical(value) for value in values}
-        assert {identity: Path(filename).read_bytes() for identity, filename in target.execute(
+        assert {identity: fao.read_bytes(filename) for identity, filename in target.execute(
             'SELECT id,filename FROM sample_attributes')} == expected
     assert list(store.conn.iterdump()) == before
 
@@ -134,7 +138,7 @@ def test_compactor_inventory_and_backup_include_samples(installed, tmp_path):
             raise RuntimeError('stop after verified backup')
     with pytest.raises(RuntimeError, match='stop after verified backup'):
         copy_compaction.run(store, progress=stop)
-    state = copy_compaction.db_handles.state(store._db_path)
+    state = db_handles.state(store._db_path)
     assert 'samples' in state['backup_file_manifests']
     candidate_path = tmp_path/'backup-restore'/'copy.db'
     candidate_path.parent.mkdir()
@@ -184,6 +188,6 @@ def test_noncanonical_captured_bytes_survive_and_export_is_cancellable(installed
         store.conn.backup(target)
         sample_files.restore(target, manifest)
         target_filename = target.execute('SELECT filename FROM sample_attributes WHERE id=?', (value['id'],)).fetchone()[0]
-        assert Path(target_filename).read_bytes() == encoded
+        assert fao.read_bytes(target_filename) == encoded
     with pytest.raises(ValueError, match='byte budget'):
         sample_files.read(filename, max_bytes=8)

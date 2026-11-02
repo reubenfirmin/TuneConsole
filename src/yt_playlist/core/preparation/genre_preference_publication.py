@@ -86,7 +86,7 @@ def definitions():
 
 def validate(conn):
     from ..migrations.current import _tokens
-    from ..migrations.v103_entity_names import transform
+    from ..entity_names import predecessor_definition as transform
     renamed = conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='accounts'").fetchone()
     for name, sql in definitions():
         row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()

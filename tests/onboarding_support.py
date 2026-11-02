@@ -25,9 +25,11 @@ def publish_personal_mix(store, now=1000, count=4):
     return [track for proto in payload['menus'][0]['protos'] for track in proto['tracks']]
 
 
-def publish_personal_album(store, now=1000):
+def publish_personal_album(store, now=1000, count=1):
     seed_catalog_track(store, 'album track|artist', 'Album track', 'Artist', video_id='album-track')
     store.rec_proposals.put_proposals('album_prepared', {
         'built_at': now, 'context': {}, 'items': [{
-            'browse_id': 'first-album', 'title': 'Your next record', 'artist': 'Artist',
-            'classification': 'discovery', 'score': .9, 'genre': 'Jazz'}]}, now)
+            'browse_id': 'first-album' if index == 0 else f'next-album-{index}',
+            'title': 'Your next record' if index == 0 else f'Another record {index}',
+            'artist': 'Artist' if index == 0 else f'Another artist {index}',
+            'classification': 'discovery', 'score': .9, 'genre': 'Jazz'} for index in range(count)]}, now)

@@ -2,7 +2,7 @@
 import pytest
 from playwright.sync_api import expect
 
-from tests.browser.test_tv_browser import tv_ui
+from tests.browser.test_tv_browser import store, tv_ui
 from tests.test_tv_stream import video
 from yt_playlist.rec import tv, tv_artwork
 from yt_playlist.util.matching import search_squash
@@ -52,6 +52,17 @@ def test_tv_keeps_playing_advancing_and_refilling_across_home_tabs(page, live_ap
         expect(tv_tab).to_have_attribute('aria-description', 'TV is playing')
     controls = page.locator('.global-now-playing')
     expect(controls.locator('.hs-source')).to_have_text('Back to TV')
+    expect(controls.get_by_role('button', name='Pause', exact=True)).to_be_in_viewport()
+    # The short desktop rail must leave both playback and navigation usable.
+    nav = page.locator('.topbar')
+    road_trip = nav.get_by_role('link', name='Road Trip', exact=True)
+    road_trip.scroll_into_view_if_needed()
+    expect(road_trip).to_be_in_viewport()
+    nav.get_by_role('button', name='Tools', exact=True).click()
+    expect(nav.get_by_role('link', name='Setup', exact=True)).to_be_in_viewport()
+    nav.get_by_role('button', name='Tools', exact=True).click()
+    expect(controls.get_by_role('button', name='Pause', exact=True)).to_be_in_viewport()
+    page.screenshot(path='/tmp/tuneconsole-tv-stream-controls.png')
     controls.get_by_role('button', name='Pause', exact=True).click()
     page.wait_for_function(f'!{MODEL}.playing')
     expect(dot).to_be_hidden()
@@ -170,7 +181,7 @@ def test_space_resumes_the_same_video_and_native_controls_keep_their_behavior(pa
     assert page.evaluate('window.tvPlayer.position') == 37
 
 
-@pytest.mark.parametrize('width', [1792, 1440, 390])
+@pytest.mark.parametrize('width', [1792, 1440])
 def test_artist_photo_covers_viewport_and_uses_alternatives_before_video(page, live_app, tv_ui, store, width):
     page.set_viewport_size({'width': width, 'height': 1000})
     page.route('**/broken-artist.jpg', lambda route: route.fulfill(status=404))

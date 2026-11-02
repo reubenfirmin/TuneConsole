@@ -9,6 +9,7 @@ from yt_playlist.rec.radio_candidates import RadioCandidates, CLUSTER_POOL_LIMIT
 from yt_playlist.rec.radio_directions import RadioDirections
 from tests.musical_support import prepare_profiles
 from yt_playlist.core import catalog
+from tests.recommendation_support import publish_bundles
 
 
 @pytest.fixture
@@ -31,7 +32,7 @@ def prepared(store):
             tracks.append(track)
         bundles[str(mid)] = dict(wheelhouse=familiar, fresh=fresh)
     store.modes.replace_modes(modes, retired_ids=[], now=1)
-    store.rec_proposals.put_proposals("mode_bundles", bundles)
+    publish_bundles(store, bundles)
     prepare_profiles(store)
     return tracks
 

@@ -3,7 +3,8 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core.migrations import current, migrate, registry
+from yt_playlist.core.migrations import migrate, registry
+from yt_playlist.core.migrations.runner import validate_version
 from tests.core.test_snapshot_revisions import database
 
 
@@ -64,8 +65,9 @@ def test_version_39_upgrade_preserves_events_and_pending_work(tmp_path):
         conn.commit()
         before = [tuple(row) for row in conn.execute('SELECT * FROM player_events')]
         pending = [tuple(row) for row in conn.execute('SELECT * FROM rec_change_queue')]
-        migrate(conn)
-        current.validate(conn)
+        # Exercise v40's telemetry trigger change on its genuine predecessor.
+        migrate(conn, registry=registry.MIGRATIONS[:40])
+        validate_version(conn, 40)
         assert [tuple(row) for row in conn.execute('SELECT * FROM player_events')] == before
         assert [tuple(row) for row in conn.execute('SELECT * FROM rec_change_queue')] == pending
         conn.execute('DELETE FROM rec_change_queue')

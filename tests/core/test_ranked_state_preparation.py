@@ -8,7 +8,7 @@ import struct
 import pytest
 
 from tests.core.test_predecessor_writes import installed
-from yt_playlist.core import library_pool_state, model_projections, recommendation_outputs as files
+from yt_playlist.core import fao, library_pool_state, model_projections, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import ranked_state as preparation
 from yt_playlist.core.store import Store
@@ -385,7 +385,7 @@ def test_missing_durable_plan_requires_explicit_retry_and_rebuilds_exact_checkpo
     checkpoint = job.step(store.conn, batch_size=1)
     generation = store.conn.execute('SELECT * FROM prepared_model_pairs_generations').fetchone()
     filename = Path(generation['plan_filename'])
-    original = filename.read_bytes()
+    original = fao.read_bytes(filename)
     filename.unlink()
     with pytest.raises(FileNotFoundError):
         job.step(store.conn, batch_size=1)
@@ -402,7 +402,7 @@ def test_missing_durable_plan_requires_explicit_retry_and_rebuilds_exact_checkpo
             job.step(reopened.conn)
         job.step(reopened.conn, batch_size=1, retry=True)
         finish(job, reopened.conn)
-        assert filename.read_bytes() == original
+        assert fao.read_bytes(filename) == original
         assert preparation.read_original(reopened.conn, generation)
     finally:
         reopened.conn.close()

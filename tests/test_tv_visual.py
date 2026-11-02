@@ -139,6 +139,31 @@ def test_concurrent_inspection_returns_pending_without_a_second_network_job(stor
         inspector.lock.release()
 
 
+def test_inspector_reuses_result_published_between_cache_read_and_lock(store, monkeypatch):
+    inspector = tv_visual.Inspector()
+    item = video(2)
+    result = {'version': tv_visual.VERSION, 'verdict': 'moving', 'at': 1}
+    cached = tv_visual.cached
+    reads = []
+
+    def completed_during_read(actual_store, video_id, now):
+        previous = cached(actual_store, video_id, now)
+        reads.append(previous)
+        if len(reads) == 1:
+            # The first read missed just before another inspection completed.
+            actual_store.rec_proposals.publish_tv_visual(video_id, result, now)
+        return previous
+
+    def unexpected_network_call(_):
+        pytest.fail('A completed concurrent inspection must not be repeated')
+
+    monkeypatch.setattr(tv_visual, 'cached', completed_during_read)
+    client = SimpleNamespace(get_video_storyboard=unexpected_network_call)
+    assert inspector.inspect(store, client, item, 1) == result
+    assert reads == [None, result]
+    assert not inspector.lock.locked()
+
+
 @pytest.mark.parametrize('kind', ['valid', 'redirect', 'html', 'oversize', 'corrupt', 'deadline'])
 def test_image_reader_decodes_bounded_images_and_refuses_unusable_downloads(monkeypatch, kind):
     encoded = BytesIO()

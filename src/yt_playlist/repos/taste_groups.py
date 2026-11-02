@@ -3,7 +3,7 @@ import json
 import time
 
 from yt_playlist.core.activity import WorkBudgetExceeded
-from yt_playlist.core import prepared_inputs
+from yt_playlist.core import prepared_inputs, profile_files
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.repos import group_publication
 
@@ -106,8 +106,9 @@ class TasteGroupsRepo(Repo):
     def corpus_page(self, after='', *, limit=128, max_bytes=8 * 1024 * 1024):
         # Bound raw bytes before fetching/decoding. Callers project each page and
         # release provenance trees, retaining only compact per-recording features.
+        profile_size = (profile_files.recording_size_sql() if profile_files.available(self.conn) else 'length(CAST(m.payload AS BLOB))')
         size = self.conn.execute('SELECT COALESCE(SUM(bytes),0) FROM (SELECT '
-            + prepared_inputs.byte_bound() + '+COALESCE(length(CAST(m.payload AS BLOB))*4,0) bytes '
+            + prepared_inputs.byte_bound() + '+COALESCE((' + profile_size + ')*4,0) bytes '
             'FROM prepared_recording_inputs p JOIN recordings r ON r.id=p.recording_id '
             'LEFT JOIN rec_musical_profiles m ON m.identity_key=r.identity_key '
             'WHERE p.library_present=1 AND r.identity_key>? '
@@ -118,8 +119,14 @@ class TasteGroupsRepo(Repo):
             'JOIN recordings r ON r.id=p.recording_id LEFT JOIN rec_musical_profiles m ON m.identity_key=r.identity_key '
             'WHERE p.library_present=1 AND r.identity_key>? '
             'ORDER BY r.identity_key LIMIT ?', (after, limit)).fetchall()
-        return [(r['identity_key'], prepared_inputs.payload(r), json.loads(r['profile']) if r['profile'] else None)
+        cache = profile_files.Cache()
+        return [(r['identity_key'], prepared_inputs.payload(r), self._profile(r, cache))
                 for r in rows]
+
+    def _profile(self, row, cache):
+        if row['profile'] is None:
+            return None
+        return json.loads(profile_files.read(self.conn, 'recording', row['identity_key'], cache=cache))
 
     @synchronized
     def lineage(self):
@@ -159,14 +166,16 @@ class TasteGroupsRepo(Repo):
         if len(keys) > 32:
             raise ValueError('Group assignment input page exceeds 32 recordings')
         qs = ','.join('?' for _ in keys)
+        profile_size = (profile_files.recording_size_sql() if profile_files.available(self.conn) else 'length(CAST(m.payload AS BLOB))')
         used = self.conn.execute('SELECT COALESCE(SUM(' + prepared_inputs.byte_bound()
-            + '+COALESCE(length(CAST(m.payload AS BLOB))*4,0)),0) '
+            + '+COALESCE((' + profile_size + ')*4,0)),0) '
             'FROM prepared_recording_inputs p JOIN recordings r ON r.id=p.recording_id '
             'LEFT JOIN rec_musical_profiles m ON m.identity_key=r.identity_key '
             f'WHERE r.identity_key IN ({qs})', keys).fetchone()[0]
         if used > max_bytes:
             raise WorkBudgetExceeded('Group assignment evidence exceeds page budget')
-        return [(row['identity_key'], prepared_inputs.payload(row), json.loads(row['profile']) if row['profile'] else None)
+        cache = profile_files.Cache()
+        return [(row['identity_key'], prepared_inputs.payload(row), self._profile(row, cache))
                 for row in self.conn.execute('SELECT r.identity_key,p.*,m.payload profile FROM prepared_recording_inputs p '
                     'JOIN recordings r ON r.id=p.recording_id LEFT JOIN rec_musical_profiles m ON m.identity_key=r.identity_key '
                     f'WHERE r.identity_key IN ({qs})', keys)]

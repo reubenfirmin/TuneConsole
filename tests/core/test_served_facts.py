@@ -1,10 +1,14 @@
 """Reporting remains exact when diagnostic traces are unavailable or expired."""
 import json
+import hashlib
+import time
 
 import pytest
 
-from yt_playlist.core import policy_documents, served_facts as facts
+from yt_playlist.core import fao, policy_documents, served_facts as facts
+from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.rec import scorecard
+from yt_playlist.repos.rec_ledger import RESPONSE_RETAIN_DAYS
 
 
 def offer(store, request, at=100, *, shadow=False, controlled=True):
@@ -86,7 +90,7 @@ def test_missing_corrupt_diagnostic_are_errors_but_reports_work(store):
     offer(store, 'one')
     baseline = reports(store)
     path = facts.directory(store.conn) / facts.relative(1)
-    encoded = path.read_bytes()
+    encoded = fao.read_bytes(path)
     path.unlink()
     with pytest.raises(ValueError, match='Unexpectedly missing'):
         scorecard.served_recommendation(store, 1)
@@ -100,7 +104,7 @@ def test_idle_retention_defers_for_reader_and_keeps_monotonic_ids(store):
     activate(store)
     offer(store, 'one')
     path = facts.directory(store.conn) / facts.relative(1)
-    now = facts.RETAIN_SECONDS + 101
+    now = max(facts.RETAIN_SECONDS, RESPONSE_RETAIN_DAYS * 86400) + 101
     with policy_documents.retained_reader(facts.directory(store.conn)):
         store.rec_ledger.maintain_impressions(now)
         assert path.exists()
@@ -112,7 +116,8 @@ def test_idle_retention_defers_for_reader_and_keeps_monotonic_ids(store):
     assert store.conn.execute('SELECT id FROM rec_served_impressions').fetchone()[0] == 2
 
 
-def test_failed_file_publication_rolls_back_and_can_retry(store, monkeypatch):
+@pytest.mark.parametrize('retry', (True, False))
+def test_failed_file_publication_rolls_back_and_recovers(store, monkeypatch, retry):
     activate(store)
     original = facts.publish
     def fail(*args, **kwargs):
@@ -124,19 +129,60 @@ def test_failed_file_publication_rolls_back_and_can_retry(store, monkeypatch):
             offer(store, 'one')
     assert not store.conn.execute('SELECT 1 FROM rec_served_impressions').fetchone()
     assert not store.conn.execute('SELECT 1 FROM served_facts').fetchone()
-    offer(store, 'one')
-    assert scorecard.served_recommendation(store, 1)['diagnostic_status'] == 'available'
+    path = facts.directory(store.conn) / facts.relative(1)
+    assert path.exists()
+    if retry:
+        offer(store, 'one')
+        assert scorecard.served_recommendation(store, 1)['diagnostic_status'] == 'available'
+    else:
+        now = time.time() + facts.RETAIN_SECONDS + 100
+        with policy_documents.retained_reader(facts.directory(store.conn)):
+            store.rec_ledger.maintain_impressions(now)
+            assert path.exists()
+        # Collection must rediscover an orphan without a SQL retirement receipt.
+        # Clear the in-memory traversal to exercise restart from its durable shard.
+        store.rec_ledger.maintain_impressions(time.time())
+        current = getattr(store.conn, '_served_orphan_gc', None)
+        if current is not None and hasattr(current[1], 'close'):
+            current[1].close()
+            store.conn._close_callbacks.remove(current[1].close)
+        store.conn._served_orphan_gc = None
+        for _ in range(3):
+            store.rec_ledger.maintain_impressions(now)
+        assert not path.exists()
 
 
-def test_backup_checks_exact_ownership_and_restores_trace(store, tmp_path):
+@pytest.mark.parametrize('damage', ('checksum', 'meaning', 'incomplete'))
+def test_backup_checks_all_members_before_restoring_trace(store, tmp_path, damage):
     activate(store)
     trace = offer(store, 'one')
+    second = offer(store, 'two')
     manifest = facts.export(store.conn, tmp_path / 'backup')
     path = facts.directory(store.conn) / facts.relative(1)
     path.unlink()
     facts.restore(store.conn, manifest)
     assert scorecard.served_recommendation(store, 1)['provenance'] == trace
-    backup = tmp_path / 'backup' / facts.relative(1)
-    backup.write_bytes(b'wrong')
-    with pytest.raises(ValueError, match='verification'):
+    before = {i: fao.read_bytes(facts.directory(store.conn)/facts.relative(i)) for i in (1, 2)}
+    document = json.loads(fao.read_bytes(manifest))
+    # A valid earlier member with a different opaque diagnostic would be
+    # accepted on its own. A bad later member must not publish that change.
+    for i in (1, 2):
+        backup = tmp_path/'backup'/facts.relative(i)
+        envelope = json.loads(fao.read_bytes(backup))
+        if i == 1:
+            envelope['body']['provenance']['diagnostic'] = {'replacement': True}
+        elif damage == 'meaning':
+            envelope['body']['provenance']['candidate']['genre'] = 'Wrong genre'
+        envelope['sha256'] = hashlib.sha256(canonical(envelope['body'])).hexdigest()
+        encoded = canonical(envelope)
+        fao.write_bytes(backup, encoded)
+        document['entries'][i-1][1:] = [len(encoded), hashlib.sha256(encoded).hexdigest()]
+    if damage == 'checksum':
+        document['entries'][1][2] = 'wrong'
+    elif damage == 'incomplete':
+        document['entries'].pop()
+    fao.write_bytes(manifest, canonical(document))
+    with pytest.raises(ValueError, match='verification|captured owner|incomplete'):
         facts.restore(store.conn, manifest)
+    assert {i: fao.read_bytes(facts.directory(store.conn)/facts.relative(i)) for i in (1, 2)} == before
+    assert scorecard.served_recommendation(store, 2)['provenance'] == second

@@ -315,6 +315,8 @@ def remove_spotify_artists(conn, *, account_id=None, import_key=None):
         parameters.append(import_key)
     affected = {r[0] for r in conn.execute('SELECT s.artist_id FROM discovery_artist_sources s '
         'JOIN discovery_origins o ON o.id=s.origin_id WHERE '+where,parameters)}
+    derived = {r[0] for r in conn.execute('SELECT s.artist_id FROM discovery_artist_sources s '
+        "JOIN discovery_origins o ON o.id=s.origin_id WHERE o.kind='spotify_model'")}
     conn.execute('DELETE FROM discovery_artist_sources WHERE origin_id IN (SELECT o.id FROM discovery_origins o WHERE '+where+')',parameters)
     removed = 0
     for aid in affected:
@@ -323,7 +325,8 @@ def remove_spotify_artists(conn, *, account_id=None, import_key=None):
             removed += conn.execute('DELETE FROM discovered_artists WHERE artist_id=?',(aid,)).rowcount
         else:
             conn.execute('UPDATE discovered_artists SET score=? WHERE artist_id=?',(remaining,aid))
-            invalidate_explanation(conn,aid)
+            if aid in derived:
+                invalidate_explanation(conn,aid)
     return removed
 
 

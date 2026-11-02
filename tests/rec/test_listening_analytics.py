@@ -69,7 +69,7 @@ def test_generated_plays_coarse_evidence_and_discovery_use_complete_history(stor
     assert total(payload, 'rated') == 0  # mutable play-event status is not historical evidence
     by_format = {row[3]: row for row in payload['rows'] if row[4]}
     assert set(by_format) == {'mixes', 'albums', 'liked'}
-    assert store.conn.execute('SELECT is_generated FROM play_events WHERE identity_key=?', ('a',)).fetchone()[0]
+    assert store.conn.execute('SELECT is_generated FROM play_event_subjects WHERE identity_key=?', ('a',)).fetchone()[0]
 
 
 def test_discovery_baseline_excludes_the_initial_capture_and_survives_partitioning(store):
@@ -112,7 +112,9 @@ def test_observed_seconds_exclude_pause_mute_seek_missing_samples_and_duplicate_
 
 def test_midnight_sample_is_split_and_radio_context_is_durable(store):
     iid = seed(store)
-    store.settings.set_setting('radio_session_playlist_ids', '["saved-radio"]')
+    from yt_playlist.core import radio_provenance
+    with store.conn:
+        radio_provenance.remember(store.conn, 'saved-radio', iid)
     midnight = NOW - 12*3600
     event(store, iid, 'tick', midnight-10, 0, playlist='saved-radio')
     event(store, iid, 'tick', midnight+20, 30, playlist='saved-radio')

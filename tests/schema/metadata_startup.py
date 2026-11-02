@@ -90,7 +90,7 @@ def convert_while_serving(store, request, directory, monkeypatch, migration, rep
         assert client.post('/sync').status_code == 503
         playing()
         page.goto(f'http://127.0.0.1:{server.config.port}/', wait_until='domcontentloaded')
-        expect(page.locator('#storage-maintenance')).to_have_text('Library updates are paused.')
+        expect(page.locator('#storage-maintenance')).to_have_text('Updating library storage; browsing and playback remain available.')
         expect(page.locator('#home-mode-cards .gen-card-body').first).to_be_visible()
         page.screenshot(path=str(directory / 'metadata-startup-pending.png'), full_page=True)
         page.goto(f'http://127.0.0.1:{server.config.port}/track/{track["video_id"]}',

@@ -7,9 +7,10 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from yt_playlist.core import albums, artists, discovery_sources
-from yt_playlist.core.migrations import current, migrate, registry
+from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations.runner import validate_version
-from yt_playlist.core.storage_maintenance import StorageMaintenance
+from yt_playlist.core.preparation import subject_publication
+from tests.core.test_subject_publication import ready
 from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 
@@ -68,8 +69,12 @@ def installed(path, version, populated):
         raise
 
 
-def persisted(conn):
-    return conn.execute('PRAGMA main.schema_version').fetchone()[0], tuple(conn.iterdump())
+def persisted(conn, *, home_visits=False):
+    # Real Home visits intentionally tick card rotation while installed owners
+    # remain writable. Every other persisted value and schema object must match.
+    dump = tuple(row for row in conn.iterdump() if not (home_visits and
+                 row.startswith('INSERT INTO "rec_impressions" VALUES(\'card\',')))
+    return conn.execute('PRAGMA main.schema_version').fetchone()[0], dump
 
 
 @contextmanager
@@ -80,7 +85,7 @@ def deferred(path, version, populated):
     store = Store(path)
     try:
         store.init_schema(defer_metadata=True)
-        assert store.activity_paused and store._schema_recovery_pending
+        assert not store.activity_paused and not store._schema_recovery_pending
         assert persisted(store.conn) == before
         yield store
     finally:
@@ -109,7 +114,7 @@ def listening_state(store):
 @pytest.mark.parametrize('populated', [False, True], ids=['empty', 'populated'])
 def test_startup_reads_installed_listening_without_mutating_it(tmp_path, version, populated):
     with deferred(tmp_path / 'installed.db', version, populated) as store:
-        before, changes = persisted(store.conn), store.conn.total_changes
+        before = persisted(store.conn,home_visits=True)
         client = web(store)
         read_startup(client)
         read_startup(client)
@@ -136,44 +141,62 @@ def test_startup_reads_installed_listening_without_mutating_it(tmp_path, version
             with pytest.raises(sqlite3.OperationalError, match='view'):
                 store.conn.execute('DELETE FROM ' + view)
             store.conn.rollback()
-        assert persisted(store.conn) == before and store.conn.total_changes == changes
+        assert persisted(store.conn,home_visits=True) == before
+        from yt_playlist.web.routes.home import ROTATING_CARDS
+        assert [tuple(row) for row in store.conn.execute(
+            "SELECT item_key,views,last_shown FROM rec_impressions WHERE surface='card' ORDER BY item_key")] == [
+                (card,2,NOW) for card in sorted(ROTATING_CARDS)]
+        store.settings.set_setting('installed-write', 'accepted')
+        store.history.record_play_event(3,'continuing|unknown','continuing',NOW,source_timezone='UTC')
+        assert store.settings.get_setting('installed-write') == 'accepted'
+        assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
+        with store.read_view() as reader:
+            assert listening_state(reader)['play_event_subjects'][-1]['identity_key'] == 'continuing|unknown'
 
 
 @pytest.mark.parametrize('version', [79, 99])
-def test_pinned_listening_reader_survives_cutover_and_new_readers_retire_adapters(tmp_path, version):
+def test_pinned_listening_reader_survives_explicit_publication_and_new_readers_select_it(tmp_path, version):
     with deferred(tmp_path / 'cutover.db', version, True) as store:
-        maintenance = StorageMaintenance(store)
         client = web(store)
-        try:
-            # Keep a real predecessor connection across the entire migration;
-            # ordinary HTTP readers have a separate ten-second query budget.
-            pinned = store._make_reader()
-            with closing(pinned.conn):
-                pinned.conn.execute('PRAGMA query_only=ON')
-                before = listening_state(pinned)
-                starters = pinned.discovery.starter_artists(), pinned.discovery.starter_tracks()
-                assert set(SUBJECTS) <= set(pinned.conn._entity_read_views)
-                maintenance.start()
-                maintenance.join(60)
-                assert not maintenance.active and not store._schema_recovery_pending
-                assert listening_state(pinned) == before
-                assert (pinned.discovery.starter_artists(), pinned.discovery.starter_tracks()) == starters
-                assert pinned.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
-                assert not getattr(store.conn, '_entity_read_views', ())
-                assert not store.conn.execute('SELECT 1 FROM sqlite_temp_schema WHERE name IN (?,?)', SUBJECTS).fetchall()
-                read_startup(client)
-                with store.read_view() as reader:
-                    assert not getattr(reader.conn, '_entity_read_views', ())
-                    assert (reader.discovery.starter_artists(), reader.discovery.starter_tracks()) == starters
+        # Publication is explicit and leaves installed writers/history intact.
+        # Old read adapters retire only with their separately verified cleanup.
+        with store.read_view() as pinned, closing(sqlite3.connect(store._db_path)) as job:
+            job.row_factory = sqlite3.Row
+            job.execute('PRAGMA foreign_keys=ON')
+            before = listening_state(pinned)
+            starters = pinned.discovery.starter_artists(), pinned.discovery.starter_tracks()
+            assert set(SUBJECTS) <= set(pinned.conn._entity_read_views)
+            identity = ready(job)
+            subject_publication.publish(job,identity=identity)
+            assert subject_publication.selected(job) == identity
+            assert listening_state(pinned) == before
+            assert (pinned.discovery.starter_artists(), pinned.discovery.starter_tracks()) == starters
+            assert pinned.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
+            read_startup(client)
+            with store.read_view() as reader:
+                assert subject_publication.selected(reader.conn) == identity
+                assert (reader.discovery.starter_artists(), reader.discovery.starter_tracks()) == starters
+                # Prove these reads select retained custody rather than silently
+                # falling back to the identical installed event/observation rows.
+                def mask(operation,owner,*unused):
+                    return (sqlite3.SQLITE_IGNORE if operation == sqlite3.SQLITE_READ and
+                            owner in ('play_events','listening_observations') else sqlite3.SQLITE_OK)
+                reader.conn.set_authorizer(mask)
+                try:
                     after = listening_state(reader)
-                    for name in SUBJECTS:
-                        assert [{key: row[key] for key in ('id', 'account_id', 'identity_key', 'recording_id')}
-                                for row in after[name]] == [
-                            {key: row[key] for key in ('id', 'account_id', 'identity_key', 'recording_id')}
-                            for row in before[name]]
-                    assert reader.collection.saved_albums_recency(include_generated=True)['MPRE_cold'] is None
-            current.validate(store.conn)
-            assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-        finally:
-            maintenance.stop()
-            maintenance.join(10)
+                    for name, originals in before.items():
+                        expected = [{field: (row['identity_key'] if row['recording_id'] is None else None)
+                                     if field == 'unresolved_subject_key' else None
+                                     if field == 'membership_ref_id' else row[field]
+                                     for field in after[name][0]} for row in originals]
+                        assert after[name] == expected
+                finally:
+                    reader.conn.set_authorizer(None)
+                assert reader.collection.saved_albums_recency(include_generated=True)['MPRE_cold'] is None
+        store.history.record_play_event(3,'continuing|unknown','continuing',NOW,source_timezone='UTC')
+        assert subject_publication.selected(store.conn) is None
+        with store.read_view() as reader:
+            assert listening_state(reader)['play_event_subjects'][-1]['identity_key'] == 'continuing|unknown'
+        with closing(sqlite3.connect(store._db_path)) as installed:
+            validate_version(installed,version)
+        assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()

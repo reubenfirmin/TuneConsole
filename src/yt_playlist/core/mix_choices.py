@@ -175,7 +175,7 @@ def publish_menu(conn, record, context_id, *, source=None):
 
 def project(conn, record):
     """Overlay a prepared legacy menu; immutable original JSON remains until #626."""
-    if not record or not available(conn):
+    if not record or 'context' not in record or not available(conn):
         return record
     if record.get('format') != 'mixes':
         context = conn.execute("SELECT context FROM choice_context_projections WHERE source_context=? AND kind='independent'",

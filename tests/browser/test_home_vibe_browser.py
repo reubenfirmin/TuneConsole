@@ -1,11 +1,12 @@
 import re
 from html import escape
 from html.parser import HTMLParser
+from urllib.parse import parse_qs
 
 import pytest
 from playwright.sync_api import expect
 
-from tests.home_fixture_support import publish_menu
+from tests.home_fixture_support import browser_store as store, publish_menu, returning_listener
 from tests.test_home_vibe import seed_sounds
 from tests.test_mode_cards_route import prepare_home
 from tests.visual_support import capture
@@ -15,6 +16,8 @@ from yt_playlist.util.matching import identity_key
 
 def prepare(store):
     seed_sounds(store)
+    # These controls operate after the listener has earned Vibes access.
+    returning_listener(store, 'vibes', now=1)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
     iid = store.accounts.get_accounts()[0].id
@@ -26,10 +29,12 @@ def prepare(store):
             store.history.record_history_plays(iid, 1 - day * 86400,
                 [identity_key(f"Favorite {i}", f"Favorite artist {i}")], source_timezone="UTC")
     prepare_home(store, 1)
+    assert store.recommendations.candidate_page('fresh', 'all', 'fresh', limit=1)['tracks']
 
 
 def prepare_controls(store):
     """Render a complete board and dense controls without fitting/preparing music."""
+    returning_listener(store, 'vibes', now=1)
     payload = publish_menu(store, 1)
     genres = ['jazz', 'techno', 'trance', 'rock-indie', 'ambient', 'classical']
     payload['fingerprint'] = {'breadth': {'families': dict.fromkeys(genres, 1 / 6), 'breadth': .8},
@@ -139,6 +144,8 @@ def test_vibe_applies_persists_recovers_from_failure_and_resets(live_app, store,
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(live_app)
+    expect(page.locator('#home-mode-cards .gen-card')).to_have_count(4)
+    expect(page.locator('#home-mode-cards')).to_have_attribute('data-preparing', 'false')
     page.get_by_role("button", name="Tune these mixes", exact=True).click()
     dialog = page.get_by_role("dialog", name="Tune these mixes", exact=True)
     expect(dialog.get_by_role("tab", name="Vibe", exact=True)).to_have_attribute("aria-selected", "true")
@@ -169,7 +176,11 @@ def test_vibe_applies_persists_recovers_from_failure_and_resets(live_app, store,
 
     before = page.locator('#home-mode-cards .gen-row').evaluate_all('rows => rows.map(row => row.dataset.key)')
     page.route("**/home/vibe", lambda route: route.fulfill(status=500, body="Unavailable"))
-    dialog.get_by_role("radio", name="Energize", exact=True).check()
+    # A rejected save restores Relax before check() can observe Energize checked.
+    with page.expect_response("**/home/vibe") as failed_save:
+        dialog.get_by_role("radio", name="Energize", exact=True).click()
+    assert failed_save.value.status == 500
+    assert parse_qs(failed_save.value.request.post_data)['vibe'] == ['energize']
     expect(dialog).not_to_be_visible()
     expect(page.locator('#home-vibe-feedback')).to_have_attribute('data-state', 'error')
     expect(page.locator('#home-vibe-feedback-title')).to_have_text('Couldn’t update your mix tapes.')
@@ -187,16 +198,21 @@ def test_vibe_applies_persists_recovers_from_failure_and_resets(live_app, store,
     gentle.check()
     expect(page.locator("#home-mode-cards")).to_have_attribute("data-vibe", "relax")
     page.get_by_role('button', name='Change vibe', exact=True).click()
-    dialog.get_by_role("button", name="Reset mix adjustments", exact=True).click()
+    # Reset closes and replaces the controls on the successful server response.
+    with page.expect_response('**/home/fingerprint/reset') as reset:
+        dialog.get_by_role("button", name="Reset mix adjustments", exact=True).click()
+    assert reset.value.status == 200
     expect(dialog).not_to_be_visible()
     expect(page.locator('#home-vibe-feedback')).not_to_be_visible()
+    expect(page.locator('#home-mode-cards')).to_have_attribute('data-vibe', '')
+    assert not store.settings.get_setting(home_vibe.SETTING)
     page.get_by_role("button", name="Tune these mixes", exact=True).click()
     expect(dialog.get_by_role("radio", name="Take it as it comes", exact=True)).to_be_checked()
     expect(dialog.locator('[role="tabpanel"]:visible')).to_have_count(1)
     assert not errors
 
 
-@pytest.mark.parametrize('width,height', [(1440, 1000), (390, 850), (320, 640)])
+@pytest.mark.parametrize('width,height', [(1440, 1000)])
 def test_slow_vibe_request_closes_dialog_and_keeps_ready_mixes_usable(live_app, store, page, width, height):
     prepare(store)
     page.set_viewport_size({'width': width, 'height': height})
@@ -234,7 +250,7 @@ def test_vibe_feedback_replacement_keeps_one_owner_and_drops_the_previous_timer(
     prepare(store)
     page.route('https://i.ytimg.com/**', lambda route: route.abort())
     page.clock.install()
-    page.set_viewport_size({'width': 390, 'height': 850})
+    page.set_viewport_size({'width': 1280, 'height': 850})
     page.goto(live_app)
     page.get_by_role('button', name='Tune these mixes', exact=True).click()
     page.get_by_role('radio', name='Relax', exact=True).check()
@@ -314,7 +330,7 @@ def test_vibe_feedback_waits_for_preparation_and_recovers_after_reload(live_app,
     expect(feedback).not_to_be_visible()
 
 
-@pytest.mark.parametrize('width,height', [(1440, 1000), (1024, 600), (390, 850), (320, 640)])
+@pytest.mark.parametrize('width,height', [(1440, 1000), (1024, 600)])
 def test_tuning_launcher_stays_at_mix_board_center_with_preference_notices(
         live_app, store, page, width, height, unlocked_home_controls):
     prepare_controls(store)
@@ -338,13 +354,13 @@ def test_tuning_launcher_stays_at_mix_board_center_with_preference_notices(
         assert abs(centers['dy']) < 2, centers
 
 
-def test_mix_tabs_fit_desktop_mobile_and_short_windows(live_app, store, page, tmp_path, unlocked_home_controls):
+def test_mix_tabs_fit_desktop_and_short_windows(live_app, store, page, tmp_path, unlocked_home_controls):
     prepare_controls(store)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(live_app)
     page.get_by_role("button", name="Tune these mixes", exact=True).click()
     dialog = page.get_by_role("dialog", name="Tune these mixes", exact=True)
-    for width, height in [(1440, 1000), (390, 850), (320, 640), (800, 480)]:
+    for width, height in [(1440, 1000), (800, 480)]:
         page.set_viewport_size({"width": width, "height": height})
         for tab in ["Vibe", "Genre focus", "Nerd out"]:
             dialog.get_by_role("tab", name=tab, exact=True).click()

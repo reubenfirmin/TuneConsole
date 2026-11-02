@@ -8,7 +8,8 @@ import shutil
 
 import pytest
 
-from yt_playlist.core import albums, audio_annotation_files, audio_annotations, policy_config, policy_recovery
+from yt_playlist.core import (albums, audio_annotation_files, audio_annotations, policy_config, policy_recovery,
+                              album_description_files, album_description_requests, fao)
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.migrations.runner import migrate
 from yt_playlist.core.policy_recovery import recover
@@ -166,6 +167,18 @@ def test_recovery_bundles_all_annotation_revisions_and_candidate_has_independent
         store.conn.execute("INSERT INTO audio_vibe_runs VALUES ('run','video','Title','Artist',1)")
         first = audio_annotations.save(store.conn, 'run', [], ['relax'], version, {'opaque': ['saved output']}, 2)
         audio_annotations.save(store.conn, 'run', [], [], version, None, 3, state='withdrawn')
+        album = albums.observe(store.conn, 'paid-album', title='Paid album', artist='Artist')
+    configuration = {'prompt_version': 1, 'exact': 'policy é'}
+    claim = album_description_requests.claim(store.conn, album, 'paid-policy', 'credential', 3, 4,
+                                             configuration=configuration)
+    assert claim['status'] == 'reserved'
+    assert album_description_requests.authorize(store.conn, claim['request_id'], claim['token'], 'credential', 3, 5)
+    paid = {'status': 'ready', 'description': 'Original paid prose. é', 'model': 'deepseek-flash',
+            'usage': {'prompt_tokens': 11, 'completion_tokens': 7, 'total_tokens': 18}}
+    assert album_description_requests.finish(store.conn, claim['request_id'], claim['token'], paid, 6)
+    original_paid = {row[0]: album_description_files.read(row[1], row[2]) for row in store.conn.execute(
+        'SELECT id,filename,content_digest FROM album_descriptions')}
+    usage = list(map(tuple, store.conn.execute('SELECT * FROM provider_usage ORDER BY id')))
     originals = {row[0]: audio_annotation_files.read(row[1]) for row in store.conn.execute(
         'SELECT id,model_output_filename FROM audio_annotations')}
     dump = list(store.conn.iterdump())
@@ -176,13 +189,25 @@ def test_recovery_bundles_all_annotation_revisions_and_candidate_has_independent
     assert hashlib.sha256(source.read_bytes()).hexdigest() == original_hash
     assert set(report['verified_backup_file_manifests']) == {
         'annotations', 'policies', 'descriptions', 'groups', 'recommendations', 'metadata', 'archives',
-        'actions', 'collections', 'samples'}
+        'actions', 'collections', 'samples', 'choice_evidence', 'served',
+        'vibe-provenance', 'profiles', 'embeddings', 'legacy-journals', 'policy-history'}
+    # These new file domains are supported but have no owners in this fixture.
+    # Prove their manifests are empty rather than accepting arbitrary additions.
+    for domain in ('vibe-provenance', 'profiles', 'embeddings', 'legacy-journals', 'policy-history'):
+        assert json.loads(fao.read_bytes(report['verified_backup_file_manifests'][domain])) == {
+            'format': 'fao-backup-1', 'files': []}
+    assert json.loads(fao.read_bytes(report['verified_backup_file_manifests']['choice_evidence'])) == {
+        'format': 'choice-evidence-1', 'pages': []}
+    assert json.loads(fao.read_bytes(report['verified_backup_file_manifests']['served'])) == {
+        'format': 'served-diagnostics-1', 'entries': []}
     with closing(sqlite3.connect(report['verified_backup'])) as backup:
         assert list(backup.iterdump()) == dump
         # Restoring the untouched original is an explicit operation on a new copy.
         with closing(sqlite3.connect(tmp_path / 'restored-original.db')) as restored:
             backup.backup(restored)
     shutil.rmtree(source.with_name(source.name + '.annotations'))
+    shutil.rmtree(source.with_name(source.name + '.policies'))
+    shutil.rmtree(source.with_name(source.name + '.descriptions'))
     assert not (output / 'working.db.annotations').exists()
     for database in (Path(report['compact_database']), tmp_path / 'restored-original.db'):
         candidate = Store(database)
@@ -193,6 +218,11 @@ def test_recovery_bundles_all_annotation_revisions_and_candidate_has_independent
             actual = {row[0]: audio_annotation_files.read(row[1]) for row in candidate.conn.execute(
                 'SELECT id,model_output_filename FROM audio_annotations')}
             assert actual == originals
+            assert candidate.rec_ledger.policy_configuration('paid-policy') == configuration
+            assert {row[0]: album_description_files.read(row[1], row[2]) for row in candidate.conn.execute(
+                'SELECT id,filename,content_digest FROM album_descriptions')} == original_paid
+            assert album_description_requests.result(candidate.conn, claim['request_id']) == paid
+            assert list(map(tuple, candidate.conn.execute('SELECT * FROM provider_usage ORDER BY id'))) == usage
             latest = audio_annotations.latest(candidate.conn, 'run', kind='session', taxonomy_version=version)
             assert audio_annotations.read(candidate.conn, latest)['state'] == 'withdrawn'
             assert candidate.conn.execute('SELECT vibe FROM audio_annotation_vibes WHERE annotation_id=?',

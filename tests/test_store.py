@@ -1,4 +1,7 @@
 # tests/test_store.py
+from tests.historical_support import upgrade_fixture
+
+
 def test_play_provenance_upgrade_preserves_unknown_history_and_reopens(tmp_path, legacy_store):
     from yt_playlist.core.store import Store
 
@@ -7,17 +10,17 @@ def test_play_provenance_upgrade_preserves_unknown_history_and_reopens(tmp_path,
     iid = 1
     with store.conn:
         # Current repositories require account scopes and provenance tables absent in v7.
-        store.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (?,'main','cred',1)", (iid,))
-        store.conn.execute("INSERT INTO playlists(account_id,provider_playlist_id,title) VALUES (?,'PLGEN','Generated')", (iid,))
+        store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (?,'main','cred',1)", (iid,))
+        store.conn.execute("INSERT INTO playlists(identity_id,ytm_playlist_id,title) VALUES (?,'PLGEN','Generated')", (iid,))
         store.conn.execute("INSERT INTO playlist_group VALUES ('PLGEN','Generated')")
         store.conn.execute("INSERT INTO tracks(video_id,title,artist,identity_key) VALUES ('vid','Song','Artist','song|artist')")
-        store.conn.execute("INSERT INTO play_events(account_id,identity_key,video_id,played_at,playlist_ytm_id) VALUES (?,'song|artist','vid',120,'RDAMPLPLGEN')", (iid,))
+        store.conn.execute("INSERT INTO play_events(identity_id,identity_key,video_id,played_at,playlist_ytm_id) VALUES (?,'song|artist','vid',120,'RDAMPLPLGEN')", (iid,))
         store.conn.execute("ALTER TABLE play_events DROP COLUMN is_generated")
         store.conn.execute("DROP TABLE schema_migrations")
     store.conn.close()
 
     store = Store(path)
-    store.init_schema()
+    upgrade_fixture(store)
     assert store.conn.execute("SELECT is_generated FROM play_events").fetchone()[0] is None
     store.tracks.upsert_track("new", "New", "Artist", None, 200)
     key = store.tracks.identity_key_for_video("new")
@@ -43,7 +46,7 @@ def test_retired_source_weights_are_removed_and_not_restored(legacy_store):
     with store.conn:
         store.conn.execute("DROP TABLE schema_migrations")
 
-    store.init_schema()
+    upgrade_fixture(store)
     assert store.rec_model.weight_records() == expected
     assert store.rec_model.restore_taste_settings("taste_settings_checkpoint_v1", param_keys)
     assert store.rec_model.weight_records() == expected
@@ -54,13 +57,15 @@ def test_retired_source_weights_are_removed_and_not_restored(legacy_store):
 def test_playlist_creation_date_migration_backfills_only_known_dates(legacy_store):
     store = legacy_store
     import json
+    from yt_playlist.core.migrations import migrate
+    from yt_playlist.core.migrations.registry import MIGRATIONS
     from yt_playlist.util.action_kinds import COPY_PLAYLIST, MOVE_IDENTITY
 
     # Recreate the previous schema, then exercise the real startup migration.
     with store.conn:
-        store.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'main','cred',1)")
+        store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','cred',1)")
         for ytm in ("song", "generated", "303", "Brexit List", "planned", "moved"):
-            store.conn.execute("INSERT INTO playlists(account_id,provider_playlist_id,title,track_count,content_hash,first_seen,last_seen,last_changed) VALUES (1,?,?,0,'',9000,9000,9000)", (ytm, ytm))
+            store.conn.execute("INSERT INTO playlists(identity_id,ytm_playlist_id,title,track_count,content_hash,first_seen,last_seen,last_changed) VALUES (1,?,?,0,'',9000,9000,9000)", (ytm, ytm))
         for kind, ytm, status, at in ((COPY_PLAYLIST, "song", "executed", 100),
                                       (COPY_PLAYLIST, "song", "executed", 200),
                                       (COPY_PLAYLIST, "planned", "planned", 300),
@@ -71,13 +76,17 @@ def test_playlist_creation_date_migration_backfills_only_known_dates(legacy_stor
         store.conn.execute("ALTER TABLE playlists DROP COLUMN created_at")
         store.conn.execute("DELETE FROM settings WHERE key='playlist_created_at_backfilled'")
         store.conn.execute("DROP TABLE schema_migrations")
-    store.init_schema()
-    dates = {p.provider_playlist_id: p.created_at for p in store.playlists.get_playlists()}
+    # Replay the creation-date migration on its frozen schema. The intentionally
+    # invalid action payload tests v4's tolerant date lookup, not v98 admission.
+    migrate(store.conn, registry=MIGRATIONS[:7])
+    dates = dict(store.conn.execute('SELECT ytm_playlist_id,created_at FROM playlists'))
     assert dates == {"song": 100, "generated": 50, "303": None, "Brexit List": None,
                      "planned": None, "moved": None}
-    store.playlist_recipes.set_recipe("generated", {"theme": "updated mix"}, 8000)
-    store.init_schema()
-    assert {p.provider_playlist_id: p.created_at for p in store.playlists.get_playlists()} == dates
+    with store.conn:
+        store.conn.execute('UPDATE rec_recipes SET recipe=?,created_at=8000 WHERE playlist_ytm=?',
+                           (json.dumps({"theme": "updated mix"}), "generated"))
+    migrate(store.conn, registry=MIGRATIONS[:7])
+    assert dict(store.conn.execute('SELECT ytm_playlist_id,created_at FROM playlists')) == dates
 
 
 def test_upsert_playlist_tracks_seen_and_changed(store):
@@ -150,21 +159,31 @@ def test_history_keys_window(store):
     assert store.history.get_recent_history_keys(6 * day) == set()
 
 def test_get_action_roundtrip(store):
+    import json
+
     aid = store.actions.record_action("plan", '{"a":1}', '{"b":2}', "planned", "{}", 10.0)
     a = store.actions.get_action(aid)
     assert a.id == aid and a.kind == "plan" and a.status == "planned"
-    assert a.params_json == '{"a":1}' and a.plan_json == '{"b":2}'
+    assert json.loads(a.params_json) == {'a': 1, 'mode': None}
+    assert json.loads(a.plan_json) == {'b': 2}
     assert store.actions.get_action(99999) is None
 
-def test_update_action_sets_undo(store):
+def test_update_action_sets_undo(store, tmp_path):
+    import json
+    from yt_playlist.core import fao
+
+    backup = tmp_path / 'backup.json'
+    fao.write_bytes(backup, json.dumps({'ytm_playlist_id': 'PL', 'tracks': []}).encode())
     aid = store.actions.record_action("plan", "{}", "{}", "planned", "{}", 10.0)
-    store.actions.update_action(aid, "executed", 20.0, undo_json='{"backup":"/x.json"}')
+    store.actions.update_action(aid, "executed", 20.0, undo_json=json.dumps({'backup': str(backup)}))
     a = store.actions.get_action(aid)
     assert a.status == "executed" and a.executed_at == 20.0
-    assert a.undo_json == '{"backup":"/x.json"}'
-    # undo_json omitted -> left unchanged
-    store.actions.update_action(aid, "cancelled", 30.0)
-    assert store.actions.get_action(aid).undo_json == '{"backup":"/x.json"}'
+    retained = json.loads(a.undo_json)['backup']
+    assert fao.read_bytes(retained) == fao.read_bytes(backup)
+    # An admitted same-state update preserves Undo when that argument is omitted.
+    store.actions.update_action(aid, "executed", 30.0)
+    assert store.actions.get_action(aid).undo_json == a.undo_json
+    assert store.actions.get_action(aid).executed_at == 30.0
 
 def test_get_playlist_tracks_with_meta_includes_duration(store):
     iid = store.accounts.upsert_account("main", "cred", None, True)

@@ -14,7 +14,8 @@ GENRE_BARS = 8
 
 def canonical_genre(genre):
     genre = (genre or "").strip()
-    return (genre_names.match_tag(genre) or genre.title()) if genre else ""
+    # Retained axes keep their identity even when a provider genre is disabled.
+    return (genre_names.match_tag(genre) or genre_names.canonical_name(genre.title())) if genre else ""
 
 
 def matches(candidate, axis):

@@ -94,9 +94,7 @@ def test_generate_endpoint_creates_and_groups(store):
 
 
 def test_generate_result_play_and_redirect(store):
-    """After Save & play: a playable YouTube Music watch link, and this tab redirects to the playlist
-    page. With the extension connected the playlist plays in your existing tab; without it (this test
-    has no live bridge), the loading window falls back to becoming the playlist."""
+    """Save & play opens the normal playlist without an intermediate success screen."""
     iid = store.accounts.upsert_account("main", "cred", None, True)
     fc = FakeClient()
     c = _client(store, lambda: {iid: fc})
@@ -105,8 +103,10 @@ def test_generate_result_play_and_redirect(store):
 
     r = c.post("/home/generate", data={"name": "Mix - June 21 2026", "tracks": tracks})
 
-    assert r.status_code == 200 and "Saved" in r.text
-    assert "music.youtube.com/watch?list=" in r.text           # playable watch link
+    assert r.status_code == 200
+    assert 'data-generated-playlist=' in r.text
+    assert 'gen-done' not in r.text and 'status-label--success' not in r.text
+    assert 'Generated</strong> group' not in r.text
     assert 'window.location.assign("/playlist/' in r.text      # this tab goes to the playlist page
     assert "genComplete(" in r.text                          # close the request's loading window
 

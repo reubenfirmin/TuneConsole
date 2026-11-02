@@ -72,55 +72,70 @@ def _tables(conn):
     return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
 
-def _export_files(conn, target, *, backup_root=None):
-    """Copy the explicit file owners from the same snapshot as SQLite."""
+def _file_exports(conn, target, *, backup_root=None):
+    """Inventory explicit exporters once, using the captured SQL layout."""
     tables, target = _tables(conn), Path(target)
     def root(domain):
         return Path(backup_root) / domain if backup_root is not None else target.with_name(target.name + '.' + domain)
-    manifests = {}
+    from . import file_owners
+    exports = [(None, file_owners.export, root)]
     from . import metadata_runtime, metadata_runtime_files, served_facts, choice_evidence_files
-    manifests['choice_evidence'] = choice_evidence_files.export(conn, root('choice_evidence'))
+    exports.append(('choice_evidence', choice_evidence_files.export, root('choice_evidence')))
     if served_facts.available(conn):
-        manifests['served'] = served_facts.export(conn, root('served'))
+        exports.append(('served', served_facts.export, root('served')))
     if metadata_runtime.active(conn):
-        manifests['runtime_metadata'] = metadata_runtime_files.export(conn, root('runtime_metadata'))
+        exports.append(('runtime_metadata', metadata_runtime_files.export, root('runtime_metadata')))
     if 'sample_attributes' in tables:
-        manifests['samples'] = sample_files.export(conn, root('samples'))
+        exports.append(('samples', sample_files.export, root('samples')))
     if 'action_backups' in tables:
         from . import action_backup_files
-        manifests['actions'] = action_backup_files.export(conn,root('actions'))
+        exports.append(('actions', action_backup_files.export, root('actions')))
     if 'album_feedback' in tables:
         from . import collection_recovery
-        manifests['collections'] = collection_recovery.export(conn,root('collections'))
+        exports.append(('collections', collection_recovery.export, root('collections')))
     if 'audio_annotations' in tables:
-        manifests['annotations'] = audio_annotation_files.export(conn, root('annotations'))
+        exports.append(('annotations', audio_annotation_files.export, root('annotations')))
     if 'recommendation_policies' in tables:
-        manifests['policies'] = policy_documents.export(conn, root('policies'))
+        exports.append(('policies', policy_documents.export, root('policies')))
     if 'album_description_requests' in tables:
-        manifests['descriptions'] = album_description_files.export(conn, root('descriptions'))
+        exports.append(('descriptions', album_description_files.export, root('descriptions')))
     if 'group_versions' in tables:
-        manifests['groups'] = group_documents.export(conn, root('groups'))
+        exports.append(('groups', group_documents.export, root('groups')))
     if 'prepared_outputs' in tables:
-        manifests['recommendations'] = recommendation_outputs.export(conn, root('recommendations'))
+        exports.append(('recommendations', recommendation_outputs.export, root('recommendations')))
     if 'metadata_deliveries' in tables:
-        manifests['metadata'] = metadata_delivery_files.export(conn, root('metadata'))
+        exports.append(('metadata', metadata_delivery_files.export, root('metadata')))
     if 'published_metadata_destination_deliveries' in tables:
-        manifests['metadata_preparation'] = metadata_destination_files.export(conn, root('metadata_preparation'))
+        exports.append(('metadata_preparation', metadata_destination_files.export, root('metadata_preparation')))
     if saved_preparation_files.available(conn):
-        manifests['saved_preparation'] = saved_preparation_files.export(conn, root('saved_preparation'))
+        exports.append(('saved_preparation', saved_preparation_files.export, root('saved_preparation')))
     if preparation_files.available(conn):
-        manifests['preparation'] = preparation_files.export(conn, root('preparation'))
+        exports.append(('preparation', preparation_files.export, root('preparation')))
     if 'legacy_catalog_evidence' in tables:
-        manifests['archives'] = legacy_evidence.export(conn, root('archives'))
+        exports.append(('archives', legacy_evidence.export, root('archives')))
+    return exports
+
+
+def _export_files(conn, target, *, backup_root=None):
+    """Copy the explicit file owners from the same snapshot as SQLite."""
+    manifests = {}
+    for name, export, root in _file_exports(conn, target, backup_root=backup_root):
+        manifest = export(conn, root)
+        if name is None:
+            manifests.update(manifest)
+        else:
+            manifests[name] = manifest
     return manifests
 
 
 def _restore_files(conn, manifests):
     """Restore domain files before allowing a disposable database to be used."""
-    if set(manifests) - {'annotations', 'policies', 'descriptions', 'groups', 'recommendations',
+    from . import file_owners
+    if set(manifests) - set(file_owners.owners()) - {'annotations', 'policies', 'descriptions', 'groups', 'recommendations',
                          'metadata', 'metadata_preparation', 'saved_preparation', 'preparation', 'archives',
                          'playback_feedback', 'collections', 'actions', 'samples', 'runtime_metadata', 'served', 'choice_evidence'}:
         raise ValueError('Unsupported recovery file domain')
+    file_owners.restore(conn, manifests)
     if 'samples' in manifests:
         sample_files.restore(conn, manifests['samples'])
     if 'collections' in manifests:
@@ -232,6 +247,8 @@ def recover(source, output_dir, *, now=None, progress=_progress):
             if time.monotonic() > deadline:
                 raise TimeoutError('Online backup exceeded five minutes; stop application writers and retry in a new directory')
         with ExitStack() as retained:
+            from . import file_owners
+            retained.enter_context(file_owners.readers(source, str(id(reader))))
             from . import choice_evidence_files
             retained.enter_context(policy_documents.retained_reader(choice_evidence_files.directory(reader)))
             from . import served_facts

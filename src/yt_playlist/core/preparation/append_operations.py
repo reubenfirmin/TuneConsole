@@ -4,7 +4,7 @@ from itertools import chain
 import json
 from pathlib import Path
 
-from .. import collection_recovery, recommendation_outputs as files
+from .. import collection_recovery, radio_checkpoint, recommendation_outputs as files
 from ..evidence_ledger import canonical
 from ..migrations.runner import MigrationError
 from ..recommendation_work import finite
@@ -183,7 +183,7 @@ def radio_units(conn, root, source, value, fields, *, retain=None):
         waiting_present=int(not append and operation.get('waiting') is not None),
         play_prefix_present=int(not append and operation.get('play_prefix') is not None), adding_video_id_snapshot=adding,
         slot=None if append else integer(operation.get('slot'), nullable=True, minimum=0),
-        choice_id=None if append else optional_text(operation.get('choice_id')))
+        choice_id=None if append else radio_checkpoint.choice_key(operation.get('choice_id')))
     fields.update(zip(('recovery_filename', 'recovery_digest', 'recovery_bytes'), retain(root, 'radio-session', source, value)))
     if append:
         return

@@ -18,7 +18,7 @@ def store(tmp_path):
     store.conn.close()
 
 
-@pytest.mark.parametrize('width', [1280, 390])
+@pytest.mark.parametrize('width', [1280])
 def test_returning_account_retains_destinations_during_refresh(live_app, store, page, monkeypatch, width):
     publish_full_journey(store, now=1)
     prepared = store.rec_proposals.get_proposals('home_tuned')

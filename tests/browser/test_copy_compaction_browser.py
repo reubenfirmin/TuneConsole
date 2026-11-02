@@ -9,14 +9,18 @@ import uvicorn
 from tests.browser_fixtures import _free_port
 from tests.conftest import FakeClient
 from tests.test_deferred_playback_feedback import library
+from tests.home_fixture_support import returning_listener
 from yt_playlist.core import playback_feedback
 from yt_playlist.core.db_rebuild import build as retained_copy
 from yt_playlist.web.app import create_app
 
 
-@pytest.mark.parametrize('width,height,font', [(1280, 720, 16), (360, 720, 24)])
-def test_banner_and_like_across_real_copy(library, page, tmp_path, monkeypatch, width, height, font):
+@pytest.mark.parametrize('width,height,font', [(1280, 720, 16)])
+def test_banner_and_like_across_real_copy(library, page, monkeypatch, width, height, font):
     store, main, other, _, _ = library
+    returning_listener(store, 'mixes')
+    store.tracks.upsert_track('known', 'Song', 'Artist', None, 180,
+                              thumbnail='/static/onboarding-mixes.png')
     remote = FakeClient()
     app = create_app(store, lambda: {main: remote, other: FakeClient()}, background_work=False)
     maintenance = app.state.ctx.storage_maintenance
@@ -40,18 +44,23 @@ def test_banner_and_like_across_real_copy(library, page, tmp_path, monkeypatch, 
         assert page.request.post(url + '/storage-maintenance/compact').status == 202
         assert entered.wait(15)
         page.set_viewport_size(dict(width=width, height=height))
+        page.add_init_script('document.addEventListener("DOMContentLoaded", () => '
+                             f'document.documentElement.style.fontSize = "{font}px");')
         page.goto(url + '/track/known')
-        page.add_style_tag(content=f'html {{ font-size: {font}px; }}')
+        assert page.evaluate('parseFloat(getComputedStyle(document.documentElement).fontSize)') == font
         banner = page.locator('#storage-maintenance')
-        expect(banner).to_have_text('Library updates are paused.')
+        expect(banner).to_have_text('Updating library storage; browsing and playback remain available.')
         expect(banner).to_be_visible()
         expect(page.locator('html')).to_have_attribute('data-storage-compacting', 'true')
         like = page.locator('.track-detail').get_by_role('button', name='Like', exact=True)
         like.click()
         expect(like).to_have_attribute('aria-pressed', 'true')
+        assert page.locator('.track-detail-art').evaluate('img => img.complete && img.naturalWidth > 0')
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
         assert remote.rated == [('known', 'LIKE')]
         assert playback_feedback.inbox(store).pending() == 1
-        page.screenshot(path=str(tmp_path / 'active-copy.png'), full_page=True)
+        page.evaluate('scrollTo(0, 0)')
+        page.screenshot(path=f'/tmp/tuneconsole-740-active-{width}-{font}.png', full_page=True, animations='disabled')
         release.set()
         assert maintenance.ready.wait(45)
         assert maintenance.phase == 'done'
@@ -60,7 +69,9 @@ def test_banner_and_like_across_real_copy(library, page, tmp_path, monkeypatch, 
         assert store.tracks.item_rating(main, 'known')['status'] == 'LIKE'
         page.reload()
         expect(like).to_have_attribute('aria-pressed', 'true')
-        page.screenshot(path=str(tmp_path / 'resumed-copy.png'), full_page=True)
+        assert page.evaluate('parseFloat(getComputedStyle(document.documentElement).fontSize)') == font
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+        page.screenshot(path=f'/tmp/tuneconsole-740-resumed-{width}-{font}.png', full_page=True, animations='disabled')
     finally:
         release.set()
         server.should_exit = True

@@ -8,6 +8,8 @@ Register a new disposable workspace with its actual test/experiment PID:
 
 Registration lets cleanup distinguish a stopped owner from unrelated test jobs.
 Unregistered legacy workspaces require all test/experiment jobs to be idle.
+Private review source snapshots directly under build/ can be removed once no
+process references them; their fixtures and process temporary files are inside.
 Reports should live beside a disposable workspace, never inside it. This command
 does not kill processes, acquire the suite lock, or delete shared lock files.
 """
@@ -27,6 +29,11 @@ MEMORY_ROOTS = frozenset('tuneconsole-' + name for name in (
     'served', 'groups', 'metadata', 'metadata-runtime', 'archives', 'policies',
     'recommendations', 'collections'))
 UUID = re.compile(r'[0-9a-f]{32}\Z')
+BUILD_PREFIXES = ('review748-', 'review-browser-fixes4-')
+
+
+def private_build_workspace(path):
+    return path.parent == REPOSITORY / 'build' and path.name.startswith(BUILD_PREFIXES)
 
 
 @dataclass
@@ -76,8 +83,9 @@ def validate_path(value, *, registering=False):
     path = Path(os.path.abspath(value))
     if path == Path('/tmp') or path == REPOSITORY / '.pytest_cache':
         raise ValueError('shared parent directory')
-    if not (path.is_relative_to('/tmp') or path.is_relative_to(REPOSITORY / '.pytest_cache')):
-        raise ValueError('outside /tmp and this checkout\'s pytest cache')
+    if not (path.is_relative_to('/tmp') or path.is_relative_to(REPOSITORY / '.pytest_cache')
+            or private_build_workspace(path)):
+        raise ValueError('outside supported temporary workspace locations')
     for component in (path, *path.parents):
         if component.is_symlink():
             raise ValueError('symlink in target path')
@@ -97,6 +105,7 @@ def validate_path(value, *, registering=False):
     workspace = (path.name.startswith(('runtime-', 'negative-runtime-', 'fixtures'))
                  and any(p.name.startswith('tuneconsole-review') for p in path.parents))
     workspace |= path.parent == Path('/tmp') and path.name.startswith('tuneconsole-') and 'workspace' in path.name
+    workspace |= private_build_workspace(path)
     pytest_run = path.parent.name.startswith('pytest-of-') and bool(re.fullmatch(r'pytest-\d+', path.name))
     new_workspace = registering and (path.is_relative_to(REPOSITORY / '.pytest_cache')
         or any(p.name.startswith('tuneconsole-') for p in (path, *path.parents) if p.parent == Path('/tmp')))
@@ -152,7 +161,7 @@ def blocker(path, running):
             # a workspace owner, but a pytest/experiment command must still block.
             if test_job(process):
                 return f'test process {process.pid} names this workspace'
-        if saved is None and test_job(process):
+        if saved is None and test_job(process) and not private_build_workspace(path):
             return f'unregistered workspace while test/experiment process {process.pid} is running'
     return None
 

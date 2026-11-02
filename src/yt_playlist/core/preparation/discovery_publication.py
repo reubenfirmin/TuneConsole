@@ -122,7 +122,7 @@ class Publication:
         from .. import genre_classifications
         from ..migrations.current import _tokens
         from ..migrations.v086_genre_classifications import transform as classified
-        from ..migrations.v103_entity_names import transform
+        from ..entity_names import predecessor_definition as transform
         renamed = conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='accounts'").fetchone()
         native = discovery_artist_publication.native(conn)
         classified_schema = self.name == 'legacy' and genre_classifications.available(conn)

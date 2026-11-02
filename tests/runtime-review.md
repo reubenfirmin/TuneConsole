@@ -5,15 +5,102 @@ review described an older snapshot; this ledger reconciles it with the current
 shared checkout. This records focused implementation evidence, not independent
 acceptance or a claim that the current test suite passes.
 
+Scope correction, 2026-11-01: the user explicitly excluded mobile support and
+testing. Phone viewports and mobile-device emulation have been removed. Unique
+functional checks formerly coupled to phone widths now use desktop windows;
+desktop, short desktop windows and TV coverage remain. Older results below are
+historical evidence, and their phone variants no longer count toward acceptance.
+
+Independent runtime investigation, 2026-11-01: fresh `Store.init_schema()` took
+9.386–12.843 seconds across two memory and two file-backed initializations. Each
+warm-reference initialization performed 53 complete schema validations, 18,709
+table signatures and 117,567 SQL tokenizations; the actual 32-track Radio fixture
+seeding took 0.543–0.727 seconds. Pure SQL tokenization now has a bounded
+4,096-entry cache of immutable tuples. Database introspection, admission checks,
+each regular migration transaction and applied history remain unchanged.
+
+The same low-overhead diagnostic with the final cache measured memory setup at
+6.351/5.801 seconds and file setup at 6.860/6.880 seconds; repeated admission took
+0.271–0.322 seconds. Both diagnostic cases passed in 31.402 seconds. Seventeen
+malformed-schema, constraint, foreign-key ownership/order and concurrent-startup
+checks also passed against this final cache. A separate capacity experiment found
+1,522 distinct SQL definitions: a 1,024-entry cache churned, while 4,096 entries
+retained the working set. This is an entry bound, not a general byte-size bound.
+Reports are `/tmp/tuneconsole-review-token-cache-timing-final-534-20261101/`,
+`/tmp/tuneconsole-review-token-cache-final-534-20261101/` and
+`/tmp/tuneconsole-review-token-working-set-534-20261101/`. The first final-cache
+attempt's two timing failures were an evidence-plugin import assumption; the
+seventeen product checks passed, and the corrected timing-only run above passed.
+
+Ordinary `store` consumers now clone a session-owned, read-only in-memory SQL
+template built by genuine `Store.init_schema()`. Each consumer creates its own
+Store, connection and external-file namespace, then runs normal admission on its
+private clone. No mutable Store or prepared user data is shared. Fresh-bootstrap
+and historical-upgrade tests continue to construct their own real databases.
+The template is closed at session teardown; every consumer retains its existing
+connection/file cleanup. This changes migration receipt timestamps to template
+creation time for ordinary consumers only.
+
+An independent experiment measured one genuine template bootstrap at 5.851
+seconds and eight private clone/admission operations at 0.357–0.364 seconds.
+All 403 tables, their SQL definitions and logical rows matched a separately
+bootstrapped Store, allowing only the two migration histories' `applied_at`
+fields to differ. Template writes were rejected and consumer mutations stayed
+private. That experiment passed nine checks in 20.649 seconds. After adopting
+the fixture, 55 storage, preference, Home and progression checks passed in
+86.328 seconds, including new full-state/isolation tests and genuine fresh,
+rollback and concurrent-bootstrap controls. The desktop TV playback/shared
+controls journey also passed. Three desktop Vibe cases initially stopped at a
+post-unlock fixture omission owned by #583. With explicit earned listener setup,
+an in-memory renewal hung during the first pointer case and reached the owner's
+1,200-second timeout; zero browser cases completed. Later file-backed WAL checks
+passed both original pointer and keyboard journeys (separate runs: 1 passed in
+135.586 seconds, then 1 passed / 1 failed in 199.860 seconds). Their screenshots
+were inspected; artwork requests were deliberately blocked, so these establish
+control behavior rather than artwork quality or native playback.
+
+The recovery failure in that second run was a contradictory Playwright `check()`
+postcondition: the injected HTTP 500 correctly restores the previously selected
+Relax radio. The action now uses `click()` and checks the actual Energize request
+and 500 response, retaining all recovery/reset assertions. Renewal reached a
+separate incomplete baseline: three ready mixes and a Fresh placeholder cannot
+justify the expected four-mix ready message with background preparation disabled.
+Fresh fixture publication is being reconciled; recovery/reset is not accepted.
+An independent connection-ownership check also confirms that the real Mix
+availability query runs before its Store lock (1 failure in 7.241 seconds).
+This does not prove the cause of the earlier concurrent in-memory hang.
+
+Vibe reports are `/tmp/tuneconsole-review-vibe-earned-access-583-20261101/`,
+`/tmp/tuneconsole-review-vibe-file-backed-583-20261102/`,
+`/tmp/tuneconsole-review-vibe-file-renewal-583-20261102/`,
+`/tmp/tuneconsole-review-vibe-recovery-583-20261102/` and
+`/tmp/tuneconsole-review-mix-serving-guard-583-20261102/`. Other reports are
+`/tmp/tuneconsole-review-pristine-store-534-20261101/`,
+`/tmp/tuneconsole-review-pristine-store-validation-534-20261101/` and
+`/tmp/tuneconsole-review-pristine-store-browser-534-20261101/`.
+
+The complete current-schema and independent-change modules passed 121 checks
+in 996.653 seconds against the earlier 1,024-entry token cache and unchanged
+frozen source. The final 4,096-entry cache has the seventeen negative/ownership
+checks above and three genuine bootstrap controls within the 55-check run;
+the full 121-check matrix is not claimed for that later capacity. Its report is
+`/tmp/tuneconsole-review-schema-token-cache-534-20261101/`.
+
+These measurements were taken during concurrent focused work, not controlled CI
+benchmarks. A separate cProfile diagnostic substantially inflated wall time and
+is not a normal-runtime measurement. **#534 remains Ready until the complete
+intended desktop/TV CI suite finishes in 15 minutes or less.** Current focused
+passes and mobile scope removal do not establish that result.
+
 ## Prioritized recommendations
 
 | Item | Disposition and preserved contract |
 | --- | --- |
 | P1. Successful fake writes | Seed real fake catalog/readback state in duration, generated-playlist, cluster-save, account-selection, fresh-enrichment and mode-engagement fixtures. `tests/playlist_fixture_support.py` shares catalog construction. Incomplete delivery, retry and acknowledgment failure fixtures retain their original behavior; production retry logic is unchanged. |
 | P2. Historical schema setup | `core/test_current_schema.py` builds genuine predecessor templates with SQLite backup and computes the fresh contract once. Each upgrade, idempotence, foreign-key and integrity check still has its own clone. Relationship tests clone a genuine pristine v24 template and explicitly replay historical upgrades before ordinary admission. Their fourteen invalid-write checks share one v25 upgrade, retaining every rejection and rolling back even unexpectedly accepted writes between cases. This tests the actual historical constraints rather than retired read-only views. Populated evidence, nonnumeric ordering, current history/feedback, reopen idempotence and interrupted-upgrade rollback retain separate real upgrade paths. Capture-evidence and recording-vibes upgrade coverage remains intact. |
-| P3. Radio motion | Transfer dense fork-lag and fixed-control clearance checks into the stronger motion journey, then remove the older 75-frame duplicate. Preserve broad pure geometry sampling, all four shapes, reversal, desktop/mobile behavior and motion under reduced-motion preferences. The third 1792-by-1398 case retains layout, covers, history navigation and scrolling while omitting the seven repeated motion traversals. Jump the hidden 30-second phase; retain real intervening frames in the 20-second evolution assertion. Diagnostic captures are opt-in. |
+| P3. Radio motion | Transfer dense fork-lag and fixed-control clearance checks into the stronger motion journey, then remove the older 75-frame duplicate. Preserve broad pure geometry sampling, all four shapes, reversal, desktop behavior and motion under reduced-motion preferences. The third 1792-by-1398 case retains layout, covers, history navigation and scrolling while omitting the seven repeated motion traversals. Jump the hidden 30-second phase; retain real intervening frames in the 20-second evolution assertion. Diagnostic captures are opt-in. |
 | P4. Prepared Home fixtures | `home_fixture_support.publish_menu` publishes four valid cards with sixteen real catalog subjects through the production cache writer. Regeneration failures, tuning geometry, discovery/story exposure and Home markup consumers use this instead of ranking/preparing a library. Analytics retains its real 84-day facts but no longer prepares unrelated Home recommendations. Baseline/tuned eligibility uses two disjoint sixteen-subject publications. Real ranking, publication races, readiness, first-user progression and vibe persistence tests retain their actual pipeline. Post-unlock control tests explicitly isolate the growth gate; growth tests do not use that override. No mutable Store is shared. |
-| P5. Similar dialog | Merge 24 journeys into 12, preserving both parents, three widths and artwork states. Bounds, image recovery, checkbox selection, action reachability, scrolling, overflow and Escape remain. Reachability scrolls the actual last rendered action rather than assuming seed order equals display order. |
+| P5. Similar dialog | Consolidate the overlapping journeys, preserving both parents, desktop widths and artwork states. Remove phone variants under the user's scope correction. Bounds, image recovery, checkbox selection, action reachability, scrolling, overflow and Escape remain. Reachability scrolls the actual last rendered action rather than assuming seed order equals display order. |
 | P6. Regeneration failure matrix | Run all six failures once with a compact published menu, reading the actual button endpoint rather than rewriting `hx-post`. Two short HTTP/template cases render both actual variants and verify endpoints, targets, swap/trigger attributes, shared handler and held opportunity. Preserve network failure, HTTP error with valid content, 422, missing/invalid fragments and empty success; each still checks deduplication, retry, original rows and animation cleanup. The real held-opportunity/animated-swap integration remains separate. |
 | P7. Deterministic waits | Replace slow playlist deletion sleeps with entered/release Events and release in cleanup. Discovery/story clocks pause during the initial hidden interval; explicit frame steps deliver Alpine's deferred panel reveal and native IntersectionObserver updates before advancing dwell time. Real requests and persisted counts still establish hidden, visible and fragment-poll behavior. The response barrier matches the requested tile's subject/kind/ID so another visible tile's concurrent POST cannot release it early. Analytics likewise waits for its actual Alpine observer/timer. The retained audio-card test runs every normal page tick under a clock, records request times in that clock and preserves retry-spacing/no-retry assertions; recovery waits for the real server response. This replaces 24.4 seconds of exposure waits and eleven seconds of audio retry waits, not a measured wall-clock speedup. The story test also waits for real lazy-fragment completion. Actual extension/media timing remains where page clocks do not control the isolated world or native capture. |
 | P8. Fair queue | Keep one compact full drain with unique small-lane survival, blocked exclusions and exhaustion. Preserve partial-consumption, ties, muting, suppression and trace tests. Move the repeated 8,000/32,000 print-only timing comparison to `experiments/investigations/bench_fair_queue.py`. |
@@ -24,7 +111,7 @@ acceptance or a claim that the current test suite passes.
 | P13. Pure JavaScript | Move all thirteen sync outcome, transport-recovery and disposal scenarios to `test_sync_outcomes_js.py`, loading actual `home.js` in a fresh Node VM per case. Keep native browser sync/SSE integrations. |
 | P14. Data scale | Discovery cleanup uses four compact operation/staging cases plus two retained 8,000-track direct/staged cases. Recent-evidence membership fixtures use three old observations and real catalog/embedding owners while keeping all eight consumer/decode guards. Unrelated churn falls from 1,000/4,000 writes to four, with exact dependency/scoped-capture assertions retained. Retain policy-upgrade volume because the shared genuine v69 harness also proves physical shrink, WAL restoration and resumed compaction; splitting its smaller normalization/early-deferral seeds remains a follow-up during ongoing storage-harness changes. Five Home-refill eligibility cases now use thirty-two subjects total while retaining fresh/held offer capture, source selection, blocked counts and exact generation/context checks. |
 | P15. Model dispatch/provenance | Item2vec dispatch uses valid fixed-vector spies while checking actual selection/publication. Five generated-history provenance cases use a fixed published vector space; numerical recall, temporal evaluation and real fit checks retain training. The older duplicate five-fold content-projection report is absent from the current snapshot; distinct leakage/recall integrations remain. |
-| P16. Responsive transactions | Keep one 1280-pixel native MV3/card pause-resume journey and one identity typing/help journey. Retain Home-vibe widths: the current slow-request test checks feedback in the viewport, including a short 320-by-640 window. Retain now-playing parents/widths because they exercise different dock parents, source-return wiring and popup/breakpoint geometry. All twelve similar-dialog combinations remain. |
+| P16. Desktop transactions | Keep one 1280-pixel native MV3/card pause-resume journey and one identity typing/help journey. Home-vibe slow-request checks retain feedback visibility on desktop. Retain now-playing parents and desktop widths because they exercise different dock parents, source-return wiring and popup geometry. Similar-dialog checks retain both parents and artwork states on desktop. Phone widths and device emulation are excluded. |
 | P17. Resource ownership | Close root/local Store fixtures with yield/finally; bound server startup/join cleanup in consolidated browser fixtures. Bridge readiness uses an Event and its loop/thread is stopped, joined and closed. Extension prompt-lock readiness uses one asynchronous `wait_for_function` instead of repeated browser roundtrips. Actual loop/thread and test-lock regressions remain. Other HTTPServer polling intervals are retained because cancellation/shutdown timing is part of their integration behavior; no global lock changes were made. |
 
 ## Concrete consolidations

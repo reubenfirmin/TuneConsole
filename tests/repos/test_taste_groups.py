@@ -43,6 +43,9 @@ def test_legacy_upgrade_preserves_rows_feedback_and_unknown_historical_membershi
     seed_modes(store, 1, 2)
     store.modes.log_impressions(1, [(0, 1), (1, 2)], 10)
     before = [tuple(row) for row in store.conn.execute('SELECT * FROM taste_modes')]
+    # Explicitly replay this unsupported predecessor, then let ordinary startup
+    # notice the changed schema and rebind its original repositories.
+    migrate(store.conn, registry=MIGRATIONS)
     store.init_schema()
     assert before == [tuple(row) for row in store.conn.execute('SELECT * FROM taste_modes')]
     assert store.conn.execute('SELECT COUNT(*) FROM rec_mode_impressions').fetchone()[0] == 2

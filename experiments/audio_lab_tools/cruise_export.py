@@ -101,7 +101,8 @@ def export(directory):
              [Path(__file__), Path(runtime.__file__), EXPERIMENTS / 'run.py',
               Path(__file__).with_name('test_cruise_specialist.py')]}
     paths.update({'product/' + Path(p).name: Path(p) for p in
-                  (runtime.production.__file__, runtime.shared.__file__, runtime.audio_embedding.__file__)})
+                  (runtime.production.__file__, runtime.bounded.__file__,
+                   runtime.shared.__file__, runtime.audio_embedding.__file__)})
     directory.mkdir(parents=True)
     code = {relative: digest(p) for relative, p in paths.items()}
     for relative, p in paths.items():

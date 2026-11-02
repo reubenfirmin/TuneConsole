@@ -137,7 +137,7 @@ def _released(worker, tab_id):
 def test_direct_capture_reads_real_pcm_without_chooser_and_keeps_playback(probe_browser, tmp_path, source_kind):
     context, worker, page, tab_id = probe_browser
     banner = page.locator("#tuneconsole-audio-probe")
-    page.set_viewport_size({"width": 390, "height": 900})
+    page.set_viewport_size({"width": 1280, "height": 900})
     if source_kind == "blob":
         page.locator("video").evaluate("""async media => {
           const response = await fetch('/probe.wav');
@@ -168,7 +168,7 @@ def test_direct_capture_reads_real_pcm_without_chooser_and_keeps_playback(probe_
     assert _resources(worker, tab_id)["contexts"] == 0
     assert banner.evaluate("host => host.getBoundingClientRect().left >= 0 && "
                            "host.getBoundingClientRect().right <= innerWidth")
-    page.screenshot(path=str(tmp_path / "audio-access-mobile.png"), full_page=True)
+    page.screenshot(path=str(tmp_path / "audio-access-desktop.png"), full_page=True)
     # Native EME state does not have to leak through a page-world JS bridge.
     assert page.evaluate("window.__tcAudioProbe === undefined")
 

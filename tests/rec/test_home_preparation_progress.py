@@ -1,9 +1,12 @@
 """Shared snapshot inputs must let bounded Home preparation make useful progress."""
+from collections import Counter
+
 import pytest
 
 from tests.rec.test_home_prepared import seed
+from tests.recommendation_support import publish_bundles
 from yt_playlist.rec import (discover, embedding_vectors as embed, home_prepared, home_themes, home_vibe,
-                             mode_surfaces, rec_params, surfaces, transient)
+                             mode_surfaces, rec_params, stored_home, surfaces, transient)
 
 
 def test_each_preparation_snapshot_reuses_listening_signals_for_all_discovery_families(store, monkeypatch):
@@ -56,15 +59,16 @@ def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(
     bundles = seed(store)
     bundles['_ppr'] = {str(mid): [item['key'] for items in bundles[str(mid)].values()
                                   for item in reversed(items)] for mid in range(6)}
-    store.rec_proposals.put_proposals('mode_bundles', bundles, 1)
+    publish_bundles(store, bundles, 1)
     rec_params.set_param(store, 'ppr_ab_share', 0.5)
     store.rec_model.record_dislike(bundles['0']['wheelhouse'][0]['key'], until=None, now=1)
     orders = [(epoch, tuple(range(epoch, 6)) + tuple(range(epoch))) for epoch in range(3)]
-    with store.read_snapshot() as snapshot:
+    with store.read_snapshot() as snapshot, stored_home.preparation_inputs() as metadata_inputs:
         reader = snapshot.store
         expected = [mode_surfaces.assemble_cards(reader, 1000, epoch, mode_order=order,
                                                 include_genres=include) for epoch, order in orders]
         preparation = {'leans': transient.facet_leans(reader, 1000),
+                       'metadata_inputs': metadata_inputs,
                        'vibe_rank': home_vibe.ranker(reader, 1000)}
         checks, resolved = [], []
         check = reader.rec_eligibility.suppressed_candidate_keys
@@ -80,25 +84,31 @@ def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(
 
         monkeypatch.setattr(reader.rec_eligibility, 'suppressed_candidate_keys', counted_check)
         monkeypatch.setattr(home_themes, 'resolved_genres', counted_resolve)
-        actual = [mode_surfaces.assemble_cards(reader, 1000, epoch, mode_order=order,
-                                              include_genres=include, preparation=preparation)
-                  for epoch, order in orders]
+        actual = []
+        for epoch, order in orders:
+            actual.append(mode_surfaces.assemble_cards(reader, 1000, epoch, mode_order=order,
+                          include_genres=include, preparation=preparation))
         assert actual == expected
         assert all(cards for cards in actual)
         assert any(card.get('counterfactual') for cards in actual for card in cards)
-        assert len(checks) == 1
-        assert preparation['assembly']['full_pools']
-        for lane in ('wheelhouse', 'explore', 'fresh'):
-            union = frozenset(item['key'] for item in bundles['all'][lane])
-            assert resolved.count(union) == int(lane in preparation['assembly']['full_pools'])
+        # Typed owners seek bounded pages instead of inflating one union. Each
+        # recording is still checked/resolved only once across all three menus.
+        assert checks and resolved
+        assert all(len(keys) <= 128 for keys in checks + resolved)
+        checked = Counter(key for keys in checks for key in keys)
+        metadata = Counter(key for keys in resolved for key in keys)
+        assert checked == metadata
+        assert set(checked.values()) == {1}
+        assert store.rec_model.disliked_identity_keys() <= checked.keys()
 
 
 @pytest.mark.parametrize('missing_bundles', [False, True])
 def test_preparation_never_rebuilds_the_library_for_cold_or_shallow_bundles(store, monkeypatch,
                                                                         missing_bundles):
-    bundles = seed(store)
+    bundles = seed(store, publish=not missing_bundles)
     bundles['_meta']['full_pools'] = False
-    store.rec_proposals.put_proposals('mode_bundles', None if missing_bundles else bundles, 1)
+    if not missing_bundles:
+        publish_bundles(store, bundles, 1)
 
     def forbidden(*args, **kwargs):
         raise AssertionError('Preparation must wait for refreshed bundles instead of reranking the library')

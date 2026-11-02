@@ -5,6 +5,7 @@ import pytest
 from yt_playlist.rec import radio_tuning
 from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.rec.radio_directions import RadioDirections
+from tests.recommendation_support import publish_bundles
 
 
 def prepare(store, groups):
@@ -23,7 +24,7 @@ def prepare(store, groups):
         bundles[str(mid)] = {"wheelhouse": tracks}
         pools.append(tracks)
     store.modes.replace_modes(modes, [], 1)
-    store.rec_proposals.put_proposals("mode_bundles", bundles)
+    publish_bundles(store, bundles)
     return pools
 
 

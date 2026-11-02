@@ -1,9 +1,12 @@
 """Recovery owns publication, while foreground reads use the last committed state."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+from html.parser import HTMLParser
 import hashlib
 import json
 from pathlib import Path
 import signal
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -15,9 +18,12 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import seed_catalog_track
 from tests.core.test_group_content import prepared
+from tests.home_fixture_support import returning_listener
 from tests.onboarding_support import publish_personal_mix
+from yt_playlist.core import fao
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.evidence_ledger import canonical, EvidenceBudgetExceeded, EvidenceLedger
+from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.storage_maintenance import EVIDENCE_MESSAGE, EVIDENCE_RETRY_MESSAGE
 from yt_playlist.core.store import Store
 from yt_playlist.rec import choice_evidence, choice_retention, group_root_backfill, group_roots, home_cards, mode_surfaces, stored_home
@@ -30,9 +36,67 @@ from yt_playlist.repos import group_queries
 from yt_playlist.web.app import create_app
 
 
+def assert_maintenance_banner(response, *, visible=False):
+    banners = []
+    banner_text = []
+
+    class Banners(HTMLParser):
+        depth = 0
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if attrs.get('id') == 'storage-maintenance':
+                banners.append(attrs)
+                self.depth = 1
+            elif self.depth:
+                self.depth += 1
+
+        def handle_endtag(self, tag):
+            if self.depth:
+                self.depth -= 1
+
+        def handle_data(self, data):
+            if self.depth:
+                banner_text.append(data)
+
+    Banners().feed(response.text)
+    assert len(banners) == 1 and ('hidden' not in banners[0]) is visible
+    if visible:
+        assert ''.join(banner_text).strip() == (
+            'Performing database maintenance - this should take just a few minutes.')
+
+
+def historical_inventory(store, identity):
+    """A predecessor file plus a prepared comparison not yet in root inventory.
+
+    Choices no longer own musical-group history (#688). Prepared comparisons
+    still do, so use that real owner to exercise historical context expansion.
+    """
+    captured = {'at': 10, 'group_generation': 'first', 'musical_groups': [
+        {'group_id': 'stable-parent', 'version': 'first-parent'},
+        {'group_id': 'stable-leaf', 'version': 'first-leaf', 'parent_version': 'first-parent'}]}
+    ledger = store.rec_ledger.evidence()
+    artifact = ledger.artifact(captured)
+    ledger.put('opportunity', identity, {'id': identity, 'schema': 1, 'format': 'mixes',
+        'at': 10, 'observed_at': 10, 'context': artifact,
+        'options': [{'id': 'one', 'score': 1}], 'prediction': ['one'], 'prediction_status': 'issued'})
+    surface = 'model_pair:' + identity + ':incumbent:mixes'
+    # Deliberately bypass live publication to represent pre-inventory storage.
+    with store.conn:
+        store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,10)',
+                           (surface, json.dumps({'context': {'artifact': artifact}})))
+        store.conn.execute('UPDATE group_retention_state SET roots_complete=0 WHERE id=1')
+    store._group_root_backfill = group_root_backfill.Backfill(store)
+    return identity, surface
+
+
 @pytest.fixture
-def library(tmp_path):
+def library(tmp_path, request):
     store = Store(tmp_path / 'library.db')
+    if getattr(request, 'param', None) == 94:
+        # This inventory exists on installed predecessors. Current installations
+        # reject generic proposal writes after the domain-owner cutover (#486).
+        migrate(store.conn, registry=registry.MIGRATIONS[:94])
     store.init_schema()
     for key in ('one', 'two'):
         seed_catalog_track(store, key, key, 'Artist', video_id=key, genre='house')
@@ -53,10 +117,11 @@ def library(tmp_path):
         store.conn.close()
 
 
-def test_correction_identity_matches_full_definition_without_decoding_files(library, monkeypatch):
+def test_correction_identity_and_current_learning_descriptors_match_the_published_head(library, monkeypatch):
     head = library.taste_groups.head()
     expected_head = {'generation': head['generation'], 'groups': [
-        {key: group.get(key, False) for key in ('group_id', 'version', 'parent_version', 'legacy')}
+        {key: group[key] for key in ('group_id', 'version', 'parent_version', 'leaf')}
+        | {'legacy': bool(group.get('legacy')), 'genres': group.get('genres', [])}
         for group in head['groups']]}
     for version in ('first-parent', 'first-leaf'):
         original = library.taste_groups.definition(version, generation='first')
@@ -71,7 +136,7 @@ def test_correction_identity_matches_full_definition_without_decoding_files(libr
     assert len(acknowledged) == 1
 
 
-def test_learning_recovers_only_relevant_legacy_ancestry_on_one_pinned_reader(library, monkeypatch):
+def test_mix_learning_does_not_recover_retired_legacy_ancestry(library, monkeypatch):
     definitions = [library.taste_groups.correction_definition(version, generation='first')
                    for version in ('first-parent', 'first-leaf')]
     oid = choice_evidence.issue(library, 'mixes', [
@@ -107,7 +172,8 @@ def test_learning_recovers_only_relevant_legacy_ancestry_on_one_pinned_reader(li
     monkeypatch.setattr(group_queries, '_generation', lambda *a: pytest.fail('Decoded model inputs'))
     actual = choice_evidence.compile_report(library, 15)
     assert actual == expected
-    assert len(readers) == 1
+    assert not readers
+    assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind IN ('offer','checkpoint')").fetchone()
 
 
 def test_small_inventory_batches_advance_before_repeating_the_whole_ledger_scan(library, monkeypatch):
@@ -170,25 +236,29 @@ def test_pending_recovery_survives_interruption_and_clears_only_after_success(li
     reopened.conn.close()
 
 
-def test_home_and_navigation_remain_available_while_processing_historical_definitions(library, monkeypatch):
+@pytest.mark.parametrize('library', [94], indirect=True, ids=['installed-v94'])
+def test_home_and_navigation_remain_available_while_processing_historical_prepared_context(library, monkeypatch):
     library.accounts.upsert_account('Main', 'bridge', None, True)
     library.settings.set_setting('last_sync_at', '1000')
     library.settings.set_setting('onboard_dismissed', '1')
     publish_personal_mix(library)
     mode_surfaces.prepare_bundles(library, 1000)
+    returning_listener(library, 'mixes', now=1000)
+    historical_inventory(library, 'historical-prepared-home')
     app = create_app(library, lambda: {}, now_fn=lambda: 1000, background_work=True)
     worker = app.state.ctx.rec_worker
     monkeypatch.setattr(worker, '_start_loop', lambda: None)
     entered, release = threading.Event(), threading.Event()
-    definition = CompactTasteGroupsRepo.correction_definition
+    context = group_roots.context
 
     def held(self, *args, **kwargs):
-        value = definition(self, *args, **kwargs)
-        entered.set()
-        assert release.wait(5)
+        value = context(self, *args, **kwargs)
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5)
         return value
 
-    monkeypatch.setattr(CompactTasteGroupsRepo, 'correction_definition', held)
+    monkeypatch.setattr(group_roots, 'context', held)
     # The real worker and capture queue are enabled; only the ticker is not
     # started. This executor runs the actual storage path under its admission.
     client = TestClient(app, base_url='http://127.0.0.1')
@@ -198,7 +268,8 @@ def test_home_and_navigation_remain_available_while_processing_historical_defini
             assert entered.wait(2)
             started = time.monotonic()
             home = client.get('/')
-            assert home.status_code == 200 and 'id="storage-maintenance"' not in home.text
+            assert home.status_code == 200
+            assert_maintenance_banner(home, visible=True)
             for lane in ('comfort', 'wheelhouse', 'explore', 'temporal'):
                 assert f'A {lane} mix for you' in home.text
             assert choice_evidence.maintain_storage(library, 1000) == {'deferred': True}
@@ -208,14 +279,23 @@ def test_home_and_navigation_remain_available_while_processing_historical_defini
             # its private reader, and therefore waited for all storage work.
             stored_home.unmodeled_cards(library, 1000, card_builder=home_cards._carded)
             stored_home.assemble(library, 1000, 0)
-            with pytest.raises(WorkBudgetExceeded):
-                PreparedRadio(library, 1000)
+            # Maintenance freezes publications. Radio can select that snapshot
+            # without a SQL lease, then retain it before workers resume (#649).
+            radio = PreparedRadio(library, 1000)
+            try:
+                with library.read_view() as reader:
+                    head = next((value for surface in ('radio', 'home', 'fresh')
+                                 if (value := reader.recommendations.head(surface)) is not None), None)
+                assert radio.generation == (head['id'] if head else None)
+                assert radio._lifetime is None
+            finally:
+                radio.close()
             assert time.monotonic() - started < 2
             assert not future.done()
         finally:
             release.set()
         future.result(5)
-    monkeypatch.setattr(CompactTasteGroupsRepo, 'correction_definition', definition)
+    monkeypatch.setattr(group_roots, 'context', context)
     for _ in range(10):
         if not choice_evidence.maintain_storage(library, 1000).get('deferred'):
             break
@@ -230,18 +310,17 @@ def test_home_and_navigation_remain_available_while_processing_historical_defini
 
 
 @pytest.mark.parametrize('phase', ['file_read', 'context_expansion'])
+@pytest.mark.parametrize('library', [94], indirect=True, ids=['installed-v94'])
 def test_inventory_preparation_does_not_hold_the_home_serving_lock(library, monkeypatch, phase):
     library.accounts.upsert_account('Main', 'bridge', None, True)
     library.settings.set_setting('last_sync_at', '1000')
     library.settings.set_setting('onboard_dismissed', '1')
     publish_personal_mix(library)
     mode_surfaces.prepare_bundles(library, 1000)
+    returning_listener(library, 'mixes', now=1000)
     # Controlled predecessor capture: real immutable evidence lacking only its
     # new SQL owner. The collector fence remains closed throughout preparation.
-    oid = choice_evidence._issue_record(library, {'id': 'inventory-home', 'format': 'mixes',
-        'at': 10, 'observed_at': 10, 'options': [{'id': 'one'}]},
-        {'at': 10, 'group_generation': 'first', 'musical_groups': [
-            {'group_id': 'stable-leaf', 'version': 'first-leaf'}]})
+    oid, surface = historical_inventory(library, 'inventory-home')
     path = library.rec_ledger.evidence()._path('opportunity', oid)
     entered, release = threading.Event(), threading.Event()
 
@@ -250,19 +329,19 @@ def test_inventory_preparation_does_not_hold_the_home_serving_lock(library, monk
             entered.set()
             assert release.wait(5)
 
-    read_bytes, context = Path.read_bytes, group_roots.context
+    read_bytes, context = fao.read_bytes, group_roots.context
 
-    def held_read(self):
+    def held_read(self, **kwargs):
         if self == path:
             hold()
-        return read_bytes(self)
+        return read_bytes(self, **kwargs)
 
     def held_context(store, captured, **kwargs):
         if captured.get('artifact') and threading.current_thread() is not threading.main_thread():
             hold()
         return context(store, captured, **kwargs)
 
-    monkeypatch.setattr(Path, 'read_bytes', held_read if phase == 'file_read' else read_bytes)
+    monkeypatch.setattr(fao, 'read_bytes', held_read if phase == 'file_read' else read_bytes)
     monkeypatch.setattr(group_roots, 'context', held_context if phase == 'context_expansion' else context)
     app = create_app(library, lambda: {}, now_fn=lambda: 1000, background_work=True)
     worker = app.state.ctx.rec_worker
@@ -274,8 +353,9 @@ def test_inventory_preparation_does_not_hold_the_home_serving_lock(library, monk
             assert entered.wait(2)
             started = time.monotonic()
             response = client.get('/')
-            assert response.status_code == 200 and 'id="storage-maintenance"' not in response.text
-            assert 'A mix for you' in response.text
+            assert response.status_code == 200
+            assert_maintenance_banner(response, visible=True)
+            assert 'A comfort mix for you' in response.text
             assert client.get('/playlists').status_code == 200
             assert client.get('/storage-maintenance/status').json()['active']
             assert time.monotonic() - started < 2
@@ -287,15 +367,18 @@ def test_inventory_preparation_does_not_hold_the_home_serving_lock(library, monk
     for _ in range(10):
         if not choice_evidence.maintain_storage(library, 1000).get('deferred'):
             break
-    assert library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='offer' AND external_key=?",
-                                (oid,)).fetchone()
+    assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='offer' AND external_key=?",
+                                    (oid,)).fetchone()
+    assert library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='comparison' AND external_key=?",
+                                ('proposal:' + surface + ':context',)).fetchone()
     assert not library.activity_paused
     assert not library.conn.execute('PRAGMA foreign_key_check').fetchone()
     worker.shutdown()
     client.close()
 
 
-def test_home_onboarding_and_growth_do_not_wait_for_a_schema_writer(library, monkeypatch):
+@pytest.mark.parametrize('shared_writer', [True, False], ids=['serving-writer', 'separate-writer'])
+def test_home_onboarding_and_growth_do_not_wait_for_a_schema_writer(library, monkeypatch, shared_writer):
     from yt_playlist.util import genre_map
 
     library.accounts.upsert_account('Main', 'bridge', None, True)
@@ -308,9 +391,13 @@ def test_home_onboarding_and_growth_do_not_wait_for_a_schema_writer(library, mon
         family: 1 / len(families) for family in families}, 'breadth': 1},
         'eras': [], 'transient': {}}
     library.rec_proposals.put_proposals('home_tuned', prepared_home, 1000)
+    # The asserted mix dashboard belongs to an established listener. A complete
+    # menu alone does not bypass the fresh-account journey's preceding stops.
+    returning_listener(library, 'mixes', now=1000)
     app = create_app(library, lambda: {}, now_fn=lambda: 1000, background_work=False)
     entered, release = threading.Event(), threading.Event()
-    library._schema_recovery_pending = True
+    before = list(map(tuple, library.conn.execute('SELECT * FROM rec_impressions ORDER BY surface,item_key')))
+    assert not library.activity_paused
     acquire = library._lock.acquire
 
     def foreground_acquire(blocking=True, timeout=-1):
@@ -321,13 +408,19 @@ def test_home_onboarding_and_growth_do_not_wait_for_a_schema_writer(library, mon
     monkeypatch.setattr(library._lock, 'acquire', foreground_acquire)
 
     def hold_writer():
-        with library._lock:
-            with library.conn:
-                library.conn.execute('BEGIN IMMEDIATE')
-                entered.set()
-                assert release.wait(10)
+        conn = library.conn if shared_writer else sqlite3.connect(library._db_path)
+        try:
+            with library._lock if shared_writer else nullcontext():
+                with conn:
+                    conn.execute('BEGIN IMMEDIATE')
+                    entered.set()
+                    assert release.wait(10)
+        finally:
+            if not shared_writer:
+                conn.close()
 
     with TestClient(app, base_url='http://127.0.0.1') as client, ThreadPoolExecutor(2) as executor:
+        app.state.ctx.storage_maintenance.phase = 'schema'
         writer = executor.submit(hold_writer)
         response = None
         try:
@@ -337,7 +430,7 @@ def test_home_onboarding_and_growth_do_not_wait_for_a_schema_writer(library, mon
             # Allow cold template compilation within the first-page deadline.
             home = response.result(timeout=5)
             assert home.status_code == 200 and 'A comfort mix for you' in home.text
-            assert 'id="storage-maintenance"' not in home.text
+            assert_maintenance_banner(home)
             assert 'id="growth-title"' in home.text
             assert not writer.done()
         finally:
@@ -345,7 +438,16 @@ def test_home_onboarding_and_growth_do_not_wait_for_a_schema_writer(library, mon
             writer.result(timeout=5)
             if response is not None:
                 response.result(timeout=5)
-            library._schema_recovery_pending = False
+            app.state.ctx.storage_maintenance.phase = 'done'
+    assert list(map(tuple, library.conn.execute('SELECT * FROM rec_impressions ORDER BY surface,item_key'))) == before
+    assert library.conn.execute('PRAGMA busy_timeout').fetchone()[0] == 5000
+    assert not library.activity_paused
+    # Ordinary visits still advance each counter once after admission is free.
+    with TestClient(app, base_url='http://127.0.0.1') as client:
+        old_views = library.rec_ledger.card_views('comfort')
+        assert client.get('/').status_code == 200
+        assert library.rec_ledger.card_views('comfort') == old_views + 1
+        assert library.rec_proposals.get_proposals('home_choice')['experiments']
 
 
 def test_playlists_keep_committed_account_metadata_while_schema_writer_is_held(library):
@@ -371,7 +473,7 @@ def test_playlists_keep_committed_account_metadata_while_schema_writer_is_held(l
     library.playlists.hide_playlist('HIDDEN')
     app = create_app(library, lambda: {}, now_fn=lambda: 1000, background_work=False)
     entered, release = threading.Event(), threading.Event()
-    paused = getattr(library, '_schema_recovery_pending', False)
+    assert not library.activity_paused
 
     def hold_writer():
         with library._lock:
@@ -381,7 +483,7 @@ def test_playlists_keep_committed_account_metadata_while_schema_writer_is_held(l
                                      'WHERE id=?', (first,))
                 library.conn.execute("UPDATE accounts SET label='Uncommitted account' WHERE id=?", (main,))
                 library.conn.execute("UPDATE playlist_scopes SET group_name='Uncommitted group' "
-                                     'WHERE ref=?', (f'@account:{main}:LM',))
+                                     'WHERE id=?', (f'@account:{main}:LM',))
                 entered.set()
                 assert release.wait(10), 'Playlists GET waited for the schema writer'
             finally:
@@ -390,7 +492,6 @@ def test_playlists_keep_committed_account_metadata_while_schema_writer_is_held(l
     with TestClient(app, base_url='http://127.0.0.1') as client:
         # Warm templates through the unchanged normal route before holding SQL.
         assert client.get('/playlists').status_code == 200
-        library._schema_recovery_pending = True
         try:
             with ThreadPoolExecutor(2) as executor:
                 writer = executor.submit(hold_writer)
@@ -414,18 +515,18 @@ def test_playlists_keep_committed_account_metadata_while_schema_writer_is_held(l
                     release.set()
                 writer.result(timeout=2)
         finally:
-            library._schema_recovery_pending = paused
+            release.set()
     assert library.playlists.get_playlist(first).title == 'Main liked'
 
 
+@pytest.mark.parametrize('library', [94], indirect=True, ids=['installed-v94'])
 def test_cached_home_does_not_wait_for_inventory_file_preparation(library, monkeypatch, tmp_path):
-    from tests.rec.test_group_root_backfill import historical_offer
-
     library.accounts.upsert_account('Main', 'bridge', None, True)
     library.settings.set_setting('last_sync_at', '1000')
     library.settings.set_setting('onboard_dismissed', '1')
     publish_personal_mix(library)
     mode_surfaces.prepare_bundles(library, 1000)
+    returning_listener(library, 'mixes', now=1000)
     app = create_app(library, lambda: {}, now_fn=lambda: 1000, background_work=True)
     worker = app.state.ctx.rec_worker
     monkeypatch.setattr(worker, '_start_loop', lambda: None)
@@ -437,11 +538,8 @@ def test_cached_home_does_not_wait_for_inventory_file_preparation(library, monke
         # Establish real cached output before creating the controlled predecessor
         # inventory, so earlier setup and warming cannot consume the gated file.
         warm = client.get('/')
-        assert warm.status_code == 200 and 'A mix for you' in warm.text
-        identity = historical_offer(library, 'inventory-serving-check', captured={
-            'at': 10, 'group_generation': 'first', 'musical_groups': [
-                {'group_id': 'stable-parent', 'version': 'first-parent'},
-                {'group_id': 'stable-leaf', 'version': 'first-leaf', 'parent_version': 'first-parent'}]})
+        assert warm.status_code == 200 and 'A comfort mix for you' in warm.text
+        identity, surface = historical_inventory(library, 'inventory-serving-check')
         ledger = library.rec_ledger.evidence()
         path = ledger._path('opportunity', identity)
         raw = path.read_bytes()
@@ -454,22 +552,22 @@ def test_cached_home_does_not_wait_for_inventory_file_preparation(library, monke
             conn.execute('UPDATE group_retention_state SET roots_complete=0 WHERE id=1')
         backfill = group_root_backfill.Backfill(library)
         library._group_root_backfill = backfill
-        read_bytes = Path.read_bytes
+        read_bytes = fao.read_bytes
 
-        def held_read(candidate):
+        def held_read(candidate, **kwargs):
             if candidate == path and threading.get_ident() == maintenance_thread[0] and not entered.is_set():
                 # The exact cursor proves this is inventory preparation, rather
                 # than a later acknowledgement or an unrelated Home file read.
                 assert backfill.pending_path == path
                 entered.set()
                 assert release.wait(10), 'Inventory test did not release its controlled file read'
-            return read_bytes(candidate)
+            return read_bytes(candidate, **kwargs)
 
         def maintain():
             maintenance_thread[0] = threading.get_ident()
             return choice_evidence.maintain_storage(library, 1000)
 
-        monkeypatch.setattr(Path, 'read_bytes', held_read)
+        monkeypatch.setattr(fao, 'read_bytes', held_read)
         request = None
         with ThreadPoolExecutor(2) as executor:
             maintenance = executor.submit(maintain)
@@ -483,8 +581,8 @@ def test_cached_home_does_not_wait_for_inventory_file_preparation(library, monke
                 except TimeoutError:
                     observed['home_timed_out'] = True
                 else:
-                    assert home.status_code == 200 and 'A mix for you' in home.text
-                    assert 'id="storage-maintenance"' not in home.text
+                    assert home.status_code == 200 and 'A comfort mix for you' in home.text
+                    assert_maintenance_banner(home, visible=True)
                     assert not maintenance.done() and not release.is_set()
                 observed['home_elapsed_before_release'] = time.monotonic() - started
                 observed['maintenance_held_before_release'] = not maintenance.done()
@@ -498,7 +596,7 @@ def test_cached_home_does_not_wait_for_inventory_file_preparation(library, monke
                             future.result(timeout=10)
                         except Exception as error:
                             observed['cleanup_errors'].append(f'{name}: {type(error).__name__}: {error}')
-        monkeypatch.setattr(Path, 'read_bytes', read_bytes)
+        monkeypatch.setattr(fao, 'read_bytes', read_bytes)
         for _ in range(10):
             if not choice_evidence.maintain_storage(library, 1000).get('deferred'):
                 break
@@ -508,12 +606,15 @@ def test_cached_home_does_not_wait_for_inventory_file_preparation(library, monke
         assert backfill.stage == len(group_root_backfill.KINDS) and backfill.pending_path is None
         assert path.read_bytes() == raw
         assert owners <= {tuple(row) for row in library.conn.execute('SELECT * FROM group_evidence_owners')}
+        assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind IN ('offer','checkpoint') "
+                                        'AND external_key=?', (identity,)).fetchone()
+        owner = 'proposal:' + surface + ':context'
         assert [row[0] for row in library.conn.execute("SELECT external_version FROM group_evidence_versions "
-            "WHERE kind='offer' AND external_key=? ORDER BY external_version", (identity,))] == [
+            "WHERE kind='comparison' AND external_key=? ORDER BY external_version", (owner,))] == [
                 'first-leaf', 'first-parent']
         assert library.conn.execute("SELECT 1 FROM group_evidence_generations e JOIN group_generations g "
-            "ON g.id=e.generation_id WHERE e.kind='offer' AND e.external_key=? AND g.external_key='first'",
-            (identity,)).fetchone()
+            "ON g.id=e.generation_id WHERE e.kind='comparison' AND e.external_key=? AND g.external_key='first'",
+            (owner,)).fetchone()
         assert not library.conn.execute('PRAGMA foreign_key_check').fetchone()
         observed['cursor_and_owner_checks_passed'] = True
         assert not observed['home_timed_out'], (
@@ -636,7 +737,9 @@ def test_accepted_fifo_tail_keeps_roots_and_retries_while_recovery_is_pending(li
     assert library.activity_paused
     assert list(worker.jobs.measurements) == captures
     assert library.choice_capture.get(oid)
-    assert library.conn.execute("SELECT count(*) FROM group_evidence_owners WHERE kind='pending'").fetchone()[0] == 2
+    # The accepted FIFO owns its immutable menu/response custody. Compact mix
+    # evidence must not recreate historical group pins during capacity recovery.
+    assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
     monkeypatch.setattr(EvidenceLedger, 'put', put)
     monkeypatch.setattr(choice_evidence, '_maintain_storage', maintain)
     worker.jobs.retry[Job.MEASUREMENT].retry_at = 0
@@ -663,17 +766,16 @@ def test_process_interruption_releases_publication_and_restart_finishes_recovery
         import sys, threading
         from pathlib import Path
         from yt_playlist.core.store import Store
-        from yt_playlist.rec import choice_evidence
-        from yt_playlist.repos.compact_taste_groups import CompactTasteGroupsRepo
+        from yt_playlist.rec import choice_evidence, choice_retention
         store = Store(sys.argv[1])
         store.init_schema()
-        original = CompactTasteGroupsRepo.correction_definition
-        def held(self, *args, **kwargs):
-            value = original(self, *args, **kwargs)
-            Path(sys.argv[2]).write_text('Historical definition read under publication admission')
+        original = choice_retention.correction_context
+        def held(*args, **kwargs):
+            value = original(*args, **kwargs)
+            Path(sys.argv[2]).write_text('Compact correction prepared under publication admission')
             threading.Event().wait(30)
             return value
-        CompactTasteGroupsRepo.correction_definition = held
+        choice_retention.correction_context = held
         try:
             choice_evidence.maintain_storage(store, 100)
         except KeyboardInterrupt:

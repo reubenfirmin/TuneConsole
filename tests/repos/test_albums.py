@@ -87,15 +87,16 @@ def test_populated_album_upgrade_rolls_back_and_reopens_without_backups(installe
 
     monkeypatch.setattr(registry,'MIGRATIONS',(*DRAFT[:22],Migration(23,DRAFT[22].name,fail)))
     with pytest.raises(MigrationError,match='interrupted album'):
-        migrate(store.conn)
+        migrate(store.conn, registry=registry.MIGRATIONS)
     assert list(store.conn.iterdump()) == before
     monkeypatch.setattr(registry,'MIGRATIONS',DRAFT)
-    store.init_schema()
+    migrate(store.conn, registry=DRAFT)
+    store._bind_repositories()
     assert store.collection.saved_album_ids() == {'release'}
     assert store.conn.execute('SELECT found_at,first_shown,offered_count FROM discovered_albums').fetchone()[:] == (5,10,1)
     assert store.conn.execute('SELECT entry_id FROM album_track_links').fetchone()[0] == entry
     state = list(store.conn.iterdump())
-    store.init_schema()
+    migrate(store.conn, registry=DRAFT)
     assert list(store.conn.iterdump()) == state
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
     assert not (tmp_path / 'backups').exists()
@@ -154,7 +155,10 @@ def test_full_fetch_round_trip_order_coverage_and_conflicts_follow_all_releases(
     store.conn.commit()
     assert store.collection.cached_album_tracklist_ids()=={'release'}
     assert store.collection.complete_album_tracklist_ids()==set()
-    assert store.collection.cached_album_share('release') is None
+    # Library membership is independent of the complete provider publication.
+    assert store.collection.has_published_album_tracklist('release')
+    assert store.collection.cached_album_share('release') == {
+        'title': 'Album', 'video_ids': ['b', 'a', 'b']}
 
 
 def test_recording_reassociation_preserves_release_relationships(store):

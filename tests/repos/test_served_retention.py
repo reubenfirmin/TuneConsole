@@ -32,12 +32,12 @@ def test_retention_batches_converge_and_preserve_cutoff_and_both_policies(store)
     prune()
     assert store.conn.execute('SELECT COUNT(*) FROM rec_served_impressions').fetchone()[0] == count + 1 - RETENTION_BATCH_SIZE
     assert store.conn.execute('SELECT COUNT(*) FROM rec_response_events').fetchone()[0] == count + 1 - RETENTION_BATCH_SIZE
-    assert store.conn.execute("SELECT 1 FROM rec_serving_policies WHERE model_version='expired-model'").fetchone()
+    assert store.conn.execute("SELECT 1 FROM recommendation_policies WHERE version='expired-model'").fetchone()
     for _ in range(4):
         prune()
     assert [r[0] for r in store.conn.execute('SELECT request_id FROM rec_served_impressions')] == ['boundary']
     assert [r[0] for r in store.conn.execute('SELECT event_id FROM rec_response_events')] == ['boundary']
-    assert {r[0] for r in store.conn.execute('SELECT model_version FROM rec_serving_policies')} == {'keep-model', 'keep-pool'}
+    assert {r[0] for r in store.conn.execute('SELECT version FROM recommendation_policies')} == {'keep-model', 'keep-pool'}
     impression = store.conn.execute('SELECT id FROM rec_served_impressions').fetchone()[0]
     retained = scorecard.served_recommendation(store, impression)
     assert retained['configuration'] == {'policy': 'keep-model'}
@@ -48,19 +48,20 @@ def test_policy_scan_passes_referenced_batch_and_resumes_after_restart(tmp_path)
     path = tmp_path / 'retention.db'
     store = Store(path)
     store.init_schema()
-    with store.conn:
-        store.conn.executemany('INSERT INTO rec_serving_policies VALUES (?, ?, 1)',
-            [(f'keep-{n:04}', '{}') for n in range(RETENTION_BATCH_SIZE)] + [('zzz-orphan', '{}')])
+    policies = [f'keep-{n:04}' for n in range(RETENTION_BATCH_SIZE)]
+    disposable = [f'remove-{n:04}' for n in range(RETENTION_BATCH_SIZE)] + ['zzz-orphan']
+    store.rec_ledger.record_prepared_policies([(version, '{}', 1) for version in policies + disposable])
     _impressions(store, [(f'kept-{n}', f'keep-{n:04}', '{}', 100) for n in range(RETENTION_BATCH_SIZE)])
     store.rec_ledger.record_served_impressions('prune', 'home', [], 101, prune_before=50)
-    assert store.conn.execute("SELECT 1 FROM rec_serving_policies WHERE model_version='zzz-orphan'").fetchone()
+    assert store.conn.execute("SELECT 1 FROM recommendation_policies WHERE version='zzz-orphan'").fetchone()
+    assert store.conn.execute('SELECT count(*) FROM recommendation_policies').fetchone()[0] == RETENTION_BATCH_SIZE + 1
     store.conn.close()
     reopened = Store(path)
     reopened.init_schema()
     try:
         reopened.rec_ledger.record_served_impressions('prune-again', 'home', [], 102, prune_before=50)
-        assert reopened.conn.execute("SELECT 1 FROM rec_serving_policies WHERE model_version='zzz-orphan'").fetchone() is None
-        assert reopened.conn.execute('SELECT COUNT(*) FROM rec_serving_policies').fetchone()[0] == RETENTION_BATCH_SIZE
+        assert reopened.conn.execute("SELECT 1 FROM recommendation_policies WHERE version='zzz-orphan'").fetchone() is None
+        assert reopened.conn.execute('SELECT COUNT(*) FROM recommendation_policies').fetchone()[0] == RETENTION_BATCH_SIZE
     finally:
         reopened.conn.close()
 
@@ -69,7 +70,7 @@ def test_numeric_pool_reference_keeps_original_text_comparison_semantics(store):
     store.rec_ledger.record_serving_policy('42', {'pool': True}, 1)
     _impressions(store, [('kept', 'model', json.dumps({'pool_policy': 42}), 100)])
     store.rec_ledger.record_served_impressions('prune', 'home', [], 101, prune_before=50)
-    assert store.conn.execute("SELECT 1 FROM rec_serving_policies WHERE model_version='42'").fetchone()
+    assert store.conn.execute("SELECT 1 FROM recommendation_policies WHERE version='42'").fetchone()
 
 
 def test_insertion_releases_serving_lock_before_cleanup(store, monkeypatch):
@@ -114,4 +115,4 @@ def test_referenced_policy_checks_do_not_scan_the_impression_ledger(store):
     _impressions(store, [(f'unrelated-{n}', 'other', '{}', 100) for n in range(3000)])
     large = work()
     assert large <= small * 2 + 500
-    assert store.conn.execute("SELECT 1 FROM rec_serving_policies WHERE model_version='pool'").fetchone()
+    assert store.conn.execute("SELECT 1 FROM recommendation_policies WHERE version='pool'").fetchone()

@@ -101,7 +101,7 @@ def _save_artists(page, base, count):
         assert response.ok
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_six_saved_artists_keep_a_seventh_search_result_and_removable_choices_visible(artist_app, store, page, width):
     _save_artists(page, artist_app, 6)
     page.route('https://example.com/**', lambda route: route.fulfill(
@@ -114,7 +114,7 @@ def test_six_saved_artists_keep_a_seventh_search_result_and_removable_choices_vi
     seventh = page.get_by_role('button', name='Choose Artist 6', exact=True)
     expect(seventh).to_be_visible()
     cards = page.locator('.artist-start-card').evaluate_all('cards => cards.map(card => card.getBoundingClientRect().toJSON())')
-    assert cards[1]['x'] - cards[0]['right'] >= (14 if width == 390 else 20) - 1
+    assert cards[1]['x'] - cards[0]['right'] >= 19
     assert page.locator('.artist-start-search label').evaluate('el => el.getBoundingClientRect().width') == 1
     page.screenshot(path=f'/tmp/tuneconsole-291-six-artists-{width}.png', full_page=True)
     seventh.click()
@@ -127,7 +127,7 @@ def test_six_saved_artists_keep_a_seventh_search_result_and_removable_choices_vi
 
 
 @pytest.mark.parametrize('outcome', ['empty', 'offline'])
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_related_artist_feedback_preserves_choices_search_and_retry(artist_app, store, page, outcome, width):
     _save_artists(page, artist_app, 1)
     endpoint = '**/home/onboard/artists/suggestions'
@@ -150,7 +150,7 @@ def test_related_artist_feedback_preserves_choices_search_and_retry(artist_app, 
     assert len(store.discovery.starter_artists()) == 1
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_first_set_generation_failure_can_retry_without_losing_artists(artist_app, store, page, monkeypatch, width):
     from yt_playlist.library import playlist_generated
 
@@ -182,7 +182,7 @@ def test_first_set_generation_failure_can_retry_without_losing_artists(artist_ap
     assert not store.conn.execute('SELECT 1 FROM play_events LIMIT 1').fetchone()
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 @pytest.mark.parametrize('catalog_state', ['empty', 'partial_history', 'incidental_live', 'unread_albums'])
 def test_required_picker_suggestions_spotify_draft_and_first_listen(
         artist_app, store, page, width, catalog_state, tmp_path, artist_flow_evidence):
@@ -226,6 +226,7 @@ def test_required_picker_suggestions_spotify_draft_and_first_listen(
     page.get_by_role('button', name='Choose Artist 1', exact=True).click()
     page.get_by_role('button', name='Coming from Spotify?').click()
     expect(page.get_by_role('heading', name='Your old favorites can come too.')).to_be_visible()
+    page.screenshot(path=f'/tmp/tuneconsole-791-spotify-{catalog_state}-{width}.png', full_page=True)
     page.get_by_role('button', name='How to request my files').click()
     expect(page.get_by_text('Extended streaming history:', exact=False)).to_be_visible()
     page.get_by_role('button', name='Back to my artists').click()

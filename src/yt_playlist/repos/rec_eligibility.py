@@ -17,6 +17,19 @@ def exclude_ids(column, ids, *, connective="AND") -> str:
 
 class RecEligibilityRepo(Repo):
     @lookup_read
+    def offered_tracks(self, videos) -> dict:
+        """Current identity and playability of the exact uploads in a saved offer."""
+        videos = list(dict.fromkeys(video for video in videos if video))
+        result = {}
+        for offset in range(0, len(videos), 500):
+            batch = videos[offset:offset + 500]
+            qs = ','.join('?' * len(batch))
+            result.update({row['video_id']: dict(row) for row in self.conn.execute(
+                'SELECT identity_key AS key,video_id,title,artist,album,thumbnail,available,'
+                f'duration_s AS duration,genre,mb_year AS year FROM catalog_tracks WHERE video_id IN ({qs})', batch)})
+        return result
+
+    @lookup_read
     def offer_metadata(self, videos) -> dict:
         """Current genre and length for bounded offered uploads, without ranking."""
         videos = list(dict.fromkeys(videos))

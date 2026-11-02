@@ -5,6 +5,7 @@ catalog document. SQLite can spill sorts to disk; only rank pages and the
 selected card are hydrated. No global cutoff can hide a rare family's tail.
 """
 from collections import Counter
+from contextlib import contextmanager
 import hashlib
 from itertools import permutations
 import json
@@ -21,9 +22,49 @@ from yt_playlist.util import genre_map
 LANES = ('wheelhouse', 'explore', 'fresh', 'comfort', 'temporal')
 
 
+@contextmanager
+def preparation_inputs():
+    """Reuse per-recording checks within one batch without retaining a library in Python."""
+    with TemporaryDirectory(prefix='tuneconsole-home-inputs-') as directory:
+        conn = sqlite3.connect(Path(directory) / 'inputs.db')
+        try:
+            conn.execute('PRAGMA cache_size=-1024')
+            conn.execute('PRAGMA mmap_size=0')
+            conn.execute('CREATE TABLE inputs(key TEXT PRIMARY KEY,genre TEXT,blocked INTEGER) WITHOUT ROWID')
+            yield PreparationInputs(conn)
+        finally:
+            conn.close()
+
+
+class PreparationInputs:
+    def __init__(self, conn):
+        self.conn, self.reader, self.now = conn, None, None
+
+    def resolve(self, reader, tracks, now):
+        if self.reader is None:
+            self.reader, self.now = reader, now
+        if reader is not self.reader or now != self.now:
+            raise ValueError('Home inputs require the same pinned reader and time')
+        keys = [track['key'] for track in tracks]
+        if not keys:
+            return [], set()
+        cached = {key: (genre, blocked) for key, genre, blocked in self.conn.execute(
+            'SELECT key,genre,blocked FROM inputs WHERE key IN (' + ','.join('?' for _ in keys) + ')', keys)}
+        missing = [track for track in tracks if track['key'] not in cached]
+        if missing:
+            resolved = home_themes.resolved_genres(reader, missing)
+            blocked = home_exclusions(reader, [track['key'] for track in missing], now)
+            rows = [(track['key'], track.get('genre'), track['key'] in blocked) for track in resolved]
+            self.conn.executemany('INSERT OR IGNORE INTO inputs VALUES (?,?,?)', rows)
+            cached.update({key: (genre, blocked) for key, genre, blocked in rows})
+        return ([{**track, 'genre': cached[track['key']][0]} for track in tracks],
+                {key for key, (_, blocked) in cached.items() if blocked})
+
+
 class Selection:
-    def __init__(self, reader, generation, now, leans, conn):
+    def __init__(self, reader, generation, now, leans, conn, inputs=None):
         self.reader, self.generation, self.now, self.leans = reader, generation, now, leans
+        self.inputs = inputs
         self.conn = conn
         self.conn.row_factory = sqlite3.Row
         self.conn.execute('PRAGMA cache_size=-1024')
@@ -54,9 +95,12 @@ class Selection:
             check_cancellable_work()
             page = self.reader.recommendations.candidate_page('home', str(mode), lane,
                 generation=self.generation, after=after, limit=128)
-            tracks = home_themes.resolved_genres(self.reader, page['tracks'])
+            if self.inputs is not None:
+                tracks, blocked = self.inputs.resolve(self.reader, page['tracks'], self.now)
+            else:
+                tracks = home_themes.resolved_genres(self.reader, page['tracks'])
+                blocked = home_exclusions(self.reader, [track['key'] for track in tracks], self.now)
             keys = [track['key'] for track in tracks]
-            blocked = home_exclusions(self.reader, keys, self.now)
             deltas = self.steering.for_keys(keys)
             self.conn.executemany('INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?,?,?)', [
                 (pool, track['pool_rank'], track['key'], track.get('artist') or '', track.get('album') or '',
@@ -248,7 +292,8 @@ def _assemble(reader, generation, now, epoch, avoid, include, mode_order, prepar
     with TemporaryDirectory(prefix='tuneconsole-home-') as directory:
         conn = sqlite3.connect(Path(directory) / 'cards.db')
         try:
-            selection = Selection(reader, generation, now, leans, conn)
+            selection = Selection(reader, generation, now, leans, conn,
+                                  (preparation or {}).get('metadata_inputs'))
             return _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order)
         finally:
             conn.close()

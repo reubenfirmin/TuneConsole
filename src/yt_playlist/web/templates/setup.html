@@ -604,9 +604,9 @@ function setupForm(rows, masterIdx, configured, savedIdentities, initialMessage,
         if (!response.ok) throw new Error('check failed');
         const result = await response.json();
         for (const check of result.checks) {
-          const before = definitions.find(saved => saved.id === check.account_id);
-          if (before && this.savedIdentities.some(saved => saved.id === check.account_id && saved.brand === before.brand)) {
-            this.identityChecks[check.account_id] = check;
+          const before = definitions.find(saved => saved.id === check.identity_id);
+          if (before && this.savedIdentities.some(saved => saved.id === check.identity_id && saved.brand === before.brand)) {
+            this.identityChecks[check.identity_id] = check;
           }
         }
         if (this.identityChecks[this.openIdentityHelp]?.state === 'valid') this.openIdentityHelp = null;

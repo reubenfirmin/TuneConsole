@@ -7,7 +7,7 @@
 {% from "_macros.html" import flow_badge %}
 {% set feedback_help = "Your feedback helps shape future recommendations. Repeated choices also update your saved preferences." %}
 <section class="fb-panel card card--inset" id="fb-{{ pid }}"
-         x-data="{ sel: {{ mood_state|default(0) }}, detailed: false }">
+         x-data="{ sel: {{ mood_state|default(0) }}, detailed: false }"{% if pid is none %} inert{% endif %}>
   {% set is_cluster = recipe and recipe.model == 'cluster' %}
   <div class="fb-simple">
     {% if is_cluster %}
@@ -19,7 +19,7 @@
     <div class="fb-btns">
       <button type="button" class="mood-btn mood-btn--more" :class="{ 'fb-sel': sel === 1 }"
               :aria-pressed="sel === 1" @click="sel = 1"
-              hx-post="/recs/mood" hx-vals='{"pid": {{ pid }}, "dir": 1}' hx-swap="none">
+              hx-post="/recs/mood" hx-vals='{"pid": {{ pid|tojson }}, "dir": 1}' hx-swap="none">
         <svg class="mood-mark" viewBox="0 0 24 24" width="20" height="20" fill="none"
              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
              aria-hidden="true" focusable="false">
@@ -31,7 +31,7 @@
       </button>
       <button type="button" class="mood-btn mood-btn--less" :class="{ 'fb-sel': sel === -1 }"
               :aria-pressed="sel === -1" @click="sel = -1"
-              hx-post="/recs/mood" hx-vals='{"pid": {{ pid }}, "dir": -1}' hx-swap="none">
+              hx-post="/recs/mood" hx-vals='{"pid": {{ pid|tojson }}, "dir": -1}' hx-swap="none">
         <svg class="mood-mark" viewBox="0 0 24 24" width="20" height="20" fill="none"
              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
              aria-hidden="true" focusable="false">
@@ -89,7 +89,7 @@
           <button type="button" class="fb-more" @click="sel = 1" :class="{ 'fb-sel': sel === 1 }"
                   :aria-pressed="sel === 1" aria-label="Like this flow: {{ journey_label }}"
                   hx-post="/recs/journey" hx-swap="none" hx-on::after-request="fbFlash(this)"
-                  hx-vals='{"pid": {{ pid }}, "dir": 1}'>
+                  hx-vals='{"pid": {{ pid|tojson }}, "dir": 1}'>
             <svg class="fb-vote-mark fb-heart" viewBox="0 0 20 20" width="14" height="14" aria-hidden="true" focusable="false">
               <path d="M10 17S3 12.6 3 8a4 4 0 0 1 7-2.5A4 4 0 0 1 17 8c0 4.6-7 9-7 9Z"/>
             </svg>
@@ -98,7 +98,7 @@
           <button type="button" class="fb-less" @click="sel = -1" :class="{ 'fb-sel': sel === -1 }"
                   :aria-pressed="sel === -1" aria-label="Not for me: {{ journey_label }} flow"
                   hx-post="/recs/journey" hx-swap="none" hx-on::after-request="fbFlash(this)"
-                  hx-vals='{"pid": {{ pid }}, "dir": -1}'>
+                  hx-vals='{"pid": {{ pid|tojson }}, "dir": -1}'>
             <svg class="fb-vote-mark fb-meh" viewBox="0 0 20 20" width="14" height="14" aria-hidden="true" focusable="false">
               <circle cx="10" cy="10" r="7"/>
               <path d="M7 8h.01M13 8h.01M7 13h6"/>

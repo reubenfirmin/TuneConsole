@@ -24,7 +24,7 @@ def test_removal_preserves_shared_sources_other_accounts_and_independent_days(st
     report = store.history.remove_spotify_history()
     assert report['events'] == 3
     assert store.history.spotify_history_stats()['events'] == 0
-    assert {r['identity_key'] for r in store.conn.execute('SELECT * FROM play_events')} == {'shared','other'}
+    assert {r['raw_identity_key'] for r in store.conn.execute('SELECT * FROM play_events')} == {'shared','other'}
     assert {r[0] for r in store.conn.execute('SELECT source FROM play_event_sources')} == {'live','takeout'}
     assert 'independent' in store.history.listening_day_counts(one)
     assert store.history.listening_day_counts(two) == {'other':1}
@@ -167,9 +167,10 @@ def test_failed_removal_rolls_back_evidence_and_artist_changes(store):
     iid = store.accounts.upsert_account('main','bridge',None,True)
     store.history.import_listening_events(iid,[('keep-on-failure',None,1700000000)],source='spotify_export')
     store.discovery.seed_spotify_artists(iid,{'Keep on failure':3},10)
-    with store.conn:
-        store.conn.execute("CREATE TRIGGER fail_removal BEFORE DELETE ON rec_proposals BEGIN SELECT RAISE(ABORT,'injected failure'); END")
     store.rec_proposals.put_proposals('trend_rollups',{'old':True},10)
+    with store.conn:
+        store.conn.execute("CREATE TRIGGER fail_removal BEFORE DELETE ON home_display_heads "
+            "WHEN OLD.surface='trend_rollups' BEGIN SELECT RAISE(ABORT,'injected failure'); END")
     with pytest.raises(sqlite3.IntegrityError,match='injected failure'):
         store.history.remove_spotify_history()
     assert store.history.spotify_history_stats()['events'] == 1

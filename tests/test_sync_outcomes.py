@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from tests.conftest import FakeClient, _track
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.bridge import BridgeError
+from yt_playlist.core import sync_state
 from yt_playlist.library import sync
 from yt_playlist.library.sync_outcomes import sync_due
 from yt_playlist.rec.actions import sync_status
@@ -64,14 +65,14 @@ def test_disconnect_preserves_success_and_reconnect_is_due_immediately(store):
     client.problem = BridgeError("extension disconnected")
     result = sync.sync_all(store, {iid: client}, 200)
     assert result["status"] == "partial"  # history is independently available
-    assert store.settings.get_setting("last_sync_at") == "100"
-    assert store.settings.get_setting("last_sync_attempt_at") == "200"
+    assert float(store.settings.get_setting("last_sync_at")) == 100
+    assert float(store.settings.get_setting("last_sync_attempt_at")) == 200
     assert result["accounts"][str(iid)]["resources"]["playlists"]["last_success_at"] == 100
     assert not sync_due(store, 201, 86400)
     assert sync_due(store, 201, 86400, retry_now=True)
     client.problem = None
     assert sync.sync_all(store, {iid: client}, 201)["status"] == "complete"
-    assert store.settings.get_setting("last_sync_at") == "201"
+    assert float(store.settings.get_setting("last_sync_at")) == 201
     assert not sync_due(store, 202, 86400)
 
 
@@ -93,7 +94,7 @@ def test_healthy_account_cannot_hide_an_unavailable_account(store, failure):
     assert result["accounts"][str(good)]["last_success_at"] == 200
     assert result["accounts"][str(bad)]["last_success_at"] == 100
     assert result["resources"]["saved_album_mirror"]["last_success_at"] == 100
-    assert store.settings.get_setting("last_sync_at") == "100"
+    assert float(store.settings.get_setting("last_sync_at")) == 100
     assert bool(expired) == (failure == "auth")
     assert not sync_due(store, 201, 86400)
     assert sync_due(store, 500, 86400)
@@ -115,8 +116,8 @@ def test_resource_freshness_advances_independently(store, failed_resource):
     assert resources[failed_resource]["last_attempt_at"] == 200
     healthy = "history" if failed_resource != "history" else "playlists"
     assert resources[healthy]["last_success_at"] == 200
-    assert store.settings.get_setting("last_sync_at") == "100"
-    assert json.loads(store.settings.get_setting("library_sync_state")) == result
+    assert float(store.settings.get_setting("last_sync_at")) == 100
+    assert sync_state.state(store) == result
 
 
 @pytest.mark.parametrize("pages", [
@@ -140,8 +141,8 @@ def test_unread_playlist_pages_preserve_freshness_and_back_off(store, monkeypatc
         assert account["resources"][name]["last_attempt_at"] == 200
     assert account["last_success_at"] == 100
     assert account["resources"]["history"]["last_success_at"] == 200
-    assert store.settings.get_setting("last_sync_at") == "100"
-    assert store.settings.get_setting("last_sync_attempt_at") == "200"
+    assert float(store.settings.get_setting("last_sync_at")) == 100
+    assert float(store.settings.get_setting("last_sync_attempt_at")) == 200
     assert not sync_due(store, 201, 86400)
     assert sync_due(store, 500, 86400)
     assert events[-1]["final"] and events[-1]["outcome"] == "partial"
@@ -149,7 +150,7 @@ def test_unread_playlist_pages_preserve_freshness_and_back_off(store, monkeypatc
 
     monkeypatch.setattr(client, "get_playlist", fetch)
     assert sync.sync_all(store, {iid: client}, 201)["status"] == "complete"
-    assert store.settings.get_setting("last_sync_at") == "201"
+    assert float(store.settings.get_setting("last_sync_at")) == 201
     assert not sync_due(store, 202, 86400)
 
 
@@ -265,7 +266,7 @@ def test_manual_and_automatic_failures_publish_error_before_terminal_and_retry(
     clock[0] = 500
     automatic_sync(ctx, None, SimpleNamespace(connected=True), stop=Ticks(1))
     assert ctx.jobs.get(jid + 1).outcome == "complete"
-    assert store.settings.get_setting("last_sync_at") == "500"
+    assert float(store.settings.get_setting("last_sync_at")) == 500
 
 
 def test_automatic_loop_waits_until_partial_resource_retry_is_due(store, monkeypatch):

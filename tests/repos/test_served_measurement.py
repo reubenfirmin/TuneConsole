@@ -4,6 +4,7 @@ import pytest
 
 from yt_playlist.rec.home_cards import _record_served_cards
 from yt_playlist.rec import measurement, scorecard
+from tests.conftest import seed_catalog_track
 
 
 def _shown(store, request, at, key="song|artist", rank=1, surface="home"):
@@ -144,11 +145,16 @@ def test_outcome_window_includes_its_exact_boundaries(store, offset, played):
     assert score["played"] == played
 
 
-def test_home_records_final_card_order_and_trace(store):
+def test_individual_offers_record_final_order_and_trace_without_home_theme_exposure(store):
     protos = [{"lane": "explore", "mode_id": 7, "ranker": "ppr",
                "recipe": {"model": "mode"},
                "tracks": [{"key": "a|x"}, {"key": "b|y"}]}]
     _record_served_cards(store, protos, 100)
+    assert store.conn.execute('SELECT count(*) FROM rec_served_impressions').fetchone()[0] == 0
+    for key, title, artist in [('a|x', 'A', 'X'), ('b|y', 'B', 'Y')]:
+        seed_catalog_track(store, key, title, artist, video_id=key)
+    measurement.record_offers(store, 'radio', [{'items': protos[0]['tracks'], 'lane': 'explore',
+        'mode_id': 7, 'ranker': 'ppr', 'provenance': {'ranker': 'ppr'}}], 100)
     rows = store.conn.execute(
         "SELECT lane,mode_id,identity_key,rank,model_version,provenance "
         "FROM rec_served_impressions ORDER BY rank").fetchall()
@@ -239,12 +245,14 @@ def test_cold_exit_attribution_survives_discovery_removal_and_report_boundaries(
 
 
 def test_retention_prunes_responses_and_only_orphaned_old_policies(store):
+    seed_catalog_track(store, 'a|artist', 'A', 'Artist', video_id='a')
+    seed_catalog_track(store, 'b|artist', 'B', 'Artist', video_id='b')
     measurement.record_recommendations(store, "similar", [{"key": "a|artist"}], 10)
     store.rec_ledger.record_recommendation_outcomes("old", "open", ["a|artist"], 20)
     store.rec_ledger.record_serving_policy("orphan", {"old": True}, 1)
     measurement.record_recommendations(store, "similar", [{"key": "b|artist"}], 100)
     store.rec_ledger.record_served_impressions("prune", "home", [], 101, prune_before=50)
     assert store.conn.execute("SELECT COUNT(*) FROM rec_response_events").fetchone()[0] == 0
-    assert store.conn.execute("SELECT COUNT(*) FROM rec_serving_policies WHERE model_version='orphan'").fetchone()[0] == 0
+    assert store.rec_ledger.policy_configuration('orphan') is None
     row = store.conn.execute("SELECT id FROM rec_served_impressions").fetchone()
     assert scorecard.served_recommendation(store, row["id"])["configuration"] is not None

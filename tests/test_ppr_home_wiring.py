@@ -1,26 +1,30 @@
+"""Home retains the visible menu assignment without historical track recipes (#688)."""
 import html
 import json
 import re
 
+from tests.rec.test_home_prepared import prepared
 
-def test_home_logs_ranker_on_impressions_and_recipe(store):
-    from tests.test_mode_cards_route import _seed_bundles, _client
-    _seed_bundles(store)
-    client = _client(store)
-    response = client.get("/home/cards")
-    recipes = [json.loads(html.unescape(raw)) for raw in re.findall(r"data-recipe='([^']*)'", response.text)]
-    expected = {recipe["lane"]: (recipe["mode_id"], recipe["ranker"])
-                for recipe in recipes if recipe.get("model") == "mode"}
-    assert expected
-    assert {row["lane"]: (row["mode_id"], row["ranker"]) for row in
-            store.conn.execute("SELECT lane,mode_id,ranker FROM rec_mode_impressions")} == expected
-    # Saving the served recipe must retain its ranker in the actual pick record,
-    # regardless of which route module owns playlist generation.
-    recipe = next(recipe for recipe in recipes if recipe.get("model") == "mode")
-    track = dict(store.conn.execute(
-        "SELECT video_id,title,artist FROM catalog_tracks WHERE video_id IS NOT NULL LIMIT 1").fetchone())
-    saved = client.post("/home/generate", data={
-        "name": "Ranker attribution", "tracks": json.dumps([track]), "recipe": json.dumps(recipe)})
-    assert saved.status_code == 200 and "YouTube returned an unexpected response" not in saved.text
-    pick, = store.conn.execute("SELECT mode_id,ranker FROM rec_mode_picks")
-    assert (pick["mode_id"], pick["ranker"]) == (recipe["mode_id"], recipe["ranker"])
+
+def test_home_keeps_assignment_and_visible_options_without_hidden_ranker_recipes(
+        store, prepared, unlocked_home_controls):
+    from tests.test_mode_cards_route import _client
+    from yt_playlist.rec import choice_evidence
+    from yt_playlist.core import mix_choices
+
+    response = _client(store).get('/home/cards')
+    assert response.status_code == 200
+    match = re.search(r"hx-vals='([^']*opportunity_id[^']*)'", response.text)
+    assert match, 'The rendered menu must identify its actual choice opportunity'
+    identity = json.loads(html.unescape(match[1]))['opportunity_id']
+    offer = choice_evidence.opportunity(store, identity)
+    assert offer and offer['format'] == 'mixes' and len(offer['options']) > 1
+    assert [option['position'] for option in offer['options']] == list(range(1, len(offer['options']) + 1))
+    for option in offer['options']:
+        visible = mix_choices.expand(store.conn, option)
+        assert visible['label'] and visible['intent']
+        assert option['assignment']['unit'] == 'whole_menu'
+        assert 0 < option['assignment']['probability'] <= 1
+        assert not {'tracks', 'recipe', 'mode_id', 'ranker', 'centroid', 'vectors'} & option.keys()
+    # Theme visibility does not claim exposure to any of its possible songs.
+    assert store.conn.execute('SELECT count(*) FROM rec_served_impressions').fetchone()[0] == 0

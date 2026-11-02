@@ -1,12 +1,16 @@
 """Task 8 (#50 follow-up): the Fresh card wires a persistent 'Not interested' (dismiss) feedback
 control on its cold items (which carry a key); the other proto cards are unaffected."""
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from yt_playlist.rec import mode_surfaces as ms
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 from tests.test_mode_cards_route import prepare_home
+from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
 
 
 def _client(store):
@@ -25,9 +29,10 @@ def test_fresh_cold_item_gets_feedback_radio_does_not(store):
     ], retired_ids=[], now=1000.0)
     cold = [{"key": f"cold|{i}", "video_id": f"v{i}", "title": f"Cold Song {i}",
              "artist": f"Cold Artist {i}", "album": "", "thumbnail": None,
-             "plays": 0, "reason": "New", "lane": "cold", "genre": ""} for i in range(6)]
+             "plays": 0, "reason": "New", "lane": "cold", "genre": "House"} for i in range(6)]
     payload = {"1": {surf: (cold if surf == "fresh" else []) for surf in ms.CARD_SURFACES}}
-    store.rec_proposals.put_proposals("mode_bundles", payload, 1000.0)
+    seed_bundle_subjects(store, payload, fresh=cold)
+    publish_bundles(store, payload, 1000.0, fresh=cold)
     prepare_home(store)
     c = _client(store)
     html = c.get("/home/cards").text

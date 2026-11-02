@@ -9,7 +9,8 @@ import pytest
 from tests.conftest import seed_catalog_track
 from tests.rec.test_vibe_prediction import capture, drain, fits, track
 from tests.test_audio_vibes import sample
-from yt_playlist.core import catalog, sample_files
+from yt_playlist.core import catalog, sample_files, profile_files, vibe_provenance, vibe_versions
+from yt_playlist.core.db_rebuild import build, destination
 from yt_playlist.core.migrations import MigrationError, migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
@@ -44,7 +45,32 @@ def test_sample_json_is_external_immutable_and_durable_before_reference(store, m
     assert store.conn.execute('SELECT COUNT(*) FROM sample_attributes').fetchone()[0] == 1
 
 
-def test_current_scores_have_exact_original_inputs_and_no_json_score_copy(store, monkeypatch):
+@pytest.fixture(params=('installed', 'normalized'))
+def versioned_store(store, request, tmp_path):
+    if request.param == 'installed':
+        yield store
+        return
+    path = tmp_path/'normalized.db'
+    with sqlite3.connect(path) as conn:
+        build._configure(conn)
+        destination.initialize(conn)
+        cursor = None
+        while True:
+            batch = destination.indexes(conn, conn, cursor, 10000)
+            if batch.done:
+                break
+            cursor = batch.cursor
+        assert destination.finish(conn, conn, None, 10000).done
+    normalized = Store(path)
+    try:
+        normalized.init_schema()
+        yield normalized
+    finally:
+        normalized.conn.close()
+
+
+def test_current_scores_have_exact_original_inputs_and_no_json_score_copy(versioned_store, monkeypatch):
+    store = versioned_store
     track(store, 'original')
     _tid, target = track(store, 'target')
     values = capture(store, 'original')
@@ -52,14 +78,15 @@ def test_current_scores_have_exact_original_inputs_and_no_json_score_copy(store,
     prediction = store.conn.execute("SELECT p.* FROM recording_vibes v JOIN predictions p ON p.id=v.prediction_id "
         "JOIN recordings r ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe='relax'", (target,)).fetchone()
     assert prediction['lineage_complete'] == 1 and prediction['kind'] == 'artist_genre'
-    inputs = store.conn.execute('SELECT m.* FROM prediction_inputs i JOIN measurements m ON m.id=i.measurement_id '
-                                'WHERE i.prediction_id=?', (prediction['id'],)).fetchall()
+    lineage = vibe_provenance.read(store.conn,prediction['id'])
+    inputs = [store.conn.execute('SELECT * FROM measurements WHERE id=?',(mid,)).fetchone() for mid in lineage['inputs']]
     assert len(inputs) == 1 and inputs[0]['source'] == 'audio_measurement'
     assert inputs[0]['vibe'] == 'relax'
     assert {row[0] for row in store.conn.execute('SELECT sample_id FROM measurement_samples WHERE measurement_id=?',
                                                 (inputs[0]['id'],))} == {value['id'] for value in values}
-    assert store.conn.execute('SELECT artist_id FROM prediction_artists WHERE prediction_id=?', (prediction['id'],)).fetchone()
-    assert all('vibes' not in json.loads(raw) for raw, in store.conn.execute('SELECT payload FROM rec_musical_profiles'))
+    assert lineage['artists']
+    assert all('vibes' not in json.loads(profile_files.read(store.conn,'recording',key))
+               for key, in store.conn.execute('SELECT identity_key FROM rec_musical_profiles'))
     before = {table: list(map(tuple, store.conn.execute(f'SELECT * FROM {table}'))) for table in (
         'measurements', 'predictions', 'prediction_inputs', 'recording_vibes')}
     with store.conn:
@@ -71,6 +98,22 @@ def test_current_scores_have_exact_original_inputs_and_no_json_score_copy(store,
     drain(store)
     assert store.conn.execute('SELECT COUNT(*) FROM measurements').fetchone()[0] > len(before['measurements'])
     assert set(before['measurements']) <= set(map(tuple, store.conn.execute('SELECT * FROM measurements')))
+    current = store.conn.execute("SELECT p.* FROM recording_vibes v JOIN predictions p ON p.id=v.prediction_id "
+        "JOIN recordings r ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe='relax'", (target,)).fetchone()
+    assert (current['score'], current['support']) == (prediction['score'], prediction['support'])
+    assert current['id'] != prediction['id']  # Equal scores do not identify different input versions.
+    rid = store.conn.execute('SELECT id FROM recordings WHERE identity_key=?', (target,)).fetchone()[0]
+    assert store.vibe_predictions._current(rid)['version'] == vibe_preparation.version()
+    assert store.vibe_predictions.overlay({target: {}})[target]['vibes']['inputs_version'] == vibe_preparation.version()
+    if vibe_versions.normalized(store.conn):
+        with pytest.raises(sqlite3.IntegrityError, match='immutable'), store.conn:
+            store.conn.execute("UPDATE vibe_versions SET value='changed' WHERE id=1")
+        reopened = Store(store._db_path)
+        try:
+            reopened.init_schema()
+            assert reopened.vibe_predictions._current(rid)['version'] == vibe_preparation.version()
+        finally:
+            reopened.conn.close()
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
     plan = ' '.join(str(tuple(row)) for row in store.conn.execute(
         "EXPLAIN QUERY PLAN SELECT recording_id,score FROM recording_vibes WHERE vibe='relax' ORDER BY score DESC,recording_id LIMIT 10"))
@@ -176,6 +219,7 @@ def test_populated_upgrade_preserves_samples_scores_labels_and_reopens(tmp_path)
     store, value = legacy(tmp_path / 'legacy.db')
     labels = store.conn.execute('SELECT * FROM audio_session_labels').fetchone()
     labels = {key: labels[key] for key in labels.keys()}
+    migrate(store.conn,registry=MIGRATIONS)
     store.init_schema()
     assert store.audio_vibes.samples(value['run_id']) == [value]
     retained = store.audio_vibes.earlier_feedback(value['run_id'])[0]
@@ -207,8 +251,9 @@ def test_externalization_failure_rolls_back_database_and_can_resume(tmp_path, mo
     with monkeypatch.context() as patch:
         patch.setattr(sample_files, 'publish', fail_after_publication)
         with pytest.raises(MigrationError, match='interrupted externalization'):
-            migrate(store.conn)
+            migrate(store.conn,registry=MIGRATIONS)
     assert list(store.conn.iterdump()) == before
+    migrate(store.conn,registry=MIGRATIONS)
     store.init_schema()
     assert store.audio_vibes.samples(value['run_id']) == [value]
     assert len(list((tmp_path / 'sample-attributes').glob('*/*.json'))) == 1
@@ -252,4 +297,4 @@ def test_dense_cohort_finishes_one_recording_with_exact_inputs(store):
     assert elapsed < 3., f'Dense one-recording preparation took {elapsed:.3f}s'
     pid = store.conn.execute("SELECT v.prediction_id FROM recording_vibes v JOIN recordings r ON r.id=v.recording_id "
                              "WHERE r.identity_key=? AND v.vibe='relax'", (target,)).fetchone()[0]
-    assert store.conn.execute('SELECT COUNT(*) FROM prediction_inputs WHERE prediction_id=?', (pid,)).fetchone()[0] == 2000
+    assert len(vibe_provenance.read(store.conn,pid)['inputs']) == 2000

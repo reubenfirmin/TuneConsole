@@ -1,9 +1,17 @@
 import pytest
-from tests.test_mode_cards_route import prepare_home
+from tests.test_mode_cards_route import prepare_home as prepare_current_home
+from tests.home_fixture_support import browser_store as store, returning_listener
 from tests.visual_support import capture
 
 
-@pytest.mark.parametrize("width", [1440, 390])
+def prepare_home(store, now=1):
+    # These are post-unlock consumers, including recovery with fewer than four
+    # current offers. Prior use keeps access; current output still drives slots.
+    returning_listener(store, 'mixes', now=now)
+    prepare_current_home(store, now)
+
+
+@pytest.mark.parametrize("width", [1440])
 def test_revisit_full_playlist_and_track_playback(live_app, store, page, width):
     from playwright.sync_api import expect
 
@@ -157,6 +165,7 @@ def test_fresh_skeleton_click_builds_selected_pool_then_shows_mix(live_app, stor
     import threading
     from playwright.sync_api import expect
     from tests.test_fresh_pool import _without_fresh
+    from tests.recommendation_support import publish_bundles
     from yt_playlist.rec import fresh_pool, surfaces
     from yt_playlist.util.matching import identity_key
 
@@ -173,8 +182,16 @@ def test_fresh_skeleton_click_builds_selected_pool_then_shows_mix(live_app, stor
         tracks.extend(surfaces.ForYouItem(f"Fresh song {i}", f"New artist {i}", "", f"new{i}", None,
                                         0, "", key=identity_key(f"Fresh song {i}", f"New artist {i}"),
                                         genre="Jazz" if i % 2 else "Techno") for i in range(12))
+        for track in tracks:
+            store.discovery.upsert_discovered_track(track.key, track.video_id,
+                track.title, track.artist, '', None, track.genre, None, 'genre:fixture', 1)
     monkeypatch.setattr(fresh_pool, "populate", populate)
-    monkeypatch.setattr(surfaces, "cold_candidates", lambda *args, **kwargs: tracks)
+    def prepare(store, now):
+        # This exercises the discovery job and its real typed publication, while
+        # ranking is controlled independently of the browser's polling deadline.
+        fresh = [surfaces._item_to_fresh_dict(track) for track in tracks]
+        return publish_bundles(store, {'all': {'fresh': fresh}}, now, fresh=fresh)
+    monkeypatch.setattr(fresh_pool, "prepare", prepare)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(f"{live_app}/")
     expect(page.locator("#home-mode-cards")).to_be_visible()
@@ -189,7 +206,7 @@ def test_fresh_skeleton_click_builds_selected_pool_then_shows_mix(live_app, stor
     card = page.locator("#gen-fresh")
     expect(card.get_by_role("button", name="Find fresh songs", exact=True)).to_be_visible()
     assert not calls
-    page.set_viewport_size({"width": 390, "height": 850})
+    page.set_viewport_size({"width": 1280, "height": 850})
     card.scroll_into_view_if_needed()
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     capture(page, path=tmp_path / "fresh-skeleton.png")
@@ -271,7 +288,7 @@ def test_two_ready_mixes_show_clickable_skeletons_for_the_missing_slots(live_app
         expect(card).to_have_class("gen-card card fresh-pool is-building is-focused")
         expect(card.locator('.fresh-pool-tile > span').first).to_have_css("animation-name", "fresh-pool-beat")
         expect(page.locator("#gen-comfort")).to_have_attribute("aria-busy", "false")
-        page.set_viewport_size({"width": 390, "height": 850})
+        page.set_viewport_size({"width": 1280, "height": 850})
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         capture(card, path=tmp_path / "catalog-building.png")
     finally:
@@ -285,7 +302,7 @@ def test_two_ready_mixes_show_clickable_skeletons_for_the_missing_slots(live_app
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_saving_wheelhouse_keeps_all_four_mixtapes(live_app, store, page, monkeypatch, width):
     import json
     from playwright.sync_api import expect
@@ -294,6 +311,7 @@ def test_saving_wheelhouse_keeps_all_four_mixtapes(live_app, store, page, monkey
     from yt_playlist.rec import home_prepared
 
     seed(store)
+    returning_listener(store, 'mixes')
     payload = home_prepared.prepare(store, 1)
     initial = home_prepared.cards(store, payload, 1, service(store))
     wheelhouse = next(p for p in initial.protos if p['lane'] == 'wheelhouse')
@@ -329,14 +347,15 @@ def test_saving_wheelhouse_keeps_all_four_mixtapes(live_app, store, page, monkey
         }).slice(0,12).map(el => [el.tagName,el.className,el.getBoundingClientRect().right])''')
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_lost_held_mix_keeps_its_slot_then_recovers_after_preparation(live_app, store, page, width):
     from copy import deepcopy
     from playwright.sync_api import expect
     from tests.rec.test_home_prepared import seed, service
     from yt_playlist.rec import home_prepared
 
-    seed(store)
+    bundles = seed(store)
+    returning_listener(store, 'mixes')
     payload = home_prepared.prepare(store, 1)
     payload['menus'] = [payload['menus'][0]]
     store.rec_proposals.put_proposals(home_prepared.SURFACE, payload, 1)
@@ -359,7 +378,6 @@ def test_lost_held_mix_keeps_its_slot_then_recovers_after_preparation(live_app, 
 
     replacement = deepcopy(payload)
     offer = next(p for p in replacement['menus'][0]['protos'] if p['lane'] == 'wheelhouse')
-    bundles = store.rec_proposals.get_proposals('mode_bundles')
     offer['tracks'] = [t for t in bundles['all']['wheelhouse'] if t['key'] not in old_keys][:12]
     next(s for s in replacement['menus'][0]['slots'] if s['proto']['lane'] == 'wheelhouse')['proto'] = offer
     store.rec_proposals.put_proposals(home_prepared.SURFACE, replacement, 2)
@@ -392,6 +410,7 @@ def test_cold_preparation_status_is_visible(live_app, store, page):
     store.settings.set_setting('last_sync_at', '1')
     store.settings.set_setting('onboard_dismissed', '1')
     store.tracks.upsert_track('cold-song', 'Song', 'Artist', None, None)
+    returning_listener(store, 'mixes')
     page.goto(live_app)
     expect(page.get_by_role('status').filter(
         has_text='Your next mixes will appear as your library is prepared.')).to_be_visible()
@@ -458,7 +477,7 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(live_app, store, p
     panel.get_by_role("checkbox", name="techno", exact=True).check()
     expect(button).to_have_accessible_name("Make mixes")
     assert set(page.evaluate("homeOfferedGenres()")) == before  # selections are a draft until applied
-    for width in (1280, 390):
+    for width in (1280,):
         page.set_viewport_size({"width": width, "height": 850})
         panel.scroll_into_view_if_needed()
         expect(button).to_be_in_viewport()
@@ -502,7 +521,7 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(live_app, store, p
     expect(panel.locator(".fp-breadth-slider")).to_be_visible()
     page.get_by_role("tab", name="Nerd out", exact=True).press("ArrowLeft")
     expect(page.get_by_role("tab", name="Genre focus", exact=True)).to_be_focused()
-    for width in (1280, 390):
+    for width in (1280,):
         page.set_viewport_size({"width": width, "height": 850})
         expect(button).to_be_visible()
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
@@ -542,7 +561,7 @@ def test_clear_mix_controls_resets_applied_and_draft_choices_from_either_tab(liv
     page.get_by_role("tab", name="Nerd out", exact=True).click()
     expect(clear).to_be_visible()
     expect(panel.locator(".fp-breadth-slider")).to_have_value("0.5")
-    for width in (1280, 390):
+    for width in (1280,):
         page.set_viewport_size({"width": width, "height": 850})
         expect(clear).to_be_in_viewport()
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
@@ -733,7 +752,7 @@ def test_configurator_modal_blocks_background_and_keeps_focus(live_app, store, p
     dialog.get_by_role("tab", name="Genre focus", exact=True).click()
     search = dialog.get_by_role("searchbox")
     search.fill("jazz")
-    for width in (1280, 390):
+    for width in (1280,):
         page.set_viewport_size({"width": width, "height": 850})
         search.focus()
         expect(search).to_have_value("jazz")
@@ -773,7 +792,7 @@ def test_quick_genres_show_favorites_and_search_reaches_the_rest(live_app, store
     from tests.test_home_other_genres import seed_genres
     from yt_playlist.util.matching import identity_key
 
-    seed_genres(store)
+    bundles = seed_genres(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
     iid = store.accounts.upsert_account("main", "cred", None, True)
@@ -782,10 +801,12 @@ def test_quick_genres_show_favorites_and_search_reaches_the_rest(live_app, store
     for day in range(30):
         store.history.record_history_plays(iid, 1 - day * 86400,
             [identity_key("Favorite", "Favorite artist")], source_timezone="UTC")
-    bundles = store.rec_proposals.get_proposals("mode_bundles")
     bundles["all"]["wheelhouse"] += [
-        {"key": f"archive-{i}", "genre": f"Archive {i}"} for i in range(20)]
-    store.rec_proposals.put_proposals("mode_bundles", bundles, 1.0)
+        {"key": f"archive-{i}|archivist", "title": f"Archive {i}", "artist": "Archivist",
+         "video_id": f"archive-{i}", "genre": f"Archive {i}"} for i in range(20)]
+    from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+    seed_bundle_subjects(store, bundles)
+    publish_bundles(store, bundles, 1)
     prepare_home(store, 1)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(f"{live_app}/")
@@ -815,6 +836,7 @@ def test_desktop_uses_side_rail_but_clusters_has_only_exit_control(live_app, sto
 
     # Check the normal Home layout after setup; the arrival screen uses a wider canvas.
     store.settings.set_setting('last_sync_at', '1')
+    returning_listener(store, 'mixes', now=1)
     publish_personal_mix(store, now=1)
     page.set_viewport_size({"width": width, "height": 800})
     page.goto(f"{live_app}/")

@@ -15,10 +15,12 @@ from yt_playlist.core.activity import WorkBudgetExceeded
 
 
 def options(generation):
-    return [{'id': 'one', 'score': .9, 'tracks': [
+    return [{'id': 'one', 'score': .9, 'label': 'Your wheelhouse',
+             'intent': 'familiar', 'genres': ['House', 'Techno'], 'tracks': [
         {'key': 'one', 'serving_context': {'recommendation_generation_id': generation,
                                          'recommendation_pool_id': 1, 'recommendation_pool_rank': 0}}]},
-        {'id': 'two', 'score': .7, 'tracks': []}]
+        {'id': 'two', 'score': .7, 'label': 'Explore',
+         'intent': 'discovery', 'genres': ['Ambient'], 'tracks': []}]
 
 
 def issue(store, generation, identity='menu'):
@@ -115,37 +117,78 @@ def test_private_reader_selects_its_pinned_head_after_the_writer_switches_and_re
         close()
 
 
-def test_queued_capture_offer_and_response_independently_keep_the_served_generation(recommendations):
+@pytest.mark.parametrize('explicit_generation', [False, True])
+def test_radio_during_maintenance_defers_its_lease_until_worker_resume(recommendations, explicit_generation):
+    from yt_playlist.rec.stored_radio import PreparedRadio
+
+    store = recommendations
+    first = publish(store, plan(store)).generation_id
+    store.activity_paused = True
+    store.conn.execute('PRAGMA query_only=ON')
+    changes = store.conn.total_changes
+    prepared = None
+    try:
+        prepared = PreparedRadio(store, 12, generation=first if explicit_generation else None)
+        assert prepared.generation == first
+        assert store.recommendations.output('home', 'framing', generation=prepared.generation) == {'title': 'one'}
+        prepared.retain(12)
+        assert not roots(store, 'pending')
+        assert store.conn.total_changes == changes
+    finally:
+        store.conn.execute('PRAGMA query_only=OFF')
+        store.activity_paused = False
+    try:
+        # The app's existing resume callback does this before starting workers.
+        prepared.retain(13)
+        prepared.retain(13)
+        assert [generation for _, generation in roots(store, 'pending')] == [first]
+        publish(store, plan(store, 'after-maintenance'))
+        collect(store)
+        assert exists(store, first)
+        assert store.recommendations.output('home', 'framing', generation=prepared.generation) == {'title': 'one'}
+    finally:
+        if prepared is not None:
+            prepared.close()
+    collect(store)
+    assert not exists(store, first)
+
+
+def test_queued_mix_capture_and_late_response_survive_retiring_track_generation(recommendations):
     store = recommendations
     first = publish(store, plan(store)).generation_id
     jobs = []
     store.choice_capture = CaptureQueue(lambda job: jobs.append(job) or True)
     assert issue(store, first) == 'menu'
-    assert [value for _, value in roots(store, 'pending')] == [first]
+    assert not roots(store, 'pending')
     assert not store.rec_ledger.evidence().get('opportunity', 'menu')
     assert choice_evidence.respond(store, 'menu', 'choice', 11, option_id='one')
-    assert len(roots(store, 'pending')) == 2
+    assert not roots(store, 'pending')
     publish(store, plan(store, 'second'))
     collect(store)
-    assert exists(store, first)
+    assert not exists(store, first)
     assert jobs[0].run() == 'menu'
     jobs[0].close()
-    assert roots(store, 'offer') == [('menu', first)]
+    offer = store.rec_ledger.evidence().get('opportunity', 'menu')
+    assert [(o['id'], o['label'], o['intent'], o['genres']) for o in offer['options']] == [
+        ('one', 'Your wheelhouse', 'familiar', ['House', 'Techno']),
+        ('two', 'Explore', 'discovery', ['Ambient'])]
+    assert all('tracks' not in o and 'serving_context' not in o for o in offer['options'])
+    assert not roots(store, 'offer')
     assert jobs[1].run()
     jobs[1].close()
     assert not roots(store, 'pending')
-    assert roots(store, 'response') == [('menu:choice:one', first)]
-    group_roots.release(store, 'offer', 'menu')
-    collect(store)
-    assert exists(store, first)
-    group_roots.release(store, 'response', 'menu:choice:one')
+    response = store.rec_ledger.evidence().get('response', 'menu:choice:one')
+    assert response['option_id'] == 'one' and response['at'] == 11
+    assert not roots(store, 'response')
     collect(store)
     assert not exists(store, first)
 
 
-def test_cancelled_and_duplicate_admissions_release_only_their_pending_reference(recommendations):
+def test_cancelled_duplicate_mix_capture_does_not_release_an_active_reader(recommendations):
     store = recommendations
     first = publish(store, plan(store)).generation_id
+    generation, close_reader = group_roots.pending_head(store, ('home',), 10)
+    assert generation == first
     jobs = []
     store.choice_capture = CaptureQueue(lambda job: jobs.append(job) or True)
     assert issue(store, first) == issue(store, first) == 'menu'
@@ -158,17 +201,24 @@ def test_cancelled_and_duplicate_admissions_release_only_their_pending_reference
     jobs[0].close()
     jobs[0].close()
     collect(store)
+    assert exists(store, first)
+    assert len(roots(store, 'pending')) == 1
+    close_reader()
+    close_reader()
+    collect(store)
     assert not exists(store, first)
     assert not roots(store, 'pending') and not roots(store, 'offer')
 
 
-def test_actual_file_retirement_releases_the_offer_publication(recommendations):
+def test_actual_file_retirement_expires_compact_offer_without_pinning_track_publication(recommendations):
     store = recommendations
     first = publish(store, plan(store)).generation_id
     assert issue(store, first) == 'menu'
     publish(store, plan(store, 'second'))
     collect(store)
-    assert exists(store, first)
+    assert not exists(store, first)
+    assert store.rec_ledger.evidence().get('opportunity', 'menu') is not None
+    assert not roots(store, 'offer')
     with group_roots.admission(store):
         retired = store.rec_ledger.evidence().maintain(100, orphan_before=100,
             retire_references=lambda offers, checkpoints: group_roots.retired(store, offers, checkpoints))
@@ -219,14 +269,21 @@ def test_comparison_context_retains_publication_without_decoding_compressed_payl
     assert not exists(store, first)
 
 
-def test_nonexistent_publication_is_rejected_before_capture_admission(recommendations):
+def test_nonexistent_publication_is_rejected_for_readers_but_not_retained_by_mix_capture(recommendations):
     store = recommendations
     jobs = []
     store.choice_capture = CaptureQueue(lambda job: jobs.append(job) or True)
     with pytest.raises(sqlite3.IntegrityError):
-        issue(store, 999999)
+        group_roots.pending(store, {'recommendation_generations': [999999]}, 10)
     assert not jobs and not roots(store, 'pending')
     assert not store.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
+    assert issue(store, 999999) == 'menu'
+    assert len(jobs) == 1 and not roots(store, 'pending')
+    assert jobs[0].run() == 'menu'
+    jobs[0].close()
+    offer = store.rec_ledger.evidence().get('opportunity', 'menu')
+    assert all('tracks' not in option for option in offer['options'])
+    assert not roots(store, 'offer')
 
 
 @pytest.mark.parametrize('value', [None, {}, 'opaque'])

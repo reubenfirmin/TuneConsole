@@ -68,7 +68,7 @@ def test_disjoint_uploads_record_separate_unverified_extents_and_preserve_gap():
     assert all(not r['account_verified'] and not r['complete'] and r['coverage_start'] is None
                for r in imports)
     assert repair.purge_phantom_history(s.conn) == 0
-    assert s.conn.execute("SELECT 1 FROM listening_observations WHERE identity_key='phone-only'").fetchone()
+    assert s.conn.execute("SELECT 1 FROM listening_observation_subjects WHERE identity_key='phone-only'").fetchone()
 
 
 def test_json_timestamp_loss_is_recorded_and_cannot_authorize_repair():

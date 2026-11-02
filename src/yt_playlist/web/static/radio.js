@@ -218,7 +218,7 @@ function radioHome(initial = {}) {
     sessionId(state = this.state) { return state.playlist_id || state.local_id; },
     get preparingSession() { return !!(this.state.active && this.sessionId() && this.playlistSessionId !== this.sessionId()); },
     get restoring() { return (this.resolving || this.preparingSession) && !this.launchSong && !this.state.starting && this.busyAction !== 'start'; },
-    get launching() { return this.launchPhase !== 'unknown' && (this.resolving || this.busyAction === 'start' || !!this.launchSong || (this.state.active && this.state.starting) || this.preparingSession); },
+    get launching() { return !!this.launchPhase || this.resolving || this.busyAction === 'start' || !!this.launchSong || (this.state.active && this.state.starting) || this.preparingSession; },
     get launchUncertain() { return ['checking', 'unknown'].includes(this.launchPhase); },
     get recoveryTitle() { return this.recoverySong?.title || 'Your Radio Session'; },
     get recoveryArtist() { return this.recoverySong?.artist || (this.recoveryFromPlaylist ? 'Radio from your playlist' : ''); },

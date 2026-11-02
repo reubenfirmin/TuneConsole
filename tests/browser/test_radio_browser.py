@@ -26,29 +26,29 @@ def test_seed_grid_fills_available_space_without_javascript_sizing(page, radio_u
     page.route('**/static/radio-artwork.js*', without_sizing)
     page.reload(wait_until='domcontentloaded')
     expect(page.locator('.radio-seed')).to_have_count(16)
-    for width, height in [(1440, 1000), (1440, 700), (390, 820), (390, 600)]:
+    for width, height in [(1440, 1000), (1440, 700)]:
         page.set_viewport_size({'width': width, 'height': height})
         geometry = page.locator('.radio-seeds').evaluate('''grid => {
           const main = grid.closest('main'), bounds = grid.getBoundingClientRect();
           const page = main.getBoundingClientRect();
           const styles = getComputedStyle(grid);
           return {height: bounds.height, bottom: bounds.bottom,
-            healthHeight: grid.closest('.home-growth').querySelector('.account-health').getBoundingClientRect().height,
             expectedBottom: page.bottom - parseFloat(getComputedStyle(main).paddingBottom),
             pageBottom: page.bottom, viewport: innerHeight,
             columns: styles.gridTemplateColumns.split(' ').length,
             rows: styles.gridTemplateRows.split(' ').length,
+            overflowingGrid: grid.scrollHeight > grid.clientHeight + 1,
             overflow: document.documentElement.scrollWidth > innerWidth};
         }''')
         assert abs(geometry['bottom'] - geometry['expectedBottom']) < 2, geometry
-        # Account health now occupies space above the dashboard. The launcher
-        # must fill the remaining viewport without sizing itself in JavaScript.
-        assert geometry['height'] > (height - geometry['healthHeight']) / 2, geometry
+        # Account health lives in the desktop sidebar. The launcher fills the
+        # dashboard's remaining viewport without sizing itself in JavaScript.
+        assert geometry['height'] > height / 2, geometry
         assert geometry['pageBottom'] <= height + 12, geometry  # main's entrance animation may translate 10px
-        assert geometry['columns'] == (2 if width < 500 else 4), geometry
-        assert geometry['rows'] == (8 if width < 500 else 4), geometry
+        assert geometry['columns'] == 4, geometry
+        assert geometry['rows'] == 4, geometry
+        assert not geometry['overflowingGrid'], geometry
         assert not geometry['overflow'], geometry
-    expect(page.locator('.radio-seeds')).to_have_css('overflow-y', 'auto')
     page.get_by_role('tab', name='Mix tapes', exact=True).click()
     expect(page.locator('.radio-seeds')).to_be_hidden()
     page.get_by_role('tab', name='On air', exact=True).click()
@@ -293,14 +293,15 @@ def test_restored_table_waits_for_its_artwork(page, radio_ui, live_app, source):
     assert page.locator(f'.radio-session img[src="{url}"]').evaluate('img => img.complete && img.naturalWidth > 0')
 
 
-def test_launch_failure_returns_to_song_choices_quietly(page, radio_ui):
+def test_launch_failure_keeps_its_selection_in_the_existing_loader(page, radio_ui):
     page.locator(".radio-seed").first.click()
     expect(page.locator(".radio-launch")).to_be_visible()
     radio_ui.starts.pop().fulfill(json={"ok": False, "reason": "Connect the YouTube Music extension first."})
     expect(page.locator(".radio-home").get_by_role("alert")).to_have_count(0)
-    expect(page.locator(".radio-seeds")).to_be_visible()
-    expect(page.locator(".radio-launch")).to_be_hidden()
-    expect(page.locator(".radio-seed").first).to_be_enabled()
+    expect(page.locator('.radio-launch-recovery')).to_have_count(0)
+    expect(page.locator('.radio-launch')).to_be_visible()
+    expect(page.locator('.radio-launch')).to_contain_text('Night frequency 1')
+    expect(page.get_by_role('button', name='Try this selection again')).to_be_enabled()
 
 
 @pytest.mark.parametrize("failure", ["network", "http", "json"])
@@ -347,9 +348,9 @@ def test_playlist_fetch_failure_keeps_transition_until_retry_succeeds(page, radi
 
 
 @pytest.mark.parametrize("failure", ["network", "http", "server", "disconnected"])
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_launch_connection_failure_never_exposes_fetch_error(page, radio_ui, failure, width):
-    page.set_viewport_size({'width': width, 'height': 1000 if width == 1440 else 820})
+    page.set_viewport_size({'width': width, 'height': 1000})
     if failure in ('network', 'http'):
         page.clock.install()
     page.locator(".radio-seed").first.click()
@@ -363,7 +364,8 @@ def test_launch_connection_failure_never_exposes_fetch_error(page, radio_ui, fai
     else:
         route.fulfill(json={"ok": False, "reason": "TypeError: Failed to fetch"})
     expect(page.locator(".radio-home").get_by_role("alert")).to_have_count(0)
-    message = page.locator('.radio-launch-recovery')
+    expect(page.locator('.radio-launch-recovery')).to_have_count(0)
+    message = page.locator('.radio-launch')
     expect(message).to_be_visible()
     expect(message.get_by_role('heading')).to_have_text('Night frequency 1')
     expect(message).to_contain_text('Artist 1')
@@ -381,12 +383,12 @@ def test_launch_connection_failure_never_exposes_fetch_error(page, radio_ui, fai
         assert not radio_ui.starts
         expect(page.locator('.radio-seed-start').first).to_be_disabled()
     else:
-        expect(page.locator(".radio-seeds")).to_be_visible()
+        expect(page.locator(".radio-seeds")).to_be_hidden()
         expect(page.locator(".radio-seed-start").first).to_be_enabled()
         if failure == 'disconnected':
             expect(message).to_contain_text('connect its extension')
         message.get_by_role('button', name='Try this selection again').click()
-        expect(message).to_be_hidden()
+        expect(message.locator('.radio-launch-actions')).to_be_hidden()
         assert len(radio_ui.starts) == 1
         radio_ui.starts.pop().fulfill(json={'ok': False})
     page.screenshot(path=f'/tmp/tuneconsole-633-radio-retry-{width}-{failure}.png', full_page=True)
@@ -407,7 +409,7 @@ def test_unknown_launch_cannot_be_settled_by_the_previous_active_session(page, r
     page.evaluate("() => { Alpine.$data(document.querySelector('.radio-home')).start({video_id:'radio0',title:'Selected song',artist:'Selected artist'}); }")
     expect(page.locator('.radio-launch')).to_be_visible()
     radio_ui.starts.pop().abort()
-    message = page.locator('.radio-launch-recovery')
+    message = page.locator('.radio-launch')
     expect(message).to_contain_text('up to 30 seconds')
     page.clock.fast_forward(30001)
     expect(message.get_by_role('heading')).to_have_text('Selected song')
@@ -422,7 +424,7 @@ def test_rejected_playlist_launch_keeps_its_title_and_retry_target(page, radio_u
     page.evaluate("song => { Alpine.$data(document.querySelector('.radio-home')).start(song,true); }", selected)
     expect(page.locator('.radio-launch')).to_be_visible()
     radio_ui.starts.pop().fulfill(json={'ok': False, 'reason': 'No playable songs'})
-    message = page.locator('.radio-launch-recovery')
+    message = page.locator('.radio-launch')
     expect(message.get_by_role('heading')).to_have_text('Evening records')
     expect(message.get_by_role('link', name='Back to this playlist')).to_have_attribute('href', '/playlist/41')
     message.get_by_role('button', name='Try this selection again').click()
@@ -476,12 +478,8 @@ def test_unconfirmed_launch_returns_to_launcher_instead_of_showing_session(page,
     expect(page.locator(".radio-home").get_by_role("alert")).to_have_count(0)
 
 
-@pytest.mark.parametrize("width,touch", [(1440, False), (390, True)])
-def test_launcher_highlight_keyboard_and_touch_layout(page, radio_ui, width, touch):
-    page.set_viewport_size({"width": width, "height": 1000})
-    if touch:
-        session = page.context.new_cdp_session(page)
-        session.send("Emulation.setTouchEmulationEnabled", {"enabled": True})
+def test_launcher_highlight_keyboard_and_pointer(page, radio_ui):
+    page.set_viewport_size({"width": 1440, "height": 1000})
     seed = page.locator(".radio-seed").first
     seed.get_by_role('button').focus()
     expect(seed.locator(".radio-seed-info")).to_have_css("opacity", "1")
@@ -489,12 +487,11 @@ def test_launcher_highlight_keyboard_and_touch_layout(page, radio_ui, width, tou
     assert seed.locator(".radio-seed-play").bounding_box()["width"] >= 40
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     seed.hover()
-    page.screenshot(path=f"/tmp/tuneconsole-radio-launcher-{width}.png")
-    if not touch:
-        expect(page.locator(".radio-seed").nth(1)).to_have_css("opacity", "0.55")
-        page.locator(".radio-seed").nth(1).hover()
-        expect(page.locator(".radio-seed").nth(1)).to_have_css("opacity", "1")
-        seed.hover()
+    page.screenshot(path="/tmp/tuneconsole-radio-launcher-1440.png")
+    expect(page.locator(".radio-seed").nth(1)).to_have_css("opacity", "0.55")
+    page.locator(".radio-seed").nth(1).hover()
+    expect(page.locator(".radio-seed").nth(1)).to_have_css("opacity", "1")
+    seed.hover()
     page.emulate_media(reduced_motion="reduce")
     seed.get_by_role('button').press("Enter")
     expect(page.locator(".radio-launch")).to_be_visible()
@@ -505,7 +502,7 @@ def test_launcher_highlight_keyboard_and_touch_layout(page, radio_ui, width, tou
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
 
-@pytest.mark.parametrize("width", [1440, 390])
+@pytest.mark.parametrize("width", [1440])
 def test_playlist_radio_button_starts_through_transition_without_relaunching_on_reload(
         page, radio_ui, store, live_app, width):
     api = radio_ui

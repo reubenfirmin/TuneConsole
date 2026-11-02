@@ -1,9 +1,13 @@
 """Dashboard surfaces: fresh songs as a proto-playlist and graphical new-artist cards."""
 from fastapi.testclient import TestClient
+import pytest
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 from tests.test_mode_cards_route import prepare_home
+from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
 
 
 def _client(store):
@@ -23,13 +27,14 @@ def test_fresh_renders_as_saveable_proto(store):
     ], retired_ids=[], now=1.0)
     fresh = [{"key": "new|newcomer", "video_id": "v1", "title": "New One",
               "artist": "Newcomer", "album": "", "thumbnail": None,
-              "plays": 0, "reason": "", "lane": "cold", "genre": ""}]
+              "plays": 0, "reason": "", "lane": "cold", "genre": "House"}]
     fresh += [{"key": f"more|{i}", "video_id": f"vm{i}", "title": f"More {i}", "artist": f"Artist {i}",
-               "album": "", "thumbnail": None, "plays": 0, "reason": "", "lane": "cold", "genre": ""}
+               "album": "", "thumbnail": None, "plays": 0, "reason": "", "lane": "cold", "genre": "House"}
               for i in range(5)]                    # enough to clear the _MIN_CARD floor
     # only the fresh surface has material, so it wins the mode
     payload = {"1": {surf: (fresh if surf == "fresh" else []) for surf in ms.CARD_SURFACES}}
-    store.rec_proposals.put_proposals("mode_bundles", payload, 1.0)
+    seed_bundle_subjects(store, payload, fresh=fresh)
+    publish_bundles(store, payload, 1.0, fresh=fresh)
     prepare_home(store, 1.0)
     html = c.get("/home/cards").text
     assert 'id="gen-fresh"' in html                 # rendered as a proto-playlist card

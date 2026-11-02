@@ -6,6 +6,7 @@ guards. Every vector in a publication uses the exact same encoder, including
 its audio normalization. Last-good models remain available between steps.
 """
 from dataclasses import dataclass
+from contextlib import closing
 import json
 import math
 import sys
@@ -28,8 +29,7 @@ MODE_PARAMS = ('modes_k', 'modes_min_members', 'modes_match_threshold')
 # Repair reads only these whole-table anti-joins. Capture their counters rather
 # than copying every per-record revision in the application for each small slice.
 REPAIR_INPUTS = frozenset((table, '') for table in (
-    'recordings', 'recording_redirects', 'recording_embeddings',
-    'prepared_recording_inputs', 'unresolved_preparation_inputs', 'rec_content_pending'))
+    'recordings', 'recording_redirects', 'prepared_recording_inputs', 'rec_content_pending'))
 
 
 @dataclass(frozen=True)
@@ -263,10 +263,11 @@ class Preparation:
                 changes = _delta(reader, rows, raw_model if revision == genre_catalog.REVISION else None)
                 # Guard a competing publisher even when this batch has no vector changes.
                 reader.settings.get_setting('rec_content_generation')
+                vibe_plan = reader.vibe_predictions.prepare_publication(*vibe_updates, now)
                 def publish():
                     self.store.prepared_content.publish_capture(rows, now)
                     self.store.musical_profiles.publish_recordings(musical, now)
-                    self.store.vibe_predictions.publish(*vibe_updates, now)
+                    self.store.vibe_predictions.publish_prepared(vibe_plan)
                     self.store.taste_groups.publish_assignments(assignments)
                     if changes:
                         self.store.rec_model.publish_training_generation(changes)
@@ -274,10 +275,11 @@ class Preparation:
                             'rec_content_generation': uuid.uuid4().hex,
                             'rec_content_inputs': '',  # not a claim of a current full-corpus fit
                         })
-                if snapshot.publish(publish):
-                    self.batch = min(self.budget.batch, max(1, self.batch * 2))
-                    self._record('published', 'changed-entity-inputs', phase=INPUT_PHASE)
-                    return True
+                with closing(vibe_plan):
+                    if snapshot.publish(publish):
+                        self.batch = min(self.budget.batch, max(1, self.batch * 2))
+                        self._record('published', 'changed-entity-inputs', phase=INPUT_PHASE)
+                        return True
         except WorkBudgetExceeded:
             self._record('deferred', 'capture-budget', phase=INPUT_PHASE)
         self.batch = max(1, self.batch // 2)

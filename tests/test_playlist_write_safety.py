@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.conftest import FakeClient, _track
+from yt_playlist.core import fao
 from yt_playlist.library import executor
 from yt_playlist.library.playlist_writes import PlaylistAddUncertain
 
@@ -177,7 +178,7 @@ def test_merge_honors_explicit_track_exclusions(transfer, selected):
     assert result["deleted"] == ["Original"]
     assert [track["videoId"] for track in t.target_client._tracks["KEEP"]] == selected
     backup = json.loads(t.store.actions.get_actions()[0].undo_json)["backups"][0]
-    assert [track["video_id"] for track in json.loads(Path(backup).read_text())["tracks"]] == ["v1", "v2"]
+    assert [track["video_id"] for track in json.loads(fao.read_bytes(backup))["tracks"]] == ["v1", "v2"]
 
 
 def test_n_way_merge_rechecks_destination_before_each_deletion(transfer, monkeypatch):
@@ -221,7 +222,7 @@ def test_lost_delete_response_preserves_backup_evidence(transfer, monkeypatch, o
         assert not result["deleted"] and "Delete response lost" in result["delete_error"]
         backup = json.loads(t.store.actions.get_actions()[0].params_json)["source_backup"]
     assert Path(backup).is_file()
-    assert len(json.loads(Path(backup).read_text())["tracks"]) == 2
+    assert len(json.loads(fao.read_bytes(backup))["tracks"]) == 2
     assert t.source_client.deleted == ["SOURCE"]  # non-idempotent deletes are never replayed
 
 

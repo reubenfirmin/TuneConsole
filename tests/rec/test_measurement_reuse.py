@@ -11,6 +11,7 @@ from yt_playlist.core.store import Store
 from yt_playlist.rec import home_cards, measurement, rec_params, scorecard
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.repos.rec_model import RecModelRepo
+from tests.conftest import seed_catalog_track
 
 
 def _cards():
@@ -20,7 +21,26 @@ def _cards():
             for i in range(4)]
 
 
-def test_home_response_shares_policy_and_unchanged_models_skip_full_reads(store, monkeypatch):
+def _record_visible_tracks(store, now):
+    offers = []
+    for card in _cards():
+        for policy, selected in [('live', card), ('counterfactual', card['counterfactual'])]:
+            offers.append({'items': selected['tracks'], 'lane': card['lane'],
+                           'ranker': selected['ranker'], 'experiment': card['experiment'],
+                           'policy_kind': policy, 'propensity': .5 if policy == 'live' else 0})
+    measurement.record_offers(store, 'radio', offers, now)
+
+
+def test_mix_theme_visibility_never_records_unexposed_track_impressions(store, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail('Mix visibility must not measure its unexposed tracks (#688)')
+    monkeypatch.setattr(measurement, 'record_offers', forbidden)
+    home_cards._record_served_cards(store, _cards(), 100)
+    assert not store.conn.execute('SELECT 1 FROM rec_served_impressions').fetchone()
+
+
+def test_track_response_shares_policy_and_unchanged_models_skip_full_reads(store, monkeypatch):
+    seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='video')
     reads = []
     for method in ["get_rec_vectors", "get_rec_content_vectors", "get_rec_discovered_content_vectors",
                    "get_rec_artist_vectors", "get_rec_artist_content_vectors"]:
@@ -34,12 +54,12 @@ def test_home_response_shares_policy_and_unchanged_models_skip_full_reads(store,
         policies.append(True)
         return original(*args, **kwargs)
     monkeypatch.setattr(measurement, "serving_policy", policy)
-    home_cards._record_served_cards(store, _cards(), 100)
+    _record_visible_tracks(store, 100)
     assert len(policies) == 1
     assert all(1 <= reads.count(method) <= 2 for method in set(reads))
     assert len(set(reads)) == 5
     reads.clear()
-    home_cards._record_served_cards(store, _cards(), 101)
+    _record_visible_tracks(store, 101)
     assert len(policies) == 2
     assert reads == []  # Analytics writes and a new response time do not invalidate model inputs.
     rows = store.conn.execute("SELECT model_version,provenance FROM rec_served_impressions").fetchall()
@@ -55,10 +75,13 @@ def test_home_response_shares_policy_and_unchanged_models_skip_full_reads(store,
     ("discovered_content_vectors", "discovered_content"), ("artist_vectors", "artists"),
     ("artist_content_vectors", "artist_content")])
 def test_each_vector_publication_invalidates_model_identity(store, suffix, field):
+    from tests.conftest import seed_catalog_track
+    seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='video')
+    key = 'artist' if suffix.startswith('artist_') else 'song|artist'
     replace = getattr(store.rec_model, "replace_rec_" + suffix)
-    replace([("song|artist", np.asarray([1., 0.], dtype=np.float32).tobytes())])
+    replace([(key, np.asarray([1., 0.], dtype=np.float32).tobytes())])
     before = measurement.serving_policy(store, 100)[1]["models"][field]
-    replace([("song|artist", np.asarray([0., 1.], dtype=np.float32).tobytes())])
+    replace([(key, np.asarray([0., 1.], dtype=np.float32).tobytes())])
     after = measurement.serving_policy(store, 100)[1]["models"][field]
     assert before != after
 
@@ -79,12 +102,15 @@ def test_external_vector_write_invalidates_cached_identity(tmp_path):
     store = Store(tmp_path / "state.db")
     store.init_schema()
     try:
+        seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='video')
         before = measurement.serving_policy(store, 100)[1]["models"]["collaborative"]
-        with sqlite3.connect(tmp_path / "state.db") as other:
-            other.execute("PRAGMA foreign_keys=ON")
-            subject = other.execute("INSERT INTO recordings(identity_key) VALUES ('song|artist')").lastrowid
-            other.execute("INSERT INTO recording_embeddings VALUES (?,'collaborative','external-test',2,?,100)",
-                          (subject, np.asarray([1., 0.], dtype=np.float32).tobytes()))
+        other = Store(tmp_path / 'state.db')
+        try:
+            other.init_schema()
+            other.rec_model.replace_rec_vectors([
+                ('song|artist', np.asarray([1., 0.], dtype=np.float32).tobytes())])
+        finally:
+            other.conn.close()
         assert measurement.serving_policy(store, 100)[1]["models"]["collaborative"] != before
     finally:
         store.conn.close()
@@ -110,6 +136,7 @@ def test_new_listening_evidence_invalidates_basket_identity(store):
 
 
 def test_failed_card_does_not_drop_remaining_response_measurements(store, monkeypatch):
+    seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='video')
     original = store.rec_ledger.record_served_impressions
     calls = []
     def fail_first(*args, **kwargs):
@@ -118,7 +145,7 @@ def test_failed_card_does_not_drop_remaining_response_measurements(store, monkey
             raise RuntimeError("instrumentation failure")
         return original(*args, **kwargs)
     monkeypatch.setattr(store.rec_ledger, "record_served_impressions", fail_first)
-    home_cards._record_served_cards(store, _cards(), 100)
+    _record_visible_tracks(store, 100)
     assert len(calls) == 8
     assert store.conn.execute("SELECT COUNT(*) FROM rec_served_impressions").fetchone()[0] == 7
 
@@ -126,12 +153,13 @@ def test_failed_card_does_not_drop_remaining_response_measurements(store, monkey
 def test_batched_queue_preserves_offer_bound_and_offer_time_attribution(tmp_path, monkeypatch):
     store = Store(tmp_path / "state.db")
     store.init_schema()
+    seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='video')
     worker = RecWorker(SimpleNamespace(store=store, work=Activity(), logger=logging.getLogger(__name__),
                                        now_fn=lambda: 100))
     monkeypatch.setattr(worker, "_start_loop", lambda: None)
     try:
         for _ in range(9):
-            home_cards._record_served_cards(store, _cards(), 100)
+            _record_visible_tracks(store, 100)
         assert len(worker.jobs.measurements) == 8
         assert sum(offer.work_units for offer in worker.jobs.measurements) == 64
         readers = [offer.snapshot.store.conn for offer in worker.jobs.measurements]

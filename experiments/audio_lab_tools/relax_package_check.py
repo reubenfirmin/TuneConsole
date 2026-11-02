@@ -24,7 +24,7 @@ def check_installed(directory, wheel, installed):
         raise ValueError('Choose a new package check directory')
     directory.mkdir(parents=True)
     root = Path(relax.__file__).resolve().parents[1]
-    names = ['rec/audio_vibe_relax.py', 'rec/audio_vibe_release.py', 'rec/audio_vibe_cruise.py',
+    names = ['rec/audio_vibe_runtime.py', 'rec/audio_vibe_relax.py', 'rec/audio_vibe_release.py', 'rec/audio_vibe_cruise.py',
              'rec/audio_vibe_model.py', 'rec/audio_vibe_external.py', 'rec/audio_vibe_preview.py',
              'rec/vibe_preparation.py', 'rec/musical_character.py', 'repos/vibe_predictions.py',
              'core/audio_vibe_contract.py', 'rec/data/relax-vibes.json', 'rec/data/relax-vibes.NOTICE.md',

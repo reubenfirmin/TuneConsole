@@ -163,8 +163,11 @@ def test_session_mode_mix_passes_radio_exclusion_to_play_events_since(store, mon
     parameter-passing contract for THIS call site specifically."""
     _install_modes(store)
     _install_content_vectors(store, monkeypatch, ["a1"], np.array([[1.0, 0.0]], dtype=np.float32))
-    store.settings.set_setting("radio_playlist_ytm", "PLRADIO")
-    store.settings.set_setting("radio_playlist_b_ytm", "PLRADIO_B")
+    from yt_playlist.core import radio_provenance
+    iid = _identity(store)
+    with store.conn:
+        radio_provenance.remember(store.conn, 'PLRADIO', iid)
+        radio_provenance.remember(store.conn, 'PLRADIO_B', iid)
     captured = {}
     orig = store.history.play_events_since
 

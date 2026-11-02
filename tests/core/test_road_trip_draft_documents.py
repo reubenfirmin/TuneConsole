@@ -2,6 +2,32 @@
 from yt_playlist.core import catalog, road_trip_draft_documents, road_trip_draft_storage
 
 
+def test_draft_admission_retains_labels_without_replacing_existing_corrections(store):
+    store.accounts.upsert_account('Account', 'account.json', None, True)
+    recipe = store.road_trip.save_road_trip_recipe(None, 'Trip', 50, [], [], 60, 1)
+    known = store.tracks.upsert_track('known', 'Provider title', 'Provider artist', None, 100)
+    with store.conn:
+        catalog.choose_field(store.conn, known, 'title', 'My corrected title')
+        catalog.choose_field(store.conn, known, 'artist', 'My corrected artist')
+        road_trip_draft_storage.save(store.conn, recipe, {
+            'revision': 'selected', 'picks': ['known', 'passenger'], 'banned': [],
+            'pool': [{'video_id': 'known', 'title': 'Provider title', 'artist': 'Provider artist'},
+                     {'video_id': 'passenger', 'title': 'Passenger title', 'artist': 'Passenger artist'}],
+        }, 10)
+    assert [tuple(row) for row in store.conn.execute(
+        'SELECT video_id,title,artist FROM catalog_tracks ORDER BY video_id')] == [
+            ('known', 'My corrected title', 'My corrected artist'),
+            ('passenger', 'Passenger title', 'Passenger artist')]
+    assert store.tracks.identity_key_for_video('passenger') == '@unresolved-video:passenger'
+    assert not store.conn.execute("SELECT 1 FROM recording_aliases WHERE alias='passenger title|passenger artist'").fetchone()
+    # The later provider read can select its metadata; the draft must not have
+    # established blank selected values that prevent normal catalog admission.
+    passenger = store.tracks.upsert_track('passenger', 'Passenger title', 'Passenger artist', None, 245)
+    assert tuple(store.conn.execute('SELECT title,artist,duration_s FROM catalog_tracks WHERE id=?',
+                                   (passenger,)).fetchone()) == ('Passenger title', 'Passenger artist', 245)
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
 def test_rekey_draft_changes_only_declared_keys_and_fences_stale_completion(store):
     store.accounts.upsert_account('Account', 'account.json', None, True)
     recipe = store.road_trip.save_road_trip_recipe(None, 'Trip', 50, [], [], 60, 1)

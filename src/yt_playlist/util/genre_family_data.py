@@ -4,13 +4,14 @@ import json
 from pathlib import Path
 
 from yt_playlist.util import genre_catalog
+from yt_playlist.core import fao
 
 _DATA = Path(__file__).parent.parent / 'data' / 'genre_families.json'
 
 
 @functools.lru_cache(maxsize=1)
 def load():
-    raw = json.loads(_DATA.read_text())
+    raw = json.loads(fao.read_bytes(_DATA))
     families = raw['families']
     adjacency = raw['adjacency']
     energy = raw.get('energy', {})

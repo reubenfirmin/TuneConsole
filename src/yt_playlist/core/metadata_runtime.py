@@ -9,7 +9,7 @@ import os
 import sqlite3
 import time
 
-from . import metadata_runtime_files as files
+from . import fao, metadata_runtime_files as files
 from .catalog_identity import RECORDING_FIELDS, ITEM_FIELDS
 
 ALTERNATIVE_SECONDS = 7 * 86400
@@ -477,8 +477,7 @@ def _expire(conn, *, now=None, limit=16):
                     break
                 keep = (row['revision'], row['revision']+1) if current != data else (row['revision'],)
                 if path.suffix == '.json' and path.stem.isdecimal() and int(path.stem) not in keep:
-                    path.unlink(missing_ok=True)
-                    removed += 1
+                    removed += fao.delete(path, missing_ok=True)
         for key, revision in conn.execute('SELECT s.source_key,s.revision FROM rec_musical_sources s '
             'JOIN rec_musical_links l ON l.source_key=s.source_key WHERE l.recording_id=?', (recording,)).fetchall():
             parent = (files.directory(conn)/files.relative('native', (key,), revision)).parent
@@ -486,8 +485,7 @@ def _expire(conn, *, now=None, limit=16):
                 if index == 128:
                     break
                 if path.suffix == '.json' and path.stem.isdecimal() and int(path.stem) != revision:
-                    path.unlink(missing_ok=True)
-                    removed += 1
+                    removed += fao.delete(path, missing_ok=True)
     conn.execute('UPDATE metadata_runtime_state SET gc_cursor=?,gc_after=? WHERE id=1',
                  (rows[-1][0] if rows else 0,0 if rows else now+3600))
     return removed
@@ -539,7 +537,5 @@ def _expire_alternatives(conn, shard, now, *, budget=128):
         except ValueError:
             continue
         if at <= now-ALTERNATIVE_SECONDS:
-            from pathlib import Path
-            Path(entry.path).unlink(missing_ok=True)
-            removed += 1
+            removed += fao.delete(entry.path, missing_ok=True)
     return removed

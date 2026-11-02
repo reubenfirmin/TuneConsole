@@ -53,7 +53,8 @@ def test_every_deletion_path_backs_up_current_order_and_occurrences(store, sourc
                                       "delete", "SOURCE", 1)
             executor.execute_planned(store, aid, {iid: client}, 1000000)
     backup, = (tmp_path / "backups").glob("SOURCE_*.json")
-    saved = json.loads(backup.read_text())
+    from yt_playlist.core import fao
+    saved = json.loads(fao.read_text(backup))
     assert [t["video_id"] for t in saved["tracks"]] == ["new", "one", "new"]
     assert [t["set_video_id"] for t in saved["tracks"]] == ["new-first", "one", "new-second"]
     assert [t["position"] for t in saved["tracks"]] == [0, 1, 2]
@@ -103,7 +104,7 @@ def test_failed_backup_does_not_delete_or_overwrite_prior_recovery(
     if failure == "fetch":
         monkeypatch.setattr(client, "get_playlist", fail)
     elif failure == "write":
-        monkeypatch.setattr(playlist_backups.json, "dump", fail)
+        monkeypatch.setattr(playlist_backups.json, "dumps", fail)
     elif failure == "publish":
         monkeypatch.setattr(playlist_backups.os, "replace", fail)
     else:
@@ -111,7 +112,7 @@ def test_failed_backup_does_not_delete_or_overwrite_prior_recovery(
     with pytest.raises(OSError, match="Backup unavailable"):
         executor.delete_playlist(store, pid, client, 2)
     assert prior.read_bytes() == saved
-    assert list((tmp_path / "backups").iterdir()) == [prior]
+    assert set((tmp_path / "backups").iterdir()) == {prior, prior.parent / ".fao.lock"}
     assert not client.deleted
     assert store.playlists.get_playlist(pid) is not None
     assert store.actions.get_actions() == []
@@ -136,5 +137,6 @@ def test_merge_gate_and_backup_use_the_same_source_snapshot(store, source, monke
     aid = executor.store_plan(store, executor.MergePlan(pid, keep, [], []), "delete", "SOURCE", 1)
     executor.execute_planned(store, aid, {iid: client}, 2)
     assert reads == ["SOURCE"]
-    payload = json.loads(Path(json.loads(store.actions.get_action(aid).undo_json)["backup"]).read_text())
+    from yt_playlist.core import fao
+    payload = json.loads(fao.read_text(Path(json.loads(store.actions.get_action(aid).undo_json)["backup"])))
     assert [t["video_id"] for t in payload["tracks"]] == ["new", "one", "new"]

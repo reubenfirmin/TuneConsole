@@ -168,4 +168,4 @@ def test_upload_does_not_purge_uncorroborated_history_between_events():
         'file': ('watch-history.json', json.dumps(entries).encode(), 'application/json')})
     assert response.status_code == 200
     store.init_schema()  # Startup must not reinterpret the additive import as deletion authority.
-    assert store.conn.execute("SELECT 1 FROM listening_observations WHERE identity_key='phone-play'").fetchone()
+    assert store.conn.execute("SELECT 1 FROM listening_observation_subjects WHERE identity_key='phone-play'").fetchone()

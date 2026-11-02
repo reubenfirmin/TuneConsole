@@ -1,6 +1,4 @@
 """Direction changes, tuning, native transitions and stream decay."""
-import json
-
 import pytest
 from fastapi import FastAPI
 from tests.template_support import web_templates
@@ -110,7 +108,7 @@ def test_tuning_preserves_history_and_waits_for_native_future_ack(poc):
     assert s.heard == history
     assert requested not in s.choices  # Slider changes aren't explicit song choices.
     assert len(frames) == 1
-    saved = json.loads(c.ctx.store.settings.get_setting("radio_current_session"))
+    saved = c.persistence.load()
     assert saved["tuning"] == controls
     assert len(set(saved["directions"]["decay"].values())) == 3
 

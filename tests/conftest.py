@@ -1,5 +1,6 @@
 import importlib.util
 import inspect
+import sqlite3
 
 import pytest
 from yt_playlist.core.store import Store
@@ -42,9 +43,46 @@ def disable_periodic_library_sync(monkeypatch):
     monkeypatch.setattr(webapp, "BACKGROUND_WORK", False)
 
 
+@pytest.fixture(scope="session")
+def _pristine_current_schema(tmp_path_factory):
+    """Read-only SQL template for ordinary consumers, built through real startup.
+
+    Fresh-bootstrap and historical-upgrade tests construct their own Stores.
+    Every consumer still owns a new connection, file namespace and admission.
+    """
+    template = sqlite3.connect(":memory:")
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv("YT_PLAYLIST_HOME", str(tmp_path_factory.mktemp("schema-template-home")))
+            patch.setenv("YT_PLAYLIST_AUDIO_VIBES", "0")
+            patch.setenv("YT_PLAYLIST_AUDIO_VIBE_MODEL", "")
+            patch.delenv("DEEPSEEK_API_KEY", raising=False)
+            initial = Store(":memory:")
+            try:
+                initial.init_schema()
+                initial.conn.backup(template)
+            finally:
+                initial.conn.close()
+        template.execute("PRAGMA query_only=ON")
+        yield template
+    finally:
+        template.close()
+
+
 @pytest.fixture
-def store():
+def store(_pristine_current_schema):
     s = Store(":memory:")
+    try:
+        _pristine_current_schema.backup(s.conn)
+        s.init_schema()
+        yield s
+    finally:
+        s.conn.close()
+
+
+@pytest.fixture
+def file_backed_store(tmp_path):
+    s = Store(tmp_path / "store.db")
     try:
         s.init_schema()
         yield s
@@ -65,6 +103,14 @@ def unlocked_home_controls(monkeypatch):
         'vibes_ready': True, 'ready_areas': {'directions': True, 'discover': True, 'recent': True},
         'ready_formats': {'mixes': True, 'albums': False, 'radio': False},
         'home_choice_available': False})
+
+
+@pytest.fixture
+def canonical_genre_matcher(monkeypatch):
+    """Provider matching tests use the catalog rather than a prior app's settings."""
+    from yt_playlist.providers import genres
+
+    monkeypatch.setattr(genres, '_active', None)
 
 
 @pytest.fixture

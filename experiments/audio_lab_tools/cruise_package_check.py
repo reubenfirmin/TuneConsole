@@ -4,9 +4,10 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 import zipfile
 
-from yt_playlist.rec import audio_vibe_cruise, audio_vibe_model
+from yt_playlist.rec import audio_vibe_cruise, audio_vibe_model, audio_vibe_runtime
 from .external_experiment import digest, save, stamp
 from .vibe_specialist_round import inside
 
@@ -17,10 +18,15 @@ def check(directory):
     directory.mkdir(parents=True)
     subprocess.run(['uv', 'build', '--offline', '--wheel', '--out-dir', str(directory)], check=True)
     wheel, = directory.glob('*.whl')
-    installed = directory / 'installed'
+    with TemporaryDirectory(prefix='wheel-', dir=directory) as installed:
+        check_installed(directory, wheel, Path(installed))
+
+
+def check_installed(directory, wheel, installed):
     with zipfile.ZipFile(wheel) as archive:
         for name, source in (
                 ('yt_playlist/rec/audio_vibe_cruise.py', Path(audio_vibe_cruise.__file__)),
+                ('yt_playlist/rec/audio_vibe_runtime.py', Path(audio_vibe_runtime.__file__)),
                 ('yt_playlist/rec/data/cruise-vibes.json', audio_vibe_cruise.DEFAULT_PATH),
                 ('yt_playlist/rec/data/emotify-vibes.json', audio_vibe_model.DEFAULT_PATH)):
             if archive.read(name) != source.read_bytes():

@@ -256,7 +256,8 @@ def test_legacy_current_value_can_be_kept_after_populated_upgrade(legacy_store):
         tid = store.conn.execute(
             "INSERT INTO tracks(video_id,title,artist,identity_key,genre) "
             "VALUES ('v','Song','Artist','song|artist','My own genre')").lastrowid
-    store.init_schema()
+    from tests.historical_support import upgrade_fixture
+    upgrade_fixture(store)
     _keep_current_value(store, tid, user_choice=False)
 
 

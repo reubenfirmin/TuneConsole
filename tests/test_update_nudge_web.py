@@ -24,7 +24,7 @@ def _home_app(store):
     # dismissal endpoints only use settings. Keep the context's required dependencies explicit.
     from yt_playlist.web.routes import home
     app = FastAPI()
-    ctx = SimpleNamespace(store=store, now_fn=lambda: 1000.0, templates=None,
+    ctx = SimpleNamespace(store=store, client_provider=lambda: {}, now_fn=lambda: 1000.0, templates=None,
                           logger=logging.getLogger(__name__))
     app.include_router(home.build(ctx))
     return app
@@ -50,6 +50,7 @@ def test_home_renders_backend_update_card(store, monkeypatch):
     from yt_playlist.web.app import create_app
     from yt_playlist.core import updatecheck
     from tests.conftest import FakeClient
+    from tests.home_fixture_support import returning_listener
     from tests.onboarding_support import publish_personal_mix
 
     # The test suite runs from an editable checkout, which is now (correctly) treated as a dev install
@@ -58,6 +59,9 @@ def test_home_renders_backend_update_card(store, monkeypatch):
     store.settings.set_setting("last_sync_at", "1700000000")
     store.settings.set_setting("latest_version_seen", "999.0.0")   # force "behind" regardless of real version
     publish_personal_mix(store, now=1700000001)
+    # Notices live on the established Home dashboard. A prepared menu alone
+    # does not complete a new listener's serial onboarding journey (#608).
+    returning_listener(store, 'mixes', now=1700000001)
     c = TestClient(create_app(store, lambda: FakeClient(), now_fn=lambda: 1700000001),
                    base_url="http://127.0.0.1")
     html = c.get("/").text
@@ -70,6 +74,7 @@ def test_home_container_update_links_to_instructions(store, monkeypatch):
     from yt_playlist.web.app import create_app
     from yt_playlist.core import updatecheck
     from tests.conftest import FakeClient
+    from tests.home_fixture_support import returning_listener
     from tests.onboarding_support import publish_personal_mix
 
     monkeypatch.setattr(updatecheck, "is_dev_install", lambda: False)
@@ -77,6 +82,7 @@ def test_home_container_update_links_to_instructions(store, monkeypatch):
     store.settings.set_setting("last_sync_at", "1700000000")
     store.settings.set_setting("latest_version_seen", "999.0.0")
     publish_personal_mix(store, now=1700000001)
+    returning_listener(store, 'mixes', now=1700000001)
     c = TestClient(create_app(store, lambda: FakeClient(), now_fn=lambda: 1700000001),
                    base_url="http://127.0.0.1")
     html = c.get("/").text

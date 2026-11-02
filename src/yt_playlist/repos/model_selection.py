@@ -127,10 +127,8 @@ class ModelSelectionRepo(Repo):
             paused = self.conn.execute("SELECT value FROM settings WHERE key='rec_selection_paused'").fetchone()
             if paused and paused["value"] == "1":
                 raise ValueError("Automatic selection was paused before publication")
-            self.conn.execute(
-                "INSERT INTO rec_model_previous_vectors SELECT ?,r.identity_key,e.vector "
-                "FROM recording_embeddings e JOIN recordings r ON r.id=e.recording_id "
-                "WHERE e.space='collaborative'", (run_id,))
+            self.conn.executemany('INSERT INTO rec_model_previous_vectors VALUES (?,?,?)',
+                ((run_id, key, vector) for key, vector in embeddings.rows(self.conn, 'rec_vectors')))
             # A selection has its own objective/basis even when dimensions match.
             embeddings.publish(self.conn, 'rec_vectors', rows, replace=True,
                                model_version=f'selection:{run_id}')

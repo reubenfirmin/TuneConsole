@@ -1,6 +1,7 @@
 import sqlite3
 
 from yt_playlist.core.store import Store
+from tests.historical_support import upgrade_fixture
 
 
 def _store(tmp_path):
@@ -33,7 +34,8 @@ def test_genre_migration_on_preexisting_db(tmp_path):
         "  year TEXT, thumbnail TEXT, found_at REAL, last_shown REAL);"
         "INSERT INTO discovered_artists(artist, score) VALUES ('Old Artist', 0.3);")
     con.commit(); con.close()
-    s = Store(db); s.init_schema()
+    s = Store(db)
+    upgrade_fixture(s)
     rows = s.discovery.get_discovered_artists()
     assert any(r["artist"] == "Old Artist" for r in rows)        # existing data preserved
     assert all("genre" in r for r in rows)                       # column now present

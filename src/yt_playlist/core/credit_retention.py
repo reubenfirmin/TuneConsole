@@ -61,6 +61,24 @@ def receipt(conn, entry, source, key, observation, credit, *, metadata_bound=Fal
                      (entry, source, key, observation, credit, int(metadata_bound)))
 
 
+def prepare_receipt(conn, observation):
+    """Adopt a capture without erasing a previously verified custody binding.
+
+    Compact metadata can release the nullable delivery FK after a bound replay
+    receipt has been published. A later retention scan must keep that outcome.
+    """
+    key = observation['delivery_key']
+    if key is None:
+        return
+    bound = observation['metadata_delivery_id'] is not None
+    if not bound:
+        old = conn.execute('SELECT metadata_bound FROM artist_credit_replays WHERE entry_id=? AND source=? '
+                           'AND delivery_key=?', (observation['entry_id'], observation['source'], key)).fetchone()
+        bound = old is not None and bool(old[0])
+    receipt(conn, observation['entry_id'], observation['source'], key, observation['id'],
+            observation['credit_id'], metadata_bound=bound)
+
+
 def _owners(conn):
     """Refuse destructive preparation if a later owner has not been audited."""
     owners = set()
@@ -77,8 +95,8 @@ def step(conn, now, *, activate=False):
         raise RuntimeError('Artist capture retirement requires an outer transaction')
     if not available(conn):
         return False
-    from .artist_credits import _clock
-    _clock(now)
+    if type(now) not in (int, float) or not -1.7976931348623157e308 <= now <= 1.7976931348623157e308:
+        raise ValueError('Artist credit capture time must be finite')
     state = conn.execute('SELECT enabled,cursor,next_scan_at FROM artist_credit_retention WHERE id=1').fetchone()
     if not state[0]:
         if not activate:
@@ -90,9 +108,7 @@ def step(conn, now, *, activate=False):
     rows = conn.execute('SELECT o.* FROM artist_credit_observations o WHERE o.id>? ORDER BY o.id LIMIT ?',
                         (state[1], BATCH)).fetchall()
     for row in rows:
-        if row['delivery_key'] is not None:
-            receipt(conn, row['entry_id'], row['source'], row['delivery_key'], row['id'], row['credit_id'],
-                    metadata_bound=row['metadata_delivery_id'] is not None)
+        prepare_receipt(conn, row)
         # Unknown-time conversion duplicates have no independent runtime use.
         # Reconciliation and unknown-time fresh evidence remain conservative.
         obsolete = row['capture_kind'] in ('legacy_capture', 'selection_snapshot')

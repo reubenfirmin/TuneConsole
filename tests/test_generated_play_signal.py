@@ -98,7 +98,9 @@ def test_evidence_plays_still_drops_radio_provenance():
     s = _store()
     iid, mine, gen = _library(s)
     _song(s, mine, "v_own", "My Song", "My Band", "Techno")
-    s.settings.set_setting("radio_playlist_ytm", "PLRADIO")
+    from yt_playlist.core import radio_provenance
+    with s.conn:
+        radio_provenance.remember(s.conn, 'PLRADIO', iid)
     s.history.record_play_event(iid, "my song|my band", "v_own", 1000.0, playlist_ytm_id="PLRADIO")
 
     limit = rec_params.get_param(s, "recent_play_limit")
