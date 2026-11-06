@@ -617,6 +617,7 @@ def test_save_failures_use_the_standard_feedback_and_leave_no_saved_link(store, 
     c, _ = _app(store, monkeypatch=monkeypatch)
     rid = _recipe(store)
     c.post(f"/road_trip/recipes/{rid}/build")
+    draft_before = store.road_trip.get_road_trip_draft(rid)
     if failure == "youtube":
         def failed(*args, **kwargs):
             raise RuntimeError("private provider details")
@@ -630,10 +631,17 @@ def test_save_failures_use_the_standard_feedback_and_leave_no_saved_link(store, 
 
     assert response.status_code == 200
     assert "Couldn't save" in response.text
-    assert 'genComplete("road-trip-failure", null, true, false)' in response.text
+    completion = re.search(r'\bgenComplete\((.*?)\);', response.text, re.S)
+    assert completion is not None
+    assert json.loads('[' + completion.group(1) + ']') == [
+        'road-trip-failure', None, True, False, False, None]
     assert "private provider details" not in response.text
     assert "window.location.assign" not in response.text
     assert store.road_trip.get_road_trip_recipe(rid)["last_playlist_id"] is None
+    if failure != 'missing':
+        draft_after = store.road_trip.get_road_trip_draft(rid)
+        assert draft_after['picks'] == draft_before['picks']
+        assert not draft_after.get('saved_playlist_id')
 
 
 def test_draft_survives_a_reload_and_is_discardable(store, monkeypatch):

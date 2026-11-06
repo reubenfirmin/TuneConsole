@@ -552,22 +552,25 @@ def test_imported_likes_and_dismissal_cannot_open_an_empty_home(store):
 @pytest.mark.parametrize("with_mode", [False, True])
 def test_unusable_prepared_offers_do_not_end_setup(store, with_mode):
     import numpy as np
-    from tests.onboarding_support import publish_personal_mix
-    from yt_playlist.rec import onboarding
+    from tests.home_fixture_support import publish_menu
+    from yt_playlist.rec import home_cache, onboarding
 
     _, client = _client(store)
     store.settings.set_setting("last_sync_at", "1000")
     if with_mode:
         store.modes.replace_modes([{"mode_id": 1, "label": "House", "families": [],
             "centroid": np.array([1.0]), "size": 5, "rep_keys": []}], [], 1000)
-    tracks = publish_personal_mix(store)
-    assert onboarding.prepared_mixes_ready(store, 1000)
-    seed_dislike(store, tracks[0]["key"], until=None, now=1000)
+    publish_menu(store, count=3, surface='home_tuned')
     assert not onboarding.prepared_mixes_ready(store, 1000)
     assert onboarding.initial_setup_pending(store, 1000)
     assert not client.get("/home/onboard/status").json()["setup"]["complete"]
     assert 'id="onboarding-feed"' in client.get("/").text
-    store.rec_proposals.put_proposals("home_tuned", {"menus": [{"protos": [None]}]}, 1000)
+    home_cache.put(store, "home_tuned", {"menus": [{"protos": [None]}]}, 1000)
     assert not onboarding.prepared_mixes_ready(store, 1000)
     assert onboarding.initial_setup_pending(store, 1000)
     assert not client.get("/home/onboard/status").json()["setup"]["complete"]
+    payload = publish_menu(store, prefix='complete', surface='home_tuned')
+    assert onboarding.prepared_mixes_ready(store, 1000)
+    track = payload['menus'][0]['protos'][0]['tracks'][0]
+    seed_dislike(store, track['key'], until=None, now=1000)
+    assert onboarding.prepared_mixes_ready(store, 1000)

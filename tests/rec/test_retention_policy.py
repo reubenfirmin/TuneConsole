@@ -74,11 +74,13 @@ def test_maintenance_dispatch_uses_repositories_and_keeps_independent_retries(no
     assert files.retry_at == runtime.retry_at == 405
 
 
-def test_gc_dispatch_uses_recovery_repository_and_resumes_daily_cadence(no_sqlite, monkeypatch):
+@pytest.mark.parametrize('paused_first', [False, True])
+def test_gc_dispatch_uses_recovery_repository_and_resumes_daily_cadence(no_sqlite, monkeypatch, paused_first):
     from yt_playlist.library import playlist_gc_retry
     from yt_playlist.rec import discover, rec_worker
 
     store = NoDatabase()
+    store._recommendation_retirement_pending = paused_first
     store.retention = Mock(spec=['maintain_collection_recovery', 'collection_recovery_pending'])
     store.retention.maintain_collection_recovery.return_value = 0
     store.retention.collection_recovery_pending.side_effect = [True, False]
@@ -93,7 +95,9 @@ def test_gc_dispatch_uses_recovery_repository_and_resumes_daily_cadence(no_sqlit
         def wait(self, seconds):
             waits.append(seconds)
             clock[0] += seconds
-            return len(waits) == 3
+            if seconds == 5:
+                store._recommendation_retirement_pending = False
+            return len(waits) == 3 + int(paused_first)
 
         def is_set(self):
             return False
@@ -106,7 +110,8 @@ def test_gc_dispatch_uses_recovery_repository_and_resumes_daily_cadence(no_sqlit
     worker._gc_loop()
     assert store.retention.maintain_collection_recovery.call_args_list == [(), ()]
     assert store.retention.collection_recovery_pending.call_args_list == [(), ()]
-    assert waits == [0, 60, 86340] and discoveries == [0]
+    assert waits == ([0, 5, 60, 86340] if paused_first else [0, 60, 86340])
+    assert discoveries == [5 if paused_first else 0]
     assert not worker.work.active
 
 
@@ -156,7 +161,9 @@ def test_recommendation_retention_checkpoints_each_bounded_repository_turn(
     assert not store._db_path.exists()
 
 
-def test_evidence_retention_enters_repository_protection_at_final_deletion(no_sqlite):
+def test_evidence_retention_enters_repository_protection_at_final_deletion(no_sqlite, monkeypatch):
+    from yt_playlist.rec import home_cache
+
     store = NoDatabase()
     store.choice_capture = Mock(spec=['artifacts', 'opportunities'])
     store.choice_capture.artifacts.return_value = {'inventory-artifact'}
@@ -165,6 +172,14 @@ def test_evidence_retention_enters_repository_protection_at_final_deletion(no_sq
     store.settings.get_setting.side_effect = lambda key: (
         'retention' if key == choice_evidence.STORAGE_PHASE else None)
     store.rec_proposals = Mock(get_proposals=Mock(return_value={}))
+    cache_reads = []
+
+    def cached(owner, surface):
+        assert owner is store and surface in home_cache.SURFACES
+        cache_reads.append(surface)
+        return {'choice_context': {'artifact': surface + '-artifact'}}
+
+    monkeypatch.setattr(home_cache, 'read', cached)
     store.radio_checkpoints = Mock(load=Mock(return_value=({}, 0)))
     store.read_view = lambda: nullcontext(store)
     store.model_selection = Mock(
@@ -187,7 +202,8 @@ def test_evidence_retention_enters_repository_protection_at_final_deletion(no_sq
 
     def maintain(cutoff, *, pending_protection, **options):
         assert not events
-        assert options['protected_artifacts'] == {'inventory-artifact'}
+        assert options['protected_artifacts'] == {'inventory-artifact'} | {
+            surface + '-artifact' for surface in home_cache.SURFACES}
         assert options['protected_opportunities'] == {'inventory-opportunity'}
         with pending_protection() as (artifacts, opportunities):
             assert artifacts == {'late-artifact'} and opportunities == {'late-opportunity'}
@@ -198,4 +214,5 @@ def test_evidence_retention_enters_repository_protection_at_final_deletion(no_sq
 
     assert choice_evidence._maintain_storage(store, 1_800_000_000) == {'retained': 1}
     assert events == ['protected', 'final pin check and deletion', 'released']
+    assert cache_reads == ['home_prepared', 'home_tuned', 'home_choice']
     store.album_feedback.protection.assert_called_once_with(store.choice_capture)

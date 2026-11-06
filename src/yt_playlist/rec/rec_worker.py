@@ -185,6 +185,7 @@ class RecWorker:
     def _retry_measurements(self):
         with self._lock:
             if (not self.enabled or self._stop.is_set() or not self.work.accepting
+                    or getattr(self.ctx.store, 'activity_paused', False)
                     or self._running or not self.jobs.measurements
                     or time.monotonic() < self.jobs.retry[Job.MEASUREMENT].retry_at):
                 return
@@ -231,6 +232,8 @@ class RecWorker:
 
     def _discover(self, now):
         from yt_playlist.rec import discover
+        if getattr(self.ctx.store, '_recommendation_retirement_pending', False):
+            return None
         self._discovering = True
         try:
             limit_native_threads()
@@ -253,6 +256,10 @@ class RecWorker:
         next_discovery = next_sweep
         next_collection = next_sweep
         while not self._stop.is_set():
+            if getattr(self.ctx.store, '_recommendation_retirement_pending', False):
+                if self._stop.wait(5):
+                    return
+                continue
             full_sweep = time.monotonic() >= next_sweep
             try:
                 clients = self.ctx.client_provider() or {}
@@ -506,7 +513,10 @@ class RecWorker:
                   stories=False, artist_images=(), prepare=False, choices=False, analytics=False, groups=False, tv=False,
                   model_health=False, evidence_storage=False, retention=False):
         with self._lock:
-            recovery = (evidence_storage and self.enabled and not self._stop.is_set()
+            if getattr(self.ctx.store, '_recommendation_retirement_pending', False):
+                if not retention or time.monotonic() < self.jobs.retry[Job.RETENTION].retry_at:
+                    return False
+            recovery = ((evidence_storage or retention) and self.enabled and not self._stop.is_set()
                         and self.work.accepting and self._storage_ready()
                         and not getattr(self.ctx.store, '_activity_paused', False))
             if not self._accepting() and not recovery:
@@ -578,7 +588,8 @@ class RecWorker:
 
     def _run_pending(self):
         while not self._stop.wait(self.debounce_s):
-            self._flush_measurements()
+            if not getattr(self.ctx.store, '_recommendation_retirement_pending', False):
+                self._flush_measurements()
             with self._lock:
                 if not self.jobs:
                     self._running = False
@@ -592,6 +603,35 @@ class RecWorker:
                     return
                 self._model_active = any(job not in {Job.MEASUREMENT, Job.EVIDENCE_STORAGE, Job.RETENTION, Job.CHOICES, Job.ANALYTICS, Job.GROUPS, Job.TV, Job.MODEL_HEALTH} for job in batch)
             full, modes = Job.FULL in batch, Job.MODES in batch
+            from yt_playlist.rec import candidate_refresh, recommendation_retirement, recommendation_roots
+            retirement = getattr(self.ctx.store, '_recommendation_retirement_pending', False)
+            try:
+                # Startup/idle recovery must not wait for the next hourly
+                # deadline to notice already-detached pools.
+                if Job.RETENTION in batch and recommendation_roots.enabled(self.ctx.store):
+                    retirement = retirement or self.ctx.store.recommendations.retirement_pending()
+                if retirement or (any(job in batch for job in (Job.FULL, Job.MODES, Job.BUNDLES))
+                                  and candidate_refresh.check_due(self.ctx.store, self.ctx.now_fn())):
+                    self._stage('recommendation cleanup', recommendation_retirement.drain,
+                                self.ctx.store, self.ctx.now_fn())
+            except WorkClosing:
+                raise
+            except Exception:
+                # Keep the entire detached batch. A cleanup failure must
+                # not admit ranking, discard queued work or spin this loop.
+                self.ctx.store._recommendation_retirement_pending = True
+                with self._lock:
+                    for job, payload in batch.items():
+                        if job != Job.RETENTION:
+                            self.jobs.merge(job, payload)
+                    # The ticker owns retry admission. A queued retention
+                    # flag would prevent it from starting another loop.
+                    self.jobs.pending.pop(Job.RETENTION, None)
+                    self.jobs.retry[Job.RETENTION].failed(time.monotonic(), base=5, cap=300)
+                    self._model_active = False
+                    self._running = False
+                self.ctx.logger.warning('Recommendation cleanup will retry before preparation', exc_info=True)
+                return
             if Job.EVIDENCE_STORAGE in batch:
                 from yt_playlist.rec import choice_evidence
                 state = self.jobs.retry[Job.EVIDENCE_STORAGE]
@@ -780,7 +820,8 @@ class RecWorker:
 
     def _stage(self, name, target, *args, **kwargs):
         limit_native_threads()
-        self._flush_measurements()
+        if name != 'recommendation cleanup' and not getattr(self.ctx.store, '_recommendation_retirement_pending', False):
+            self._flush_measurements()
         with (self.ctx.store.priority.background(check_stopping), cancellable_work(self._stop.is_set),
               work_span("rec: " + name, announce=True, level=logging.DEBUG)):
             return target(*args, **kwargs)
@@ -891,7 +932,7 @@ class RecWorker:
         return self.projections.run('trends')
 
     def _refresh_bundles(self):
-        from yt_playlist.rec import candidate_refresh, mode_surfaces
+        from yt_playlist.rec import candidate_refresh, mode_surfaces, recommendation_retirement
         store = self.ctx.store
         # Model fitting can succeed while ranking fails. Keep the pool's retry
         # clock separate so it cannot stall ratings or reset its own backoff.
@@ -901,6 +942,10 @@ class RecWorker:
                     or not candidate_refresh.check_due(store, self.ctx.now_fn())):
                 state.dirty = True
                 return None
+        # A failed cleanup has not started ranking and must not consume its
+        # hourly retry interval. Direct preparation callers share this gate.
+        self._stage('recommendation cleanup', recommendation_retirement.drain, store, self.ctx.now_fn())
+        with self._lock:
             state.dirty = False
             state.started(time.monotonic())
         try:

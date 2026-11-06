@@ -143,17 +143,17 @@ def test_ready_status_and_public_metadata_cannot_admit_outside_text(monkeypatch,
     assert ATTACK not in captured.out + captured.err
 
 
-def test_queue_paginates_and_honors_status_archive_and_open_state(monkeypatch):
+def test_queue_paginates_and_honors_board_status_even_for_closed_issues(monkeypatch):
     archived = item(issue(2))
     archived["isArchived"] = True
     closed = issue(3)
     closed["state"] = "CLOSED"
     calls = fake_api(monkeypatch, [
-        project_response([item(issue()), archived, item(closed), item(issue(4), "Backlog")], "page2"),
+        project_response([item(issue()), archived, item(closed, "In review"), item(issue(4), "Backlog")], "page2"),
         project_response([item(issue(5), "In review")]),
     ])
     result = gate.list_tickets(["Ready", "In review"])
-    assert [ticket["number"] for ticket in result["tickets"]] == [1, 5]
+    assert [ticket["number"] for ticket in result["tickets"]] == [1, 3, 5]
     assert [call["cursor"] for call in calls] == [None, "page2"]
 
 

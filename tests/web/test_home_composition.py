@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
 from tests.home_fixture_support import publish_menu, returning_listener
+from yt_playlist.rec import home_cache, home_cards, home_prepared
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes.home import ROTATING_CARDS
 from yt_playlist.web.routes.home_views import HomeViews
@@ -19,20 +20,24 @@ def client_for(store):
                       base_url='http://127.0.0.1')
 
 
-def test_home_metadata_update_during_composition_appears_on_next_visit(file_backed_store, monkeypatch):
+def test_home_metadata_update_preserves_publication_and_refreshes_next_snapshot(file_backed_store, monkeypatch):
     store = file_backed_store
     payload = publish_menu(store, tracks_per_card=5)
     returning_listener(store, 'mixes', now=1000)
     track = payload['menus'][0]['protos'][0]['tracks'][0]
     original = HomeViews.prepared
     updated = False
+    observed = []
 
     def update_after_menu_read(self, now, request=None):
         nonlocal updated
         result = original(self, now, request)
-        if request is not None and request.url.path == '/' and not updated:
-            updated = True
-            store.tracks.upsert_track(track['video_id'], 'Corrected title', track['artist'], '', 180)
+        if request is not None and request.url.path == '/':
+            observed.append(self.store.tracks.metadata_for_video(track['video_id'])['title'])
+            if not updated:
+                updated = True
+                store.tracks.upsert_track(track['video_id'], 'Corrected title', track['artist'], '', 180)
+                assert self.store.tracks.metadata_for_video(track['video_id'])['title'] == track['title']
         return result
 
     monkeypatch.setattr(HomeViews, 'prepared', update_after_menu_read)
@@ -41,10 +46,22 @@ def test_home_metadata_update_during_composition_appears_on_next_visit(file_back
         assert first.status_code == 200
         assert f'data-title="{track["title"]}"' in first.text
         assert 'data-title="Corrected title"' not in first.text
+        assert observed and set(observed) == {track['title']}
+        observed.clear()
         following = client.get('/')
         assert following.status_code == 200
-        assert 'data-title="Corrected title"' in following.text
-        assert f'data-title="{track["title"]}"' not in following.text
+        assert observed and set(observed) == {'Corrected title'}
+        assert f'data-title="{track["title"]}"' in following.text
+        assert 'data-title="Corrected title"' not in following.text
+        assert home_cache.read(store, home_prepared.SURFACE) == payload
+        # An explicit build replaces the held menu, including its display metadata.
+        replacement = deepcopy(payload['menus'][0])
+        replacement['protos'][0]['tracks'][0]['title'] = 'Corrected title'
+        assert home_prepared.remember(store, payload, home_cards.CardsResult(**replacement), 1001)
+        refreshed = client.get('/')
+        assert refreshed.status_code == 200
+        assert 'data-title="Corrected title"' in refreshed.text
+        assert f'data-title="{track["title"]}"' not in refreshed.text
 
 
 def test_failed_home_visit_does_not_advance_only_some_cards(file_backed_store, monkeypatch):

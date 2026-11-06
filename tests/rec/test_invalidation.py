@@ -33,12 +33,13 @@ def test_refresh_retains_playable_menus_usage_and_tv_until_replacement(store, ch
     assert onboarding.prepared_mixes_ready(store, 1001)
     key = previous_mix['menus'][0]['protos'][0]['tracks'][0]['key']
     seed_dislike(store, key, until=None, now=1002)
-    assert not onboarding.prepared_mixes_ready(store, 1002)
+    assert onboarding.prepared_mixes_ready(store, 1002)
     # Removing evidence explicitly still clears the completed outputs.
     with store.conn.atomic():
         invalidation.clear_display(store.conn)
         invalidation.clear_findings(store.conn)
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) is None
+    assert not onboarding.prepared_mixes_ready(store, 1002)
     assert not store.rec_proposals.choice_usage()
     assert tv.cached(store) is None
 

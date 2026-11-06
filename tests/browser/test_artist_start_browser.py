@@ -207,10 +207,12 @@ def test_required_picker_suggestions_spotify_draft_and_first_listen(
     assert not artist_flow_evidence['growth_after_first_play']['ready_formats']['mixes']
     # Saving the first set starts an optional achievement, but its distant
     # route must stay dark until it is explored. Only the connected core
-    # preparation frontier receives the blue path light.
+    # preparation frontier receives the blue path light. A destination can
+    # span several shared walking sections without lighting another branch.
     frontier = page.locator('.festival-routes .growth-route.is-preparing:visible')
-    expect(frontier).to_have_count(1)
-    expect(frontier).to_have_attribute('data-destination', 'foundation')
+    expect(page.locator('.festival-routes [data-destination="foundation"].is-preparing')).to_be_visible()
+    assert frontier.evaluate_all('''routes => routes.length > 0 && routes.every(
+        route => route.dataset.destinations.split(' ').includes('foundation'))''')
     expect(page.locator('.festival-routes [data-destination="milestones"]')).to_be_hidden()
     assert page.url.rstrip('/') == artist_app
     assert len(store.discovery.starter_artists()) == 3

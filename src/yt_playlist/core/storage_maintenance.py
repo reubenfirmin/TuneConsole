@@ -139,17 +139,30 @@ class StorageMaintenance:
         pending = self.store.playback_feedback.pending()
         rebuild_required = getattr(self.store, '_rebuild_source_version', None) == 64
         copy_active = self.active or bool(getattr(self.store,'_activity_paused',False))
-        # A resumable cleanup cursor or playback backlog does not make the
-        # installed database unsafe. Only actual cutover/recovery fences writes.
-        active = copy_active or rebuild_required
+        retiring = bool(getattr(self.store, '_recommendation_retirement_pending', False))
+        # Ordinary incremental retention remains writable. The priority
+        # recommendation drain deliberately pauses app mutations until done.
+        active = copy_active or rebuild_required or retiring
         retrying = evidence and getattr(self.store, '_evidence_recovery_failed', False)
-        phase = (self.phase if copy_active else getattr(self.store, '_evidence_phase', 'listening_history')
-                 if evidence else 'rebuild_required' if rebuild_required else 'playback_feedback' if pending else self.phase)
-        message = (self.message if copy_active and self.phase=='recovery_required' else
-                   (REBUILD_MESSAGE if self._rebuilding else MESSAGE) if copy_active else EVIDENCE_RETRY_MESSAGE if retrying else EVIDENCE_MESSAGE
-                   if evidence else 'Your library remains available while its storage update is pending. '+LISTENING_MESSAGE
-                   if rebuild_required else 'Applying saved playback feedback. Your library remains available.' if pending
-                   else SCHEMA_RETRY_MESSAGE if phase == 'schema_retry' else self.message)
+        if copy_active:
+            phase = self.phase
+            message = (self.message if phase == 'recovery_required' else
+                       REBUILD_MESSAGE if self._rebuilding else MESSAGE)
+        elif retiring:
+            phase = 'recommendation_retirement'
+            message = 'Cleaning up old recommendations. ' + LISTENING_MESSAGE
+        elif evidence:
+            phase = getattr(self.store, '_evidence_phase', 'listening_history')
+            message = EVIDENCE_RETRY_MESSAGE if retrying else EVIDENCE_MESSAGE
+        elif rebuild_required:
+            phase = 'rebuild_required'
+            message = 'Your library remains available while its storage update is pending. ' + LISTENING_MESSAGE
+        elif pending:
+            phase = 'playback_feedback'
+            message = 'Applying saved playback feedback. Your library remains available.'
+        else:
+            phase = self.phase
+            message = SCHEMA_RETRY_MESSAGE if phase == 'schema_retry' else self.message
         detail = {'inventory': 'Checking saved recommendation contexts.',
                   'checkpoint': 'Checkpointing retained listening evidence.',
                   'retention': 'Reclaiming acknowledged diagnostic storage.'}.get(phase)
@@ -170,7 +183,8 @@ class StorageMaintenance:
         return dict(active=active, phase=phase, message=message, pending_feedback=pending,
                     recording=not active, capturing_feedback=True,
                     warning=warning, banner_message=banner_message,
-                    progress=dict(self.detail), error=self.error,
+                    progress=dict(getattr(self.store, '_recommendation_retirement_progress', {})) if retiring else dict(self.detail),
+                    error=getattr(self.store, '_recommendation_retirement_error', '') if retiring else self.error,
                     evidence_maintenance=dict(pending=bool(evidence),
                         running=bool(getattr(self.store, '_evidence_maintenance', 0)),
                         phase=getattr(self.store, '_evidence_phase', 'inventory'), retrying=bool(retrying),

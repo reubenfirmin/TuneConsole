@@ -48,3 +48,19 @@ def test_status_uses_repository_and_keeps_backlog_recording_and_copy_capture(mon
     assert copying['banner_message'] == OPTIMIZING_BANNER and not copying['warning']
     assert pending.call_count == 3
     assert all(not call.args and not call.kwargs for call in pending.call_args_list)
+
+
+def test_priority_recommendation_cleanup_pauses_writes_without_copy_or_evidence():
+    store = SimpleNamespace(playback_feedback=SimpleNamespace(pending=lambda: 2),
+                            _recommendation_retirement_pending=True,
+                            _recommendation_retirement_progress={'rows': 2048, 'pools': 3},
+                            _recommendation_retirement_error='OperationalError')
+    maintenance = StorageMaintenance(store)
+    status = maintenance.status()
+    assert status['active'] and status['phase'] == 'recommendation_retirement'
+    assert 'Cleaning up old recommendations.' in status['message']
+    assert not status['recording'] and status['capturing_feedback']
+    assert status['progress'] == {'rows': 2048, 'pools': 3}
+    assert status['error'] == 'OperationalError'
+    store._recommendation_retirement_pending = False
+    assert maintenance.status()['recording'] and not maintenance.status()['active']

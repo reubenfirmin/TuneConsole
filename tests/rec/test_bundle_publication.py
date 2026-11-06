@@ -1,13 +1,18 @@
 """Real staged publication keeps policy claims, heads and captured settings coherent."""
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 import pytest
 
 from tests.core.test_compact_groups_migration import predecessor
 from tests.repos.test_compact_group_publication import database
 from tests.repos.test_bundle_storage import recommendations, historical_recommendations, collect
+from tests.repos.test_typed_recommendation_publication import plan, publish as publish_plan
 from yt_playlist.rec import measurement, mode_surfaces
 from yt_playlist.repos import policy_storage, recommendation_publication as publication
+from yt_playlist.core import recommendation_pools as pools
+from yt_playlist.rec import recommendation_retirement
 
 
 @pytest.fixture
@@ -26,6 +31,111 @@ def publish(store, *, now=10, guard=None):
             store.settings.set_setting('bundle-guard', guard)
         return mode_surfaces._publish_typed_bundles(store, snapshot, value, [], policies,
                                                   {'rec_candidate_preferences': str(now)}, now)
+
+
+@pytest.mark.parametrize('interrupted', [False, True])
+def test_priority_drain_resumes_orphan_children_and_preserves_live_shared_and_build_owners(
+        recommendations, monkeypatch, interrupted):
+    store = recommendations
+    with store.conn:
+        store.conn.executemany('INSERT INTO recordings(id,identity_key) VALUES (?,?)',
+                               [(i, f'recording-{i}') for i in range(3, 1303)])
+    first = publish_plan(store, plan(store, 'retained'))
+    with store.conn:
+        store.conn.execute('BEGIN IMMEDIATE')
+        store.recommendations.retain('checkpoint', 'live-radio', first.generation_id)
+    for version in ('expired-pool-policy', 'expired-unused-one', 'expired-unused-two'):
+        store.rec_ledger.record_serving_policy(version, {'algorithm': version}, -10000)
+    old = plan(store, 'old-large', fingerprint='b' * 64,
+               candidates=[pools.Candidate(i, 1 / i) for i in range(1, 1303)])
+    old_pool = pools.prepare('wheelhouse', 'expired-pool-policy', None, 'b' * 64, 'card', old.slots[0].pool.candidates)
+    old = replace(old, policy_version='expired-pool-policy',
+                  slots=tuple(replace(slot, pool=old_pool) for slot in old.slots))
+    previous = publish_plan(store, old)
+    current = publish_plan(store, plan(store, 'current'))  # Shares the retained pool.
+    active = store.recommendations.claim(plan(store, 'active', fingerprint='c' * 64))
+    store.recommendations.stage(plan(store, 'active', fingerprint='c' * 64), active)
+    expired_plan = plan(store, 'expired', fingerprint='d' * 64)
+    expired = store.recommendations.claim(expired_plan)
+    store.recommendations.stage(expired_plan, expired)
+    with store.conn:
+        store.conn.execute('UPDATE recommendation_builds SET expires_at=0 WHERE generation_id=?',
+                           (expired.generation_id,))
+    # Detach old ownership first. The real incident already had no generation
+    # headers for most of its orphan pools, so that must not satisfy the gate.
+    while publication.cleanup_generations(store.recommendations):
+        pass
+    assert store.conn.execute('SELECT 1 FROM recommendation_generations WHERE id=?',
+                              (previous.generation_id,)).fetchone() is None
+    assert store.recommendations.retirement_pending()
+    original = publication.cleanup_pools
+    reads, failed = [], False
+    if interrupted:
+        # Force an incomplete durable prefix without constructing a giant
+        # fixture. The ordinary variant exercises the larger recovery batch.
+        monkeypatch.setattr(recommendation_retirement, 'BATCH_ROWS', 1024)
+
+    def prefix(repo, **kwargs):
+        nonlocal failed
+        result = original(repo, **kwargs)
+        if result:
+            if not interrupted:
+                assert result.rows > 1024
+            assert store.activity_paused and not store.conn.in_transaction
+            def browse():
+                assert store.settings.get_setting('safe-browse') is None
+                assert store.recommendations.head('home')['id'] == current.generation_id
+                assert store.recommendations.output('home', 'framing') == {'title': 'current'}
+                reads.append(True)
+            # A separate caller must acquire serving/repository locks between
+            # committed prefixes, while the whole cleanup is still running.
+            with ThreadPoolExecutor(1) as foreground:
+                foreground.submit(browse).result(timeout=2)
+            if interrupted and not failed:
+                failed = True
+                raise OSError('controlled failure after committed prefix')
+        return result
+
+    monkeypatch.setattr(publication, 'cleanup_pools', prefix)
+    monkeypatch.setattr(policy_storage, 'SCAN_LIMIT', 2)
+    if interrupted:
+        with pytest.raises(OSError, match='committed prefix'):
+            recommendation_retirement.drain(store, 10000)
+        assert store.activity_paused and store._recommendation_retirement_error == 'OSError'
+        assert store.recommendations.retirement_pending()
+        assert store.conn.execute('SELECT 1 FROM recommendation_pool_retirements').fetchone()
+        # Reconstruct process-local admission; remaining SQL is the recovery
+        # source of truth even when a previous process's flag no longer exists.
+        del store._recommendation_retirement_pending
+    recommendation_retirement.drain(store, 10000)
+    assert reads and not store.activity_paused
+    assert not store.recommendations.retirement_pending()
+    assert not store.rec_ledger.policy_retirement_pending(10000)
+    assert store.rec_ledger.policy_configuration('expired-pool-policy') is None
+    assert {row[0] for row in store.conn.execute('SELECT id FROM recommendation_generations')} == {
+        first.generation_id, current.generation_id, active.generation_id}
+    assert store.recommendations.output('home', 'framing', generation=first.generation_id) == {'title': 'retained'}
+    assert store.conn.execute('SELECT count(*) FROM recommendation_candidates').fetchone()[0] == 4
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
+def test_hourly_admission_waits_for_cleanup_without_consuming_hour(recommendations, monkeypatch):
+    from yt_playlist.rec import candidate_refresh
+
+    store, calls = recommendations, []
+    def blocked(*args):
+        calls.append('cleanup')
+        raise OSError('cannot clear old generation')
+    monkeypatch.setattr(recommendation_retirement, 'drain', blocked)
+    monkeypatch.setattr(mode_surfaces, 'prepare_bundles', lambda *args: calls.append('ranking') or {})
+    with pytest.raises(OSError, match='old generation'):
+        mode_surfaces.prepare_scheduled(store, 10000)
+    assert calls == ['cleanup'] and candidate_refresh.check_due(store, 10000)
+    assert not store._candidate_preparation_active
+    monkeypatch.setattr(recommendation_retirement, 'drain', lambda *args: calls.append('cleared'))
+    assert mode_surfaces.prepare_scheduled(store, 10000) == {}
+    assert calls == ['cleanup', 'cleared', 'ranking']
+    assert not candidate_refresh.check_due(store, 10001)
 
 
 @pytest.mark.parametrize('retired', [False, True])

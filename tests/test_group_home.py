@@ -67,7 +67,7 @@ def test_default_home_offers_use_exact_graph_definitions_without_legacy_ids(stor
     assert not list(store.rec_ledger.evidence().records('opportunity'))
 
 
-def test_cached_group_headings_are_corrected_without_rewriting_the_prepared_set(store, adaptive_library):
+def test_cached_group_headings_are_served_without_rewriting_the_prepared_set(store, adaptive_library):
     _tracks, head = adaptive_library
     payload = home_prepared.prepare(store, 1200)
     names = {group['version']: group['name'] for group in head['groups']}
@@ -80,9 +80,12 @@ def test_cached_group_headings_are_corrected_without_rewriting_the_prepared_set(
     result = home_prepared.cards(store, payload, 1201, service(store), record=False)
     assert result.protos
     for proto in result.protos:
-        assert proto['note'] != names[proto['group_version']]
-        assert proto['name'].startswith(proto['label'] + ' - ')
+        assert proto['note'] == names[proto['group_version']]
+        assert proto['name'].startswith(f"{proto['note']} - {proto['label']} - ")
         assert proto['recipe']['group_generation'] == head['generation']
+    shown = [(p['name'], p['note'], p['tracks']) for p in result.protos]
+    assert any([(p['name'], p['note'], p['tracks']) for p in menu['protos']] == shown
+               for menu in original['menus'])
     assert payload == original
 
 

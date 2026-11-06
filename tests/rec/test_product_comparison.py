@@ -477,7 +477,7 @@ def test_rebuilt_home_menu_captures_new_opportunity_without_old_comparison(store
     worker = RecWorker(SimpleNamespace(store=store, work=Activity(),
         logger=logging.getLogger(__name__), now_fn=lambda: 1001), debounce_s=0)
     monkeypatch.setattr(worker, '_start_loop', lambda: None)
-    ctx = SimpleNamespace(store=store, rec_worker=worker, now_fn=lambda: 1001,
+    ctx = SimpleNamespace(store=store, rec_worker=worker, vibe_requests=None, now_fn=lambda: 1001,
         logger=logging.getLogger(__name__), jobs=SimpleNamespace(latest=lambda *args: None),
         templates=SimpleNamespace(TemplateResponse=lambda request, template, context: context))
     views = HomeViews(ctx)

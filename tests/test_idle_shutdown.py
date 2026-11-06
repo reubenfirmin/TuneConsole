@@ -217,6 +217,11 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
     elif kind == "fresh_pool":
         from yt_playlist.rec import fresh_pool
 
+        def head(kind):
+            assert kind == 'fresh' and stages == ["populating", "populated"]
+            assert ctx.work.active and not ctx.work.accepting
+            return {'id': 'published-fresh'}
+
         def prepare(store, now):
             assert store is ctx.store and now == 1000
             assert stages == ["populating", "populated"]
@@ -232,6 +237,7 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
 
         monkeypatch.setattr(fresh_pool, "populate", blocking)
         monkeypatch.setattr(fresh_pool, "prepare", prepare)
+        ctx.store.recommendations = SimpleNamespace(head=head)
         ctx.rec_worker = SimpleNamespace(trigger_home_refresh=refresh)
         ctx.now_fn = lambda: 1000
         job = jobs.start_fresh_pool(ctx, {})
@@ -269,6 +275,7 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
         assert kills == [(203, signal.SIGTERM)]
         if kind == "fresh_pool":
             assert stages == ["populating", "populated", "prepared", "refreshed"]
+            assert job.result == {'generation': 'published-fresh', 'requested_at': 1000}
     finally:
         finish.set()
         assert ctx.work.wait(5)

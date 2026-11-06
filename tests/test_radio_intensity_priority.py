@@ -110,9 +110,11 @@ def test_intensity_escapes_styles_within_the_genre_constraint_and_relabels_each_
     assert max(reads) <= CLUSTER_POOL_LIMIT
 
 
-def test_intensity_refills_the_suitable_style_beyond_one_lookahead(store, distant_chill):
-    pools, quiet = distant_chill
+def test_intensity_refills_the_suitable_style_beyond_one_lookahead(intensity_store, request):
+    store = intensity_store
+    pools, quiet = store._fixture_intensity
     c, history = candidate(store, theme=.5), [pools['1'][0]]
+    request.addfinalizer(c.close)
     for _ in quiet:
         track = c.next_track(history, target=history[0])
         assert track and musical_character.intensity(track) == .04

@@ -51,7 +51,8 @@ class EnrichWorker:
 
     def _stop(self) -> bool:
         """should_stop for run_waterfall: abort the in-flight batch on pause or shutdown."""
-        return self._shutdown or not self._enabled()
+        return (self._shutdown or not self._enabled()
+                or getattr(self.ctx.store, '_recommendation_retirement_pending', False))
 
     @property
     def busy(self) -> bool:

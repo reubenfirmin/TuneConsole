@@ -117,9 +117,12 @@ def prepare_scheduled(store, now):
     with store._lock:
         if getattr(store, '_candidate_preparation_active', False) or not candidate_refresh.check_due(store, now):
             return None
-        candidate_refresh.checked(store, now)
         store._candidate_preparation_active = True
     try:
+        from yt_playlist.rec import recommendation_retirement
+        recommendation_retirement.drain(store, now)
+        with store._lock:
+            candidate_refresh.checked(store, now)
         return prepare_bundles(store, now)
     finally:
         with store._lock:

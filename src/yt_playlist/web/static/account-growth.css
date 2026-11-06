@@ -56,7 +56,7 @@ main.page-home { animation-fill-mode:backwards; }
 .festival-grounds { filter:brightness(.85) saturate(.95); pointer-events:none; }
 .festival-routes { pointer-events:none; }
 .growth-route { fill:none; stroke:var(--festival-route); stroke-width:3px; stroke-linecap:round; stroke-linejoin:round; opacity:.85; }
-.growth-route.is-preparing { stroke:var(--festival-pending); stroke-width:24px; opacity:.45; mix-blend-mode:screen; filter:url(#festival-path-light); }
+.growth-route.is-preparing { stroke:var(--festival-pending); stroke-width:7px; opacity:.65; mix-blend-mode:screen; filter:url(#festival-path-light); }
 .festival-destination { outline:none; }
 .festival-destination[role=button] { cursor:pointer; pointer-events:bounding-box; }
 .landmark-halo { fill:var(--festival-halo); opacity:0; pointer-events:none; transition:opacity .25s; }

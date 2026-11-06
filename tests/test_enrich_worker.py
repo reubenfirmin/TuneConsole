@@ -137,9 +137,13 @@ def test_stamps_caught_up_after_primary_drains(store):
     assert float(store.settings.get_setting("enrich_caught_up_at")) == 1000.0
 
 
-def test_paused_drain_does_not_mark(store):
+@pytest.mark.parametrize('pause', ['setting', 'recommendation-retirement'])
+def test_paused_drain_does_not_mark(store, pause):
     t = _unprocessed(store)
-    store.settings.set_setting("enrich_worker_enabled", "0")        # paused
+    if pause == 'setting':
+        store.settings.set_setting("enrich_worker_enabled", "0")
+    else:
+        store._recommendation_retirement_pending = True
     w = make_worker(store, now=1000.0)
     assert w.drain_once() == 0                             # should_stop -> batch abandoned
     assert store.enrichment_reports.queue_remaining() == 1                    # left for next time, not marked

@@ -26,23 +26,13 @@ def browser_type_launch_args(browser_type_launch_args, stdlib_test_storage):
     lives elsewhere. Give the browser a short alias to the same owned storage;
     Python temporaries and all browser data still use the selected volume.
     """
-    @contextmanager
-    def short_path():
-        if pathlib.Path('/proc/self/fd').is_dir():
-            descriptor = os.open(stdlib_test_storage, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                # The parent owns this open descriptor until every browser has
-                # stopped. No directory or symlink needs space on /tmp.
-                yield pathlib.Path(f'/proc/{os.getpid()}/fd/{descriptor}')
-            finally:
-                os.close(descriptor)
-        else:
-            with tempfile.TemporaryDirectory(dir='/tmp', prefix='tuneconsole-browser-workspace-') as alias:
-                temporary = pathlib.Path(alias) / 'tmp'
-                temporary.symlink_to(stdlib_test_storage, target_is_directory=True)
-                yield temporary
-
-    with short_path() as temporary:
+    # Chromium in the CI container hangs while evaluating injected scripts when
+    # TMPDIR uses /proc/<parent>/fd/<descriptor>. A filesystem symlink keeps the
+    # short socket path without that cross-process procfs dependency. Only this
+    # tiny alias lives on /tmp; browser data stays on the selected fixture volume.
+    with tempfile.TemporaryDirectory(dir='/tmp', prefix='tc-browser-') as alias:
+        temporary = pathlib.Path(alias) / 'tmp'
+        temporary.symlink_to(stdlib_test_storage, target_is_directory=True)
         yield {**browser_type_launch_args, 'env': {
             **os.environ, **browser_type_launch_args.get('env', {}), 'TMPDIR': str(temporary)}}
 

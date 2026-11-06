@@ -184,8 +184,6 @@ def list_tickets(statuses):
             if not eligible_issue(issue):
                 withheld += 1
                 continue
-            if issue.get("state") != "OPEN":
-                continue
             tickets.append({**issue_summary(issue), "item_id": item["id"],
                             "status": status, "priority": (item.get("priority") or {}).get("name")})
         if cursor is None:
@@ -220,7 +218,7 @@ def read_ticket(number):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    listing = commands.add_parser("list", help="List eligible open project issues")
+    listing = commands.add_parser("list", help="List eligible issues by project status")
     listing.add_argument("--status", action="append", choices=STATUSES)
     reading = commands.add_parser("read", help="Read an eligible issue and filtered comments")
     reading.add_argument("number", type=int)

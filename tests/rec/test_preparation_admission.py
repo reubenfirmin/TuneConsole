@@ -5,7 +5,7 @@ import pytest
 
 from tests.test_mode_refresh_worker import scheduled
 from yt_playlist.core import playback_feedback
-from yt_playlist.rec import mode_surfaces, rec_worker
+from yt_playlist.rec import candidate_refresh, mode_surfaces, rec_worker
 from yt_playlist.rec.worker_queue import Job
 
 
@@ -20,6 +20,7 @@ def test_ticker_admits_content_beside_pool_retries(scheduled, monkeypatch, retry
     assert worker.preparation.due(worker.ctx.now_fn())
     clock, calls, ticks = [100.0], [], [0]
     monkeypatch.setattr(rec_worker, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    worker.ctx.now_fn = lambda: 2000.0 + clock[0] - 100.0
 
     def capture(now):
         calls.append(('content', clock[0]))
@@ -63,6 +64,13 @@ def test_ticker_admits_content_beside_pool_retries(scheduled, monkeypatch, retry
             while targets:
                 targets.pop(0)()
             ticks[0] += 1
+            if ticks[0] == 125:
+                # Content and ratings keep receiving turns while pool work is
+                # held by its independent hourly admission. Advance both clocks
+                # to exercise the next admitted round without a real-time wait.
+                assert sum(kind == 'pools' for kind, _ in calls) == 1
+                assert sum(kind == 'content' for kind, _ in calls) >= 10
+                clock[0] += candidate_refresh.CHECK_INTERVAL_S
             clock[0] += .5
             return ticks[0] > 250
 
@@ -75,7 +83,7 @@ def test_ticker_admits_content_beside_pool_retries(scheduled, monkeypatch, retry
         assert len(content) >= 20
         assert all(b - a >= 5 for a, b in zip(content, content[1:]))
         assert len(pools) >= 2
-        assert all(b - a >= 60 for a, b in zip(pools, pools[1:]))
+        assert all(b - a >= candidate_refresh.CHECK_INTERVAL_S for a, b in zip(pools, pools[1:]))
         assert ratings == content
         assert not targets and not worker._running and not worker.jobs
     finally:

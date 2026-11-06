@@ -38,6 +38,15 @@ class RecLedgerRepo(Repo):
     def policy_retention_candidates(self, now):
         return policy_storage.retention_candidates(self.conn, now)
 
+    @snapshot_read
+    def policy_retirement_pending(self, now):
+        return policy_storage.retirement_pending(self.conn, now)
+
+    def restart_policy_retirement(self):
+        from yt_playlist.core.db_writes import atomic_write
+        with atomic_write(self._store):
+            self.conn.execute('DELETE FROM settings WHERE key=?', (policy_storage.CURSOR,))
+
     @synchronized
     def prune_policies(self, versions, cursor):
         return policy_storage.prune(self.conn, versions, cursor)

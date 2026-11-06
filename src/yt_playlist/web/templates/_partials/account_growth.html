@@ -27,8 +27,9 @@
       <defs>
         <filter id="festival-glow"><feGaussianBlur stdDeviation="9"/></filter>
         <filter id="festival-path-light" filterUnits="userSpaceOnUse" x="0" y="0" width="1536" height="1024"><feGaussianBlur stdDeviation="2"/></filter>
+        <filter id="festival-cutout-edge"><feGaussianBlur stdDeviation="1.3"/></filter>
         {% include '_partials/festival_trail_mask.svg' %}
-        {% for stop in growth.nodes %}<clipPath id="festival-{{ stop.id }}"><path d="{{ stop.shape }}"/></clipPath>{% endfor %}
+        {% for stop in growth.nodes %}<mask id="festival-{{ stop.id }}" maskUnits="userSpaceOnUse" x="0" y="0" width="1536" height="1024"><path fill="white" d="{{ stop.shape }}" filter="url(#festival-cutout-edge)"/></mask>{% endfor %}
       </defs>
       <image class="festival-grounds" href="/static/festival-grounds-v4.png" width="1536" height="1024"/>
       <g class="festival-routes" mask="url(#festival-path-surface)" aria-hidden="true">
@@ -44,7 +45,7 @@
       {% for stop in growth.nodes %}
       <g class="landmark-art{% if growth_intro|default(false) and stop.id == 'first' %} is-soundcheck{% endif %}" data-landmark="{{ stop.id }}" :class="{['is-' + node('{{ stop.id }}').state]: true, 'is-connected': node('{{ stop.id }}').connected, 'is-lit': hovered === '{{ stop.id }}' || selected === '{{ stop.id }}'}" aria-hidden="true">
         <path class="landmark-halo" d="{{ stop.shape }}" filter="url(#festival-glow)"/>
-        <image class="landmark-light" href="/static/festival-grounds-v4.png" width="1536" height="1024" clip-path="url(#festival-{{ stop.id }})"/>
+        <image class="landmark-light" href="/static/festival-grounds-v4.png" width="1536" height="1024" mask="url(#festival-{{ stop.id }})"/>
       </g>
       {% endfor %}
       {# Put every label above every cutout; a later tent must never cover a sign. #}

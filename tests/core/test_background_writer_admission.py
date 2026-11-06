@@ -15,7 +15,7 @@ from yt_playlist.rec import group_roots
 ORIGINAL = {'deezer': {'fingerprint': 'original', 'status': 'available'}}
 CHANGED = {'deezer': {'fingerprint': 'changed', 'status': 'available'}}
 OPERATIONS = ['provider-unchanged', 'provider-changed', 'recommendation-empty',
-              'recommendation-write', 'snapshot']
+              'recommendation-write', 'recommendation-retirement', 'snapshot']
 
 
 @pytest.fixture
@@ -32,6 +32,9 @@ def operation(store, kind, stack):
         snapshot = stack.enter_context(store.read_snapshot())
         snapshot.store.settings.get_setting('input')
         return lambda: snapshot.publish(lambda: store.settings.publish_values({'result': 'published'}))
+    if kind == 'recommendation-retirement':
+        from yt_playlist.repos.recommendation_publication import cleanup_pools
+        return lambda: cleanup_pools(store.recommendations)
     def write():
         with group_roots.writer(store) as conn:
             if kind == 'recommendation-write':

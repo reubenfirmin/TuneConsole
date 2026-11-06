@@ -1,5 +1,6 @@
 """Leased bounded preparation and one guarded recommendation head switch."""
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass, astuple
 import hashlib
 import math
@@ -8,6 +9,8 @@ import uuid
 
 from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools, policy_documents
 from yt_playlist.core.activity import WorkBudgetExceeded, check_cancellable_work
+from yt_playlist.core.db_checkpoint import deferred_autocheckpoint
+from yt_playlist.core.db_writes import reserved_write
 from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core.recommendation_custody import retain, release
 from . import policy_storage, proposal_cache
@@ -512,14 +515,47 @@ def cleanup(repo):
     return bool(generations or pools)
 
 
-def cleanup_generations(repo, *, checkpoint=True):
+def _retiring_generation(conn):
+    return conn.execute('SELECT g.id,g.status FROM recommendation_generations g WHERE NOT EXISTS('
+        'SELECT 1 FROM recommendation_heads h WHERE h.generation_id=g.id) AND NOT EXISTS('
+        'SELECT 1 FROM recommendation_generation_refs r WHERE r.generation_id=g.id) AND ('
+        "g.status IN ('published','retiring') OR EXISTS(SELECT 1 FROM recommendation_builds b "
+        'WHERE b.generation_id=g.id AND b.expires_at<?)) ORDER BY g.id LIMIT 1', (time.time(),)).fetchone()
+
+
+def _orphan_pools(conn):
+    revalidations = ('AND NOT EXISTS(SELECT 1 FROM recommendation_pool_revalidations v WHERE v.pool_id=p.id) '
+        if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='recommendation_pool_revalidations'").fetchone() else '')
+    return ('SELECT p.id FROM recommendation_pools p WHERE NOT EXISTS('
+        'SELECT 1 FROM recommendation_surface_pools m WHERE m.pool_id=p.id) AND NOT EXISTS('
+        'SELECT 1 FROM recommendation_build_pools b WHERE b.pool_id=p.id) AND NOT EXISTS('
+        'SELECT 1 FROM prepared_outputs o WHERE o.pool_id=p.id) ' + revalidations + 'ORDER BY p.id LIMIT ?')
+
+
+def retirement_pending(conn):
+    """Use the collectors' actual owners, including pools detached from a deleted generation."""
+    return bool(_retiring_generation(conn) or conn.execute(_orphan_pools(conn), (1,)).fetchone())
+
+
+@contextmanager
+def _retirement_write(repo, checkpoint):
+    """Wait for another writer outside ServingLock; commit one short prefix."""
+    committed = deferred = False
+    try:
+        with reserved_write(repo._store):
+            with deferred_autocheckpoint(repo.conn, repo._store._db_path is not None) as deferred:
+                yield repo.conn
+                repo.conn.commit()
+                committed = True
+    finally:
+        if checkpoint and deferred and committed:
+            repo.checkpoint_retirement()
+
+
+def cleanup_generations(repo, *, checkpoint=True, row_limit=CLEANUP_ROWS):
     """Fence a no-longer-required generation, then remove a bounded prefix."""
-    with proposal_cache._write(repo, checkpoint=checkpoint) as conn:
-        row = conn.execute('SELECT g.id,g.status FROM recommendation_generations g WHERE NOT EXISTS('
-            'SELECT 1 FROM recommendation_heads h WHERE h.generation_id=g.id) AND NOT EXISTS('
-            'SELECT 1 FROM recommendation_generation_refs r WHERE r.generation_id=g.id) AND ('
-            "g.status IN ('published','retiring') OR EXISTS(SELECT 1 FROM recommendation_builds b "
-            'WHERE b.generation_id=g.id AND b.expires_at<?)) ORDER BY g.id LIMIT 1', (time.time(),)).fetchone()
+    with _retirement_write(repo, checkpoint) as conn:
+        row = _retiring_generation(conn)
         if row:
             identity, status = row
             removed = 0
@@ -535,8 +571,8 @@ def cleanup_generations(repo, *, checkpoint=True):
                                    *revalidations,
                                    ('recommendation_build_pools', ('generation_id', 'pool_id')),
                                    ('recommendation_generation_surfaces', ('generation_id', 'surface'))):
-                removed += _delete(conn, table, columns, 'generation_id=?', (identity,), CLEANUP_ROWS - removed)
-                if removed == CLEANUP_ROWS:
+                removed += _delete(conn, table, columns, 'generation_id=?', (identity,), row_limit - removed)
+                if removed == row_limit:
                     return Retirement(rows=removed)
             conn.execute('DELETE FROM recommendation_builds WHERE generation_id=?', (identity,))
             conn.execute('DELETE FROM recommendation_generations WHERE id=?', (identity,))
@@ -544,30 +580,35 @@ def cleanup_generations(repo, *, checkpoint=True):
         return Retirement()
 
 
-def cleanup_pools(repo, *, checkpoint=True):
+def cleanup_pools(repo, *, checkpoint=True, row_limit=CLEANUP_ROWS, pool_limit=CLEANUP_POOLS):
     """Drain orphan pools even while generations remain eligible for retirement."""
     removed = retired = 0
-    with proposal_cache._write(repo, checkpoint=checkpoint) as conn:
+    with _retirement_write(repo, checkpoint) as conn:
         # The writer reservation keeps this bounded selection valid throughout
         # the transaction. Repeating the same anti-joins for each small pool
         # can consume the whole turn once retained pools lead the ID order.
-        revalidations = ('AND NOT EXISTS(SELECT 1 FROM recommendation_pool_revalidations v WHERE v.pool_id=p.id) '
-            if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='recommendation_pool_revalidations'").fetchone() else '')
-        selected = conn.execute('SELECT p.id FROM recommendation_pools p WHERE NOT EXISTS('
-            'SELECT 1 FROM recommendation_surface_pools m WHERE m.pool_id=p.id) AND NOT EXISTS('
-            'SELECT 1 FROM recommendation_build_pools b WHERE b.pool_id=p.id) AND NOT EXISTS('
-            'SELECT 1 FROM prepared_outputs o WHERE o.pool_id=p.id) ' + revalidations + 'ORDER BY p.id LIMIT ?',
-            (CLEANUP_POOLS,)).fetchall()
-        for pool in selected:
+        selected = tuple(row[0] for row in conn.execute(_orphan_pools(conn), (pool_limit,)))
+        if not selected:
+            return Retirement()
+        marks = ','.join('?' for _ in selected)
+        conn.execute('INSERT INTO recommendation_pool_retirements '
+            'SELECT id FROM recommendation_pools WHERE id IN (' + marks + ') ON CONFLICT DO NOTHING', selected)
+        for table, key in (('recommendation_radio_bands', 'recording_id'),
+                           ('recommendation_candidates', 'recording_id'), ('unresolved_recommendation_candidates', 'raw_key')):
             check_cancellable_work()
-            identity = pool[0]
-            conn.execute('INSERT INTO recommendation_pool_retirements VALUES (?) ON CONFLICT DO NOTHING', (identity,))
-            for table, key in (('recommendation_radio_bands', 'recording_id'),
-                               ('recommendation_candidates', 'recording_id'), ('unresolved_recommendation_candidates', 'raw_key')):
-                removed += _delete(conn, table, ('pool_id', key), 'pool_id=?', (identity,), CLEANUP_ROWS - removed)
-                if removed == CLEANUP_ROWS:
-                    return Retirement(rows=removed, pools=retired)
-            conn.execute('DELETE FROM recommendation_pool_retirements WHERE pool_id=?', (identity,))
-            conn.execute('DELETE FROM recommendation_pools WHERE id=?', (identity,))
-            retired += 1
+            removed += _delete(conn, table, ('pool_id', key), 'pool_id IN (' + marks + ')', selected, row_limit - removed)
+            if removed == row_limit:
+                break
+        # Delete empty parents together, even when another selected pool still
+        # has children to drain next time. The reservation and retirement fence
+        # keep the owner decision valid through this commit.
+        empty = tuple(row[0] for row in conn.execute(
+            'SELECT p.id FROM recommendation_pools p WHERE p.id IN (' + marks + ') AND '
+            'NOT EXISTS(SELECT 1 FROM recommendation_candidates c WHERE c.pool_id=p.id) AND '
+            'NOT EXISTS(SELECT 1 FROM recommendation_radio_bands b WHERE b.pool_id=p.id) AND '
+            'NOT EXISTS(SELECT 1 FROM unresolved_recommendation_candidates c WHERE c.pool_id=p.id)', selected))
+        if empty:
+            marks = ','.join('?' for _ in empty)
+            conn.execute('DELETE FROM recommendation_pool_retirements WHERE pool_id IN (' + marks + ')', empty)
+            retired = conn.execute('DELETE FROM recommendation_pools WHERE id IN (' + marks + ')', empty).rowcount
     return Retirement(rows=removed, pools=retired)

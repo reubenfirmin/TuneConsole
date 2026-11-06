@@ -62,6 +62,10 @@ class RecommendationPublicationsRepo(Repo):
     def cleanup(self):
         return publication.cleanup(self)
 
+    @snapshot_read
+    def retirement_pending(self):
+        return publication.retirement_pending(self.conn)
+
     def checkpoint_retirement(self):
         """Best-effort WAL copy after a bounded turn has released its writer."""
         from yt_playlist.core.db_checkpoint import checkpoint_wal

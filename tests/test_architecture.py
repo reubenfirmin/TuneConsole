@@ -39,13 +39,22 @@ def _flat_repository_references(tree, methods):
     # aliases must also work for reader/writer/repaired and fixture dictionaries.
     stores = {"store", "db", "store2", "ctx.store", "self.store", "self.ctx.store"}
     constructors = {"Store", "yt_playlist.core.store.Store"}
+    forwarded_methods = methods - {"get"}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "yt_playlist.core.store":
             constructors.update(a.asname or a.name for a in node.names if a.name == "Store")
 
+    @cache
+    def reference(node):
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute) and isinstance(node.value, (ast.Name, ast.Attribute)):
+            return f"{reference(node.value)}.{node.attr}"
+        return ast.unparse(node)
+
     def is_store(node, stores):
-        return (ast.unparse(node) in stores
-                or (isinstance(node, ast.Call) and ast.unparse(node.func) in constructors)
+        return ((isinstance(node, (ast.Name, ast.Attribute)) and reference(node) in stores)
+                or (isinstance(node, ast.Call) and reference(node.func) in constructors)
                 or (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)
                     and node.slice.value == "store"))
 
@@ -65,11 +74,11 @@ def _flat_repository_references(tree, methods):
             for node in assignments:
                 if node.value is not None and is_store(node.value, aliases):
                     targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                    aliases.update(ast.unparse(t) for t in targets if isinstance(t, (ast.Name, ast.Attribute)))
+                    aliases.update(reference(t) for t in targets if isinstance(t, (ast.Name, ast.Attribute)))
             if len(aliases) == before:
                 break
         for node in local:
-            if isinstance(node, ast.Attribute) and node.attr in methods - {"get"} and is_store(node.value, aliases):
+            if isinstance(node, ast.Attribute) and node.attr in forwarded_methods and is_store(node.value, aliases):
                 yield node.lineno, ast.unparse(node)
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                     and node.func.attr == "setattr" and len(node.args) > 1

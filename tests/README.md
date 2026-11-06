@@ -21,6 +21,10 @@ tests. Use `-m browser` for the browser suite, `-n 0` for serial execution or
 `-n N` for an explicit worker count. Coverage runs need explicit `-n 4` to use
 workers. Coordinate full-suite ownership under [AGENTS.md](../AGENTS.md).
 CI tests run only on pull requests; releases build and publish without tests.
+Browser coverage has a 20-minute total pytest budget, including collection,
+fixtures and teardown. CI verifies the sum of all browser shards' elapsed
+times; adding runners does not increase the allowance. Select distinct useful
+desktop/TV behavior by measured cost, with no fixed test-count target.
 
 ## Fixtures
 
@@ -58,7 +62,7 @@ Paths below are relative to `tests/`.
 | Road Trip | `test_road_trip.py`, `test_road_trip_acquisition.py`, `test_road_trip_mixing.py`, `test_road_trip_balance.py`, `test_road_trip_ordering.py` |
 | Taste | `test_taste_page.py`, `test_taste_controls_web.py`, `test_taste_evaluation_web.py`, `test_taste_feedback_web.py`; `browser/test_taste*_browser.py` |
 | Web routes | `test_web.py`, `test_setup_routes.py`, `test_network_routes.py`, `test_sync_routes.py`, `test_cleanup_routes.py`, `test_merge_routes.py`, `test_enrichment_routes.py`, `test_move_routes.py` |
-| Storage repair | `test_storage_maintenance.py`, `browser/test_storage_maintenance_browser.py` |
+| Storage repair | `test_storage_maintenance.py`, `browser/test_storage_notice_browser.py` |
 
 Shared helpers live in `radio_session_support.py`, `browser/radio_ui_support.py`,
 `road_trip_support.py`, `web_support.py`, `setup_support.py` and

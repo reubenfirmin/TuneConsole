@@ -77,6 +77,7 @@ class Store:
     def activity_paused(self):
         source = getattr(self, '_evidence_source', self)
         return (getattr(source, '_activity_paused', False)
+                or getattr(source, '_recommendation_retirement_pending', False)
                 or getattr(source, '_rebuild_source_version', None) == 64)
 
     @activity_paused.setter

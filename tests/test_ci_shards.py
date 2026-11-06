@@ -97,6 +97,28 @@ def test_every_parameter_case_executes_once_and_all_phases_feed_timings():
     assert result["phase_seconds"] == pytest.approx({"setup": .3, "call": .3, "teardown": .3})
 
 
+@pytest.mark.parametrize("total", [1, 2, 4])
+def test_browser_budget_counts_all_runners_and_is_independent_of_case_count(total):
+    rows = reports(total, [f"file-{n}.py::test_case" for n in range(8)])
+    for row in rows:
+        row.update(suite="browser", elapsed_seconds=1200 / total)
+    assert verify(rows, "browser", total)["test_runner_minutes"] == 20
+    rows[-1]["elapsed_seconds"] += .001
+    with pytest.raises(ValueError, match="aggregate.*1200s total budget"):
+        verify(rows, "browser", total)
+    for row in rows:
+        row["suite"] = "unit"
+    assert verify(rows, "unit", total)["test_runner_minutes"] > 20
+
+
+@pytest.mark.parametrize("elapsed", [None, "300", float("nan"), float("inf"), -1])
+def test_invalid_process_timings_cannot_establish_the_budget(elapsed):
+    rows = reports()
+    rows[0]["elapsed_seconds"] = elapsed
+    with pytest.raises(ValueError, match="invalid elapsed time"):
+        verify(rows, "unit")
+
+
 def test_serial_control_requires_explicit_total_and_has_identical_case_coverage():
     rows = reports()
     control = deepcopy(rows[0])
@@ -211,15 +233,21 @@ def test_unknown_tail():
     assert partial['journal_incomplete'] and partial['tests'] == recovered['tests']
 
 
-def test_journal_keeps_its_io_during_product_fault_injection(tmp_path, monkeypatch):
+@pytest.mark.parametrize('change_directory', [False, True])
+def test_journal_keeps_its_io_during_product_fault_injection(tmp_path, monkeypatch, change_directory):
     import ci_test_shards as journal
 
-    shard = journal.Shard(None, 1, 1, tmp_path / 'shard.json', 'unit', {})
+    monkeypatch.chdir(tmp_path)
+    shard = journal.Shard(None, 1, 1, Path('evidence/shard.json'), 'unit', {})
+    product_directory = tmp_path / 'product'
+    product_directory.mkdir()
     node = 'test_product.py::test_fault'
     shard.report.update(expected=[node], selected=[node], file_owners={'test_product.py': 1}, estimated_seconds=[1])
     def fail(*args, **kwargs):
         raise OSError('product-only fault')
     with monkeypatch.context() as patch:
+        if change_directory:
+            patch.chdir(product_directory)
         patch.setattr(json, 'dumps', fail)
         patch.setattr(os, 'fsync', fail)
         assert journal._diagnostic('failure details') == 'failure details'
@@ -234,6 +262,8 @@ def test_journal_keeps_its_io_during_product_fault_injection(tmp_path, monkeypat
     events = [json.loads(line) for line in shard.journal.read_text().splitlines()]
     assert [event['sequence'] for event in events] == list(range(len(events)))
     assert events[-1]['event'] == 'finish'
+    assert shard.path == tmp_path / 'evidence/shard.json'
+    assert not (product_directory / 'evidence').exists()
 
 
 def test_real_journal_sync_failure_propagates_without_reusing_sequence_or_certifying_completion(tmp_path, monkeypatch):

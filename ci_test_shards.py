@@ -18,6 +18,7 @@ import pytest
 BASELINE = Path(__file__).parent / ".github/test-durations.json"
 SHARD_COUNTS = (1, 2, 4)
 DIAGNOSTIC_BYTES = 64 * 1024
+BROWSER_BUDGET_SECONDS = 20 * 60
 
 
 def _diagnostic(value):
@@ -141,12 +142,12 @@ def pytest_configure(config):
 
 class Shard:
     def __init__(self, config, index, total, path, suite, durations):
-        self.config, self.path, self.durations = config, path, durations
+        self.config, self.path, self.durations = config, path.resolve(), durations
         self.started = time.monotonic()
         self.sequence = 0
         self.journal_failed = False
         self._sync = _journal_fsync
-        self.journal = path.with_suffix('.events.jsonl')
+        self.journal = self.path.with_suffix('.events.jsonl')
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.journal.write_bytes(b'')
         self.report = {"schema": 2, "suite": suite, "index": index, "total": total,
@@ -254,6 +255,9 @@ def verify(reports, suite, total=2):
             raise ValueError(f"{suite}: shard {report['index']} did not pass")
         if report.get('active') or report.get('journal_incomplete'):
             raise ValueError(f"{suite}: shard {report['index']} has incomplete journal work")
+        elapsed = report.get("elapsed_seconds")
+        if type(elapsed) not in (int, float) or not math.isfinite(elapsed) or elapsed < 0:
+            raise ValueError(f"{suite}: shard {report['index']} has invalid elapsed time")
         planned = [nodeid for nodeid in original if report["file_owners"][nodeid.split("::", 1)[0]] == report["index"]]
         if report["selected"] != planned or set(report["tests"]) != set(planned):
             raise ValueError(f"{suite}: missing or unexpected executed cases on shard {report['index']}")
@@ -270,11 +274,15 @@ def verify(reports, suite, total=2):
         executed.extend(report["executions"])
     if Counter(executed) != Counter(original):
         raise ValueError(f"{suite}: shards must execute every collected case exactly once")
+    elapsed_seconds = sum(report["elapsed_seconds"] for report in reports)
+    if suite == "browser" and elapsed_seconds > BROWSER_BUDGET_SECONDS:
+        raise ValueError(f"browser: aggregate pytest elapsed time {elapsed_seconds:.3f}s "
+                         f"exceeds the {BROWSER_BUDGET_SECONDS}s total budget")
     return {"suite": suite, "revision": reports[0]["revision"], "shards": total, "cases": len(original),
             "case_digest": hashlib.sha256(json.dumps(sorted(original)).encode()).hexdigest(),
             "estimated_seconds": reports[0]["estimated_seconds"],
             "shard_seconds": [report["elapsed_seconds"] for report in reports],
-            "test_runner_minutes": sum(report["elapsed_seconds"] for report in reports) / 60,
+            "test_runner_minutes": elapsed_seconds / 60,
             "phase_seconds": {name: sum(phases.get(name, {}).get("seconds", 0)
                                          for report in reports for phases in report["tests"].values())
                               for name in ("setup", "call", "teardown")},

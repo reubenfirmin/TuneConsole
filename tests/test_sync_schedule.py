@@ -234,7 +234,8 @@ def test_only_verified_listing_can_retire_active_child_deadlines(file_backed_sto
         reopened.conn.close()
 
 
-def test_reconnect_retry_survives_a_busy_manual_sync_lock(store, monkeypatch):
+@pytest.mark.parametrize('blocked', ['manual-sync', 'recommendation-retirement'])
+def test_reconnect_retry_survives_a_busy_manual_sync_lock(store, monkeypatch, blocked):
     import logging
     import threading
     from types import SimpleNamespace
@@ -248,7 +249,10 @@ def test_reconnect_retry_survives_a_busy_manual_sync_lock(store, monkeypatch):
     sync.sync_all(store, {iid: client}, 100)
     client.partial.clear()
     lock = threading.Lock()
-    lock.acquire()
+    if blocked == 'manual-sync':
+        lock.acquire()
+    else:
+        store._recommendation_retirement_pending = True
 
     class Ticks:
         count = 0
@@ -256,7 +260,10 @@ def test_reconnect_retry_survives_a_busy_manual_sync_lock(store, monkeypatch):
         def wait(self, timeout):
             self.count += 1
             if self.count == 2:
-                lock.release()
+                if blocked == 'manual-sync':
+                    lock.release()
+                else:
+                    store._recommendation_retirement_pending = False
             return self.count > 2
 
     monkeypatch.setattr("yt_playlist.web.app._maybe_check_update", lambda ctx: None)

@@ -199,3 +199,61 @@ def test_inflight_retention_coalesces_ticker_polls_and_preserves_serving(mainten
     assert m.calls[-1] == ('ratings', 700)
     assert len(m.calls) == 8
     assert m.worker.jobs.retry[Job.RETENTION].retry_at == 1000
+
+
+def test_priority_cleanup_failure_retains_work_and_ticker_restarts_before_ranking(maintenance, monkeypatch):
+    from yt_playlist.rec import recommendation_retirement
+
+    m = maintenance
+    store = m.worker.ctx.store
+    attempts = []
+
+    def drain(owner, now):
+        attempts.append(m.clock[0])
+        assert owner is store
+        if len(attempts) == 1:
+            store._recommendation_retirement_pending = True
+            # Reproduce a ticker arrival during a long cleanup attempt.
+            m.worker._poll_retention()
+            raise OSError('interrupted committed cleanup')
+        store._recommendation_retirement_pending = False
+
+    monkeypatch.setattr(recommendation_retirement, 'drain', drain)
+    monkeypatch.setattr(m.worker.tasks, 'ratings', lambda: m.calls.append(('ratings', m.clock[0])) or set())
+    monkeypatch.setattr(m.worker, '_refresh_bundles', lambda: m.calls.append(('ranking', m.clock[0])))
+    m.worker.trigger_candidate_refresh()
+    m.worker.trigger_rating_update()
+    m.worker._poll_retention()
+    m.targets.pop()()
+    assert attempts == [100] and not m.calls
+    assert store.activity_paused and not m.worker._running
+    assert m.worker.jobs.has(Job.BUNDLES) and m.worker.jobs.has(Job.RATINGS)
+    assert not m.worker.jobs.has(Job.RETENTION)
+    assert m.worker.jobs.retry[Job.BUNDLES].attempted_at == float('-inf')
+    m.clock[0] = 104.9
+    m.worker._poll_retention()
+    m.worker._poll_evidence_storage()
+    m.worker.trigger_candidate_refresh()
+    m.worker.trigger_rating_update()
+    assert not m.targets
+    m.clock[0] = 105
+    m.worker._poll_retention()
+    m.targets.pop()()
+    assert attempts == [100, 105]
+    assert m.calls[-2:] == [('ratings', 105), ('ranking', 105)]
+    assert not store.activity_paused and not m.worker.jobs and not m.worker._running
+
+
+def test_idle_retention_recovers_backlog_before_hourly_deadline(maintenance, monkeypatch):
+    from yt_playlist.rec import candidate_refresh, recommendation_retirement
+
+    m = maintenance
+    store = m.worker.ctx.store
+    candidate_refresh.checked(store, 2000)
+    assert not candidate_refresh.check_due(store, 2000)
+    monkeypatch.setattr(store.recommendations, 'retirement_pending', lambda: True)
+    monkeypatch.setattr(recommendation_retirement, 'drain',
+                        lambda *args: m.calls.append(('priority cleanup', m.clock[0])))
+    m.run(100)
+    assert m.calls[0] == ('priority cleanup', 100)
+    assert len(m.calls) == 9

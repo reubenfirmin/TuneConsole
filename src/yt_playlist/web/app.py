@@ -204,6 +204,8 @@ def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=
         except WorkClosing:
             return
         try:
+            if getattr(ctx.store, '_recommendation_retirement_pending', False):
+                continue
             if setup is not None and not setup.configured:
                 continue
             if not (bridge is not None and bridge.connected):

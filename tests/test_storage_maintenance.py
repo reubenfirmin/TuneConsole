@@ -31,6 +31,33 @@ def current_copy_store(file_backed_store):
     return file_backed_store
 
 
+def test_recommendation_recovery_serves_browsing_and_buffers_then_replays_feedback(file_backed_store, monkeypatch):
+    store = file_backed_store
+    store.accounts.upsert_account('Main', 'bridge', None, True)
+    store.tracks.upsert_track('playing', 'Playing', 'Artist', None, 180)
+    app = web_app.create_app(store, lambda: {}, background_work=False)
+    ctx = app.state.ctx
+    monkeypatch.setattr(ctx.rec_worker, 'trigger_mode_refresh', lambda: None)
+    with TestClient(app, base_url='http://127.0.0.1', backend_options={'use_uvloop': True}) as client:
+        store._recommendation_retirement_pending = True
+        try:
+            status = client.get('/storage-maintenance/status').json()
+            assert status['active'] and status['phase'] == 'recommendation_retirement'
+            for path in ('/', '/playlists', '/cleanup', '/radio/status'):
+                assert client.get(path).status_code == 200, path
+            assert client.post('/sync').status_code == 503
+            assert player_events.handle_player_event(ctx,
+                {'kind': 'state', 'state': 'paused', 'videoId': 'playing'}, 1000)
+            assert playback_feedback.inbox(store).pending() == 1
+            assert playback_feedback.drain(store) == 0
+        finally:
+            store._recommendation_retirement_pending = False
+        assert playback_feedback.drain(store) == 1
+        assert not playback_feedback.inbox(store).pending()
+        assert store.conn.execute("SELECT count(*) FROM player_events WHERE kind='state'").fetchone()[0] == 1
+        assert client.get('/storage-maintenance/status').json()['recording']
+
+
 @pytest.mark.parametrize('synced', [False, True])
 def test_ui_and_extension_playback_during_actual_copy(current_copy_store, monkeypatch, synced):
     store = current_copy_store

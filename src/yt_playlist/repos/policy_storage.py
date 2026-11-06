@@ -294,6 +294,18 @@ def protected_references(conn):
     return protected
 
 
+def retirement_pending(conn, now):
+    """A complete scan boundary, independent of an earlier incremental cursor."""
+    if not typed(conn):
+        return False
+    protected = protected_references(conn)
+    policies = conn.execute('SELECT version FROM recommendation_policies p WHERE created_at<? AND '
+        + _typed_protection(conn), (now - GRACE_SECONDS,))
+    return any(row[0] not in protected for row in policies) or bool(conn.execute(
+        'SELECT 1 FROM recommendation_policy_bodies b WHERE b.served=0 AND NOT EXISTS('
+        'SELECT 1 FROM recommendation_policies p WHERE p.base_version=b.version) LIMIT 1').fetchone())
+
+
 def retention_candidates(conn, now, *, limit=None, cursor_key=CURSOR):
     limit = SCAN_LIMIT if limit is None else limit
     row = conn.execute('SELECT value FROM settings WHERE key=?', (cursor_key,)).fetchone()

@@ -89,8 +89,10 @@ def test_four_eligible_mixes_are_required_everywhere(store, count):
         assert 'id="onboarding-feed"' not in home.text
     if expected:
         seed_dislike(store, 'prepared 0|artist', until=None, now=1000)
-        assert not onboarding.prepared_mixes_ready(store, 1000)
-        assert not client.get('/home/growth').json()['ready_formats']['mixes']
+        # Feedback schedules new preparation; serving keeps the published board.
+        assert onboarding.prepared_mixes_ready(store, 1000)
+        assert client.get('/home/growth').json()['ready_formats']['mixes']
+        assert client.get('/home/onboard/status').json()['setup']['mixes_ready']
 
 
 def test_new_destinations_require_usable_outputs_and_recheck_current_eligibility(store):

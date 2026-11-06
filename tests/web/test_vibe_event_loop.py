@@ -6,12 +6,10 @@ import time
 
 import httpx
 import pytest
-from fastapi import Response
 from fastapi.testclient import TestClient
 
 from yt_playlist.rec import account_growth
 from yt_playlist.web.app import create_app
-from yt_playlist.web.routes.home_views import HomeViews
 
 
 @pytest.mark.parametrize('allowed,status', [(True, 400), (False, 409)], ids=['invalid', 'locked'])
@@ -54,7 +52,8 @@ def test_vibe_reader_waits_leave_the_event_loop_responsive(file_backed_store, mo
     # This fault probe isolates reader ownership, independently of music readiness.
     monkeypatch.setattr(account_growth, 'retained_access', lambda *_: True)
     monkeypatch.setattr(account_growth, 'vibe_access', lambda *_: True)
-    monkeypatch.setattr(HomeViews, 'cards_safe', lambda *_: Response('selected'))
+    # This request accepts durable intent. Generation has separate worker owners.
+    monkeypatch.setattr(app.state.ctx.vibe_requests, 'resume', lambda: None)
     entered, release = threading.Event(), threading.Event()
     original_view = store.read_view
 
@@ -99,11 +98,20 @@ def test_vibe_reader_waits_leave_the_event_loop_responsive(file_backed_store, mo
                 watchdog.cancel()
                 watchdog.join(1)
                 response = await asyncio.wait_for(selection, 5)
-            assert response.status_code == 200 and response.text == 'selected'
+            assert response.status_code == 200 and response.text == ''
+            assert response.headers['HX-Reswap'] == 'none'
+            accepted = app.state.ctx.vibe_requests.state()
+            assert accepted == {'id': response.headers['X-Home-Vibe-Request'],
+                                'vibe': 'concentrate', 'phase': 'pending'}
             assert store.settings.get_setting('home_mix_vibe') == 'concentrate'
             # Cleanup releases the context and admission for the next manual choice.
             response = await client.post('/home/vibe', data={'vibe': 'relax'})
             assert response.status_code == 200
+            assert response.headers['HX-Reswap'] == 'none'
+            latest = app.state.ctx.vibe_requests.state()
+            assert latest == {'id': response.headers['X-Home-Vibe-Request'],
+                              'vibe': 'relax', 'phase': 'pending'}
+            assert latest['id'] != accepted['id']
             assert store.settings.get_setting('home_mix_vibe') == 'relax'
 
     asyncio.run(exercise())

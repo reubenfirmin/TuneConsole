@@ -6,6 +6,7 @@ from yt_playlist.web.app import create_app
 from yt_playlist.web.context import Ctx
 from tests.conftest import FakeClient
 from yt_playlist.rec import home_prepared
+from yt_playlist.rec.worker_queue import Job
 
 
 class _ArtistClient(FakeClient):
@@ -25,6 +26,22 @@ def _ctx(store, client):
     iid = store.accounts.upsert_account("main", "cred", None, True)
     return iid, Ctx(store=store, client_provider=lambda: {iid: client}, now_fn=lambda: 1.0,
                     templates=None, jobs=None)
+
+
+def test_discovery_waits_for_priority_recommendation_retirement(store, monkeypatch):
+    from yt_playlist.rec import discover
+    _, ctx = _ctx(store, FakeClient())
+    worker = RecWorker(ctx)
+    calls = []
+    monkeypatch.setattr(discover, 'run_discovery', lambda *args: calls.append('discovery') or {})
+    monkeypatch.setattr(worker, '_start_loop', lambda: None)
+    store._recommendation_retirement_pending = True
+    assert worker._discover(10) is None
+    assert not calls and not worker.jobs
+    store._recommendation_retirement_pending = False
+    worker._discover(11)
+    assert calls == ['discovery']
+    worker.shutdown()
 
 
 def test_worker_materializes_proposals(store, monkeypatch):
@@ -88,13 +105,20 @@ def test_discovery_pass_publishes_new_songs_before_the_next_rebuild(store, monke
     monkeypatch.setattr(worker, '_start_loop', lambda: None)
     try:
         worker._discover(10)
+        # Discovery persists new inputs, then joins the admitted ranking round.
+        # Only that producer can make the candidates available to serving.
+        assert len(store.discovery.discovered_track_keys()) == 12
+        assert fresh_pool.pick(store, 11) == []
+        assert worker.jobs.has(Job.BUNDLES) and not worker.jobs.has(Job.HOME)
+        assert worker._refresh_bundles() is not None
         assert len(fresh_pool.pick(store, 11)) == 12
+        assert worker.jobs.has(Job.HOME)
     finally:
         worker.shutdown()
 
 
 @pytest.mark.parametrize("fails", [False, True])
-def test_discovery_finishes_and_queues_home_refresh_only_on_success(store, monkeypatch, fails):
+def test_discovery_finishes_and_queues_candidate_refresh_only_on_success(store, monkeypatch, fails):
     from yt_playlist.rec import discover
     _, ctx = _ctx(store, FakeClient())
     worker = RecWorker(ctx)
@@ -113,7 +137,8 @@ def test_discovery_finishes_and_queues_home_refresh_only_on_success(store, monke
     else:
         worker._discover(10)
     assert not worker._discovering
-    assert worker.jobs.has('home') is (not fails)
+    assert worker.jobs.has(Job.BUNDLES) is (not fails)
+    assert not worker.jobs.has(Job.HOME)
     assert worker.discovery_busy is (not fails)
     worker.shutdown()
 
@@ -123,7 +148,7 @@ def test_discovery_retries_an_actual_sql_deadline_without_an_exception_trace(
     import logging
     import sqlite3
     from yt_playlist.core.activity import work_budget
-    from yt_playlist.rec import discover, fresh_pool
+    from yt_playlist.rec import discover
 
     store = file_backed_store
     _, ctx = _ctx(store, FakeClient())
@@ -146,17 +171,18 @@ def test_discovery_retries_an_actual_sql_deadline_without_an_exception_trace(
                 with work_budget(.005):
                     reader.conn.execute('WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL '
                         'SELECT x+1 FROM n WHERE x<100000000) SELECT SUM(x) FROM n').fetchone()
-        assert not worker.jobs.has('home'), 'A failed discovery must not queue a Home publication'
+        assert not worker.jobs.has(Job.BUNDLES), 'A failed discovery must not queue candidate preparation'
+        assert not worker.jobs.has(Job.HOME), 'Discovery must not publish a Home menu directly'
         return {}
 
     monkeypatch.setattr(worker._stop, 'wait', wait)
     monkeypatch.setattr(discover, 'run_discovery', scan)
-    monkeypatch.setattr(fresh_pool, 'prepare', lambda *args: None)
     with caplog.at_level(logging.INFO):
         worker._tick_loop()
     assert attempts == 2
     assert waits == [1800, 60, 1800]
-    assert worker.jobs.has('home') and not worker._discovering
+    assert worker.jobs.has(Job.BUNDLES) and not worker._discovering
+    assert not worker.jobs.has(Job.HOME)
     assert 'Discovery deferred by read deadline' in caplog.text
     assert not any(record.exc_info for record in caplog.records)
     with pytest.raises(sqlite3.ProgrammingError, match='closed'):
