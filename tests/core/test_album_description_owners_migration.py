@@ -9,10 +9,11 @@ from threading import Barrier
 
 import pytest
 
-from yt_playlist.core import (album_description_files as files, album_description_requests as requests,
+from yt_playlist.core import (album_description_files as files,
                               album_aliases, audio_annotation_files, audio_annotations, choice_evidence_files,
                               policy_documents, sample_files)
 from tests import file_custody_support as custody
+from tests import paid_request_support as requests
 from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations import v070_policy_documents as policies
 from yt_playlist.core.migrations import v071_album_descriptions as migration
@@ -589,14 +590,10 @@ def test_paid_repository_cannot_leave_a_policy_row_when_admission_rolls_back(pai
 
 
 def test_paid_repository_reads_legacy_evidence_without_resolving_its_owner(predecessor):
-    from yt_playlist.repos.album_descriptions import AlbumDescriptionsRepo
-    from threading import RLock
-    from types import SimpleNamespace
-
     conn = predecessor
     original = seed(conn)
     apply(conn)
-    repo = AlbumDescriptionsRepo(SimpleNamespace(conn=conn, _lock=RLock(), _db_path=None))
+    repo = requests.service(conn)
     assert repo.legacy_result('unresolved-hash') == json.loads(original['album_description:unresolved-hash'][0])
     assert repo.cached(1, 'new-policy') is None
     assert conn.execute('SELECT count(*) FROM album_description_requests WHERE album_id IS NOT NULL').fetchone()[0] == 0

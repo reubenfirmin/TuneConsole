@@ -102,13 +102,12 @@ def test_resweep_selects_stale_incomplete_only(store):
     assert sweep == ["Stale"]                          # only stale AND incomplete
 
 
-def test_processed_timeline_is_cumulative(store):
+def test_processed_timestamp_query_keeps_first_pass_order(store):
     for i, ts in enumerate([10.0, 20.0, 30.0]):
         t = _track(store, f"v{i}", f"T{i}", "A")
         complete_entries(store, [t], now=ts)
-    tl = store.enrichment_reports.processed_timeline(buckets=3)
-    assert tl[-1]["n"] == 3                            # cumulative reaches total
-    assert [p["n"] for p in tl] == sorted(p["n"] for p in tl)  # monotonic
+    assert store.enrichment_reports.repository.processed_timestamps() == [
+        {'first': timestamp, 'last': timestamp} for timestamp in (10., 20., 30.)]
 
 
 def test_re_enrichment_extends_the_chart_without_counting_another_first_pass(store):
@@ -118,10 +117,8 @@ def test_re_enrichment_extends_the_chart_without_counting_another_first_pass(sto
     store.enrichment_queue.mark_recordings_enriched(recordings, now=10.0)
     store.enrichment_queue.mark_recordings_enriched(recordings[:1], now=30.0)
     store.enrichment_queue.mark_recordings_enriched(recordings[:1], now=50.0)
-    timeline = store.enrichment_reports.processed_timeline(buckets=4)
-    assert timeline[-1] == {"t": 50.0, "n": 2, "refresh": 1}
-    assert [point["n"] for point in timeline] == [2, 2, 2, 2]
-    assert [point["refresh"] for point in timeline] == [0, 0, 0, 1]
+    assert store.enrichment_reports.repository.processed_timestamps() == [
+        {'first': 10., 'last': 50.}, {'first': 10., 'last': 10.}]
 
 
 def test_one_priority_order_applies_to_both_sources_before_limit_and_offset(store):

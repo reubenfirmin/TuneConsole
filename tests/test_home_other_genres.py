@@ -1,5 +1,6 @@
 import html
 import json
+import logging
 import re
 
 import numpy as np
@@ -9,9 +10,8 @@ from fastapi.testclient import TestClient
 from tests.conftest import FakeClient
 from tests.home_fixture_support import home_routes_only
 from tests.prepared_fixture_support import prepared_template
-from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
-from yt_playlist.rec import home_prepared, home_themes, mode_surfaces
+from yt_playlist.rec import home_cache, home_prepared, home_themes, mode_surfaces
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
 from yt_playlist.rec import home_cards as home
@@ -28,22 +28,74 @@ def genre_candidates_template(_pristine_current_schema):
         yield template
 
 
+@pytest.fixture(scope='module')
+def genre_controls_template(_pristine_current_schema):
+    # HTTP controls need four playable tracks per lane. Backfill checks retain
+    # the larger candidate template above and manipulate its real pools.
+    def seed(source):
+        bundles = seed_genres(source, tracks_per_lane=4)
+        _publish_menu(source, 1000.0)
+        return bundles
+
+    with prepared_template(_pristine_current_schema, seed) as template:
+        yield template
+
+
+@pytest.fixture
+def genre_controls(store, genre_controls_template):
+    return genre_controls_template.restore(store)
+
+
+@pytest.fixture(scope='module')
+def template_bytecode(tmp_path_factory):
+    from jinja2 import FileSystemBytecodeCache
+
+    return FileSystemBytecodeCache(str(tmp_path_factory.mktemp('genre-template-bytecode')))
+
+
 @pytest.fixture(autouse=True)
-def genre_routes(monkeypatch, home_routes_only, one_menu_per_attempt):
+def genre_routes(monkeypatch, home_routes_only, template_bytecode):
+    from yt_playlist.providers import genres as genre_provider
+    from yt_playlist.web import app as webapp
+
     # Diagnostic history rereads every displayed track, independently of genre
     # steering. Its real payload/metadata contracts live in test_home_audit.
     monkeypatch.setattr(home.HomeCards, 'audit', lambda *args, **kwargs: None)
+    # The metadata provider's global tag matcher is unrelated to Home's real
+    # catalog resolution. Avoid rebuilding that separate subsystem per app.
+    monkeypatch.setattr(genre_provider, 'configure', lambda *args, **kwargs: None)
+    templates = webapp.Jinja2Templates
+
+    def cached_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = template_bytecode
+        return result
+
+    # Share compiled source only; each app keeps its own environment, globals
+    # and request context. The real templates still render every response.
+    monkeypatch.setattr(webapp, 'Jinja2Templates', cached_templates)
+
+
+def _publish_menu(store, now):
+    # Publish the real genre selection once. Worker snapshot coordination,
+    # discovery summaries and alternative-menu enumeration belong to
+    # test_home_prepared, rather than every HTTP genre-control scenario.
+    result = home.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__)).cards(
+        home.CardsRequest(now, record=False))
+    home_prepared.remember(store, None, result, now)
+    payload = home_cache.read(store, 'home_tuned')
+    assert home_prepared._valid(payload)
+    home_cache.put(store, home_prepared.SURFACE, payload, now)
+    home_cache.put(store, 'home_tuned', {}, now)
+    home_cache.put(store, 'home_choice', {}, now)
 
 
 def _client(store, now=1000.0, *, prepare=True):
     from yt_playlist.web.app import create_app
 
     identity = store.accounts.upsert_account('main', 'cred', None, True)
-    # Genre steering consumes candidate pools and one completed mix menu.
-    # Independent discovery/revisit summaries and twelve alternative menus
-    # have separate preparation owners in test_home_prepared.
-    if prepare:
-        assert home_prepared.prepare_mixes(store, now) is not None
+    if prepare and not home_prepared._valid(home_cache.read(store, home_prepared.SURFACE)):
+        _publish_menu(store, now)
     return TestClient(create_app(store, lambda: {identity: FakeClient()},
                                 now_fn=lambda: now, background_work=False),
                       base_url='http://127.0.0.1')
@@ -82,7 +134,7 @@ def offered(response):
             for g in json.loads(html.unescape(value))}
 
 
-def test_other_genres_changes_actual_themes_without_changing_taste(store, genre_candidates):
+def test_other_genres_changes_actual_themes_without_changing_taste(store, genre_controls):
     client = _client(store)
     before = client.get("/home/cards")
     current = offered(before)
@@ -108,7 +160,7 @@ def test_other_genres_changes_actual_themes_without_changing_taste(store, genre_
     assert "genre_request" not in regular.text
 
 
-def test_no_alternative_genres_keeps_usable_mixes_and_explains(store, genre_candidates):
+def test_no_alternative_genres_keeps_usable_mixes_and_explains(store, genre_controls):
     response = _client(store).post("/home/other-genres", data={
         "genres": json.dumps(["Jazz", "Techno", "Trance", "Indie Rock", "Ambient", "Classical"])})
     assert response.status_code == 200
@@ -158,20 +210,20 @@ def test_other_genres_does_not_attribute_a_rethemed_card_to_the_old_mode(store, 
     assert all(t["genre"] != "Jazz" for c in cards for t in c["tracks"])
 
 
-def test_other_genres_uses_current_library_genres_before_rendering(store, genre_candidates):
-    bundles = genre_candidates
+def test_other_genres_uses_current_library_genres_before_rendering(store, genre_controls):
+    bundles = genre_controls
     # The worker cached Techno; enrichment has since corrected these tracks to Jazz.
     # Leave other alternatives available so this must succeed without the usual-mix fallback.
-    for lane, items in bundles["1"].items():
-        for i, item in enumerate(items):
-            item["title"] = f"{lane} song {i}"
-            item["key"] = identity_key(item["title"], item["artist"])
-            tid = store.tracks.upsert_track(f"{lane}-{i}", item["title"], item["artist"], None, None)
-            store.tracks.set_track_genre(tid, "Jazz")
-        # General backfill carries the same stale rows as the mode bucket.
-        bundles["all"][lane] = list(items)
-    publish_bundles(store, bundles, 1.0)
     generation = store.recommendations.head('home')
+    for item in {item['key']: item for items in bundles["1"].values() for item in items}.values():
+        assert item['genre'] == 'Techno'
+        entry = store.conn.execute(
+            'SELECT e.id FROM catalog_entries e JOIN recordings r ON r.id=e.recording_id '
+            'WHERE r.identity_key=?', (item['key'],)).fetchone()
+        assert entry is not None
+        store.tracks.set_track_genre(entry[0], 'Jazz')
+    # Do not republish: the real mode and general pools must still carry the
+    # stale Techno payload while selection resolves the corrected catalog.
     client = _client(store)
 
     response = client.post("/home/other-genres", data={
@@ -195,7 +247,7 @@ def test_genre_filter_resolves_library_metadata_without_mutating_candidates(stor
     assert items[0]["genre"] == "Jazz"
 
 
-def test_chosen_genres_constrain_tracks_and_expire_without_changing_taste(store, genre_candidates):
+def test_chosen_genres_constrain_tracks_and_expire_without_changing_taste(store, genre_controls):
     client = _client(store)
     weights, leans = store.rec_model.get_weights(), store.rec_model.get_leans()
     generation = store.recommendations.head('home')
@@ -247,10 +299,11 @@ def test_chosen_genres_keep_a_fresh_skeleton_when_the_pool_cannot_fill_a_mix(sto
     # Four Techno tracks per lane keep the usual menu usable. The requested
     # Jazz pool remains genuinely underfilled without preparing four unused
     # genre families or duplicate candidate tracks.
-    bundles = seed_genres(store, genres=['Jazz', 'Techno'], tracks_per_lane=4)
+    bundles = genre_bundles(store, genres=['Jazz', 'Techno'], tracks_per_lane=4)
     for lane in mode_surfaces.CARD_SURFACES:
         bundles["0"][lane] = bundles["0"][lane][:1]
         bundles["all"][lane] = [t for t in bundles["all"][lane] if t["genre"] != "Jazz"]
+    seed_bundle_subjects(store, bundles)
     publish_bundles(store, bundles, 1.0)
     client = _client(store)
     assert 'techno' in offered(client.get('/home/cards'))

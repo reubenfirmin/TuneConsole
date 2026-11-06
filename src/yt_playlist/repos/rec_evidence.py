@@ -1,143 +1,80 @@
-"""Historical recommendation evidence and reconstructable training baskets.
+"""SQLite facts for recommendation training and causal evaluation."""
+import json
 
-Cutoffs are applied here, alongside the provenance needed to keep generated plays
-out of held-out evaluation. Basket reads pin one snapshot for all eligibility and
-membership queries, including calls into the shared eligibility owner.
-"""
-from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized, snapshot_read
-from yt_playlist.repos.rec_eligibility import exclude_ids
-from yt_playlist.core import genre_identity
-from yt_playlist.util.years import decade
-
-_ARTIST_BASKET_CAP = 50
-_CONTENT_BASKET_CAP = 80
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 
 
 class RecEvidenceRepo(Repo):
     @synchronized
-    def evaluation_history_bounds(self) -> tuple:
-        """Include generated events in the clock, so exclusions cannot move holdout."""
-        row = self.conn.execute(
-            "SELECT MIN(at),MAX(at) FROM (SELECT at FROM listening_activity "
-            "UNION ALL SELECT played_at FROM play_events WHERE is_generated=1)").fetchone()
-        return tuple(row)
+    def evaluation_history_bounds(self):
+        # Generated plays still establish the clock for the holdout interval.
+        return tuple(self.conn.execute(
+            'SELECT MIN(at),MAX(at) FROM (SELECT at FROM listening_activity '
+            'UNION ALL SELECT played_at FROM play_events WHERE is_generated=1)').fetchone())
 
     @snapshot_read
-    def generated_only_keys_between(self, start_ts, end_ts, group=GENERATED_GROUP) -> set[str]:
-        """Generated-only provenance for causal evaluation's [start, end) interval."""
+    def generated_only_keys_between(self, start_ts, end_ts, group='Generated'):
         rows = self.conn.execute(
-            "WITH independent_keys AS MATERIALIZED (SELECT DISTINCT CAST(identity_key AS TEXT) identity_key "
-            "FROM listening_days WHERE day_ts>=? AND day_ts<?) "
-            "SELECT pe.identity_key k,SUM(CASE WHEN pe.is_generated=1 THEN 0 ELSE 1 END) non_generated "
-            "FROM play_event_subjects pe WHERE pe.played_at>=? AND pe.played_at<? GROUP BY pe.identity_key "
-            "HAVING NOT EXISTS (SELECT 1 FROM independent_keys d WHERE d.identity_key=pe.identity_key)",
-            (start_ts,end_ts,start_ts,end_ts)).fetchall()
-        return {r["k"] for r in rows if r["non_generated"] == 0}
+            'WITH independent_keys AS MATERIALIZED (SELECT DISTINCT CAST(identity_key AS TEXT) identity_key '
+            'FROM listening_days WHERE day_ts>=? AND day_ts<?) '
+            'SELECT pe.identity_key k,SUM(CASE WHEN pe.is_generated=1 THEN 0 ELSE 1 END) non_generated '
+            'FROM play_event_subjects pe WHERE pe.played_at>=? AND pe.played_at<? GROUP BY pe.identity_key '
+            'HAVING NOT EXISTS (SELECT 1 FROM independent_keys d WHERE d.identity_key=pe.identity_key)',
+            (start_ts, end_ts, start_ts, end_ts)).fetchall()
+        return {row['k'] for row in rows if row['non_generated'] == 0}
 
-    @snapshot_read
-    def rec_baskets(self, max_album=30, max_session=120) -> list[list[str]]:
-        """Eligible playlist, album, artist, listening-session and content baskets.
+    @synchronized
+    def eligible_keys(self, *, maximum_duration, excluded_video_types):
+        return {row[0] for row in self.conn.execute(
+            'SELECT DISTINCT identity_key FROM tracks '
+            'WHERE (video_type IS NULL OR video_type NOT IN (SELECT value FROM json_each(?))) '
+            'AND (duration_s IS NULL OR duration_s<=?)', (json.dumps(excluded_video_types), maximum_duration))}
 
-        Generated-only songs never contribute. Overlarge catch-all playlists and
-        over-cap album/artist/content/session baskets carry too little information.
-        """
-        eligibility = self._store.rec_eligibility
-        good = {r["k"] for r in self.conn.execute(
-            "SELECT DISTINCT identity_key k FROM tracks "
-            "WHERE (video_type IS NULL OR video_type <> 'MUSIC_VIDEO_TYPE_UGC') "
-            f"AND {eligibility.track_length_clause()}")}
-        good -= eligibility.generated_only_keys()
-        excl = eligibility.excluded_playlist_ids() | eligibility.catchall_playlist_ids()
-        pl_where = exclude_ids("pt.playlist_id", excl, connective="WHERE")
-        out = []
-        pbuckets: dict = {}
-        for r in self.conn.execute(
-                "SELECT pt.playlist_id g, t.identity_key k FROM playlist_tracks pt "
-                "JOIN tracks t ON t.id=pt.track_id" + pl_where):
-            if r["k"] in good:
-                pbuckets.setdefault(r["g"], set()).add(r["k"])
-        out += [list(s) for s in pbuckets.values() if len(s) > 1]
-        for grp, cap in (
-            (f"SELECT at.album_id g,t.identity_key k FROM tracks t JOIN {self.album_tracks_table} at ON at.entry_id=t.id", max_album),
-            (f"SELECT ta.artist_id g, t.identity_key k FROM tracks t JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id", _ARTIST_BASKET_CAP)):
-            buckets = {}
-            for r in self.conn.execute(grp):
-                if r["k"] in good:
-                    buckets.setdefault(r["g"], set()).add(r["k"])
-            out += [list(s) for s in buckets.values() if 1 < len(s) <= cap]
-        sbuckets: dict = {}
-        for r in self.conn.execute(
-                "SELECT snapshot_id g,identity_key k FROM listening_daily_items"):
-            if r["k"] in good:
-                sbuckets.setdefault(r["g"], set()).add(r["k"])
-        out += [list(s) for s in sbuckets.values() if 1 < len(s) <= max_session]
-        fam, yr = {}, {}
-        for r in self.conn.execute("SELECT genre, mb_year, identity_key k FROM tracks "
-                                   "WHERE genre<>'' OR mb_year<>''"):
-            if r["k"] not in good:
-                continue
-            if r["genre"]:
-                fam.setdefault(genre_identity.family(self.conn, r['genre']), set()).add(r['k'])
-            dec = decade(r["mb_year"])
-            if dec is not None:
-                yr.setdefault(dec, set()).add(r["k"])
-        out += [list(s) for s in fam.values() if 1 < len(s) <= _CONTENT_BASKET_CAP]
-        out += [list(s) for s in yr.values() if 1 < len(s) <= _CONTENT_BASKET_CAP]
-        return out
+    @synchronized
+    def playlist_memberships(self, *, excluded=(), included=None):
+        return [tuple(row) for row in self.conn.execute(
+            'SELECT pt.playlist_id,t.identity_key FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id '
+            'WHERE pt.playlist_id NOT IN (SELECT value FROM json_each(:excluded)) '
+            'AND (:included IS NULL OR pt.playlist_id IN (SELECT value FROM json_each(:included)))',
+            {'excluded': json.dumps(list(excluded)),
+             'included': json.dumps(list(included)) if included is not None else None})]
 
-    @snapshot_read
-    def rec_baskets_as_of(self, cutoff, max_album=30, max_session=120) -> tuple[list[list[str]], dict]:
-        """Conservative baskets proven to exist by cutoff, plus coverage disclosure.
+    @synchronized
+    def album_memberships(self):
+        return [tuple(row) for row in self.conn.execute(
+            f'SELECT at.album_id,t.identity_key FROM tracks t JOIN {self.album_tracks_table} at ON at.entry_id=t.id')]
 
-        Admit only unchanged, previously seen playlists. Their memberships can
-        prove existence for legacy tracks without created_at. Mutable genre/year
-        enrichment and undated album/artist relationships are excluded;
-        listening-session evidence is strictly before cutoff.
-        """
-        eligibility = self._store.rec_eligibility
-        excl = eligibility.excluded_playlist_ids() | eligibility.catchall_playlist_ids()
-        safe_playlists = {r["id"] for r in self.conn.execute(
-            "SELECT id FROM playlists WHERE first_seen IS NOT NULL AND first_seen<=? "
-            "AND last_changed IS NOT NULL AND last_changed<=?", (cutoff, cutoff))}
-        safe_playlists -= excl
-        proven_by_playlist = set()
-        if safe_playlists:
-            qs = ",".join("?" * len(safe_playlists))
-            proven_by_playlist = {r["k"] for r in self.conn.execute(
-                f"SELECT DISTINCT t.identity_key k FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
-                f"WHERE pt.playlist_id IN ({qs})", list(safe_playlists))}
-        eligible = {r["k"] for r in self.conn.execute(
-            "SELECT DISTINCT identity_key k FROM tracks "
-            "WHERE (video_type IS NULL OR video_type <> 'MUSIC_VIDEO_TYPE_UGC') "
-            f"AND {eligibility.track_length_clause()}")}
-        dated = {r["k"] for r in self.conn.execute(
-            "SELECT DISTINCT identity_key k FROM tracks WHERE created_at IS NOT NULL AND created_at<=?",
-            (cutoff,))}
-        good = (dated | proven_by_playlist) & eligible
-        good -= eligibility.generated_only_keys()
-        out = []
-        pbuckets = {}
-        if safe_playlists:
-            qs = ",".join("?" * len(safe_playlists))
-            for r in self.conn.execute(
-                    f"SELECT pt.playlist_id g, t.identity_key k FROM playlist_tracks pt "
-                    f"JOIN tracks t ON t.id=pt.track_id WHERE pt.playlist_id IN ({qs})",
-                    list(safe_playlists)):
-                if r["k"] in good:
-                    pbuckets.setdefault(r["g"], set()).add(r["k"])
-        out += [list(s) for s in pbuckets.values() if len(s) > 1]
-        # These relationships have no observation timestamp. Current enrichment
-        # cannot establish that the same co-membership existed before cutoff.
-        sbuckets = {}
-        for r in self.conn.execute(
-                "SELECT DISTINCT account_id||':'||day g,identity_key k FROM listening_activity WHERE at<?", (cutoff,)):
-            if r["k"] in good:
-                sbuckets.setdefault(r["g"], set()).add(r["k"])
-        out += [list(s) for s in sbuckets.values() if 1 < len(s) <= max_session]
-        total_playlists = self.conn.execute(
-            "SELECT COUNT(*) n FROM playlists WHERE first_seen IS NOT NULL AND first_seen<=?", (cutoff,)).fetchone()["n"]
-        coverage = {"eligible_tracks": len(good), "safe_playlists": len(safe_playlists),
-                    "known_playlists": int(total_playlists), "session_baskets": len(sbuckets),
-                    "mutable_content_baskets_excluded": True,
-                    "undated_relationship_baskets_excluded": ["album", "artist"]}
-        return out, coverage
+    @synchronized
+    def artist_memberships(self):
+        return [tuple(row) for row in self.conn.execute(
+            f'SELECT ta.artist_id,t.identity_key FROM tracks t JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id')]
+
+    @synchronized
+    def session_memberships(self):
+        return [tuple(row) for row in self.conn.execute('SELECT snapshot_id,identity_key FROM listening_daily_items')]
+
+    @synchronized
+    def dated_session_memberships(self, cutoff):
+        return [tuple(row) for row in self.conn.execute(
+            "SELECT DISTINCT account_id||':'||day,identity_key FROM listening_activity WHERE at<?", (cutoff,))]
+
+    @synchronized
+    def content_facets(self):
+        return [dict(row) for row in self.conn.execute(
+            "SELECT genre,mb_year year,identity_key key FROM tracks WHERE genre<>'' OR mb_year<>''")]
+
+    @synchronized
+    def unchanged_playlists(self, cutoff):
+        return {row[0] for row in self.conn.execute(
+            'SELECT id FROM playlists WHERE first_seen IS NOT NULL AND first_seen<=? '
+            'AND last_changed IS NOT NULL AND last_changed<=?', (cutoff, cutoff))}
+
+    @synchronized
+    def dated_keys(self, cutoff):
+        return {row[0] for row in self.conn.execute(
+            'SELECT DISTINCT identity_key FROM tracks WHERE created_at IS NOT NULL AND created_at<=?', (cutoff,))}
+
+    @synchronized
+    def known_playlist_count(self, cutoff):
+        return self.conn.execute('SELECT COUNT(*) FROM playlists WHERE first_seen IS NOT NULL AND first_seen<=?',
+                                 (cutoff,)).fetchone()[0]

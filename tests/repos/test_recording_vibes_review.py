@@ -6,7 +6,6 @@ import sqlite3
 from tempfile import TemporaryDirectory
 
 import pytest
-from tests.historical_support import upgrade_fixture
 from tests.prepared_fixture_support import capture_template, roots
 
 from tests.rec.test_vibe_prediction import capture, drain, fits, track
@@ -14,6 +13,8 @@ from tests.repos.test_recording_vibes import legacy
 from tests.test_audio_vibes import sample
 from yt_playlist.core import sample_files
 from yt_playlist.core.db_revisions import column_group_reads
+from yt_playlist.core.migrations import migrate, registry
+from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.store import Store
 
 
@@ -44,6 +45,15 @@ def legacy_recording_vibes(tmp_path, recording_vibe_predecessor):
         yield restore
 
 
+def externalize_recording_vibes(store):
+    # These alternatives belong to v61. The populated upgrade/reopen owner in
+    # test_recording_vibes retains the full historical suffix and current API.
+    migrate(store.conn, registry=registry.MIGRATIONS[:61])
+    validate_version(store.conn, 61)
+    store._bind_repositories()
+    assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 61
+
+
 @pytest.mark.parametrize('retain_alias', [True, False])
 def test_upgrade_unknown_video_cannot_change_an_existing_text_identity(legacy_recording_vibes, retain_alias):
     store, _value = legacy_recording_vibes('identity-upgrade')
@@ -56,7 +66,7 @@ def test_upgrade_unknown_video_cannot_change_an_existing_text_identity(legacy_re
                 store.conn.execute('DELETE FROM recording_aliases')
             store.conn.execute('INSERT INTO audio_vibe_samples VALUES (?,?,?,?,?)',
                 (extra['id'], extra['run_id'], extra['point'], json.dumps(extra), 11))
-        upgrade_fixture(store)
+        externalize_recording_vibes(store)
         assert tuple(store.conn.execute('SELECT id,identity_key FROM recordings WHERE id=?',
                                         (original[0],)).fetchone()) == original
         moved = store.conn.execute('SELECT recording_id,filename FROM sample_attributes WHERE id=?',
@@ -133,7 +143,7 @@ def test_upgrade_last_good_scores_preserve_missing_times_and_contributors(legacy
                                ('last-good-target', None, 'psybient', None, 'old-model'))
             store.conn.execute('INSERT INTO rec_musical_profiles VALUES (?,?,?,?,?)',
                                ('last-good-target', json.dumps(profile), 'old', 'digest', 13))
-        upgrade_fixture(store)
+        externalize_recording_vibes(store)
         for key, source, published_version, excerpt in recordings:
             historical = store.conn.execute(
                 'SELECT m.* FROM recording_vibes v JOIN measurements m ON m.id=v.measurement_id '
@@ -159,7 +169,7 @@ def test_upgrade_last_good_scores_preserve_missing_times_and_contributors(legacy
         predictions = list(map(tuple, store.conn.execute('SELECT * FROM predictions ORDER BY id')))
         assert len(before) == 2 * len(cases)
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-        store.init_schema()
+        externalize_recording_vibes(store)
         assert list(map(tuple, store.conn.execute('SELECT * FROM measurements ORDER BY id'))) == before
         assert list(map(tuple, store.conn.execute('SELECT * FROM predictions ORDER BY id'))) == predictions
     finally:
@@ -188,7 +198,7 @@ def test_v60_predecessor_copies_keep_inline_evidence_and_private_upgrade_files(
     for name, directory in template.files.items():
         assert len({directory, owned[0][name], owned[1][name]}) == 3, name
     for consumer in (first, second):
-        upgrade_fixture(consumer)
+        externalize_recording_vibes(consumer)
         assert consumer.audio_vibes.samples(value['run_id']) == [value]
         assert not consumer.conn.execute('PRAGMA foreign_key_check').fetchall()
     paths = [Path(consumer.conn.execute('SELECT filename FROM sample_attributes WHERE id=?',

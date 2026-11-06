@@ -279,7 +279,7 @@ def test_retained_menu_checks_each_presets_current_evidence_policy(file_backed_s
             assert not vibe_readiness.ready(obsolete, 1001, 0)
             with store.read_view() as uncached:
                 assert not vibe_readiness.ready(uncached, 1000, 0)
-            assert vibe_readiness.ready(before, 1000, 0)
+            assert not vibe_readiness.ready(before, 1000, 0)
             with store.conn:
                 store.conn.execute('BEGIN IMMEDIATE')
                 store.conn.executemany(
@@ -288,7 +288,7 @@ def test_retained_menu_checks_each_presets_current_evidence_policy(file_backed_s
             with store.read_view(tracked=True) as restored:
                 assert vibe_readiness.ready(restored, 1000, 0)
                 assert vibe_readiness.load(restored, (), ()) == saved
-                assert not vibe_readiness.ready(obsolete, 1000, 0)
+                assert vibe_readiness.ready(obsolete, 1000, 0)
                 assert vibe_readiness.ready(before, 1000, 0)
     assert store.recommendations.head('home')['id'] == head
 

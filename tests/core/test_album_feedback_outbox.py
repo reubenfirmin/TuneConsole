@@ -285,7 +285,8 @@ def test_replay_defers_late_serving_ownership_inside_actual_evidence_reads(pair,
 
     with ThreadPoolExecutor(2) as workers, monkeypatch.context() as controlled:
         name = '_mix_projection' if boundary == 'projection' else 'evidence'
-        operation = getattr(other.rec_ledger, name)
+        owner = other.rec_ledger.repository if boundary == 'projection' else other.rec_ledger
+        operation = getattr(owner, name)
 
         def read(*args, **kwargs):
             calls.append(True)
@@ -294,7 +295,7 @@ def test_replay_defers_late_serving_ownership_inside_actual_evidence_reads(pair,
                 assert held.wait(2)
             return operation(*args, **kwargs)
 
-        controlled.setattr(other.rec_ledger, name, read)
+        controlled.setattr(owner, name, read)
         replay = workers.submit(album_feedback.try_drain, other)
         try:
             assert held.wait(2)

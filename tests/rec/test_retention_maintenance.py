@@ -5,20 +5,20 @@ from types import SimpleNamespace
 import pytest
 
 from tests.test_mode_refresh_worker import scheduled, _worker
+from yt_playlist.controllers.retention import Retention
 from yt_playlist.core import fao, vibe_provenance as provenance
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.rec import group_roots, measurement, rec_worker
 from yt_playlist.rec.worker_queue import Job
-from yt_playlist.repos.retention import RetentionRepo
 
 
 def owners():
-    return ((RetentionRepo, 'maintain_managed_files', 'files', 0),
-            (RetentionRepo, 'maintain_prediction_provenance', 'vibes', 0),
-            (RetentionRepo, 'collect_musical_profiles', 'profiles', 0),
-            (RetentionRepo, 'collect_embeddings', 'embeddings', 0),
-            (RetentionRepo, 'expire_legacy_diagnostics', 'diagnostics', 0),
-            (RetentionRepo, 'maintain_runtime_history', 'runtime', {'credits': 0, 'modes': 0}),
+    return ((Retention, 'maintain_managed_files', 'files', 0),
+            (Retention, 'maintain_prediction_provenance', 'vibes', 0),
+            (Retention, 'collect_musical_profiles', 'profiles', 0),
+            (Retention, 'collect_embeddings', 'embeddings', 0),
+            (Retention, 'expire_legacy_diagnostics', 'diagnostics', 0),
+            (Retention, 'maintain_runtime_history', 'runtime', {'credits': 0, 'modes': 0}),
             (group_roots, 'maintain_retention', 'derived', {'pending': False}),
             (measurement, 'maintain_storage', 'policies', {'pending': False}))
 
@@ -27,7 +27,7 @@ def owners():
 def maintenance(scheduled, monkeypatch):
     worker, targets = scheduled
     clock, calls = [100.0], []
-    original_vibes = RetentionRepo.maintain_prediction_provenance
+    original_vibes = Retention.maintain_prediction_provenance
     monkeypatch.setattr(rec_worker, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
     for module, method, name, result in owners():
         def healthy(*args, _name=name, _result=result, **kwargs):
@@ -94,7 +94,7 @@ def test_malformed_bookmark_is_preserved_and_failed_owner_recovers(maintenance, 
     bookmark = provenance.directory(store.conn) / '.history-collection.json'
     damaged = b'{damaged bookmark'
     fao.write(bookmark, damaged)
-    monkeypatch.setattr(RetentionRepo, 'maintain_prediction_provenance', m.original_vibes)
+    monkeypatch.setattr(Retention, 'maintain_prediction_provenance', m.original_vibes)
     m.run(100)
     state = m.worker.retention.progress['prediction provenance retirement']
     assert state.failures == 1 and state.error.startswith('JSONDecodeError:')
@@ -160,7 +160,7 @@ def test_shutdown_stops_bundle_instead_of_retrying_owner(maintenance, monkeypatc
             m.worker.work.close_admission()
         return 0
 
-    monkeypatch.setattr(RetentionRepo, 'maintain_managed_files', close)
+    monkeypatch.setattr(Retention, 'maintain_managed_files', close)
     m.run(100)
     assert m.calls == [('files', 100)]
     assert m.worker._stop.is_set()
@@ -192,7 +192,7 @@ def test_inflight_retention_coalesces_ticker_polls_and_preserves_serving(mainten
         m.worker.trigger_rating_update()
         return 0
 
-    monkeypatch.setattr(RetentionRepo, 'maintain_managed_files', active)
+    monkeypatch.setattr(Retention, 'maintain_managed_files', active)
     monkeypatch.setattr(m.worker.tasks, 'ratings',
                         lambda: m.calls.append(('ratings', m.clock[0])) or set())
     m.run(100)

@@ -45,17 +45,11 @@ def directory(conn):
 
 
 def pinned_read(method):
+    """Protect referenced files for a read without opening a SQL transaction."""
     @wraps(method)
     def wrapped(conn,*args,**kwargs):
         with policy_documents.retained_reader(directory(conn)):
-            own_snapshot = not conn.in_transaction
-            if own_snapshot:
-                conn.execute('BEGIN')
-            try:
-                return method(conn,*args,**kwargs)
-            finally:
-                if own_snapshot:
-                    conn.rollback()
+            return method(conn,*args,**kwargs)
     return wrapped
 
 

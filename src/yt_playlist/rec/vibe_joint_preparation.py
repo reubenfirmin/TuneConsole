@@ -86,7 +86,24 @@ def prior_inputs(reader, rows, vibe):
 
 
 def step(store, *, seconds=10, memory_bytes=model.MEMORY_BYTES):
-    """Fit one current-original snapshot. Last-good heads survive deferral."""
+    """Synchronous rehearsal driver; the worker advances ``steps`` by turn."""
+    work = steps(store, seconds=seconds, memory_bytes=memory_bytes)
+    try:
+        while True:
+            next(work)
+    except StopIteration as completed:
+        return completed.value
+    finally:
+        work.close()
+
+
+def steps(store, *, seconds=10, input_seconds=2, memory_bytes=model.MEMORY_BYTES):
+    """Capture bounded metadata batches, then fit under its own admission.
+
+    One guarded snapshot spans the batches. A yield holds only manifest inputs
+    and the reader lease; no work-budget context or posterior survives a yield.
+    Closing abandons unpublished work and releases its file/SQL leases.
+    """
     if not qualified():
         return False
     now = time.time()
@@ -99,20 +116,30 @@ def step(store, *, seconds=10, memory_bytes=model.MEMORY_BYTES):
         revision = store.settings.get_setting(files.REVISION) or '0'
         configuration = config_identity()
         try:
-            with work_budget(seconds), store.read_snapshot() as snapshot:
+            with store.read_snapshot() as snapshot:
                 reader = snapshot.store
                 revision = reader.settings.get_setting(files.REVISION) or '0'
                 # Guard competing model publishers, including no prior head.
                 reader.settings.get_setting(files.HEAD_PREFIX + vibe)
-                rows = reader.vibe_predictions.joint_inputs(vibe, model.MAX_ROWS)
-                rows = prior_inputs(reader, rows, vibe)
-                value = model.fit(rows, vibe, memory_bytes=memory_bytes)
-                generation, staged = reader.vibe_predictions.stage_joint_model(value) if value else ('', None)
+                with work_budget(seconds):
+                    originals = reader.vibe_predictions.joint_inputs(vibe, model.MAX_ROWS)
+                rows, input_started = [], time.monotonic()
+                for start in range(0, len(originals), 32):
+                    with work_budget(input_seconds):
+                        rows.extend(prior_inputs(reader, originals[start:start + 32], vibe))
+                    yield
+                input_seconds_used = time.monotonic() - input_started
+                fit_started = time.monotonic()
+                with work_budget(seconds):
+                    value = model.fit(rows, vibe, memory_bytes=memory_bytes)
+                    generation, staged = reader.vibe_predictions.stage_joint_model(value) if value else ('', None)
+                fit_seconds = time.monotonic() - fit_started
                 refresh = _refresh_ready(reader, vibe)
                 outcome = {'revision': revision, 'configuration': configuration,
                            'attempted_at': now,
                            'outcome': 'ready' if value else 'empty',
                            'wall_seconds': time.time() - now,
+                           'input_seconds': input_seconds_used, 'fit_seconds': fit_seconds,
                            'recordings': len(rows),
                            'accounted_memory_bytes': value['diagnostics']['accounted_memory_bytes'] if value else 0}
 

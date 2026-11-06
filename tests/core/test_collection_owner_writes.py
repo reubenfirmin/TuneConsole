@@ -11,11 +11,12 @@ from tests.core.test_predecessor_writes import installed
 from tests.core.test_collection_feedback_publication import prepare
 from tests.repos.test_album_aliases import release
 from tests.prepared_fixture_support import prepared_template
-from yt_playlist.core import album_feedback_storage, albums
+from yt_playlist.core import album_feedback_storage
 from yt_playlist.core.preparation import collection_feedback_publication
 from yt_playlist.core.store import Store
 from yt_playlist.rec import album_feedback, choice_evidence
 from yt_playlist.repos.collection import CollectionRepo
+from yt_playlist.repos.album_feedback import AlbumFeedbackRepo
 from yt_playlist.repos.settings import SettingsRepo
 from yt_playlist.web.context import Ctx
 
@@ -128,7 +129,7 @@ def test_overlapping_normal_feedback_writers_keep_each_release(
     assert other.rec_ledger.evidence().get('opportunity', 'second-release') is not None
     entered, resume, second_started = threading.Event(), threading.Event(), threading.Event()
     original = CollectionRepo.preferred_album_ids
-    original_observe = albums.observe
+    original_facts = AlbumFeedbackRepo.replacement_facts
     held = False
 
     def hold_first(repo, values):
@@ -143,14 +144,14 @@ def test_overlapping_normal_feedback_writers_keep_each_release(
         second_started.set()
         album_feedback.set_feedback(other, 'second-release', 'known', 2, 'second-release')
 
-    def hold_native(connection, browse, **kwargs):
-        if connection is store.conn:
+    def hold_native(repo, browse, account_id):
+        if repo._store is store:
             hold_first(store.collection, [browse])
-        return original_observe(connection, browse, **kwargs)
+        return original_facts(repo, browse, account_id)
 
     monkeypatch.setattr(CollectionRepo, 'preferred_album_ids', hold_first)
     if version == 107:
-        monkeypatch.setattr(albums, 'observe', hold_native)
+        monkeypatch.setattr(AlbumFeedbackRepo, 'replacement_facts', hold_native)
     try:
         with ThreadPoolExecutor(max_workers=2) as workers:
             first = workers.submit(album_feedback.set_feedback, store, 'first-release', 'more', 3, 'first-release')

@@ -4,6 +4,7 @@ import threading
 import uuid
 from contextlib import contextmanager, ExitStack
 from pathlib import Path
+from functools import partial
 
 from yt_playlist.core.activity import interrupt_query
 from yt_playlist.core.db_reads import MAX_READERS, ReaderDiagnostics, read_view
@@ -20,6 +21,7 @@ from yt_playlist.controllers.search import Search
 from yt_playlist.controllers.recommendation_refresh import RecommendationRefresh
 from yt_playlist.controllers.recommendation_candidates import RecommendationCandidates
 from yt_playlist.controllers.recommendation_eligibility import RecommendationEligibility
+from yt_playlist.controllers.recommendation_evidence import RecommendationEvidence
 from yt_playlist.controllers.recommendation_query import RecommendationQuery
 from yt_playlist.controllers.recap import Recap
 from yt_playlist.controllers.trends import Trends
@@ -29,10 +31,14 @@ from yt_playlist.controllers.sync import LibrarySync
 from yt_playlist.controllers.charts import Charts
 from yt_playlist.controllers.readiness import Readiness
 from yt_playlist.controllers.cluster_evidence import ClusterEvidence
+from yt_playlist.controllers.enrichment_queue import EnrichmentQueue
+from yt_playlist.controllers.enrichment_reports import EnrichmentReports
+from yt_playlist.controllers.album_descriptions import AlbumDescriptions
+from yt_playlist.controllers.album_feedback import AlbumFeedback
 from yt_playlist.controllers.playback_feedback import PlaybackFeedback
 from yt_playlist.controllers.recommendation_ledger import RecommendationLedger
 from yt_playlist.core.priority import RequestPriority, ServingLock
-from yt_playlist.core import collection_recovery, group_documents, metadata_delivery_files, metadata_runtime_files, policy_documents, recommendation_outputs, served_facts
+from yt_playlist.core import album_description_files, album_feedback_outbox, collection_recovery, group_documents, metadata_delivery_files, metadata_runtime_files, policy_documents, recommendation_outputs, served_facts
 # Store owns the connection, schema lifecycle, and explicitly named repositories.
 from yt_playlist.repos.actions import ActionRepo
 from yt_playlist.repos.album_descriptions import AlbumDescriptionsRepo
@@ -273,16 +279,16 @@ class Store:
         self.summary_inputs = SummaryInputs(SummaryInputsRepo(self), self.settings)
         self.listening_analytics = ListeningAnalyticsRepo(self)
         self.group_evidence = GroupEvidenceRepo(self)
-        self.album_feedback = AlbumFeedbackRepo(self)
         self.playback_feedback = PlaybackFeedback(PlaybackFeedbackRepo(self),
             getattr(self, '_evidence_source', self)._playback_feedback, self)
         self.actions = ActionRepo(self)
-        self.album_descriptions = AlbumDescriptionsRepo(self)
         self.audio_vibes = AudioVibesRepo(self)
         self.artists = ArtistRepo(self)
         self.accounts = AccountRepo(self)
         self.history = HistoryRepo(self)
         self.collection = CollectionRepo(self)
+        self.album_feedback = AlbumFeedback(AlbumFeedbackRepo(self), self.collection,
+            partial(album_feedback_outbox.fence, self), read_original)
         self.cluster_evidence = ClusterEvidence(ClusterEvidenceRepo(self))
         self.rec_model = RecModelRepo(self)
         self.model_selection = ModelSelectionRepo(self)
@@ -291,9 +297,15 @@ class Store:
         self.rec_query = RecommendationQuery(RecQueryRepo(self), self.genres, self.rec_eligibility, self.artists)
         self.readiness = Readiness(ReadinessRepo(self), self.rec_eligibility)
         self.rec_candidates = RecommendationCandidates(RecCandidatesRepo(self), self.rec_eligibility)
-        self.rec_evidence = RecEvidenceRepo(self)
+        self.rec_evidence = RecommendationEvidence(RecEvidenceRepo(self), self.rec_eligibility, self.genres,
+            read_view=self.read_view, read_only=getattr(self, '_read_only', False))
         self.rec_ledger = RecommendationLedger(RecLedgerRepo(self))
         self.rec_proposals = RecProposalsRepo(self)
+        self.album_descriptions = AlbumDescriptions(AlbumDescriptionsRepo(self), album_description_files.read,
+            partial(album_description_files.publish,
+                    album_description_files.root_for_database(self._db_path, self._evidence_key)),
+            partial(policy_documents.publish, policy_documents.root_for_database(self._db_path, self._evidence_key)),
+            proposals=self.rec_proposals, installed=self._paid_descriptions)
         self.home_cache = HomeCacheRepo(self)
         self.recommendations = RecommendationPublicationsRepo(self)
         self.rec_signals = RecommendationSignals(RecSignalsRepo(self))
@@ -310,9 +322,13 @@ class Store:
         self.discovery = DiscoveryRepo(self)
         self.search = Search(SearchRepo(self))
         self.enrichment = EnrichmentRepo(self)
-        self.enrichment_queue = EnrichmentQueueRepo(self)
-        self.enrichment_reports = EnrichmentReportsRepo(self)
+        self.enrichment_reports = EnrichmentReports(EnrichmentReportsRepo(self),
+            partial(metadata_runtime_files.read_at,
+                    metadata_runtime_files.root_for_database(self._db_path, self._evidence_key)))
         self.enrichment_state = EnrichmentStateRepo(self)
+        self.enrichment_queue = EnrichmentQueue(EnrichmentQueueRepo(self), self.enrichment_state, self.settings,
+            read_snapshot=self.read_snapshot, memoized_read=self.memoized_read,
+            read_only=getattr(self, '_read_only', False))
         self.wiki = WikipediaCards(WikiRepo(self))
         self.modes = ModesRepo(self)
         self.taste_groups = (CompactTasteGroupsRepo if self._compact_group_files else TasteGroupsRepo)(self)

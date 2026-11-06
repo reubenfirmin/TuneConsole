@@ -7,6 +7,7 @@ import pytest
 from yt_playlist.core import albums, album_tracklists, genre_identity
 from yt_playlist.core.migrations import Migration, MigrationError, current, migrate, registry
 from yt_playlist.core.migrations import v099_album_occurrences
+from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.store import Store
 from yt_playlist.library.album_catalog import remember_album
 
@@ -130,6 +131,7 @@ def test_interruption_rolls_back_owner_replacement_then_restart_preserves_it(tmp
     store = legacy_owner_store(tmp_path/'rollback.db', 98)
     store.tracks.upsert_track('one','One','Artist',None,10,album_browse_id='release')
     before = [dict(r) for r in store.conn.execute('SELECT * FROM album_tracks')]
+    original_dump = list(store.conn.iterdump())
     def interrupt(conn,context):
         v099_album_occurrences.apply(conn,context)
         raise RuntimeError('interrupted occurrence cutover')
@@ -137,14 +139,24 @@ def test_interruption_rolls_back_owner_replacement_then_restart_preserves_it(tmp
     monkeypatch.setattr(registry,'MIGRATIONS',(*original[:98],Migration(99,'album_occurrences',interrupt,rebuild_tables=True)))
     with pytest.raises(MigrationError,match='interrupted occurrence cutover'):
         migrate(store.conn, registry=registry.MIGRATIONS)
+    assert list(store.conn.iterdump()) == original_dump
     assert [dict(r) for r in store.conn.execute('SELECT * FROM album_tracks')]==before
     assert store.conn.execute("SELECT type FROM sqlite_schema WHERE name='album_tracks'").fetchone()[0]=='table'
     monkeypatch.setattr(registry,'MIGRATIONS',original)
-    migrate(store.conn, registry=registry.MIGRATIONS)
-    store.init_schema()
-    assert store.conn.execute('SELECT legacy_row_id FROM album_item_observations').fetchone()[0]==before[0]['id']
-    current.validate(store.conn)
+    # Retry the owning v99 conversion after a real disk reopen. The populated
+    # legacy-occurrence case above owns the full suffix and current admission.
+    path = store._db_path
     store.conn.close()
+    reopened = Store(path)
+    try:
+        migrate(reopened.conn, registry=original[:99])
+        assert reopened.conn.execute('SELECT legacy_row_id FROM album_item_observations').fetchone()[0]==before[0]['id']
+        assert reopened.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 99
+        validate_version(reopened.conn, 99)
+        assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
+        assert reopened.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    finally:
+        reopened.conn.close()
 
 
 def test_interrupted_publication_keeps_old_pointer_and_captured_order(store,monkeypatch):

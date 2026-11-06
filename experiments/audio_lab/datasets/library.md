@@ -12,14 +12,14 @@ Teacher predictions and propagated descendants are not additional human votes.
 | Oct 29 #530 | 76 protected human identities include 20 additions; two had prior silver use. Primary reserved slice is 18, now consumed, with zero Release positives. Twelve unlabeled compatible recordings (eight with complete soft-teacher lineage) gave no reliable native-task improvement. |
 | Oct 29–30 specialist work | Refreshed 84-recording usable cohort, including 18 Focus / 15 Relax positives. Local labels neither fit nor select native specialist consensus. Full/partial capture replays establish routing, not human quality. |
 | Oct 30 #587 | 85 positive-label recordings; only 73 match inference sample windows exactly. Cannot infer list precision or compare scores as calibrated probabilities. See [consumer evaluation](../BROWSER_EVALUATION_424.md). |
-| Nov 6 metadata transfer | 140 annotation revisions resolve to 115 current positive canonical recordings. Historical identity matching gives 85 development and 30 newly reserved recordings; 55 development identities trained the shared teacher and two had prior silver exposure. New positives: Focus 3, Relax 2, Cruise 9, Energize 12, Release 5, Uplift 0. This reserve cannot establish all six vibes. See [joint pooling](../models/pooling.md). |
+| Nov 6 metadata transfer | 140 annotation revisions resolve to 115 current positive canonical recordings: 85 development and 30 initially reserved. The 30 were consumed by the sealed format-four product comparison; they are no longer an unused reserve. Of the development identities, 55 trained the shared teacher and two had prior silver exposure. New positives: Focus 3, Relax 2, Cruise 9, Energize 12, Release 5, Uplift 0. These cannot establish all six vibes. See [joint pooling](../models/pooling.md). |
 
 Metadata-transfer evaluation resolves feedback through playback video identities
 and recording redirects, including labels without captured samples. Preserve
 supersession and the latest empty/withdrawn judgment across alternate uploads;
 do not revive an earlier positive. Reserve eligibility means absence from the
 supplied historical identity snapshots, not proof of no earlier exposure.
-Exclude every human target's original measurements from fitting. Current
+Evaluation excludes every human target's original measurements from fitting. Current
 original-only coverage is 3,441 recordings per vibe: 3,201 provider and 240
 captured-audio measurements; historical and retracted measurements are excluded.
 

@@ -6,6 +6,7 @@ reserved predictions. Positive labels are never numeric fitting observations.
 """
 import argparse
 from collections import defaultdict
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import time
@@ -20,7 +21,7 @@ from . import vibe_pooling_source_genre as source_genre
 
 FORMAT = 'metadata-categorical-transfer-6'
 CODE_FILE = 'experiments/audio_lab_tools/vibe_pooling_transfer.py'
-RECIPES = ('metadata', 'descriptors', 'pairs', 'offset', 'source-genre')
+RECIPES = ('metadata', 'descriptors', 'pairs', 'offset', 'source-genre', 'runtime')
 FOLD_POLICIES = ('fivefold', 'single-model')
 
 
@@ -37,7 +38,7 @@ def inputs(source, candidate, recipe):
     measurement reports remain bound to their original source identities.
     """
     humans, fitted = json.loads(source.read_text()), json.loads(candidate.read_text())
-    candidate_format = {'metadata': metadata.FORMAT, 'descriptors': descriptors.FORMAT,
+    candidate_format = {'metadata': metadata.FORMAT, 'runtime': metadata.FORMAT, 'descriptors': descriptors.FORMAT,
                         'pairs': pairs.FORMAT, 'offset': offset.FORMAT,
                         'source-genre': source_genre.FORMAT}.get(recipe)
     if (recipe not in RECIPES or humans['format'] != labels.FORMAT or fitted['format'] != candidate_format
@@ -92,6 +93,7 @@ def freeze(source, candidate, destination, recipe='descriptors', fold_policy='fi
     plan = {'format': FORMAT, 'code': identity(), 'recipe': recipe, 'fold_policy': fold_policy,
         'source': str(source.resolve()), 'source_sha256': evaluation.digest(source.read_bytes()),
         'candidate': str(candidate.resolve()), 'candidate_sha256': evaluation.digest(candidate.read_bytes()),
+        'runtime_candidate': joint.configuration() if recipe == 'runtime' else None,
         'criteria': evaluation.CRITERIA, 'label_policy': labels.LABEL_POLICY,
         'policy': 'Original-only fits; all human identities excluded; no numeric label truth.',
         'single_model_policy': 'Known uses all nonhuman originals. Unseen excludes every connected '
@@ -104,7 +106,8 @@ def load(path):
     plan = json.loads(path.read_text())
     if (plan['format'] != FORMAT or plan['code'] != identity()
             or plan['criteria'] != evaluation.CRITERIA or plan['label_policy'] != labels.LABEL_POLICY
-            or plan['fold_policy'] not in FOLD_POLICIES):
+            or plan['fold_policy'] not in FOLD_POLICIES
+            or plan.get('runtime_candidate') != (joint.configuration() if plan['recipe'] == 'runtime' else None)):
         raise ValueError('Human transfer configuration changed; freeze a separate protocol')
     source, candidate = Path(plan['source']), Path(plan['candidate'])
     if (evaluation.digest(source.read_bytes()) != plan['source_sha256']
@@ -122,9 +125,9 @@ def candidate_rows(fitted, vibe, recipe):
                    'covariates': descriptor['covariates']}
         else:
             profile = evaluation.masked_profile(fitted['profile_inputs'][str(row['recording'])])
-            if profile is None:
+            if profile is None and recipe != 'runtime':
                 raise ValueError('Missing masked training profile; do not drop an original')
-            yield {**row, 'metadata_prior': home_vibe.heuristic_affinity(profile, vibe)}
+            yield {**row, 'metadata_prior': home_vibe.heuristic_affinity(profile, vibe) if profile is not None else .5}
 
 
 def hidden_recordings(humans, fold_policy, stratum, fold):
@@ -172,9 +175,9 @@ def run(path, output, stratum, fold, vibe, partition='development', candidate_se
     context = {'descriptors': descriptors.design_context, 'metadata': metadata.design_context,
                'offset': offset.design_context,
                'source-genre': source_genre.design_context,
-               'pairs': pairs.design_context}[plan['recipe']]
+               'pairs': pairs.design_context, 'runtime': nullcontext}[plan['recipe']]
     fit_model = {'pairs': pairs.fit, 'offset': offset.fit,
-                 'source-genre': source_genre.fit}.get(plan['recipe'], metadata.fit)
+                 'source-genre': source_genre.fit, 'runtime': joint.fit}.get(plan['recipe'], metadata.fit)
     predict_model = {'pairs': pairs.predict, 'source-genre': source_genre.predict}.get(plan['recipe'], metadata.predict)
     with context():
         try:
@@ -209,7 +212,12 @@ def run(path, output, stratum, fold, vibe, partition='development', candidate_se
             target = {**row, 'metadata_prior': fallback}
             if plan['recipe'] == 'descriptors':
                 target['covariates'] = descriptors.descriptors(profile)
-            score, interval = predict_model(posterior, target)
+            if plan['recipe'] == 'runtime':
+                estimate = posterior.predict(row['artists'], row['genre'], album=row['album'],
+                    recording=recording, metadata_prior=fallback)
+                score, interval = (estimate['score'], estimate['interval90']) if estimate else (fallback, [0., 1.])
+            else:
+                score, interval = predict_model(posterior, target)
             credit = json.dumps(row['artists'], separators=(',', ':'))
             old = baseline.resolve({vibe: fallback}, None,
                 [(key, stats[key]) for key in baseline.groups(credit, row['genre']) if key in stats])['fits'][vibe]['score']

@@ -310,7 +310,7 @@ def test_masked_metadata_refits_after_categorical_changes_without_learning_own_n
     assert categorical['metadata_profile_digest'] != original['metadata_profile_digest']
     assert changed != first
     assert fits(store, own)['relax']['source'] == 'audio_measurement'
-    assert fits(store, target)['relax']['source'] == 'artist_genre'
+    assert fits(store, target)['relax']['source'] == 'artist'
     prediction, = store.conn.execute('SELECT v.prediction_id FROM recording_vibes v JOIN recordings r '
         "ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe='relax'", (target,)).fetchone()
     assert 'metadata_prior' in vibe_provenance.read(store.conn, prediction)['conditioning']
@@ -713,6 +713,61 @@ def test_provider_backlog_cannot_starve_vibe_bootstrap_or_dependency_fanout(file
     drain(store, batch=2)
 
 
+@pytest.mark.parametrize('originals', [0, 3])
+@pytest.mark.parametrize('qualified', [False, True])
+def test_first_new_score_and_reopened_home_do_not_require_joint_fit(
+        file_backed_store, monkeypatch, originals, qualified):
+    from fastapi.testclient import TestClient
+
+    from yt_playlist.repos import vibe_models
+    from yt_playlist.web.app import create_app
+
+    store = file_backed_store
+    monkeypatch.setattr(vibe_joint_preparation, 'QUALIFICATIONS', {})
+    for index in range(originals):
+        track(store, f'startup-original-{index}')
+        capture(store, f'startup-original-{index}')
+    drain(store).close()
+    if qualified:
+        monkeypatch.setattr(vibe_joint_preparation, 'QUALIFICATIONS',
+            {vibe_joint_preparation.config_identity(): 'controlled-first-output-fixture'})
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('First usable output or a reopened Home request required a joint model')
+
+    monkeypatch.setattr(joint, 'fit', forbidden)
+    monkeypatch.setattr(vibe_models, 'read', forbidden)
+    _entry, target = track(store, 'startup-new-target')
+    assert not store.vibe_predictions.fit_scores([target], 'relax')
+    worker = Preparation(store)
+    try:
+        for _ in range(20):
+            worker.capture(1000)
+            cached = store.vibe_predictions.fit_scores([target], 'relax')
+            if cached:
+                break
+        else:
+            pytest.fail('First recording output never became usable')
+    finally:
+        worker.close()
+    assert 0 <= cached[target] <= 1
+    assert fits(store, target)['relax']['source'] == ('artist_genre' if originals else 'heuristic')
+    assert not any(vibe_joint_preparation.state(store, vibe) for vibe in vibe_joint_preparation.VIBES)
+
+    reopened = Store(store._db_path)
+    try:
+        reopened.init_schema()
+        assert reopened.vibe_predictions.fit_scores([target], 'relax') == cached
+        # Exercise all ordinary Home routers and HTTP handler threads. No
+        # readiness override or prebuilt menu makes a fit appear unnecessary.
+        with TestClient(create_app(reopened, lambda: {}, background_work=False),
+                        base_url='http://127.0.0.1') as client:
+            assert client.get('/').status_code == 200
+        assert reopened.vibe_predictions.fit_scores([target], 'relax') == cached
+    finally:
+        reopened.conn.close()
+
+
 def test_continuing_backlog_completes_a_model_cycle_across_worker_restart(file_backed_store, monkeypatch):
     from yt_playlist.core import vibe_model_files
     store = file_backed_store
@@ -751,11 +806,17 @@ def test_continuing_backlog_completes_a_model_cycle_across_worker_restart(file_b
         # indefinitely. An abandoned cycle returns to ordinary fair turns.
         assert not vibe_joint_preparation.active(store)
     # Durable per-channel state resumes after a worker restart. Our source
-    # worker cannot change originals between the remaining seven admissions.
+    # worker cannot change originals between the remaining seven fits. Input
+    # batches and fitting have separate bounded admissions.
     source_before = len(source_turns)
     worker = Preparation(store)
-    for _ in range(len(vibe_joint_preparation.VIBES) - 1):
-        assert worker.capture(1000)
+    for _ in range(len(vibe_joint_preparation.VIBES) * 3):
+        count = len(fits_seen)
+        worker.capture(1000)
+        assert len(fits_seen) - count <= 1
+        assert len(source_turns) == source_before
+        if len(fits_seen) == len(vibe_joint_preparation.VIBES):
+            break
     assert len(source_turns) == source_before
     assert fits_seen == list(vibe_joint_preparation.VIBES)
     assert not vibe_joint_preparation.active(store)
@@ -777,6 +838,59 @@ def test_continuing_backlog_completes_a_model_cycle_across_worker_restart(file_b
                      for v in vibe_joint_preparation.VIBES}
     monkeypatch.setattr(vibe_joint_preparation.time, 'time', lambda: attempted + 61)
     assert vibe_joint_preparation.admitted(store, waiting=True)
+
+
+@pytest.mark.parametrize('interruption', ['close', 'stale', 'deadline', 'pause'])
+def test_joint_input_batches_release_readers_and_preserve_heads(
+        file_backed_store, monkeypatch, interruption):
+    from yt_playlist.core import file_collection, vibe_model_files
+    from yt_playlist.rec import progressive
+    from yt_playlist.repos import vibe_models
+
+    store = file_backed_store
+    monkeypatch.setattr(vibe_joint_preparation, 'QUALIFICATIONS', {})
+    entry, _key = track(store, 'batched-original')
+    track(store, 'batched-target')
+    capture(store, 'batched-original')
+    drain(store)
+    monkeypatch.setattr(vibe_joint_preparation, 'QUALIFICATIONS',
+        {vibe_joint_preparation.config_identity(): 'controlled-input-batches'})
+    # Keep a valid prior generation while a changed revision is prepared.
+    for _ in vibe_joint_preparation.VIBES:
+        assert vibe_joint_preparation.step(store)
+    heads = {vibe: store.settings.get_setting(vibe_model_files.HEAD_PREFIX + vibe)
+             for vibe in vibe_joint_preparation.VIBES}
+    revision = int(store.settings.get_setting(vibe_model_files.REVISION) or 0)
+    store.settings.set_setting(vibe_model_files.REVISION, str(revision + 1))
+    worker = Preparation(store)
+    original_fit = joint.fit
+    monkeypatch.setattr(joint, 'fit', lambda *args, **kwargs: pytest.fail('Fitted before input batch completed'))
+    assert worker._joint_step()
+    assert worker._capturing_kind == 'joint' and worker.due(1000)
+    assert worker._capturing_pending is None
+    assert not worker.fit(1000)
+    with file_collection.collector(vibe_models.directory(store.conn)) as admitted:
+        assert not admitted
+    if interruption == 'stale':
+        with store.conn:
+            catalog.choose_field(store.conn, entry, 'genre', 'Detroit Techno')
+        # Restore fitting only after proving the first turn yielded input.
+        monkeypatch.setattr(joint, 'fit', original_fit)
+        assert not worker.capture(1000)
+    elif interruption == 'deadline':
+        with monkeypatch.context() as expired:
+            expired.setattr(progressive.time, 'monotonic', lambda: worker._capturing_expires_at + 1)
+            assert not worker.capture(1000)
+    elif interruption == 'pause':
+        worker.expire_capture(paused=True)
+    else:
+        worker.close()
+    assert worker._capturing is None and worker._capturing_kind is None
+    assert heads == {vibe: store.settings.get_setting(vibe_model_files.HEAD_PREFIX + vibe)
+                     for vibe in vibe_joint_preparation.VIBES}
+    with file_collection.collector(vibe_models.directory(store.conn)) as admitted:
+        assert admitted
+    assert vibe_joint_preparation.due(store)
 
 
 @pytest.mark.parametrize('interruption', ['close', 'stale', 'deadline', 'idle-pause', 'idle-deadline'])

@@ -1,5 +1,6 @@
 """Independent response laws and holdout boundaries for metadata pooling."""
 import json
+import math
 import numpy as np
 import pytest
 
@@ -406,3 +407,60 @@ def test_selection_summary_reports_the_loaded_candidate_policy(tmp_path):
     assert report['selection'] == runtime.POLICY
     assert report['failed_gates'] == ['incomplete campaign']
     assert not report['complete']
+
+
+def test_product_metadata_model_matches_the_development_recipe_without_patches():
+    training = [{'recording': i, 'measurement': i, 'artists': [1 + (i - 1) // 4],
+        'genre': ('ambient', 'techno')[i % 2], 'album': str(i // 3),
+        'source': 'audio_measurement/control' if i % 5 == 0 else 'provider_measurement/control',
+        'support': (1., .4, .8)[i % 3], 'metadata_prior': .3 + .3 * (i % 2),
+        'score': .35 + .3 * (i % 2) + .1 * math.sin(i)} for i in range(1, 49)]
+    product = joint.Posterior(joint.fit(training, 'relax'))
+    assert product.value['format'] == 4
+    with metadata.design_context():
+        research = joint.Posterior(metadata.fit(training, 'relax'))
+        expected = metadata.predict(research, {'recording': 99, 'artists': [999],
+            'genre': 'ambient', 'album': 'new', 'metadata_prior': .4})
+    actual = product.predict([999], 'ambient', album='new', recording=99, metadata_prior=.4)
+    assert actual['score'] == pytest.approx(expected[0], abs=1e-5)
+    assert actual['interval90'] == pytest.approx(expected[1], abs=1e-5)
+
+
+def test_runtime_human_transfer_uses_product_and_keeps_both_human_partitions_out(tmp_path, monkeypatch):
+    training = [{'recording': i, 'measurement': i, 'artists': [1 + (i - 1) // 4],
+        'genre': 'ambient', 'album': None, 'source': 'provider_measurement/control',
+        'score': .55 + i / 200, 'support': .8} for i in range(1, 25)]
+    profile = {'content': {'library': {'genre': 'ambient', 'year': None, 'audio': {}},
+                           'discovered': None}, 'sources': [], 'overrides': {}, 'truncated': False}
+    humans = {'human_targets': [
+        {'recording': 99, 'labels': ['relax'], 'partition': 'development'},
+        {'recording': 100, 'labels': ['energize'], 'partition': 'reserved'}],
+        'assignments': {**runtime.evaluation.assignments(training),
+            '99': {'cluster': 'artist:1'}, '100': {'cluster': 'artist:2'}},
+        'metadata': {'99': {'artists': [1], 'genre': 'ambient', 'album': None}},
+        'profile_inputs': {'99': profile}}
+    fitted = {'rows': {'relax': training},
+              'profile_inputs': {str(row['recording']): profile for row in training}}
+    plan = {'recipe': 'runtime', 'fold_policy': 'single-model'}
+    path, output = tmp_path / 'plan.json', tmp_path / 'result.json'
+    path.write_text(json.dumps(plan))
+    monkeypatch.setattr(transfer, 'load', lambda _: (plan, humans, fitted))
+    seen, original = [], joint.fit
+    def fit(rows, vibe):
+        seen.extend(rows)
+        value = original(rows, vibe, fixed=joint.INITIAL)
+        assert value['format'] == 4
+        return value
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Runtime human evaluation used a historical research recipe')
+    monkeypatch.setattr(joint, 'fit', fit)
+    monkeypatch.setattr(metadata, 'fit', forbidden)
+    monkeypatch.setattr(metadata, 'design_context', forbidden)
+    transfer.run(path, output, 'unseen', 0, 'relax')
+    report = json.loads(output.read_text())
+    assert report['outcome'] == 'complete' and len(report['rows']) == 1
+    assert report['rows'][0]['recording'] == 99 and report['rows'][0]['interval90']
+    assert {row['recording'] for row in seen} == set(range(9, 25))
+    assert not {artist for row in seen for artist in row['artists']}.intersection({1, 2})
+    with pytest.raises(ValueError, match='prospective candidate seal'):
+        transfer.run(path, tmp_path / 'reserved.json', 'unseen', 0, 'relax', partition='reserved')

@@ -10,17 +10,8 @@ import time
 
 from yt_playlist.core import catalog, metadata, metadata_evidence, metadata_conflicts, metadata_attempts
 from yt_playlist.core import metadata_runtime
+from yt_playlist.core.enrichment_contract import FIELD_COLUMN
 from yt_playlist.repos.base import Repo, synchronized
-
-# Concept -> (canonical column, caster), shared with read-only review projections.
-FIELD_COLUMN = {
-    "title": ("title", str), "artist": ("artist", str),
-    "genre": ("genre", str), "year": ("mb_year", str), "label": ("label", str),
-    "music_key": ("music_key", str), "music_scale": ("music_scale", str),
-    "bpm": ("bpm", float), "energy": ("energy", float), "danceability": ("danceability", float),
-    "popularity": ("popularity", int), "gain": ("gain", float),
-}
-
 
 class EnrichmentRepo(Repo):
     @synchronized

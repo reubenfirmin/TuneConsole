@@ -134,7 +134,12 @@ def publish_many(conn, documents):
 
 
 def read(conn, kind, owner, revision, *, missing=False, max_bytes=MAX_BYTES):
-    path = directory(conn) / relative(kind, owner, revision)
+    return read_at(directory(conn), kind, owner, revision, missing=missing, max_bytes=max_bytes)
+
+
+def read_at(root, kind, owner, revision, *, missing=False, max_bytes=MAX_BYTES):
+    """Read a SQL-selected document using an injected directory and primary keys."""
+    path = Path(root) / relative(kind, owner, revision)
     try:
         with fao.read(path) as stream:
             encoded = stream.read(min(max_bytes, MAX_BYTES) + 1)

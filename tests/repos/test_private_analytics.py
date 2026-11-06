@@ -1,4 +1,4 @@
-"""Analytics release the serving connection and retain coherent publication inputs."""
+"""Reporting reads release the serving connection; worker snapshots track inputs."""
 from concurrent.futures import ThreadPoolExecutor
 import sqlite3
 import threading
@@ -117,7 +117,7 @@ def test_album_context_memo_keeps_history_dependencies(library):
         assert not second.publish(lambda: pytest.fail('Memoized album context lost its evidence dependency'))
 
 
-def test_chart_dimensions_and_ranking_share_one_committed_view(library, monkeypatch):
+def test_chart_sections_allow_commits_between_queries(library, monkeypatch):
     store, account, _ = library
     original, changed = chart_routes._build_ticker, []
 
@@ -135,14 +135,14 @@ def test_chart_dimensions_and_ranking_share_one_committed_view(library, monkeypa
     client = TestClient(app, base_url='http://127.0.0.1')
     first = client.get('/charts?view=songs')
     assert first.status_code == 200
-    assert [song['title'] for song in first.context['songs']] == ['Song']
-    assert 'Later artist' not in {row['cat'] for row in first.context['tickers']['artist']['rows']}
+    assert {song['title'] for song in first.context['songs']} == {'Song', 'Later'}
+    assert 'Later artist' in {row['cat'] for row in first.context['tickers']['artist']['rows']}
     following = client.get('/charts?view=songs')
     assert following.status_code == 200
     assert {song['title'] for song in following.context['songs']} == {'Song', 'Later'}
 
 
-def test_artist_saved_flags_and_owners_share_one_committed_view(library, monkeypatch):
+def test_artist_report_reads_current_saved_flags_after_song_query(library, monkeypatch):
     from yt_playlist.repos.charts import ChartsRepo
     store, _, _ = library
     original, changed = ChartsRepo.artist_songs, []
@@ -160,8 +160,8 @@ def test_artist_saved_flags_and_owners_share_one_committed_view(library, monkeyp
     client = TestClient(app, base_url='http://127.0.0.1')
     first = client.get('/artist?name=Artist')
     assert first.status_code == 200
-    assert first.context['collection'][0]['saved']
-    assert 'B' in first.context['saved_owners']
+    assert not first.context['collection'][0]['saved']
+    assert 'B' not in first.context['saved_owners']
     following = client.get('/artist?name=Artist')
     assert following.status_code == 200
     assert not following.context['collection'][0]['saved']

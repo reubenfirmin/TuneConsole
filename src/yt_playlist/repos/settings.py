@@ -33,14 +33,7 @@ class SettingsRepo(Repo):
     @lookup_read
     def get_settings_with_prefix(self, prefix):
         """Read a settings namespace, treating SQL pattern characters literally."""
-        own_snapshot = not self.conn.in_transaction
-        if own_snapshot:
-            self.conn.execute('BEGIN')
-        try:
-            return self._settings_with_prefix(prefix)
-        finally:
-            if own_snapshot:
-                self.conn.rollback()
+        return self._settings_with_prefix(prefix)
 
     def _settings_with_prefix(self, prefix):
         from yt_playlist.core.preparation import workflow_publication

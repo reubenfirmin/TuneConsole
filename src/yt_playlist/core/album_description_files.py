@@ -20,10 +20,14 @@ OWNERS = {
 
 def directory(conn, memory_key=None):
     path = conn.execute('PRAGMA database_list').fetchone()[2]
+    memory_key = memory_key or getattr(conn, '_policy_memory_key', f'{os.getpid()}-{id(conn)}')
+    return root_for_database(path, memory_key)
+
+
+def root_for_database(path, memory_key):
     if path:
         database = Path(path).resolve()
         return database.with_name(database.name + '.descriptions')
-    memory_key = memory_key or getattr(conn, '_policy_memory_key', f'{os.getpid()}-{id(conn)}')
     return Path(tempfile.gettempdir()) / 'tuneconsole-descriptions' / memory_key
 
 

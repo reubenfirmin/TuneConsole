@@ -320,6 +320,12 @@ class ChartsRepo(Repo):
     @contextmanager
     def story_track_rows(self, *, since, artist=None, genres=()):
         """Stream ordered candidates for a controller-owned bounded read."""
+        if not (getattr(self._store, '_read_only', False)
+                or getattr(self._lock, 'held_by_current_thread', False)):
+            with self._store.read_view() as view:
+                with type(self)(view).story_track_rows(since=since, artist=artist, genres=genres) as rows:
+                    yield rows
+            return
         with self._lock:
             rows = self._story_track_rows(since=since, artist=artist, genres=genres)
             try:

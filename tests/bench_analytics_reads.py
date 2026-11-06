@@ -61,7 +61,7 @@ def test_actual_library_private_analytics_match_owned_connection_and_allow_write
             # Reproduce the old connection/lock boundary without changing SQL.
             # This baseline is serial and confined to the disposable copy.
             with work_budget(10), store._lock:
-                value = target.__wrapped__(repo, *values, **kwargs)
+                value = target(*values, **kwargs)
             elapsed = time.monotonic() - started
             label = f'{repo_name}.{method}'
             baseline[label] = digest(value)

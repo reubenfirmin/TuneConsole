@@ -157,6 +157,7 @@ class Preparation:
         self._capturing = None
         self._capturing_pending = None
         self._capturing_expires_at = 0
+        self._capturing_kind = None
         self.groups = group_preparation.Preparation(store)
 
     def close(self):
@@ -167,6 +168,7 @@ class Preparation:
                 self._capturing = None
                 self._capturing_pending = None
                 self._capturing_expires_at = 0
+                self._capturing_kind = None
 
     def expire_capture(self, *, paused=False):
         """Release idle snapshot leases even when no further work is admitted.
@@ -269,14 +271,14 @@ class Preparation:
         # External changes still invalidate each guarded snapshot normally.
         if vibe_joint_preparation.active(self.store):
             return vibe_preparation.step(self.store, self.batch,
-                seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes)
+                seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes, joint_step=self._joint_step)
         # Alternate source fan-out and recording captures. Each admission gets
         # one time budget, and continual source updates cannot starve recordings.
         if self._source_turn:
             self._source_turn = False
             self._vibe_turn = not self._vibe_turn
             if not self._vibe_turn and vibe_preparation.step(self.store, self.batch,
-                    seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes):
+                    seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes, joint_step=self._joint_step):
                 return True
             if musical_preparation.source_step(self.store, now, batch=self.batch,
                                                seconds=self.budget.capture_seconds):
@@ -287,12 +289,24 @@ class Preparation:
         pending = self.store.prepared_content.pending(self.batch)
         if not pending:
             return vibe_preparation.step(self.store, self.batch,
-                seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes)
+                seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes, joint_step=self._joint_step)
         self._capturing_pending = pending
+        self._capturing_kind = 'recordings'
         self._capturing_expires_at = (time.monotonic() + self.budget.capture_seconds
             + len(vibe_joint_preparation.VIBES) * self.budget.fit_seconds)
         self._capturing = self._capture(pending, now)
         return self._advance_capture()
+
+    def _joint_step(self):
+        self._capturing_kind = 'joint'
+        self._capturing_pending = None
+        # This bounds the lifetime of the pinned reader, not one worker turn.
+        self._capturing_expires_at = time.monotonic() + 180
+        self._capturing = vibe_joint_preparation.steps(self.store,
+            seconds=self.budget.fit_seconds, input_seconds=self.budget.capture_seconds,
+            memory_bytes=self.budget.memory_bytes)
+        published = self._advance_capture()
+        return published or self._capturing is not None
 
     def _advance_capture(self):
         # The first turn captures inputs; each subsequent turn reconstructs at
@@ -313,7 +327,10 @@ class Preparation:
             self.close()
             raise
         pending = self._capturing_pending
+        kind = self._capturing_kind
         self.close()
+        if kind == 'joint':
+            return published
         if published:
             self.batch = min(self.budget.batch, max(1, self.batch * 2))
             self._record('published', 'changed-entity-inputs', phase=INPUT_PHASE)

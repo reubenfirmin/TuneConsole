@@ -242,12 +242,14 @@ The `core/vibe_model_files.py` adapter performs physical FAO operations only.
 Regular change 31 creates bounded DDL and invalidation triggers, without fitting
 or converting populated data. Installed `album_tracks` and current occurrence
 owners have separate trigger/query paths; compatibility remains in place.
+Change 34 adds bounded metadata-invalidation triggers; it does not convert data
+or modify the applied change-31 history.
 
 Each immutable `vibe-models/HH/SHA256.json` contains one original-only training
 manifest, exact measurement/configuration identities, canonical credits and
 specific genres, unambiguous album identities, source/version groups, fitted
 variance components, diagnostics, and a packed conditional Gaussian posterior.
-Formats 2 and 3 store sparse effect precision and conditional effect means instead of
+Formats 2 through 4 store sparse effect precision and conditional effect means instead of
 a dense recording Cholesky triangle. Format 1 remains readable during continuing
 preparation. Artifacts remain bounded at 16 MiB; input capture is byte-bounded
 and has a 32,768-recording sentinel instead of the old dense 1,024-row ceiling.
@@ -285,6 +287,17 @@ new-group prior, with an interval; missing genre/album groups retain their
 prior variance. If both artist and genre are absent, the existing explicit
 heuristic fallback remains. No new SQL source kind or migration is introduced.
 
+Format 4 is implemented by `rec/vibe_joint_calibrated.py`, with no dependency on
+experiment code. It learns the masked production heuristic's coefficient,
+nests album effects within artists, and fits separate audio/provider residuals
+plus a provider log-support slope of either sign. Predictive intervals are
+equal-tail quantiles of at most 128 empirical source/support mixture components.
+Each original records its masked profile digest/version and scalar prior.
+Masking removes recording-source observations and numeric choices before
+profile resolution; artist/release descriptions and categorical genre choices
+remain available. Raw-input/source changes invalidate the model; derived score
+publication and human annotations do not become new fitting observations.
+
 For this candidate, `support` means mean input coverage multiplied by the
 fractional reduction in latent-mean variance. It is neither suitability nor a
 new-track confidence interval. A compact calculation receipt stores artists,
@@ -295,7 +308,7 @@ not an independent effective sample size. Existing source kinds describe
 available artist/genre conditioning, rather than a selected exclusive cohort.
 Existing receipts without target conditioning remain readable and writable
 during compatibility preparation. New runtime receipts include it, so changing
-the target album creates a distinct calculation even when scores and variances
+the target album or format-four metadata prior creates a distinct calculation even when scores and variances
 are unchanged. This metadata stays in FAO rather than new SQL contributor rows.
 
 Fit artifacts are staged and verified off the request path on a consistent
@@ -304,6 +317,9 @@ retain their actual generation and exact calculation identity; unchanged means
 with changed originals still receive new receipts. A capture loads one posterior
 per bounded worker turn, retaining only target estimates and one guarded snapshot
 between turns. Its pending queue is acknowledged only on final publication.
+Model metadata capture separately yields after each 32-recording, two-second
+input admission, then fits under the ten-second admission. Its reader lifetime
+is capped at 180 seconds; no work-budget context survives a yield.
 Shutdown, storage pauses and batch expiry close idle snapshots and file-reader
 leases; cancellation and stale publication leave the durable queue for retry.
 Product score readers use SQL and do not read these files or fit.

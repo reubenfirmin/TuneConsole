@@ -33,11 +33,12 @@ def due(store):
             or store.vibe_predictions.pending() is not None or vibe_joint_preparation.due(store))
 
 
-def step(store, batch=32, *, seconds=10, memory_bytes=vibe_joint_model.MEMORY_BYTES):
+def step(store, batch=32, *, seconds=10, memory_bytes=vibe_joint_model.MEMORY_BYTES, joint_step=None):
     store.vibe_predictions.ensure_version(version())
     waiting = store.prepared_content.has_pending() or store.musical_profiles.pending()
     if vibe_joint_preparation.admitted(store, waiting=waiting):
-        if vibe_joint_preparation.step(store, seconds=seconds, memory_bytes=memory_bytes):
+        if (joint_step() if joint_step is not None else
+                vibe_joint_preparation.step(store, seconds=seconds, memory_bytes=memory_bytes)):
             return True
     if store.vibe_predictions.fanout(batch):
         return True

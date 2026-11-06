@@ -9,9 +9,10 @@ import sqlite3
 import pytest
 
 from tests import file_custody_support as custody
+from tests import paid_request_support as album_description_requests
 from tests.schema.actual_library import copy_readonly_library
 from yt_playlist.core import (albums, audio_annotation_files, audio_annotations,
-    album_description_files, album_description_requests, evidence_ledger, fao)
+    album_description_files, evidence_ledger, fao)
 from yt_playlist.core.store import Store
 
 

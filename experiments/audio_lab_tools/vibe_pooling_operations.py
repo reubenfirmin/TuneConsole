@@ -131,6 +131,10 @@ def phase(store, keys, candidate, *, seconds, turns, request_idle):
                     return {'outcome': 'complete', 'turns': turn}
                 kind = 'model-eligible' if preparation.due(store) else 'content-and-scores'
                 changed = worker.capture(1000)
+                if turn % 100 == 0:
+                    print(json.dumps({'phase': 'candidate' if candidate else 'baseline',
+                        'turn': turn, 'elapsed': round(time.monotonic() - started, 2),
+                        'kind': kind}), flush=True)
                 if first_score is None and candidate and store.conn.execute(
                         'SELECT 1 FROM prediction_model_generations LIMIT 1').fetchone():
                     first_score = time.monotonic() - started
@@ -179,7 +183,7 @@ def run(output, *, seconds=180., turns=1000, request_idle=.1):
         'priority': 'production request/background scopes; identical SQL workload and cadence in both phases',
         'dataset': 'private CoW snapshot selected by test-library manager',
         'limits': ['Warm existing prepared state; does not establish fresh-user startup.',
-            'Product-format candidate only; detached metadata/paired recipes are not integrated.',
+            'Only the product-format candidate is executed; historical research variants are excluded.',
             'Single background worker and foreground caller; bounded SQL workload, not full Home HTTP.',
             'Baseline precedes candidate on one snapshot; cache/order effects remain possible.',
             'No independent backup/restore or full retention acceptance follows from these timings.'],

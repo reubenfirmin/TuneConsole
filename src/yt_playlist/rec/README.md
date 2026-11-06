@@ -74,6 +74,13 @@ predictions from distinct measured recordings with matching canonical credits an
 specific subgenres. Broad genres do not form prediction cohorts. Predictions and
 repeated uploads never add measurement votes; missing evidence uses the heuristic.
 
+The inactive joint candidate lives in `vibe_joint_model` and
+`vibe_joint_calibrated`; `vibe_joint_preparation` and `progressive` own bounded
+background preparation. Product code never imports experiments. Its qualification
+mapping remains empty until the recorded statistical and lifecycle gates pass.
+Shared generation storage, uncertainty and compatibility are specified by the
+[FAO owner contract](../../../experiments/retained_copy/FAO-OWNERS.md#shared-vibe-model-candidate-819).
+
 The shared Emotify model supplies classification. Six independent specialists
 supply within-vibe suitability. Their scores are not comparable probabilities
 and never enter a mixed six-way maximum. Radio intensity retains the shared

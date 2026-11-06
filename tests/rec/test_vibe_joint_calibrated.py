@@ -87,6 +87,39 @@ def test_format_four_rejects_incomplete_or_invalid_conditioning():
         joint.Posterior(value)
 
 
+def test_format_four_accumulation_accounts_for_artist_dependence_and_track_variation():
+    def original(recording, *, artist=1, genre='deep', score=.7, album=None):
+        return {'recording': recording, 'measurement': recording, 'artists': [artist],
+                'genre': genre, 'album': album, 'score': score, 'metadata_prior': .5,
+                'support': 1., 'source': 'audio_measurement/control'}
+
+    def predict(training, *, artist=1, genre='deep'):
+        posterior = joint.Posterior(joint.fit(training, 'relax', fixed=joint.INITIAL))
+        return posterior.predict([artist] if artist else [], genre, metadata_prior=.5)
+
+    one = [original(1)]
+    ten = [original(recording) for recording in range(1, 11)]
+    first, agreeing = predict(one), predict(ten)
+    assert .5 < first['score'] < agreeing['score'] <= .7
+    assert agreeing['mean_variance'] < first['mean_variance']
+    assert agreeing['new_track_variance'] - agreeing['mean_variance'] == pytest.approx(joint.INITIAL['residual'])
+    assert agreeing['new_track_variance'] > joint.INITIAL['residual']
+    assert predict(ten + ten) == agreeing
+    assert predict([*ten, original(11, score=.1)])['score'] < agreeing['score']
+    with pytest.raises(ValueError, match='Conflicting original'):
+        predict([*one, original(1, score=.1)])
+    diverse = [original(recording, artist=recording) for recording in range(1, 11)]
+    assert predict(diverse, artist=999)['mean_variance'] < predict(ten, artist=999)['mean_variance']
+    specific = [original(1, score=.9)]
+    broad = [original(2, genre='other', score=.1), original(3, artist=2, score=.1)]
+    assert predict(specific + broad)['score'] < predict(specific)['score']
+    clustered = [original(recording, album='same') for recording in range(1, 11)]
+    independent = [original(recording, album=str(recording)) for recording in range(1, 11)]
+    assert predict(independent)['mean_variance'] < predict(clustered)['mean_variance']
+    assert predict(one, artist=None, genre=None) is None
+    assert predict(one, artist=999, genre='unseen')['mean_variance'] > first['mean_variance']
+
+
 def test_masked_prior_ignores_own_numeric_inputs_and_preserves_artist_descriptions():
     import json
     from yt_playlist.rec import musical_preparation, musical_profiles

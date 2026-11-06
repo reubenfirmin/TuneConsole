@@ -23,7 +23,7 @@ def test_named_recommendation_repositories(store):
     assert not hasattr(store, "rec_surface")
     assert isinstance(store.rec_query.repository, RecQueryRepo)
     assert isinstance(store.rec_candidates.repository, RecCandidatesRepo)
-    assert isinstance(store.rec_evidence, RecEvidenceRepo)
+    assert isinstance(store.rec_evidence.repository, RecEvidenceRepo)
     assert isinstance(store.rec_eligibility.repository, RecEligibilityRepo)
     store.rec_model.set_weight("lane:neighbourhood", 1.1)
     assert store.rec_model.get_weights()["lane:neighbourhood"] == pytest.approx(1.1)
@@ -34,7 +34,7 @@ def test_named_recommendation_repositories(store):
 def test_unified_onto_repo_base(store):
     for dao in (store.rec_model, store.rec_ledger.repository, store.rec_proposals, store.rec_signals.repository,
                 store.playlist_recipes, store.artist_similarity.repository, store.rec_query.repository,
-                store.rec_candidates.repository, store.rec_evidence, store.rec_eligibility.repository):
+                store.rec_candidates.repository, store.rec_evidence.repository, store.rec_eligibility.repository):
         assert isinstance(dao, Repo)
         assert dao.conn is store.conn and dao._lock is store._lock
 

@@ -35,7 +35,7 @@ def test_queue_calculation_allows_foreground_reads_and_writes(database, monkeypa
             snapshot.store.conn.set_progress_handler(progress, 1)
             yield snapshot
 
-    monkeypatch.setattr(database, "read_snapshot", paused_reader)
+    monkeypatch.setattr(database.enrichment_queue, "read_snapshot", paused_reader)
     with ThreadPoolExecutor(2) as pool:
         selection = pool.submit(database.enrichment_queue.next_enrich_batch, 2, providers=["deezer"], now=1000)
         try:
@@ -101,7 +101,7 @@ def test_snapshot_candidates_are_revalidated_before_job_admission(database, monk
             elif change == "refresh_completed":
                 database.enrichment_state.record_enrichment_attempt(first["identity_key"], "deezer", {}, now=1000)
 
-    monkeypatch.setattr(database, "read_snapshot", changed_reader)
+    monkeypatch.setattr(database.enrichment_queue, "read_snapshot", changed_reader)
     batch = database.enrichment_queue.next_enrich_batch(2, providers=["deezer"], now=1000)
     expected = [] if change in ("cooldown", "provider_disabled", "provider_reconfigured") else ["Second"]
     assert [t["title"] for t in batch] == expected
@@ -138,7 +138,7 @@ def test_enrichment_scans_allow_foreground_reads_and_writes(database, monkeypatc
             reader.conn.set_progress_handler(progress, 1)
             yield view
 
-    monkeypatch.setattr(database, boundary, paused_reader)
+    monkeypatch.setattr(database.enrichment_queue if operation == 'resweep' else database, boundary, paused_reader)
     operations = {
         'coverage': database.enrichment_reports.coverage_stats,
         'remaining': database.enrichment_reports.queue_remaining,
@@ -193,7 +193,7 @@ def test_resweep_rechecks_current_inputs_after_snapshot_selection(database, monk
                     seed_enrichment(database, first['id'], 'House', '2000')
                     seed_audio(database, first['id'], bpm=120, energy=.5, danceability=.5)
 
-    monkeypatch.setattr(database, 'read_snapshot', changed_reader)
+    monkeypatch.setattr(database.enrichment_queue, 'read_snapshot', changed_reader)
     result = database.enrichment_queue.resweep_batch(2, 500, providers=['deezer'], now=1000)
     expected = [] if change in ('cooldown', 'provider') else ['Second']
     assert [t['title'] for t in result] == expected

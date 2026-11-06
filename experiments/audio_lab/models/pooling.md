@@ -13,7 +13,55 @@ variance components; the conditional posterior omits uncertainty in those
 estimates. Shared classifier bias and true between-track variation cannot be
 identified separately from measurement noise by this holdout.
 
+The format-four runtime implementation is under `src/yt_playlist/rec/`:
+`vibe_joint_calibrated.py` owns fitting, prediction and mixture quantiles;
+`vibe_joint_model.py` owns versioned representation and compatibility;
+`vibe_joint_preparation.py` owns masked covariates and guarded publication.
+Experiments contain offline evaluators and historical recipes only. The
+format-four recipe learns the full masked-metadata covariate, artist-nested
+album effects, separate audio/provider residuals and provider support slope.
+
 ## Development decisions
+
+The sealed product human comparison consumed the 30 previously reserved
+recordings; they are no longer available for candidate selection or independent
+reuse. Its known-artist slice has 21 recordings across 21 clusters; unseen has
+all 30 across 30 clusters. Within-vibe positives recovered at ten are mixed:
+known Focus 0/3 to 1/3, Cruise 5/8 to 6/8, Energize 3/6 to 2/6, Relax 2/2
+unchanged, Release 2/3 to 3/3; unseen Energize improves 3/12 to 5/12 and the
+other observed-positive counts are unchanged. Uplift has no positive target.
+Secondary top-choice coverage falls 9/21 to 5/21 known and rises 7/30 to 8/30
+unseen; cross-vibe scores remain independent suitability scales. These sparse
+positive-only outcomes do not establish precision, numeric calibration or a
+general human gain. Both human-evaluation training sets exclude all 115 human
+identities. Runtime fitting uses original measurements, never their annotations.
+Protocol SHA256
+`58189da68ae45571b6d59c76bc95be2bbf67fbb3edc67970479ee388f18b306b`;
+prospective seal SHA256
+`76b61d70506374a0827b3c3cf29ccffb67d33277ab07f581277b15c7c141e061`.
+All 24 tasks completed using the unmodified product fitter/posterior. Exact
+sources, inputs, full results and gaps are in
+`build/test-reports/implementation819-product-human-campaign-20261106/`.
+Earlier reserve statements below describe the preceding campaigns.
+
+The format-four product integration reproduces the scalar development gain
+using unmodified runtime code: all 60 fits complete, macro MAE improves 15.28%,
+the paired-cluster absolute-gain interval is [.01281, .01615], and nominal-90%
+coverage is 90.38–93.82%. Every numerical development gate passes. Fits take
+2.38–6.69s with 44.36–48.91 MB accounted data. This reuses development originals
+and does not establish human quality or operational acceptance. Protocol SHA256
+`02816a360e20bf16bfb9730b1461e71b28ef93b6c5994e0a27fbc913ae020430`;
+reports, exact inputs and unchanged full-source archive:
+`build/test-reports/implementation819-calibrated-runtime-campaign-20261106/`.
+
+The format-three product candidate completed its corrected-ranking campaign
+with a 14.80% macro MAE gain, but failed coverage (known Focus 95.75%) and
+unseen Relax, Focus and Cruise ranking gates. Reject adoption. Protocol SHA256
+`9b4f37b4c98a11ffc439ecb8793c58634d58f800edcb72917b379f13afdaca55`;
+exact sources and the separately corrected summary identity are preserved in
+`build/test-reports/implementation819-runtime-within-model-20261106b/`.
+This failure is distinct from the detached scalar recipe's passing development
+campaign and requires evaluating the format-four product integration separately.
 
 Nov 6, 2026: the source/support-mixture development recipe reduced combined
 six-vibe measurement MAE from .09744 to .08342 (14.4%) and achieved 90.3–93.8%
@@ -189,9 +237,9 @@ calibrated precision. Equal-tail source/support-mixture intervals retain real
 between-track variation. This research representation is never passed to
 product publication. All 115 current positive human targets are excluded from fitting and
 measurement evaluation, leaving 3,334 originals and preserving the new reserve.
-Integrating such a covariate would also require exact profile-input identities
-and invalidation on profile changes in the shared generation owner; the research
-driver does not establish that runtime contract.
+The format-four product integration records exact masked profile identities
+and invalidates changed source/raw inputs. Its separate runtime evaluation is
+required; the research driver's passing result does not establish that contract.
 
 `./experiments/run.py vibe-pooling-descriptors` retains individual dimensions
 and supports as covariates. `vibe-pooling-transfer` binds that candidate to the

@@ -1,14 +1,9 @@
-"""Read-only coverage, provenance and conflict review projections.
-
-Writable field names and conflict choices belong to enrichment.py. Provider precedence
-belongs to core.metadata; these projections do not duplicate either mutation policy.
-"""
+"""SQLite coverage, conflict facts and references to retained provider evidence."""
 import json
 
 from yt_playlist.core import catalog, metadata, metadata_runtime
 from yt_playlist.core.preparation import conflict_publication, metadata_publication
 from yt_playlist.repos.base import Repo, snapshot_read, synchronized
-from yt_playlist.repos.enrichment import FIELD_COLUMN
 from yt_playlist.repos.enrichment_sql import TRACKS_CTE, pending_coverage
 
 
@@ -20,8 +15,7 @@ class EnrichmentReportsRepo(Repo):
         return conflict_publication.table(self.conn)
 
     @synchronized
-    def genre_provenance(self, track_id) -> dict | None:
-        """Current genre plus the latest retained answer from each enrichment provider."""
+    def genre_provenance_facts(self, track_id):
         track_id = catalog.resolve_entry(self.conn, track_id)
         track = self.conn.execute(
             "SELECT id, recording_id, video_id, title, artist, COALESCE(genre, '') genre FROM catalog_tracks WHERE id=?", (track_id,)
@@ -37,40 +31,24 @@ class EnrichmentReportsRepo(Repo):
             "WHERE newer.provider=e.provider) ORDER BY id",
             (track['recording_id'],track['recording_id'],track['video_id'],track_id)
         ).fetchall()
-        candidates = [{"provider": r["provider"], "value": r["value"] or ""} for r in rows]
-        if metadata_runtime.active(self.conn):
-            candidates = [{'provider': provider, 'value': data.get('fields', {}).get('genre') or ''}
-                for (provider,) in self.conn.execute('SELECT provider FROM enrichment_provider_state WHERE recording_id=?',
-                                                    (track['recording_id'],))
-                if (data := metadata_runtime.alternatives(self.conn, track['recording_id'], provider))]
+        candidates = [{'provider': row['provider'], 'value': row['value'] or ''} for row in rows]
+        runtime = metadata_runtime.active(self.conn)
+        references = [dict(row) for row in self.conn.execute(
+            'SELECT s.recording_id,s.provider,p.id provider_id,s.at FROM enrichment_provider_state s '
+            'JOIN metadata_runtime_providers p ON p.name=s.provider WHERE s.recording_id=?',
+            (track['recording_id'],))] if runtime else []
         conflict = self.conn.execute(
             f"SELECT candidates FROM {self._conflict_table} WHERE track_id=? AND field='genre'", (track_id,)
         ).fetchone()
-        seen = {(c["provider"], c["value"]) for c in candidates}
-        if conflict:
-            details = (metadata_runtime.conflict_details(self.conn, metadata_runtime.conflict(self.conn, track_id, 'genre'))['candidates']
-                       if metadata_runtime.active(self.conn) else json.loads(conflict['candidates']))
-            for c in details:
-                pair = (str(c.get("provider") or "unknown"), str(c.get("value") or ""))
-                if pair not in seen:
-                    candidates.append({"provider": pair[0], "value": pair[1]})
-                    seen.add(pair)
-        options = []
-        by_value = {}
-        for candidate in candidates:
-            value = candidate["value"]
-            if not value:
-                continue
-            option = by_value.get(value)
-            if option is None:
-                option = {"value": value, "providers": []}
-                by_value[value] = option
-                options.append(option)
-            if candidate["provider"] not in option["providers"]:
-                option["providers"].append(candidate["provider"])
-        return {"track_id": track["id"], "video_id": track["video_id"],
-                "title": track["title"], "artist": track["artist"],
-                "current": track["genre"], "candidates": candidates, "options": options}
+        return {'track': dict(track), 'candidates': candidates, 'runtime': runtime,
+                'provider_references': references,
+                'conflict': self._candidate_evidence(track_id, 'genre', conflict['candidates']) if conflict else None}
+
+    def _candidate_evidence(self, track_id, field, encoded):
+        if metadata_runtime.active(self.conn):
+            row = metadata_runtime.conflict(self.conn, track_id, field)
+            return {'reference': (row['id'], row['revision']), 'updated_at': row['updated_at']} if row else None
+        return {'candidates': json.loads(encoded)}
 
     @synchronized
     def conflict_count_for_playlist(self, playlist_id) -> int:
@@ -92,9 +70,7 @@ class EnrichmentReportsRepo(Repo):
     def _conflicts(self, rows) -> list:
         return [{"track_id": r["track_id"], "title": r["title"], "artist": r["artist"],
                  "video_id": r["video_id"], "mb_recording_id": r["mb_recording_id"], "field": r["field"],
-                 "candidates": (metadata_runtime.conflict_details(self.conn,
-                     metadata_runtime.conflict(self.conn, r['track_id'], r['field']))['candidates']
-                     if metadata_runtime.active(self.conn) else json.loads(r['candidates']))} for r in rows]
+                 'evidence': self._candidate_evidence(r['track_id'], r['field'], r['candidates'])} for r in rows]
 
     @synchronized
     def unresolved_conflicts_for_playlist(self, playlist_id) -> list:
@@ -156,15 +132,15 @@ class EnrichmentReportsRepo(Repo):
             f"SELECT COUNT(*) n FROM {self._conflict_table} WHERE resolved=0").fetchone()["n"]
 
     @synchronized
-    def enrichment_activity_stats(self, now) -> dict:
+    def activity_stats(self, since) -> dict:
         row = self.conn.execute(
             "WITH " + TRACKS_CTE +
             " SELECT MAX(last_enriched_at) latest, SUM(last_enriched_at >= ?) recent "
-            "FROM enrichment_tracks", (now - 900,)).fetchone()
+            "FROM enrichment_tracks", (since,)).fetchone()
         return {"latest": row["latest"], "recent": row["recent"] or 0}
 
     @synchronized
-    def enriched_tracks(self, limit=40, offset=0) -> list:
+    def enriched_tracks(self, limit, offset) -> list:
         """Completed passes, newest first; missing metadata does not imply a failed pass."""
         rows = self.conn.execute(
             "WITH " + TRACKS_CTE +
@@ -175,116 +151,47 @@ class EnrichmentReportsRepo(Repo):
         return [dict(r) for r in rows]
 
     @synchronized
-    def unresolved_enrichment_conflicts(self, limit=20, offset=0) -> list:
-        """Library-wide review, paged by field disagreement rather than song."""
+    def unresolved_enrichment_conflicts(self, limit, offset, *, fields):
         rows = self.conn.execute(
-            self._review_select() + " WHERE c.resolved=0 "
+            self._review_select(fields) + " WHERE c.resolved=0 "
             "ORDER BY t.title COLLATE NOCASE, t.id, c.field LIMIT ? OFFSET ?",
             (limit, offset)).fetchall()
-        return self._review_conflicts(rows)
+        return self._review_facts(rows, fields)
 
-    def _review_select(self):
-        columns = ", ".join("t." + col for col in sorted({spec[0] for spec in FIELD_COLUMN.values()}))
+    def _review_select(self, fields):
+        columns = ", ".join("t." + col for col in sorted(set(fields.values())))
         return ("SELECT c.track_id, c.field, c.candidates, c.resolved_value, "
                 "t.title, t.artist, t.video_id, t.mb_recording_id, "
                 f"{columns} FROM {self._conflict_table} c JOIN catalog_tracks t ON t.id=c.track_id")
 
-    def _review_conflicts(self, rows):
-        """Offer saved values even when absent from provider candidates; label unknown sources."""
+    def _review_facts(self, rows, fields):
         result = self._conflicts(rows)
         for conflict, row in zip(result, rows):
-            spec = FIELD_COLUMN.get(conflict["field"])
-            current = row[spec[0]] if spec else None
+            column = fields.get(conflict['field'])
+            current = row[column] if column else None
             conflict["current"] = current
-            conflict["can_resolve"] = spec is not None
-            cast = spec[1] if spec else str
-
-            def key(value):
-                if value is None or value == "":
-                    return None
-                try:
-                    value = cast(value)
-                except (TypeError, ValueError):
-                    pass
-                return value.strip().casefold() if isinstance(value, str) else value
-
-            current_key = key(current)
-            options = [{"value": str(current) if current is not None else "",
-                        "label": current if current is not None and current != "" else "Not set",
-                        "current": True, "providers": [], "source_note": ""}]
-            by_value = {current_key: options[0]}
-            for candidate in conflict["candidates"]:
-                value = candidate["value"]
-                option = by_value.get(key(value))
-                if option is None:
-                    option = {"value": str(value) if value is not None else "",
-                              "label": value if value not in (None,'') else "Not set", "current": False,
-                              "providers": [], "source_note": ""}
-                    by_value[key(value)] = option
-                    options.append(option)
-                if candidate["provider"] not in option["providers"]:
-                    option["providers"].append(candidate["provider"])
-            if not options[0]["providers"] and current_key is not None:
-                if metadata_runtime.active(self.conn):
-                    source = metadata.selected_source(self.conn, conflict['track_id'], spec[0] if spec else conflict['field'])
-                    if source:
-                        options[0]['providers'].append(source)
-                findings = self.conn.execute(
-                    f"SELECT provider, value FROM {metadata_publication.read_table(self.conn,'enrichment_log')} WHERE track_id=? AND field=? ORDER BY id",
-                    (conflict["track_id"], conflict["field"])).fetchall()
-                for finding in findings:
-                    if key(finding["value"]) == current_key and finding["provider"] not in options[0]["providers"]:
-                        options[0]["providers"].append(finding["provider"])
+            conflict['selected_source'] = (metadata.selected_source(self.conn, conflict['track_id'], column or conflict['field'])
+                                           if metadata_runtime.active(self.conn) and current not in (None, '') else None)
+            conflict['findings'] = [dict(finding) for finding in self.conn.execute(
+                f"SELECT provider,value FROM {metadata_publication.read_table(self.conn,'enrichment_log')} "
+                'WHERE track_id=? AND field=? ORDER BY id', (conflict['track_id'], conflict['field']))]
             override = self.conn.execute('SELECT 1 FROM '+metadata_publication.read_table(self.conn,'entry_field_choices')+' WHERE entry_id=? AND field=?',
-                                         (conflict['track_id'],spec[0] if spec else conflict['field'])).fetchone()
-            if override:
-                options[0]["source_note"] = "Your choice"
-            elif not options[0]["providers"]:
-                options[0]["source_note"] = ("No saved value" if current_key is None else
-                                              "Saved locally; original source not recorded")
-            for option in options:
-                option["id"] = (f"enrich-choice-{conflict['track_id']}-{conflict['field']}-"
-                                + option["value"].encode().hex())
-            # Preserve alternative positions after saving, including keyboard focus.
-            provider_order = {}
-            for candidate in conflict["candidates"]:
-                provider_order.setdefault(key(candidate["value"]), len(provider_order))
-            options.sort(key=lambda option: provider_order.get(key(option["value"]), -1))
-            conflict["options"] = options
+                                         (conflict['track_id'], column or conflict['field'])).fetchone()
+            conflict['overridden'] = override is not None
         return result
 
     @synchronized
-    def enrichment_conflict_detail(self, track_id, field) -> dict | None:
+    def enrichment_conflict_detail(self, track_id, field, *, fields):
         track_id = catalog.resolve_entry(self.conn, track_id)
-        rows = self.conn.execute(self._review_select() + " WHERE c.track_id=? AND c.field=?",
+        rows = self.conn.execute(self._review_select(fields) + " WHERE c.track_id=? AND c.field=?",
                                  (track_id, field)).fetchall()
-        return self._review_conflicts(rows)[0] if rows else None
+        return self._review_facts(rows, fields)[0] if rows else None
 
     @synchronized
-    def processed_timeline(self, buckets=40) -> list:
-        """Cumulative first checks and each track's latest re-enrichment on one timeline."""
+    def processed_timestamps(self):
         rows = self.conn.execute(
             "WITH " + TRACKS_CTE +
             " SELECT first_enriched_at first, last_enriched_at last "
             "FROM enrichment_tracks WHERE first_enriched_at IS NOT NULL "
             "ORDER BY first_enriched_at").fetchall()
-        if not rows:
-            return []
-        refreshed = sorted(row["last"] for row in rows
-                           if row["last"] is not None and row["last"] > row["first"])
-        lo, hi, total = rows[0]["first"], max(rows[-1]["first"], max(refreshed, default=0)), len(rows)
-        if hi <= lo:
-            return [{"t": hi, "n": total, "refresh": 0}]
-        width = (hi - lo) / buckets
-        out, cum, i, refreshed_count = [], 0, 0, 0
-        for b in range(1, buckets + 1):
-            edge = lo + width * b
-            while i < len(rows) and rows[i]["first"] <= edge:
-                cum += 1
-                i += 1
-            while refreshed_count < len(refreshed) and refreshed[refreshed_count] <= edge:
-                refreshed_count += 1
-            out.append({"t": edge, "n": cum, "refresh": refreshed_count})
-        out[-1]["n"] = total
-        out[-1]["refresh"] = len(refreshed)
-        return out
+        return [dict(row) for row in rows]
